@@ -1,0 +1,8 @@
+[Unit]
+Description=fleet-kit CEO pass — self-heal + backlog drive (agents/ceo.md)
+
+[Service]
+Type=oneshot
+Environment=FLEET_ENV_FILE={{KIT_PATH}}/fleet.env
+ExecStart={{KIT_PATH}}/scripts/run_agent_pass.sh ceo --model opus --max-turns 120
+User={{USER}}

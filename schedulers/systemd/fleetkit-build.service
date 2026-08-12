@@ -1,0 +1,8 @@
+[Unit]
+Description=fleet-kit builder — claims one backlog item, builds it, opens a PR
+
+[Service]
+Type=oneshot
+Environment=FLEET_ENV_FILE={{KIT_PATH}}/fleet.env
+ExecStart={{KIT_PATH}}/scripts/worktree_builder.sh
+User={{USER}}

@@ -1,0 +1,8 @@
+[Unit]
+Description=fleet-kit architect pass — daily epic PRD + sequencing (agents/architect.md)
+
+[Service]
+Type=oneshot
+Environment=FLEET_ENV_FILE={{KIT_PATH}}/fleet.env
+ExecStart={{KIT_PATH}}/scripts/run_agent_pass.sh architect --model opus --max-turns 200
+User={{USER}}

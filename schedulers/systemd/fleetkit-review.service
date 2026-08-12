@@ -1,0 +1,8 @@
+[Unit]
+Description=fleet-kit reviewer — one PR per tick, posts fleet-code-review status
+
+[Service]
+Type=oneshot
+Environment=FLEET_ENV_FILE={{KIT_PATH}}/fleet.env
+ExecStart={{KIT_PATH}}/scripts/code_review_local.sh
+User={{USER}}

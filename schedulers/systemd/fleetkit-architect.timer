@@ -1,0 +1,9 @@
+[Unit]
+Description=Run fleetkit-architect daily at 15:10 UTC
+
+[Timer]
+OnCalendar=*-*-* 15:10:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
