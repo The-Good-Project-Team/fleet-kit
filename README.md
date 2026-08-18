@@ -1,48 +1,147 @@
-# fleet-kit
+<h1 align="center">
+  <img src="docs/img/magikarp.gif" width="110" alt="a Magikarp, flopping"><br>
+  fleet-kit <sub><sup>aka <b>magikarp</b></sup></sub>
+</h1>
 
-An unattended software-development fleet you point at a git repo. It runs a full loop —
-observe → rank → build → review → gate → merge → deploy — with a human touching only the
-parts that genuinely need judgment: initial auth, scheduler install, and a one-time branch
-protection call.
+<p align="center">
+  <i>It flops. It splashes. It does absolutely nothing useful for twenty levels.<br>
+  Then one day it is a Gyarados and merges a thousand PRs while you sleep.</i>
+</p>
 
-Extracted 2026-08-12 from 990 Scout's production fleet (`nonprofit-atlas`) after an audit
-found the loop working end-to-end for 21 days (1,000 PRs merged) but structurally coupled to
-one product's box, DB, and API. This kit is that fleet with every product-specific string
-pulled into one env file.
+An unattended software-development fleet you point at a git repo. It runs the full loop —
+observe, rank, build, review, gate, merge, deploy — with a human touching only the parts that
+genuinely need judgment: initial auth, scheduler install, and a one-time branch-protection call.
+
+## Why "magikarp"
+
+Because the honest version of this pitch is that it is useless at first and you have to keep
+feeding it anyway.
+
+A fleet like this does not arrive working. It arrives **flopping**: passes that burn tokens and
+produce nothing, jobs that report healthy while doing no work, an agent that files an issue into
+a store nothing downstream reads. The failure mode is never a crash — it is a fleet that looks
+busy. Every guardrail in this kit exists because the source fleet did one of those things in
+production and someone had to go find out why.
+
+The name is also the metric. In the source repo, `magikarp` is a **score**: percent of the way
+to a loop that runs unattended, measured by blockers closed and by work that actually shipped
+with no human in the path. Not "did the job fire" — did anything **evolve**.
+
+<p align="center"><img src="docs/img/gyarados.gif" width="150" alt="Gyarados"></p>
 
 ## The loop
 
 ```
-GitHub Issues (board)  →  rank (RICE)  →  build (fresh worktree, claude -p)
-    ↑                                            │
-    │                                            ▼
-  deploy driver  ←  merge (auto-merge)  ←  review (claude -p) + CI gates
+GitHub Issues (board)  ->  rank (RICE)  ->  build (fresh worktree, claude -p)
+    ^                                              |
+    |                                              v
+  deploy driver  <-  merge (auto-merge)  <-  review (claude -p) + CI gates
 ```
 
-- **Board** = GitHub Issues, labeled `fleet:backlog` / `fleet:claimed` (`scripts/board_github.py`).
-  Any repo with `gh` auth gets a working queue for free — no separate DB, no dashboard.
-- **Rank** — a daily/hourly pass reads open backlog issues and reorders by RICE. Not shipped
-  as a standalone script here (it's a thin `gh issue list` + `claude -p` loop); see
-  `agents/ceo.md` for the reasoning it should apply.
-- **Build** — `scripts/worktree_builder.sh` claims one backlog item, works in a FRESH git
-  worktree (never the shared checkout — see `agents/persona_law.md`), opens a PR, arms
-  `gh pr merge --auto`.
-- **Review** — `scripts/code_review_local.sh`: one `claude -p` pass per open PR, untrusted-diff
-  prompt, posts a `fleet-code-review` commit status.
-- **Gate** — your CI (tests, lint, whatever your repo needs) plus the review status above, wired
-  as GitHub required status checks via branch protection.
-- **Merge** — GitHub's own auto-merge. No custom drain loop, no TOCTOU handling to write —
-  GitHub already serializes this.
+- **Board** = GitHub Issues, labeled `fleet:backlog` / `fleet:claimed`
+  (`scripts/board_github.py`). Any repo with `gh` auth gets a working queue for free — no
+  separate database, no dashboard to keep alive.
+- **Rank** — a recurring pass reorders open backlog issues by RICE. See `agents/ceo.md` for the
+  reasoning it applies.
+- **Build** — `scripts/worktree_builder.sh` claims one item, works in a **fresh git worktree**
+  (never the shared checkout — see `agents/persona_law.md`), opens a PR, arms `gh pr merge --auto`.
+- **Review** — `scripts/code_review_local.sh`: one `claude -p` pass per open PR with an
+  untrusted-diff prompt, posting a `fleet-code-review` commit status.
+- **Gate** — your CI plus that review status, wired as GitHub required status checks.
+- **Merge** — GitHub's own auto-merge. No custom drain loop and no TOCTOU handling to write;
+  GitHub already serializes it.
 - **Deploy** — a 3-function driver contract (`scripts/deploy_driver.md`): `current_sha`,
-  `deploy`, `health`. Bring your own script; the kit ships no deployer because "how you deploy"
-  is the most product-specific thing in the whole loop.
-- **CEO pass** — a daily/hourly deep session (`agents/ceo.md`) that keeps the fleet's own
-  guardrails intact and unblocks stalled work, using a priority ladder (self → tools → policy →
-  prod → backlog) so it never spends a pass polishing features while its own tooling is broken.
-- **Architect pass** — a daily deep session (`agents/architect.md`) that decomposes your product
-  vision into ONE feature epic at a time: a PRD plus a sequence of PR-sized, builder-executable
-  issues. Without this layer, a fleet only ever produces increments — this is what turns
-  increments into features.
+  `deploy`, `health`. Bring your own — how you deploy is the most product-specific thing here.
+- **CEO pass** — a recurring deep session (`agents/ceo.md`) that keeps the fleet's own guardrails
+  intact and unblocks stalled work, on a priority ladder (self → tools → policy → prod → backlog)
+  so it never polishes features while its own tooling is broken.
+- **Architect pass** — a daily session (`agents/architect.md`) that decomposes a product vision
+  into ONE epic at a time: a PRD plus PR-sized, builder-executable issues. Without this layer a
+  fleet only ever produces increments.
+
+## The four things that make it survivable
+
+Extracted from a production fleet after 21 days and ~1,000 merged PRs. These are the parts
+that were learned the expensive way, and they are what separates this from a cron job that
+calls an LLM.
+
+**1. One store.** A fleet member is one file: schedule, model, turn budget, tools, prompt. Not
+a config row in one place and a scheduler entry in another — the source fleet ran two definition
+stores for six days after a migration, only one of which had a reconciler, and the result was
+that a prompt edit merged to `main` never reached the running agent. Six of seven lanes silently
+followed an instruction they had never been given.
+
+**2. Reporting the member cannot skip.** Lifecycle and token cost are written by the *wrapper*,
+around the agent — never self-reported. Only the outcome is the agent's own words, and its
+**absence is recorded as a status**, not as silence. A pass that ran and produced nothing must
+not look like a pass that never ran. That distinction is the single most useful thing in the kit.
+
+**3. Receipts.** Every `claude -p` pass books `num_turns`, `stop_reason`, and weighted token
+cost. The source fleet ran for weeks with `--output-format json` available and unused, so nobody
+could say which agent was spending the budget. When it was finally measured, one hourly member
+was ~14M tokens and ~$10 per pass — about $245/day, invisible until someone looked.
+
+**4. A ceiling.** Every request re-reads the whole context, so an agent session that never ends
+gets quadratically expensive. Cap it, and make a truncated pass say so out loud.
+
+## Portability
+
+`schedulers/` ships both **launchd** (macOS) and **systemd timers** (Linux) for every job.
+
+A `.plist` is just macOS's cron: what to run, how often, what environment, where output goes.
+Two properties matter — launchd will not start a second copy of a job while one is running
+(which is a stronger concurrency guarantee than a database lock), and an edit does not take
+effect until the job is booted out and re-bootstrapped, so something must reconcile installed
+state against the repo. `systemd` timers give you the same two properties by different names.
+
+Everything product-specific is a variable in `fleet.env` — repo path, label prefix, account
+names, models. No host, no absolute path, and no company string is baked into a script.
+
+## A fleet member, in one file
+
+`members/*.fleet.json` is the whole definition. Change it, merge it, and the reconciler makes
+it live — there is no second place to keep in sync.
+
+```json
+{
+  "name": "example-scout",
+  "kind": "llm",
+  "schedule": { "interval_s": 3600 },
+  "timeout_s": 1800,
+  "llm": {
+    "model": "sonnet",
+    "max_turns": 40,
+    "prompt_file": "agents/builder.md",
+    "tools": { "allow": ["Read", "Grep", "Bash(gh pr list:*)"],
+               "deny":  ["Bash(gh pr merge:*)", "Bash(git push --force:*)"] }
+  },
+  "report": { "vision_link": "required" }
+}
+```
+
+A `mechanical` member drops the `llm` block and adds `"command"`. Same schedule, same lifecycle,
+same report row — it just has no turn budget.
+
+**JSON, not YAML, on purpose.** The runner parses this on the fleet host with the standard
+library alone. The source fleet's host had no `yaml` module, and that class of assumed
+dependency — an interpreter or import that exists on the laptop and not where it must run — was
+a recurring way to ship a member that silently never started.
+
+**Tools are per-member, and they are authority.** `scripts/overrides.py` can retune
+`max_turns`, `model`, `enabled`, and `schedule` live, without a PR, because the delivery rail is
+exactly what fails during an incident. It will **refuse** to touch `prompt` or `tools`: a turn
+budget is a dial, "may this agent merge PRs" is not.
+
+## Verify before you schedule
+
+```
+python3 scripts/selftest.py
+```
+
+Five checks, no network: specs validate, the report contract records silence as a status,
+overrides tune dials and refuse authority, `fleet.env` is yours and untracked, and schedulers
+exist for both platforms. This caught a real break during the port — `run_report.py` imported a
+scoring module that was never copied, so a fresh clone crashed on import and nothing noticed.
 
 ## What's NOT in this kit (extension points)
 

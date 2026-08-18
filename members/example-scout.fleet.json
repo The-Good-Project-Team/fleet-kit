@@ -1,0 +1,54 @@
+{
+  "name": "example-scout",
+  "kind": "llm",
+  "lane": "example",
+  "roster_actor": "prettifier",
+  "schedule": {
+    "interval_s": 3600
+  },
+  "timeout_s": 1800,
+  "enabled": true,
+  "llm": {
+    "model": "sonnet",
+    "max_turns": 40,
+    "prompt_file": "agents/builder.md",
+    "prompt_extra": "agents/persona_law.md",
+    "tools": {
+      "allow": [
+        "Bash(gh pr list:*)",
+        "Bash(gh pr view:*)",
+        "Bash(gh pr diff:*)",
+        "Bash(gh pr checks:*)",
+        "Bash(gh issue list:*)",
+        "Bash(gh issue view:*)",
+        "Bash(gh issue create:*)",
+        "Bash(gh run list:*)",
+        "Bash(gh run view:*)",
+        "Bash(git log:*)",
+        "Bash(git diff:*)",
+        "Bash(git show:*)",
+        "Bash(git status:*)",
+        "Bash(curl:*)",
+        "Bash(jq:*)",
+        "Bash(rg:*)",
+        "Bash(grep:*)",
+        "Bash(python3 scripts/lane_pass_log.py:*)",
+        "Read",
+        "Grep",
+        "Glob",
+        "WebFetch"
+      ],
+      "deny": [
+        "Bash(git stash:*)",
+        "Bash(git push:*)",
+        "Bash(gh pr merge:*)",
+        "Bash(git push --force:*)",
+        "Edit(.claude/hooks/**)",
+        "Write(.claude/hooks/**)"
+      ]
+    }
+  },
+  "report": {
+    "vision_link": "required"
+  }
+}
