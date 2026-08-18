@@ -4,8 +4,8 @@
 </h1>
 
 <p align="center">
-  <i>It flops. It splashes. It does absolutely nothing useful for twenty levels.<br>
-  Then one day it is a Gyarados and merges a thousand PRs while you sleep.</i>
+  <i>The worst Pokémon in the game already contains a sea serpent.<br>
+  Nothing gets added — it just has to survive long enough to become what it is.</i>
 </p>
 
 An unattended software-development fleet you point at a git repo. It runs the full loop —
@@ -14,20 +14,42 @@ genuinely need judgment: initial auth, scheduler install, and a one-time branch-
 
 ## Why "magikarp"
 
-Because the honest version of this pitch is that it is useless at first and you have to keep
-feeding it anyway.
+Magikarp is the joke Pokémon. It is famously, aggressively useless — it flops on the ground, its
+only move is Splash, and Splash does *nothing*. Not weak damage. Nothing. You catch one, you look
+at it, you understand immediately that you have been given garbage.
 
-A fleet like this does not arrive working. It arrives **flopping**: passes that burn tokens and
-produce nothing, jobs that report healthy while doing no work, an agent that files an issue into
-a store nothing downstream reads. The failure mode is never a crash — it is a fleet that looks
-busy. Every guardrail in this kit exists because the source fleet did one of those things in
-production and someone had to go find out why.
+And it evolves into Gyarados: a sea serpent that levels towns.
 
-The name is also the metric. In the source repo, `magikarp` is a **score**: percent of the way
-to a loop that runs unattended, measured by blockers closed and by work that actually shipped
-with no human in the path. Not "did the job fire" — did anything **evolve**.
+**Nothing is added.** No new part arrives, nothing is bolted on, you do not trade it for a better
+creature. The entire capacity was inside the flopping fish the whole time — the only thing
+separating the two is accumulated experience it could not skip. That is the idea, and it is why
+the name fits an agent fleet better than anything else we could have called it.
 
-<p align="center"><img src="docs/img/gyarados.gif" width="150" alt="Gyarados"></p>
+A fleet arrives flopping. Every failure this kit guards against is one the source fleet actually
+shipped: passes that burned tokens and produced nothing, jobs that reported healthy while doing
+no work, an agent filing findings into a store nothing downstream read, six of seven lanes
+obeying an instruction they had never been given. The failure mode is never a crash. **It is a
+fleet that looks busy.** Someone had to go find out why, every time, and each guardrail here is
+the residue of one of those investigations.
+
+The part worth internalizing: none of those fixes made the fleet *more capable*. The loop was
+always able to run unattended — the same scripts, the same model, the same repo. What was
+missing was the accumulated experience that turns "it ran" into "it shipped": knowing that a
+silent pass must be recorded as a status, that a turn cap must be measured before it is set,
+that a definition living in two places will drift, that an unparseable config file fails quietly.
+The kit is that experience, written down, so your fleet skips the levels ours had to grind.
+
+**The name is also the metric.** In the source repo `magikarp` is a *score*: percent of the way
+to a loop that runs unattended, measured by work that actually shipped with no human in the path
+— never by whether a job fired. A fleet at 100% of its blockers with nothing shipped is still
+flopping. Splash still does nothing.
+
+<p align="center">
+  <img src="docs/img/magikarp.gif" width="70" alt="Magikarp">
+  &nbsp;&nbsp;→&nbsp;&nbsp;
+  <img src="docs/img/gyarados.gif" width="150" alt="Gyarados">
+</p>
+<p align="center"><sub>same animal, nothing added</sub></p>
 
 ## The loop
 
