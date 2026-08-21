@@ -44,6 +44,7 @@ INSTANCE_DIR="$(pwd)/instances/$NAME"
 mkdir -p "$INSTANCE_DIR/repo" "$INSTANCE_DIR/logs"
 ENV_FILE="$INSTANCE_DIR/fleet.env"
 CREDS_DIR="$HOME/.claude-$ACCOUNT"
+WEBHOOK_SECRET_FILE="$INSTANCE_DIR/webhook_secret"
 
 # 1. Build the image if it doesn't exist yet (idempotent — podman skips unchanged layers).
 if ! podman image exists "$IMAGE_TAG"; then
@@ -76,16 +77,37 @@ if [ -z "$GH_TOKEN_VAL" ]; then
   exit 1
 fi
 
+# 5. Generate this instance's webhook secret on first run only (same never-overwrite reasoning
+#    as fleet.env above). the-fixer's event-driven trigger (scripts/webhook_receiver.py) needs
+#    this to verify GitHub's HMAC signature; without it entrypoint.sh just skips starting the
+#    receiver and the fleet stays poll-only -- a valid, not-broken mode, same as no messenger
+#    driver configured. Print it once here so the operator can paste it into GitHub's webhook
+#    settings; never re-print an existing one on a re-run (it's already configured or the
+#    operator chose not to use it).
+if [ ! -f "$WEBHOOK_SECRET_FILE" ]; then
+  openssl rand -hex 32 > "$WEBHOOK_SECRET_FILE"
+  chmod 600 "$WEBHOOK_SECRET_FILE"
+  echo "[up] generated webhook secret at $WEBHOOK_SECRET_FILE -- configure a GitHub repo"
+  echo "[up]   webhook (Settings -> Webhooks -> Add webhook) with:"
+  echo "[up]     Payload URL: <your public /webhook path>"
+  echo "[up]     Content type: application/json"
+  echo "[up]     Secret:       $(cat "$WEBHOOK_SECRET_FILE")"
+  echo "[up]     Events:       just 'Workflow runs'"
+fi
+
 # Port: explicit --port wins; else derive a stable, distinct port per instance name (so N
 # projects on one box never collide on fleet_view_server.py's default 8420) via a hash; else
-# fall back to the template's FLEET_VIEW_PORT for a single-instance box.
+# fall back to the template's FLEET_VIEW_PORT for a single-instance box. Webhook port is
+# always dashboard-port + 1 -- deterministic from the same offset, no separate flag needed,
+# never collides with another instance's dashboard OR webhook port on the same box.
 if [ -z "$VIEW_PORT" ]; then
   DEFAULT_PORT="$(grep -oE '^FLEET_VIEW_PORT=[0-9]+' fleet.env.example | cut -d= -f2)"
   OFFSET=$(( $(cksum <<<"$NAME" | cut -d' ' -f1) % 500 ))
   VIEW_PORT=$(( ${DEFAULT_PORT:-8420} + OFFSET ))
 fi
+WEBHOOK_PORT=$(( VIEW_PORT + 1 ))
 
-echo "[up] starting fleet '$NAME' -> $REPO_URL (image $IMAGE_TAG, account $ACCOUNT, view port $VIEW_PORT)"
+echo "[up] starting fleet '$NAME' -> $REPO_URL (image $IMAGE_TAG, account $ACCOUNT, view port $VIEW_PORT, webhook port $WEBHOOK_PORT)"
 exec podman run -d \
   --name "fleet-kit-$NAME" \
   --replace \
@@ -94,9 +116,12 @@ exec podman run -d \
   -e "GH_TOKEN=$GH_TOKEN_VAL" \
   -e "FLEET_ENV_FILE=/fleet-kit/fleet.env" \
   -e "FLEET_VIEW_PORT=$VIEW_PORT" \
+  -e "FLEET_WEBHOOK_PORT=$WEBHOOK_PORT" \
   -v "$ENV_FILE:/fleet-kit/fleet.env:ro" \
+  -v "$WEBHOOK_SECRET_FILE:/fleet-kit/.webhook_secret:ro" \
   -v "$CREDS_DIR:/root/.claude-$ACCOUNT:ro" \
   -v "$INSTANCE_DIR/repo:/repo" \
   -v "$INSTANCE_DIR/logs:/var/log/fleet-kit" \
   -p "$VIEW_PORT:$VIEW_PORT" \
+  -p "$WEBHOOK_PORT:$WEBHOOK_PORT" \
   "$IMAGE_TAG"

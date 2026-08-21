@@ -5,3 +5,5 @@ runs.jsonl
 __pycache__/
 *.pyc
 .DS_Store
+.webhook_secret
+instances/
