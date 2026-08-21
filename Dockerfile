@@ -43,5 +43,9 @@ COPY . /fleet-kit
 
 RUN chmod +x /fleet-kit/scripts/*.sh /fleet-kit/entrypoint.sh
 
+# fleet_view_server.py (started by entrypoint.sh's cron-foreground mode) -- documents the
+# port for anyone inspecting the image; actual publishing still needs `-p` at `podman run`.
+EXPOSE 8420
+
 ENTRYPOINT ["/fleet-kit/entrypoint.sh"]
 CMD ["cron-foreground"]
