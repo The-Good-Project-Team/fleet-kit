@@ -74,7 +74,7 @@ case "${1:-cron-foreground}" in
       # exports GH_TOKEN from the root-only file right before running, in its own subshell.
       echo "*/10 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && cd $FLEET_REPO && git pull --ff-only >> $LOG_DIR/gitpull.log 2>&1"
       echo "0 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/worktree_builder.sh >> $LOG_DIR/builder.log 2>&1"
-      echo "*/15 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/code_review_local.sh >> $LOG_DIR/review.log 2>&1"
+      echo "*/15 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/members/judge-judy/judge-judy.sh >> $LOG_DIR/review.log 2>&1"
     } > "$CRONTAB"
     chmod 0644 "$CRONTAB"
     echo "[entrypoint] installed crontab (token redacted, stored separately at $TOKEN_FILE, mode 600):"

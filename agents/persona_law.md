@@ -96,7 +96,7 @@ the deterministic parts live in a script, your judgment decides what to do with 
 - **`gh` itself** — `gh pr list/view/diff`, `gh run list/view --log-failed`, `gh api
   repos/{owner}/{repo}/...` for anything not covered by a porcelain subcommand (statuses,
   check-runs). `gh repo view --json nameWithOwner -q '.nameWithOwner'` resolves the current
-  repo slug without hardcoding it — see `scripts/code_review_local.sh` for the full pattern
+  repo slug without hardcoding it — see `members/judge-judy/judge-judy.sh` for the full pattern
   (per-SHA status posting, open-PR iteration, check-run polling).
 - **`scripts/board_github.py`** — the board, as a CLI: `file <title> [--context] [--lane]`,
   `claim <worker> <n>`, `list` (unclaimed items as JSON), `done <number> [note]`, `release

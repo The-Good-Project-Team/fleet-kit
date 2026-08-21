@@ -27,7 +27,7 @@
     "model": "sonnet",
     "max_turns": 30,
     "prompt_file": "judge-judy.md",
-    "runner": "scripts/code_review_local.sh",
+    "runner": "members/judge-judy/judge-judy.sh",
     "tools": {
       "allow": ["none"],
       "deny": ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "WebFetch"]

@@ -1,6 +1,8 @@
 #!/bin/bash
-# code_review_local.sh — code review as a local `claude -p` pass, posting a GitHub commit
-# status other gates (branch protection, a CEO pass) can key on.
+# judge-judy.sh — code review as a local `claude -p` pass, posting a GitHub commit
+# status other gates (branch protection, a CEO pass) can key on. judge-judy's own runner --
+# see judge-judy.fleet.json's `llm.runner` and judge-judy.md's header for why this member
+# is invoked directly rather than through the generic run_member.sh path.
 #
 # Provenance: genericized from nonprofit-atlas's `scripts/lucky2/code_review_local.sh`
 # (2026-08-12), written to replace a hosted-VM code-review service for that product. The
@@ -25,19 +27,20 @@
 # Env (see fleet.env.example): FLEET_REPO, FLEET_LOG_DIR, FLEET_CODE_REVIEW_MODEL (default
 # sonnet), FLEET_CODE_REVIEW_TIMEOUT (default 900s), FLEET_REQUIRED_CHECKS (space-separated
 # check-run names that must not be red before reviewing a head — default empty, meaning no
-# filter). PR override: code_review_local.sh <pr>.
+# filter). PR override: judge-judy.sh <pr>.
 set -uo pipefail
 
 [ -f "${FLEET_ENV_FILE:-./fleet.env}" ] && . "${FLEET_ENV_FILE:-./fleet.env}"
 
+KIT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 REPO="${FLEET_REPO:?set FLEET_REPO in fleet.env}"
 LOG_DIR="${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}"
-LOG="$LOG_DIR/codereview.log"
+LOG="$LOG_DIR/judge-judy.log"
 MODEL="${FLEET_CODE_REVIEW_MODEL:-sonnet}"
 TIMEOUT_S="${FLEET_CODE_REVIEW_TIMEOUT:-900}"
 REQUIRED_CHECKS="${FLEET_REQUIRED_CHECKS:-}"
 MAX_PARSE_STRIKES=2
-STRIKE_DIR="$HOME/.cache/fleet-kit/code-review-strikes"
+STRIKE_DIR="$HOME/.cache/fleet-kit/judge-judy-strikes"
 # The diff is capped, not because big diffs don't deserve review, but because an unbounded
 # prompt can blow the context window and produce an unparseable half-answer — which then
 # reads as a reviewer outage.
@@ -51,16 +54,16 @@ log() { echo "[$(ts)] $*" >> "$LOG"; }
 # Master kill switch, then this member's own switch -- see fleet_enabled.sh's header for why
 # both are the same fleet.env-flag mechanism.
 # shellcheck source=/dev/null
-[ -f "$(dirname "$0")/fleet_enabled.sh" ] && . "$(dirname "$0")/fleet_enabled.sh"
-fleet_enabled_or_exit "reviewer"
+[ -f "$KIT_DIR/scripts/fleet_enabled.sh" ] && . "$KIT_DIR/scripts/fleet_enabled.sh"
+fleet_enabled_or_exit "judge-judy"
 if [ "${FLEET_RUN_NOW:-0}" != "1" ] && [ "${FLEET_REVIEWER_ENABLED:-false}" != "true" ]; then
-  log "reviewer: FLEET_REVIEWER_ENABLED != true -- exiting without doing anything"
+  log "judge-judy: FLEET_REVIEWER_ENABLED != true -- exiting without doing anything"
   exit 0
 fi
 
 cd "$REPO" 2>/dev/null || { log "FATAL: repo missing at $REPO"; exit 1; }
 # shellcheck source=/dev/null
-[ -f "$(dirname "$0")/account_pool.sh" ] && . "$(dirname "$0")/account_pool.sh"
+[ -f "$KIT_DIR/scripts/account_pool.sh" ] && . "$KIT_DIR/scripts/account_pool.sh"
 if ! command -v account_pool_run >/dev/null 2>&1; then
   # No account pool sourced (single-account setups can skip it) — define a passthrough so
   # the rest of this script is identical either way.
@@ -120,7 +123,7 @@ if [ "$(wc -c < "$DIFF_FILE")" -gt "$MAX_DIFF_BYTES" ]; then
 fi
 gh pr view "$PR" --json title,body -q '"TITLE: \(.title)\n\n\(.body)"' > "$BODY_FILE" 2>/dev/null || true
 
-# See agents/reviewer_prompt.md for the annotated version of this template.
+# See judge-judy.md (this member's own charter) for the annotated version of this template.
 PROMPT="You are the merge-blocking code reviewer for this repo. Review the diff below for
 CORRECTNESS defects only: bugs, broken call paths, security regressions, tests that cannot
 fail, silent failure modes. Style/preference nits are NOT blocking. Be concrete: file:line +
@@ -140,7 +143,6 @@ VERDICT: approve
 or
 VERDICT: block"
 
-KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # --output-format json for the provider's own per-call cost/token accounting (see
 # pass_accounting.py) -- text still lands in $OUT_FILE unchanged so the VERDICT: grep below
 # doesn't need to know the call shape changed.
@@ -171,7 +173,7 @@ rm -f "$STRIKE_FILE"
 
 report_run() { # <outcome-line> <evidence-line>
   printf 'Outcome: %s\nEvidence: %s\n' "$1" "$2" | python3 "$KIT_DIR/scripts/run_report.py" \
-    --member "reviewer" --run-id "review-${PR}-${HEAD_SHA:0:12}" --kind llm --exit-code 0 \
+    --member "judge-judy" --run-id "review-${PR}-${HEAD_SHA:0:12}" --kind llm --exit-code 0 \
     --pass-file - --usage-file "$USAGE_FILE" --pr "$PR" >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
 }
 

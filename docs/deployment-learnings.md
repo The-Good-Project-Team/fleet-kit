@@ -95,7 +95,7 @@ does NOT cover `Bash` — that stays gated behind an interactive approval prompt
 worktree with no human attached has no one to answer it. `worktree_builder.sh` and
 `run_agent_pass.sh` both fixed to use `--dangerously-skip-permissions` instead: the fresh,
 throwaway worktree IS the isolation boundary (per this kit's own `persona_law.md`), which is
-what makes skipping the interactive prompt safe specifically here. `code_review_local.sh`
+what makes skipping the interactive prompt safe specifically here. `members/judge-judy/judge-judy.sh`
 was left alone — it only reads and posts a status, no Bash execution needed.
 
 **If you see a build session report a completed fix but no commit/PR, check for this exact

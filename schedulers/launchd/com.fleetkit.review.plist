@@ -9,7 +9,7 @@
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>exec "{{KIT_PATH}}/scripts/code_review_local.sh"</string>
+    <string>exec "{{KIT_PATH}}/members/judge-judy/judge-judy.sh"</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

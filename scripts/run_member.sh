@@ -81,7 +81,7 @@ fi
 
 RUN_ID="${MEMBER}-$$-$(date +%s)"
 
-# A member MAY declare its own runner (e.g. judge-judy's code_review_local.sh, which reviews a
+# A member MAY declare its own runner (e.g. judge-judy's judge-judy.sh, which reviews a
 # diff as untrusted TEXT with zero tools -- a shape the generic claude -p path below can't
 # express safely). Default: none, every other member runs through the generic path.
 CUSTOM_RUNNER=$(jget "['llm'].get('runner', '')")

@@ -9,7 +9,7 @@ Templates for both macOS (launchd) and Linux (systemd timer). Fill the `{{...}}`
 | gitpull | 5–15 min | `git -C $FLEET_REPO pull --ff-only` — one line, no dedicated script needed | if the fleet runs on a persistent box rather than cloning fresh each tick |
 | rank | hourly | your own `gh issue list` + RICE pass (not shipped — see README's "Rank" note) | optional; without it the backlog stays FIFO |
 | build | hourly | `scripts/worktree_builder.sh` | **required** |
-| review | 15 min | `scripts/code_review_local.sh` | **required** if you don't have another review gate |
+| review | 15 min | `members/judge-judy/judge-judy.sh` | **required** if you don't have another review gate |
 | ceo | hourly | your `agents/ceo.md`-driven pass | optional; the fleet still runs without one, just with no self-healing |
 | architect | daily | your `agents/architect.md`-driven pass | optional; without it the fleet only ever ships PR-sized increments, never features |
 | view | always-on (not interval-scheduled) | `scripts/fleet_view_server.py` | optional — a live window onto `runs.jsonl` + `gh` state; kill it and the loop above is untouched. See `fleetkit-view.service` / `com.fleetkit.view.plist` (a long-running service, not a timer/interval job like the rest of this table). |

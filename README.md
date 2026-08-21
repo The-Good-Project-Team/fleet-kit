@@ -69,7 +69,7 @@ GitHub Issues (board)  ->  rank (RICE)  ->  build (fresh worktree, claude -p)
   (never the shared checkout — see `agents/persona_law.md`), opens a PR, arms `gh pr merge --auto`.
   Every pass — win or lose — appends one record to `$FLEET_LOG_DIR/runs.jsonl` via
   `run_report.py` (see "Receipts" below); `fleet_view_server.py` tails that file live.
-- **Review** — `scripts/code_review_local.sh`: one `claude -p` pass per open PR with an
+- **Review** — `members/judge-judy/judge-judy.sh`: one `claude -p` pass per open PR with an
   untrusted-diff prompt, posting a `fleet-code-review` commit status, and its own `runs.jsonl`
   record either way.
 - **Gate** — your CI plus that review status, wired as GitHub required status checks.

@@ -53,11 +53,14 @@ MAX_RUNS = 500  # bound memory; this is a window, not an archive -- runs.jsonl o
 # human's text editor are the same mechanism, never two that can disagree.
 ENV_FILE = Path(os.environ.get("FLEET_ENV_FILE", KIT_DIR / "fleet.env"))
 
-# Real, runnable members in this kit today (agents/ceo.md and architect.md are bring-your-own
-# scripts per the README -- nothing to toggle/run-now until a project wires its own driver).
+# TODO: stale -- predates the 7 real members (members/*/*.fleet.json) and run_member.sh
+# (2026-08-21). Still wired to the two oldest standalone scripts; doesn't know about
+# dumbledore/gru/jefe/judge-judy/roomba/the-fixer/dont-shoot-the-messenger at all. Real fix is
+# to build this table from member_spec.load_all() instead of a hand-maintained dict -- filed as
+# a follow-up, not fixed here (out of scope for a rename).
 MEMBERS = {
     "builder": {"script": "worktree_builder.sh", "enabled_var": "FLEET_BUILDER_ENABLED"},
-    "reviewer": {"script": "code_review_local.sh", "enabled_var": "FLEET_REVIEWER_ENABLED"},
+    "judge-judy": {"script": "../members/judge-judy/judge-judy.sh", "enabled_var": "FLEET_REVIEWER_ENABLED"},
 }
 
 

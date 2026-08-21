@@ -4,5 +4,5 @@ Description=fleet-kit reviewer — one PR per tick, posts fleet-code-review stat
 [Service]
 Type=oneshot
 Environment=FLEET_ENV_FILE={{KIT_PATH}}/fleet.env
-ExecStart={{KIT_PATH}}/scripts/code_review_local.sh
+ExecStart={{KIT_PATH}}/members/judge-judy/judge-judy.sh
 User={{USER}}
