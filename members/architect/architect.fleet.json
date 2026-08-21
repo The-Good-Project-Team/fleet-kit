@@ -1,0 +1,22 @@
+{
+  "name": "architect",
+  "kind": "llm",
+  "lane": "planning",
+  "schedule": {
+    "daily_at": "15:10"
+  },
+  "timeout_s": 3600,
+  "enabled": false,
+  "llm": {
+    "model": "opus",
+    "max_turns": 80,
+    "prompt_file": "prompt.md",
+    "tools": {
+      "allow": ["Read", "Grep", "Glob", "Edit", "Write", "Bash", "WebFetch"],
+      "deny": ["Bash(gh pr merge:*)"]
+    }
+  },
+  "report": {
+    "vision_link": "required"
+  }
+}

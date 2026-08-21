@@ -1,0 +1,22 @@
+{
+  "name": "builder",
+  "kind": "llm",
+  "lane": "build",
+  "schedule": {
+    "hourly_at_minute": 0
+  },
+  "timeout_s": 2400,
+  "enabled": false,
+  "llm": {
+    "model": "sonnet",
+    "max_turns": 60,
+    "prompt_file": "prompt.md",
+    "tools": {
+      "allow": ["Read", "Edit", "Write", "Bash", "Grep", "Glob"],
+      "deny": ["Bash(git stash:*)", "Bash(git push --force:*)"]
+    }
+  },
+  "report": {
+    "vision_link": "optional"
+  }
+}

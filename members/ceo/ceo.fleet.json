@@ -1,0 +1,22 @@
+{
+  "name": "ceo",
+  "kind": "llm",
+  "lane": "orchestrate",
+  "schedule": {
+    "interval_s": 3600
+  },
+  "timeout_s": 1800,
+  "enabled": false,
+  "llm": {
+    "model": "opus",
+    "max_turns": 60,
+    "prompt_file": "prompt.md",
+    "tools": {
+      "allow": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
+      "deny": ["Bash(gh pr merge:*)", "Bash(git push --force:*)"]
+    }
+  },
+  "report": {
+    "vision_link": "required"
+  }
+}

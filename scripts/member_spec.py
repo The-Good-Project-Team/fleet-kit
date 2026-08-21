@@ -25,6 +25,13 @@ defect class as the prmerged plist pinning an interpreter that did not exist (#2
 scout prompts telling agents to run bare `python` when the fleet host has none: an assumed dependency
 that is absent exactly where it has to work. `.fleet.json` keeps comments out but costs
 nothing a reviewer needs.
+
+ONE PERSONA = ONE DIRECTORY, not one file. `members/<name>/<name>.fleet.json` sits alongside
+that persona's own behavior file (`prompt.md` for kind=llm, a runnable script for
+kind=mechanical) -- config never inlines the prompt text or the command logic, only a path to
+it. This is the actual modularity: adding or removing a persona is copying or deleting one
+self-contained folder, nothing else in the kit changes. A prompt or a script is independently
+readable, diffable, and (for mechanical members) independently testable without touching JSON.
 """
 from __future__ import annotations
 
@@ -36,10 +43,13 @@ MEMBERS_DIR = Path(__file__).resolve().parent.parent / "members"
 
 KINDS = ("llm", "mechanical")
 
-# A mechanical member runs a command; an LLM member runs a prompt through claude -p. Both get
-# the same lifecycle and the same report contract -- that is the whole point of one schema.
+# A mechanical member runs its own script; an LLM member runs its own prompt through claude -p.
+# Both get the same lifecycle and the same report contract -- that is the whole point of one
+# schema. Both point OUT to a file in their own directory, never inline text/commands in the
+# JSON, so the actual behavior stays independently readable/diffable/testable.
 _REQUIRED = ("name", "kind", "schedule", "timeout_s", "enabled", "report")
 _LLM_REQUIRED = ("model", "max_turns", "prompt_file", "tools")
+_MECHANICAL_REQUIRED = ("run_file",)
 
 
 class SpecError(ValueError):
@@ -62,6 +72,13 @@ def validate(spec: dict, *, filename: str = "<dict>") -> dict:
     if filename not in ("<dict>",):
         stem = Path(filename).name.replace(".fleet.json", "")
         _require(stem == name, f"{where}filename must match name {name!r}, got {stem!r}")
+        # One persona = one directory: members/<name>/<name>.fleet.json. Catches the copy-paste
+        # mistake of a folder renamed but its .fleet.json left with the old name (or vice
+        # versa) before it becomes a silent "which spec actually loaded" bug at runtime.
+        parent = Path(filename).parent.name
+        _require(parent == name,
+                 f"{where}parent directory must match name {name!r}, got {parent!r} "
+                 f"(expected members/{name}/{name}.fleet.json)")
 
     kind = spec["kind"]
     _require(kind in KINDS, f"{where}kind must be one of {KINDS}, got {kind!r}")
@@ -106,8 +123,10 @@ def validate(spec: dict, *, filename: str = "<dict>") -> dict:
         _require(isinstance(llm["max_turns"], int) and llm["max_turns"] > 0,
                  f"{where}llm.max_turns must be a positive int")
     else:
-        _require(isinstance(spec.get("command"), str) and spec["command"],
-                 f"{where}kind=mechanical needs a command string")
+        for key in _MECHANICAL_REQUIRED:
+            _require(key in spec, f"{where}{key} is required for kind=mechanical")
+        _require(isinstance(spec["run_file"], str) and spec["run_file"],
+                 f"{where}run_file must be a non-empty relative path (e.g. 'run.sh')")
 
     report = spec["report"]
     _require(isinstance(report, dict), f"{where}report must be an object")
@@ -134,12 +153,23 @@ def load_all(members_dir: str | os.PathLike | None = None) -> list[dict]:
     fleet every two minutes.
     """
     d = Path(members_dir or MEMBERS_DIR)
-    return [load(f) for f in sorted(d.glob("*.fleet.json"))]
+    return [load(f) for f in sorted(d.glob("*/*.fleet.json"))]
 
 
 def by_name(name: str, members_dir: str | os.PathLike | None = None) -> dict:
     d = Path(members_dir or MEMBERS_DIR)
-    p = d / f"{name}.fleet.json"
+    p = d / name / f"{name}.fleet.json"
     if not p.exists():
         raise SpecError(f"no such fleet member: {name} (looked for {p})")
     return load(p)
+
+
+def behavior_path(spec: dict, members_dir: str | os.PathLike | None = None) -> Path:
+    """Resolve a member's prompt_file (llm) or run_file (mechanical) to an absolute path,
+    relative to ITS OWN directory -- never the repo root or cwd. This is what keeps a persona
+    folder copy/paste-portable: the spec never needs to know where members/ itself lives."""
+    d = Path(members_dir or MEMBERS_DIR) / spec["name"]
+    rel = spec["llm"]["prompt_file"] if spec["kind"] == "llm" else spec["run_file"]
+    p = d / rel
+    _require(p.exists(), f"{spec['name']}: behavior file not found at {p}")
+    return p
