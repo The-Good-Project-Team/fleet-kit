@@ -1,0 +1,36 @@
+{
+  "name": "marie",
+  "emoji": "🧹",
+  "kind": "llm",
+  "lane": "hygiene",
+  "mandate": {
+    "target": "the fleet:claimed label is trustworthy -- every issue wearing it has a live, matching, open PR",
+    "checklist": [
+      "list every open issue labeled fleet:claimed",
+      "for each, check for an open PR that actually references/fixes it",
+      "no matching open PR -> the claim is stale (a builder pass died mid-work, or claimed and never started) -- remove fleet:claimed, leave a one-line comment saying why",
+      "a matching open PR exists -> leave the label alone, it is correct",
+      "never touch fleet:claimed on an issue with a genuinely in-progress PR",
+      "never close or edit the issue body itself -- label + comment only"
+    ],
+    "limits": {"max_turns": 40, "timeout_s": 1800, "max_budget_usd": 4},
+    "escalation": "can't tell if a PR is stale vs genuinely still in progress (e.g. draft PR, recent commits) -- leave the label alone and say so in the report rather than guessing wrong. A false stale-clear is worse than a missed one: it lets two builders claim the same item."
+  },
+  "schedule": {
+    "hourly_at_minute": 30
+  },
+  "timeout_s": 1800,
+  "enabled": true,
+  "llm": {
+    "model": "sonnet",
+    "max_turns": 40,
+    "prompt_file": "marie.md",
+    "tools": {
+      "allow": ["Read", "Bash", "Grep", "Glob", "TodoWrite"],
+      "deny": ["Bash(gh pr merge:*)", "Bash(gh issue close:*)", "Bash(git push --force:*)"]
+    }
+  },
+  "report": {
+    "vision_link": "optional"
+  }
+}
