@@ -12,9 +12,12 @@ Templates for both macOS (launchd) and Linux (systemd timer). Fill the `{{...}}`
 | review | 15 min | `scripts/code_review_local.sh` | **required** if you don't have another review gate |
 | ceo | hourly | your `agents/ceo.md`-driven pass | optional; the fleet still runs without one, just with no self-healing |
 | architect | daily | your `agents/architect.md`-driven pass | optional; without it the fleet only ever ships PR-sized increments, never features |
+| view | always-on (not interval-scheduled) | `scripts/fleet_view_server.py` | optional — a live window onto `runs.jsonl` + `gh` state; kill it and the loop above is untouched. See `fleetkit-view.service` / `com.fleetkit.view.plist` (a long-running service, not a timer/interval job like the rest of this table). |
 
 launchd: `cp <file> ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/<file>`
 systemd: `cp <file>.service <file>.timer /etc/systemd/system/ && systemctl enable --now <file>.timer`
+(the `view` job has no `.timer` — it's `Type=simple` + `Restart=on-failure`, enabled directly:
+`systemctl enable --now fleetkit-view.service`)
 
 Both template families set `PATH`/environment explicitly — neither launchd nor a systemd
 timer gives a job a login shell, so `gh`/`git`/`claude` are not guaranteed to be found

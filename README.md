@@ -67,8 +67,11 @@ GitHub Issues (board)  ->  rank (RICE)  ->  build (fresh worktree, claude -p)
   reasoning it applies.
 - **Build** — `scripts/worktree_builder.sh` claims one item, works in a **fresh git worktree**
   (never the shared checkout — see `agents/persona_law.md`), opens a PR, arms `gh pr merge --auto`.
+  Every pass — win or lose — appends one record to `$FLEET_LOG_DIR/runs.jsonl` via
+  `run_report.py` (see "Receipts" below); `fleet_view_server.py` tails that file live.
 - **Review** — `scripts/code_review_local.sh`: one `claude -p` pass per open PR with an
-  untrusted-diff prompt, posting a `fleet-code-review` commit status.
+  untrusted-diff prompt, posting a `fleet-code-review` commit status, and its own `runs.jsonl`
+  record either way.
 - **Gate** — your CI plus that review status, wired as GitHub required status checks.
 - **Merge** — GitHub's own auto-merge. No custom drain loop and no TOCTOU handling to write;
   GitHub already serializes it.
@@ -168,9 +171,15 @@ scoring module that was never copied, so a fresh clone crashed on import and not
 ## What's NOT in this kit (extension points)
 
 The source fleet had product-specific machinery this kit deliberately does not port:
-- **A dashboard.** The source product had a live ops HUD reading fleet telemetry off its own
-  DB. This kit reports via plain log files + GitHub — wire your own dashboard reading
-  `gh issue list` / `gh pr list` / the schedulers' logs if you want one.
+- **A heavy dashboard.** The source product's fleet HUD was ~2,700 lines across five files —
+  its own Postgres tables, its own API layer, its own auth-gated routes riding on the app it
+  existed to watch. This kit ships the opposite bet instead: `scripts/fleet_view_server.py`, one
+  stdlib process (no framework, no DB) that tails `runs.jsonl` and polls `gh pr/issue list`,
+  pushing both over SSE to one static page (`scripts/fleet_view.html`). Kill it and the
+  build/review/merge loop is untouched — it's a window, not a component. See the `view` row in
+  `schedulers/README.md`. It has no auth of its own; put it behind your own reverse proxy or
+  tunnel for remote access (see `docs/deployment-learnings.md` #15 for a Cloudflare Tunnel
+  recipe) rather than exposing the raw port.
 - **A browser-VM design gate.** The source product used a hosted browser-agent service to
   render UI changes and judge them visually. If your product has a UI, add an equivalent gate
   as another required status check — the merge/gate architecture here doesn't care what

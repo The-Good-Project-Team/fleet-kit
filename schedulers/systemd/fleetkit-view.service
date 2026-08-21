@@ -1,0 +1,18 @@
+[Unit]
+Description=fleet-kit view — live dashboard (runs.jsonl + gh state), no DB, no auth
+After=network.target
+
+[Service]
+Type=simple
+Environment=FLEET_ENV_FILE={{KIT_PATH}}/fleet.env
+# fleet_view_server.py sources the same env vars every other kit script reads (FLEET_REPO,
+# FLEET_LOG_DIR); FLEET_VIEW_PORT (default 8420) and FLEET_VIEW_GH_POLL_S (default 20s) are
+# specific to this one. Put it behind your own reverse proxy / Cloudflare Tunnel for remote
+# access -- this process itself has zero auth, by design (it's a window, not a product).
+ExecStart=/usr/bin/env bash -c 'set -a; . {{KIT_PATH}}/fleet.env; set +a; exec python3 {{KIT_PATH}}/scripts/fleet_view_server.py'
+User={{USER}}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

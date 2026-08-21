@@ -151,10 +151,18 @@ if [ -z "$VERDICT" ]; then
 fi
 rm -f "$STRIKE_FILE"
 
+KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+report_run() { # <outcome-line> <evidence-line>
+  printf 'Outcome: %s\nEvidence: %s\n' "$1" "$2" | python3 "$KIT_DIR/scripts/run_report.py" \
+    --member "reviewer" --run-id "review-${PR}-${HEAD_SHA:0:12}" --kind llm --exit-code 0 \
+    --pass-file - --pr "$PR" >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
+}
+
 if [ "$VERDICT" = "VERDICT: approve" ]; then
   post_status "$HEAD_SHA" "success" "Code review passed (local claude, model=$MODEL)" \
     && log "PR #$PR: APPROVED -- status posted" \
     || log "PR #$PR: WARN approved but status POST failed"
+  report_run "approved PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: success"
 else
   # Findings comment first, status second: a failure status pointing at nothing is worse
   # than no status at all.
@@ -165,5 +173,6 @@ $FINDINGS" >/dev/null 2>&1 || log "PR #$PR: WARN findings comment failed"
   post_status "$HEAD_SHA" "failure" "Code review found blocking issues -- see PR comment" \
     && log "PR #$PR: BLOCKED -- status + findings posted" \
     || log "PR #$PR: WARN blocked but status POST failed"
+  report_run "blocked PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: failure, see PR comment"
 fi
 exit 0

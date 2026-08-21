@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- fleet-kit view — live dashboard, always-on. Optional (the loop runs fine with this off;
+     it's a window onto runs.jsonl + gh state, not a dependency of build/review/merge). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fleetkit.view</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>set -a; . "{{KIT_PATH}}/fleet.env"; set +a; exec python3 "{{KIT_PATH}}/scripts/fleet_view_server.py"</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/{{USER}}</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/{{USER}}/Library/Logs/fleet-kit/view.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/{{USER}}/Library/Logs/fleet-kit/view.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

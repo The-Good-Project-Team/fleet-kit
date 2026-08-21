@@ -94,7 +94,8 @@ def classify(report: dict, *, vision_required: bool) -> str:
 
 
 def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
-                 pass_text: str, usage: dict | None, vision_required: bool) -> dict:
+                 pass_text: str, usage: dict | None, vision_required: bool,
+                 item_id: str | None = None, pr: str | None = None) -> dict:
     """One run = one record. `usage` is pass_accounting's parsed JSON, or None (mechanical)."""
     report = parse_report(pass_text)
     rec = {
@@ -106,6 +107,11 @@ def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
         "outcome": report["outcome"],
         "evidence": report["evidence"],
         "vision_link": report["vision_link"],
+        # Deterministic, not regex-parsed from prose -- the caller already knows these when it
+        # writes the record (worktree_builder.sh resolves PR_NUM itself before calling this).
+        # Optional: a mechanical member or an early-exit ("no unclaimed items") has neither.
+        "item_id": item_id,
+        "pr": pr,
     }
     u = usage or {}
     rec["tokens"] = {
@@ -128,6 +134,8 @@ def main(argv=None) -> int:
     ap.add_argument("--pass-file", help="file holding the pass's text output ('-' for stdin)")
     ap.add_argument("--usage-file", help="JSON usage record from pass_accounting")
     ap.add_argument("--vision-required", action="store_true")
+    ap.add_argument("--item-id", help="board item id this pass worked, if any")
+    ap.add_argument("--pr", help="PR number this pass produced, if any")
     a = ap.parse_args(argv)
 
     if a.pass_file == "-":
@@ -144,7 +152,8 @@ def main(argv=None) -> int:
             usage = None
 
     rec = build_record(member=a.member, run_id=a.run_id, kind=a.kind, exit_code=a.exit_code,
-                       pass_text=text, usage=usage, vision_required=a.vision_required)
+                       pass_text=text, usage=usage, vision_required=a.vision_required,
+                       item_id=a.item_id, pr=a.pr)
     print(json.dumps(rec))
     return 0
 

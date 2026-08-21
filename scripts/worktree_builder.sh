@@ -99,7 +99,11 @@ ID: $ITEM_ID
 Title: $ITEM_TEXT
 Context: $ITEM_CONTEXT
 
-You are in a fresh worktree at $WT_PATH on branch $WT_BRANCH. Commit + push from here."
+You are in a fresh worktree at $WT_PATH on branch $WT_BRANCH. Commit + push from here.
+
+## Report (injected — end your final message with exactly these two lines)
+Outcome: <one line — what you did, naming the PR # if you opened one, or why you stopped>
+Evidence: <the PR URL / commit sha / file:line that proves it, or the exact error you hit>"
 
 log "building item #$ITEM_ID in $WT_PATH (model=$MODEL)"
 # --dangerously-skip-permissions, not --permission-mode acceptEdits: acceptEdits only
@@ -129,6 +133,10 @@ RC=$?
 
 if [ "$RC" -ne 0 ]; then
   log "item #$ITEM_ID: build session failed rc=$RC (account=${ACCOUNT_POOL_SELECTED:-none})"
+  RUN_ID="build-${ITEM_ID}-$$-$(date +%s)"
+  echo "$OUT" | python3 "$KIT_DIR/scripts/run_report.py" \
+    --member "builder" --run-id "$RUN_ID" --kind llm --exit-code "$RC" --pass-file - \
+    --item-id "$ITEM_ID" >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
   exit 1
 fi
 
@@ -136,6 +144,17 @@ fi
 # Same lesson as the source fleet: a prose "mention the item ID" instruction has a real-world
 # compliance rate well under 100%. Stamp it deterministically here rather than hoping.
 PR_NUM=$(grep -oE 'github\.com/[^ ]+/pull/[0-9]+' <<<"$OUT" | tail -1 | grep -oE '[0-9]+$')
+
+# --- report: one line in runs.jsonl per pass ------------------------------------------------
+# This is the leg the fleet-view server tails. Written here (by the wrapper, around the agent)
+# rather than left to the agent to self-report -- see run_report.py's own header for why that
+# split is load-bearing, not stylistic. Written AFTER PR_NUM resolves so the record carries it
+# deterministically instead of relying only on the agent's own Evidence: line.
+RUN_ID="build-${ITEM_ID}-$$-$(date +%s)"
+echo "$OUT" | python3 "$KIT_DIR/scripts/run_report.py" \
+  --member "builder" --run-id "$RUN_ID" --kind llm --exit-code "$RC" --pass-file - \
+  --item-id "$ITEM_ID" ${PR_NUM:+--pr "$PR_NUM"} >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
+
 if [ -n "$PR_NUM" ]; then
   BODY=$(gh pr view "$PR_NUM" --json body -q '.body' 2>/dev/null || echo "")
   if ! grep -qE 'Backlog:[[:space:]]*#[0-9]+' <<<"$BODY"; then

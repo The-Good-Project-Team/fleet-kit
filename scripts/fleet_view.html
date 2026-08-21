@@ -1,0 +1,159 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>fleet-kit — live</title>
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #14171c; --border: #262b33; --text: #d7dce2; --dim: #6b7480;
+    --ok: #3e9b5c; --warn: #c9a227; --bad: #c9463e; --accent: #4a8fd6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.5 -apple-system, "SF Mono", ui-monospace, monospace; }
+  header { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex;
+    align-items: center; gap: 12px; position: sticky; top: 0; background: var(--bg); z-index: 5; }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  #dot.live { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .layout { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 1px; background: var(--border);
+    min-height: calc(100vh - 41px); }
+  .col { background: var(--bg); overflow: auto; max-height: calc(100vh - 41px); }
+  .col-head { padding: 8px 12px; font-weight: 600; color: var(--dim); text-transform: uppercase;
+    font-size: 11px; letter-spacing: .05em; position: sticky; top: 0; background: var(--bg);
+    border-bottom: 1px solid var(--border); }
+  .row { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .row:hover { background: var(--panel); }
+  .pill { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px;
+    font-weight: 600; text-transform: uppercase; }
+  .pill.ok { background: rgba(62,155,92,.18); color: var(--ok); }
+  .pill.quiet { background: rgba(201,162,39,.18); color: var(--warn); }
+  .pill.reported_nothing, .pill.no_vision_link, .pill.fail { background: rgba(201,70,62,.18); color: var(--bad); }
+  .pill.pending { background: rgba(107,116,128,.18); color: var(--dim); }
+  .row .meta { color: var(--dim); font-size: 11px; margin-top: 2px; }
+  .row .outcome { margin-top: 4px; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  button { background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 3px; padding: 2px 8px; font-size: 11px; cursor: pointer; font-family: inherit; }
+  button:hover { border-color: var(--accent); }
+  .actions { margin-top: 4px; display: flex; gap: 6px; }
+  #empty { padding: 20px; color: var(--dim); text-align: center; }
+  .checks-green { color: var(--ok); } .checks-pending { color: var(--warn); } .checks-failing { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <span id="dot"></span>
+  <h1>fleet-kit</h1>
+  <span id="repo" style="color:var(--dim)"></span>
+</header>
+<div class="layout">
+  <div class="col">
+    <div class="col-head">Runs (live)</div>
+    <div id="runs"><div id="empty">waiting for the first pass…</div></div>
+  </div>
+  <div class="col">
+    <div class="col-head">Open PRs</div>
+    <div id="prs"></div>
+  </div>
+  <div class="col">
+    <div class="col-head">Backlog (issues)</div>
+    <div id="issues"></div>
+  </div>
+</div>
+<script>
+const runsEl = document.getElementById('runs');
+const prsEl = document.getElementById('prs');
+const issuesEl = document.getElementById('issues');
+const dot = document.getElementById('dot');
+
+function esc(s) { return (s ?? '').toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function ago(iso_or_epoch) {
+  if (!iso_or_epoch) return '';
+  const t = typeof iso_or_epoch === 'number' ? iso_or_epoch * 1000 : Date.parse(iso_or_epoch);
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 60) return Math.round(s) + 's ago';
+  if (s < 3600) return Math.round(s / 60) + 'm ago';
+  return Math.round(s / 3600) + 'h ago';
+}
+
+function renderRun(rec) {
+  const div = document.createElement('div');
+  div.className = 'row';
+  const status = rec.status || 'pending';
+  const pr = rec.pr ? `<a href="#" data-pr="${esc(rec.pr)}">PR #${esc(rec.pr)}</a>` : '';
+  div.innerHTML = `
+    <span class="pill ${esc(status)}">${esc(status)}</span>
+    <b>${esc(rec.member)}</b>
+    <span class="meta">${esc(rec.kind || '')} · item ${esc(rec.item_id || '—')} ${pr ? '· ' + pr : ''}</span>
+    <div class="outcome">${esc(rec.outcome || '(no outcome reported)')}</div>
+    ${rec.evidence ? `<div class="meta">${esc(rec.evidence)}</div>` : ''}
+    ${rec.tokens && rec.tokens.cost_usd ? `<div class="meta">$${Number(rec.tokens.cost_usd).toFixed(3)} · ${esc(rec.tokens.num_turns)} turns</div>` : ''}
+    <div class="actions">
+      <button data-act="steer" data-member="${esc(rec.member)}">throttle ${esc(rec.member)}</button>
+    </div>`;
+  document.getElementById('empty')?.remove();
+  runsEl.prepend(div);
+  while (runsEl.children.length > 300) runsEl.removeChild(runsEl.lastChild);
+}
+
+function renderGh(gh) {
+  prsEl.innerHTML = (gh.prs || []).map(pr => {
+    const cls = pr._rollup === 'green' ? 'checks-green' : pr._rollup === 'failing' ? 'checks-failing' : 'checks-pending';
+    return `<div class="row">
+      <a href="${esc(pr.url)}" target="_blank">#${pr.number}</a> ${pr.isDraft ? '<span class="meta">draft</span>' : ''}
+      <div>${esc(pr.title)}</div>
+      <div class="meta"><span class="${cls}">${esc(pr._rollup)}</span> · ${esc(pr.headRefName)} · ${ago(pr.updatedAt)}</div>
+      <div class="actions"><button data-act="close_pr" data-pr="${pr.number}">close</button></div>
+    </div>`;
+  }).join('') || '<div id="empty">no open PRs</div>';
+
+  issuesEl.innerHTML = (gh.issues || []).map(i => `<div class="row">
+      <a href="#" class="meta">#${i.number}</a>
+      <div>${esc(i.title)}</div>
+      <div class="meta">${i._claimed ? '<span class="pill quiet">claimed</span>' : '<span class="pill ok">open</span>'} · ${ago(i.updatedAt)}</div>
+      ${i._claimed ? `<div class="actions"><button data-act="prune" data-issue="${i.number}">release claim</button></div>` : ''}
+    </div>`).join('') || '<div id="empty">backlog empty</div>';
+}
+
+document.body.addEventListener('click', async (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  const act = b.dataset.act;
+  if (act === 'steer') {
+    const key = prompt('override key (max_turns, model, enabled, schedule):', 'max_turns');
+    if (!key) return;
+    const value = prompt('value (JSON, e.g. 20 or "sonnet" or false):');
+    if (value === null) return;
+    const why = prompt('why? (required)', 'throttled from fleet-view');
+    if (!why) return;
+    let parsed; try { parsed = JSON.parse(value); } catch { parsed = value; }
+    const r = await fetch('/api/steer', { method: 'POST', body: JSON.stringify(
+      { member: b.dataset.member, key, value: parsed, why }) });
+    alert((await r.json()).ok ? 'applied' : 'failed — see server log');
+  } else if (act === 'prune') {
+    if (!confirm(`release the claim on issue #${b.dataset.issue}?`)) return;
+    const r = await fetch('/api/prune', { method: 'POST', body: JSON.stringify({ issue: b.dataset.issue }) });
+    alert((await r.json()).ok ? 'released' : 'failed — see server log');
+  } else if (act === 'close_pr') {
+    if (!confirm(`close PR #${b.dataset.pr}?`)) return;
+    const r = await fetch('/api/close_pr', { method: 'POST', body: JSON.stringify({ pr: b.dataset.pr }) });
+    alert((await r.json()).ok ? 'closed' : 'failed — see server log');
+  }
+});
+
+async function boot() {
+  const snap = await (await fetch('/api/snapshot')).json();
+  snap.runs.slice().reverse().forEach(renderRun);
+  renderGh(snap.gh);
+
+  const es = new EventSource('/api/stream');
+  es.onopen = () => dot.classList.add('live');
+  es.onerror = () => dot.classList.remove('live');
+  es.addEventListener('run', e => renderRun(JSON.parse(e.data)));
+  es.addEventListener('gh', e => renderGh(JSON.parse(e.data)));
+}
+boot();
+</script>
+</body>
+</html>
