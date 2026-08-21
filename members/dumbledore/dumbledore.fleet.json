@@ -25,7 +25,7 @@
   "timeout_s": 3600,
   "enabled": false,
   "llm": {
-    "model": "opus",
+    "model": "sonnet",
     "max_turns": 100,
     "prompt_file": "dumbledore.md",
     "tools": {

@@ -24,7 +24,7 @@
   "timeout_s": 1800,
   "enabled": false,
   "llm": {
-    "model": "opus",
+    "model": "sonnet",
     "max_turns": 60,
     "prompt_file": "jefe.md",
     "tools": {

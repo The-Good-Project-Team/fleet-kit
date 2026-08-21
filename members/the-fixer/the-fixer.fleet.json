@@ -21,7 +21,7 @@
   "timeout_s": 1800,
   "enabled": false,
   "llm": {
-    "model": "opus",
+    "model": "sonnet",
     "max_turns": 80,
     "prompt_file": "the-fixer.md",
     "tools": {
