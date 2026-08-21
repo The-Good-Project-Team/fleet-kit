@@ -47,7 +47,7 @@ KINDS = ("llm", "mechanical")
 # Both get the same lifecycle and the same report contract -- that is the whole point of one
 # schema. Both point OUT to a file in their own directory, never inline text/commands in the
 # JSON, so the actual behavior stays independently readable/diffable/testable.
-_REQUIRED = ("name", "emoji", "kind", "schedule", "timeout_s", "enabled", "report")
+_REQUIRED = ("name", "emoji", "kind", "mandate", "schedule", "timeout_s", "enabled", "report")
 _LLM_REQUIRED = ("model", "max_turns", "prompt_file", "tools")
 _MECHANICAL_REQUIRED = ("run_file",)
 
@@ -111,6 +111,25 @@ def validate(spec: dict, *, filename: str = "<dict>") -> dict:
     _require(isinstance(spec["timeout_s"], int) and spec["timeout_s"] > 0,
              f"{where}timeout_s must be a positive int")
     _require(isinstance(spec["enabled"], bool), f"{where}enabled must be a bool")
+
+    # A persona described only in prose ("try harder", "do better") gives a human nothing to
+    # PULL when it underperforms -- no lever, just a vague hope the next pass does better.
+    # `mandate` makes the levers structural: what it's judged against (target), the concrete
+    # steps it runs through (checklist -- a list, not a paragraph a model can skim past), and
+    # its own limits restated in one place a reviewer reads without hunting through prompt
+    # prose. Every field here should map to something you could actually dial down in a bad
+    # week: fewer checklist items, a tighter target, a lower turn/timeout ceiling.
+    mandate = spec["mandate"]
+    _require(isinstance(mandate, dict), f"{where}mandate must be an object")
+    _require(isinstance(mandate.get("target"), str) and mandate["target"],
+             f"{where}mandate.target must be a non-empty string (what this member is judged against)")
+    checklist = mandate.get("checklist")
+    _require(isinstance(checklist, list) and checklist,
+             f"{where}mandate.checklist must be a non-empty list of concrete steps")
+    _require(all(isinstance(c, str) and c for c in checklist),
+             f"{where}mandate.checklist items must all be non-empty strings")
+    _require(isinstance(mandate.get("limits"), dict),
+             f"{where}mandate.limits must be an object (turns/timeout/budget, restated for review)")
 
     if kind == "llm":
         llm = spec.get("llm")

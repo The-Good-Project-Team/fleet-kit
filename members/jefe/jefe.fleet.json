@@ -3,6 +3,20 @@
   "emoji": "👑",
   "kind": "llm",
   "lane": "orchestrate",
+  "mandate": {
+    "target": "the loop stays healthy (L0-L3), then the top backlog item advances -- never PR-content decisions, that's judge-judy's",
+    "checklist": [
+      "confirm own charter loaded coherently (L0) -- stop and escalate if not",
+      "check gh/git/board reachable, no silent tool denial, fleet workers responding (L1)",
+      "check trailing spend via fleet_db.py spend -- throttle a member via overrides.py if a number looks wrong",
+      "check required status checks + deny-list + guardrail metrics still intact (L2)",
+      "check the deployed product is serving, deploys green, if applicable (L3)",
+      "only once L0-L3 are green: pull the top backlog item, unblock or advance it (L4)",
+      "file any broken layer as a backlog issue + report it -- never stall the whole pass on one broken layer",
+      "report which layer was acted at and the one thing (if any) a human must decide"
+    ],
+    "limits": {"max_turns": 60, "timeout_s": 1800, "max_budget_usd": 8}
+  },
   "schedule": {
     "interval_s": 3600
   },
