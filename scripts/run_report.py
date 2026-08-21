@@ -114,12 +114,19 @@ def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
         "pr": pr,
     }
     u = usage or {}
+    # Field names here match pass_accounting.py's split() output verbatim -- that module is the
+    # ONE place that reads `claude -p --output-format json`, so every consumer of a run record
+    # (fleet_db.py, fleet_view.html) reads these same names rather than each guessing at the
+    # provider's raw JSON shape a second time.
     rec["tokens"] = {
         "num_turns": u.get("num_turns"),
         "stop_reason": u.get("stop_reason"),
-        "cost_usd": u.get("cost_usd"),
-        "weighted_input": u.get("weighted_input"),
-        "output": u.get("output"),
+        "cost_usd": u.get("total_cost_usd", u.get("cost_usd")),  # cost_usd: back-compat alias
+        "duration_ms": u.get("duration_ms"),
+        "input_tokens": u.get("input_tokens"),
+        "output_tokens": u.get("output_tokens"),
+        "cache_read_input_tokens": u.get("cache_read_input_tokens"),
+        "cache_creation_input_tokens": u.get("cache_creation_input_tokens"),
     }
     return rec
 

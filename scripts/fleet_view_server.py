@@ -37,6 +37,9 @@ from urllib.parse import parse_qs, urlparse
 
 KIT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(KIT_DIR / "scripts"))
+import fleet_db          # noqa: E402  (sqlite mirror -- search/spend queries over runs.jsonl)
+import member_spec       # noqa: E402
+import overrides as ov   # noqa: E402  ('overrides' shadows nothing here; keep the module name clear)
 
 REPO = os.environ.get("FLEET_REPO", "")
 LOG_DIR = Path(os.environ.get("FLEET_LOG_DIR", Path.home() / "Library" / "Logs" / "fleet-kit")).expanduser()
@@ -100,6 +103,11 @@ class State:
                     continue
 
     def tail_runs_forever(self):
+        # A separate sqlite connection for the background thread -- sqlite3 connections aren't
+        # shared across threads by default, and this loop's writes (fleet_db.sync) are
+        # independent of anything a request handler reads, so a dedicated connection is
+        # simpler than adding a lock around a shared one.
+        db = fleet_db.connect()
         while True:
             try:
                 if RUNS_FILE.exists():
@@ -120,6 +128,7 @@ class State:
                                 except json.JSONDecodeError:
                                     continue
                             self.runs = self.runs[-MAX_RUNS:]
+                fleet_db.sync(db)
             except OSError:
                 pass
             time.sleep(2)
@@ -195,6 +204,39 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/snapshot":
             self._json(STATE.snapshot())
+            return
+        if path == "/api/spend":
+            qs = parse_qs(urlparse(self.path).query)
+            hours = float(qs.get("hours", ["24"])[0])
+            member = qs.get("member", [None])[0]
+            db = fleet_db.connect()
+            fleet_db.sync(db)
+            self._json({"spend": fleet_db.spend(db, member=member, hours=hours), "hours": hours})
+            return
+        if path == "/api/query":
+            qs = parse_qs(urlparse(self.path).query)
+            db = fleet_db.connect()
+            fleet_db.sync(db)
+            rows = fleet_db.query_runs(
+                db, member=qs.get("member", [None])[0], status=qs.get("status", [None])[0],
+                item_id=qs.get("item_id", [None])[0],
+                limit=int(qs.get("limit", ["100"])[0]))
+            self._json({"runs": rows})
+            return
+        if path == "/api/members":
+            # Every member's reviewed spec + whatever's currently overridden on top of it --
+            # the same effective config a running pass would get (member_spec.load + overrides.apply,
+            # not a re-derivation of that logic).
+            out = []
+            try:
+                specs = member_spec.load_all()
+            except Exception as exc:
+                self._json({"error": str(exc)}, 500)
+                return
+            for spec in specs:
+                eff, applied = ov.apply(spec)
+                out.append({"spec": spec, "effective": eff, "overrides": applied})
+            self._json({"members": out})
             return
         if path == "/api/stream":
             self.send_response(200)

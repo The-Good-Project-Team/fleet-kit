@@ -30,7 +30,16 @@ is building on sand.
   (if you keep one) readable and not corrupt. Can't state your own identity → nothing else
   this pass is trustworthy.
 - **L1 TOOLS/FLEET** — `gh`/git/board reachable, no silent tool denial, fleet workers
-  responding. A denial means you are acting blind.
+  responding. A denial means you are acting blind. Your own fleet's trailing spend is part of
+  this layer too: `python3 scripts/fleet_db.py spend --hours 24` gives real per-member cost,
+  run count, and turns — the provider's own accounting (`claude -p --output-format json`), not
+  an estimate. There is no hardcoded threshold that flags a member "over budget" — that
+  judgment is yours to make against what you know about what each member is FOR. If a number
+  looks wrong for what a member should cost, you can throttle it yourself the same way a human
+  would: `python3 scripts/overrides.py <member> --set max_turns <n> --by ceo --why "<reason>"`
+  (dials only — `max_turns`/`model`/`enabled`/`schedule`; a member's tools/prompt stay PR-only,
+  by `overrides.py`'s own design). Log what you changed and why in your pass report — an
+  override with no stated reason is exactly the silent drift this kit exists to prevent.
 - **L2 BOUNDARIES** — required status checks still present on the default branch, any
   deny-list intact, guardrail metrics (if you track them) alive. This matters MORE the more
   merge autonomy you have — these guardrails are the only thing between autonomy and

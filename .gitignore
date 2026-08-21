@@ -1,5 +1,7 @@
 fleet.env
 *.log
+fleet.db
+runs.jsonl
 __pycache__/
 *.pyc
 .DS_Store

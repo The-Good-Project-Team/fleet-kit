@@ -32,7 +32,7 @@ import json
 import os
 from pathlib import Path
 
-MEMBERS_DIR = Path(__file__).resolve().parent / "members"
+MEMBERS_DIR = Path(__file__).resolve().parent.parent / "members"
 
 KINDS = ("llm", "mechanical")
 

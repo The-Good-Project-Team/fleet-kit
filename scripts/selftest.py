@@ -40,6 +40,18 @@ def _members():
     return specs
 
 
+def _members_dir_default_is_right():
+    # Regression check: MEMBERS_DIR once pointed at scripts/members (a directory that has
+    # never existed -- members/ lives at repo root, a sibling of scripts/), so
+    # member_spec.load_all() with NO explicit path silently returned []. Every OTHER check in
+    # this file passes ROOT / "members" explicitly and would never have caught that -- this is
+    # the one check that exercises the module's own default.
+    import member_spec
+    assert member_spec.MEMBERS_DIR == ROOT / "members", (
+        f"member_spec.MEMBERS_DIR = {member_spec.MEMBERS_DIR}, expected {ROOT / 'members'}")
+    assert member_spec.load_all(), "member_spec.load_all() with its OWN default path found nothing"
+
+
 def _member_specs_validate():
     for s in _members():
         assert s["name"] and s["kind"] in ("llm", "mechanical")
@@ -93,6 +105,7 @@ def _schedulers_for_both_platforms():
 
 if __name__ == "__main__":
     check("member specs load and validate", _member_specs_validate)
+    check("member_spec's OWN default MEMBERS_DIR resolves (not just an explicit path)", _members_dir_default_is_right)
     check("report contract: ok + silence is recorded", _report_contract)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)

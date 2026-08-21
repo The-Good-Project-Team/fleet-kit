@@ -86,7 +86,7 @@ if ! create_build_worktree; then
   log "FATAL: could not create worktree for item #$ITEM_ID"
   exit 1
 fi
-cleanup() { git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true; git -C "$REPO" worktree prune >/dev/null 2>&1 || true; }
+cleanup() { git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true; git -C "$REPO" worktree prune >/dev/null 2>&1 || true; rm -f "${USAGE_FILE:-}"; }
 trap cleanup EXIT
 
 # --- STEP 3: build ------------------------------------------------------------------------------
@@ -126,17 +126,24 @@ log "building item #$ITEM_ID in $WT_PATH (model=$MODEL)"
 # looked like it was doing nothing across three full attempts before this was found.
 # `user` scope keeps auth/model preferences, drops project-level CLAUDE.md/hooks/settings,
 # so builder.md's own charter (injected below) is what actually governs the session.
-OUT=$(cd "$WT_PATH" && account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" \
+# --output-format json: the provider's own per-call accounting (cost/tokens/turns), not a
+# hand-rolled estimate -- see pass_accounting.py's header. --max-budget-usd is a CLI-enforced
+# hard backstop per call, independent of anything this kit measures after the fact.
+RAW=$(cd "$WT_PATH" && account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" \
   --model "$MODEL" --dangerously-skip-permissions --setting-sources user \
-  --max-turns "$MAX_TURNS" 2>>"$LOG")
+  --max-turns "$MAX_TURNS" --output-format json \
+  --max-budget-usd "${FLEET_MAX_BUDGET_USD:-5}" 2>>"$LOG")
 RC=$?
+OUT=$(printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" text)
+USAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_usage.XXXXXX")
+printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" usage > "$USAGE_FILE" 2>/dev/null
 
 if [ "$RC" -ne 0 ]; then
   log "item #$ITEM_ID: build session failed rc=$RC (account=${ACCOUNT_POOL_SELECTED:-none})"
   RUN_ID="build-${ITEM_ID}-$$-$(date +%s)"
   echo "$OUT" | python3 "$KIT_DIR/scripts/run_report.py" \
     --member "builder" --run-id "$RUN_ID" --kind llm --exit-code "$RC" --pass-file - \
-    --item-id "$ITEM_ID" >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
+    --item-id "$ITEM_ID" --usage-file "$USAGE_FILE" >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
   exit 1
 fi
 
@@ -153,7 +160,7 @@ PR_NUM=$(grep -oE 'github\.com/[^ ]+/pull/[0-9]+' <<<"$OUT" | tail -1 | grep -oE
 RUN_ID="build-${ITEM_ID}-$$-$(date +%s)"
 echo "$OUT" | python3 "$KIT_DIR/scripts/run_report.py" \
   --member "builder" --run-id "$RUN_ID" --kind llm --exit-code "$RC" --pass-file - \
-  --item-id "$ITEM_ID" ${PR_NUM:+--pr "$PR_NUM"} >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
+  --item-id "$ITEM_ID" --usage-file "$USAGE_FILE" ${PR_NUM:+--pr "$PR_NUM"} >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
 
 if [ -n "$PR_NUM" ]; then
   BODY=$(gh pr view "$PR_NUM" --json body -q '.body' 2>/dev/null || echo "")

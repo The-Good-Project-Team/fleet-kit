@@ -100,7 +100,7 @@ log "PR #$PR head ${HEAD_SHA:0:12} -- reviewing (model=$MODEL)"
 DIFF_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_review_diff.XXXXXX")
 BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_review_body.XXXXXX")
 OUT_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_review_out.XXXXXX")
-trap 'rm -f "$DIFF_FILE" "$BODY_FILE" "$OUT_FILE"' EXIT
+trap 'rm -f "$DIFF_FILE" "$BODY_FILE" "$OUT_FILE" "${USAGE_FILE:-}"' EXIT
 
 gh pr diff "$PR" > "$DIFF_FILE" 2>/dev/null || { log "PR #$PR: gh pr diff failed"; exit 1; }
 TRUNC_NOTE=""
@@ -130,8 +130,16 @@ VERDICT: approve
 or
 VERDICT: block"
 
-account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" --model "$MODEL" > "$OUT_FILE" 2>>"$LOG"
+KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# --output-format json for the provider's own per-call cost/token accounting (see
+# pass_accounting.py) -- text still lands in $OUT_FILE unchanged so the VERDICT: grep below
+# doesn't need to know the call shape changed.
+RAW=$(account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" --model "$MODEL" \
+  --output-format json --max-budget-usd "${FLEET_MAX_BUDGET_USD:-5}" 2>>"$LOG")
 RC=$?
+printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" text > "$OUT_FILE"
+USAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_usage.XXXXXX")
+printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" usage > "$USAGE_FILE" 2>/dev/null
 if [ "$RC" -ne 0 ]; then
   log "PR #$PR: claude -p failed rc=$RC (account=${ACCOUNT_POOL_SELECTED:-none} reason=${ACCOUNT_POOL_LAST_REASON:-}) -- no status posted, next tick retries"
   exit 1
@@ -151,11 +159,10 @@ if [ -z "$VERDICT" ]; then
 fi
 rm -f "$STRIKE_FILE"
 
-KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 report_run() { # <outcome-line> <evidence-line>
   printf 'Outcome: %s\nEvidence: %s\n' "$1" "$2" | python3 "$KIT_DIR/scripts/run_report.py" \
     --member "reviewer" --run-id "review-${PR}-${HEAD_SHA:0:12}" --kind llm --exit-code 0 \
-    --pass-file - --pr "$PR" >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
+    --pass-file - --usage-file "$USAGE_FILE" --pr "$PR" >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
 }
 
 if [ "$VERDICT" = "VERDICT: approve" ]; then

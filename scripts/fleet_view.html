@@ -16,7 +16,7 @@
   header h1 { font-size: 14px; margin: 0; font-weight: 600; }
   #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
   #dot.live { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
-  .layout { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 1px; background: var(--border);
+  .layout { display: grid; grid-template-columns: 1.1fr 0.9fr 0.9fr 1fr; gap: 1px; background: var(--border);
     min-height: calc(100vh - 41px); }
   .col { background: var(--bg); overflow: auto; max-height: calc(100vh - 41px); }
   .col-head { padding: 8px 12px; font-weight: 600; color: var(--dim); text-transform: uppercase;
@@ -59,6 +59,10 @@
   <div class="col">
     <div class="col-head">Backlog (issues)</div>
     <div id="issues"></div>
+  </div>
+  <div class="col">
+    <div class="col-head">Members &amp; spend (24h)</div>
+    <div id="members"></div>
   </div>
 </div>
 <script>
@@ -142,15 +146,69 @@ document.body.addEventListener('click', async (e) => {
   }
 });
 
+const membersEl = document.getElementById('members');
+const DIAL_KEYS = ['max_turns', 'model', 'enabled', 'schedule'];
+
+function dialValue(eff, key) {
+  if (key === 'enabled') return eff.enabled;
+  if (key === 'schedule') return JSON.stringify(eff.schedule);
+  return (eff.llm || {})[key];
+}
+
+async function renderMembers() {
+  const [{ members }, { spend }] = await Promise.all([
+    fetch('/api/members').then(r => r.json()),
+    fetch('/api/spend?hours=24').then(r => r.json()),
+  ]);
+  const spendByMember = Object.fromEntries((spend || []).map(s => [s.member, s]));
+  membersEl.innerHTML = members.map(m => {
+    const name = m.spec.name;
+    const s = spendByMember[name];
+    const spendLine = s
+      ? `<span class="meta">$${(s.total_cost || 0).toFixed(2)} / ${s.runs} runs / ${s.total_turns || 0} turns (24h)</span>`
+      : `<span class="meta">no runs in 24h</span>`;
+    const overrideNote = m.overrides.length
+      ? `<div class="meta">live overrides: ${m.overrides.map(o => `${o.key}=${JSON.stringify(o.value)} (${esc(o.why)})`).join(', ')}</div>`
+      : '';
+    const dials = DIAL_KEYS.map(key => {
+      const v = dialValue(m.effective, key);
+      return `<button data-act="edit-dial" data-member="${esc(name)}" data-key="${key}"
+        title="click to change">${key}=${esc(JSON.stringify(v))}</button>`;
+    }).join(' ');
+    return `<div class="row">
+      <b>${esc(name)}</b> <span class="meta">${esc(m.spec.kind)}${m.spec.lane ? ' · ' + esc(m.spec.lane) : ''}</span>
+      <div>${spendLine}</div>
+      ${overrideNote}
+      <div class="actions" style="flex-wrap:wrap">${dials}</div>
+    </div>`;
+  }).join('') || '<div id="empty">no members/*.fleet.json found</div>';
+}
+
+document.body.addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-act="edit-dial"]');
+  if (!b) return;
+  const key = b.dataset.key;
+  const value = prompt(`new value for ${b.dataset.member}.${key} (JSON):`);
+  if (value === null) return;
+  const why = prompt('why? (required)', 'tuned from fleet-view');
+  if (!why) return;
+  let parsed; try { parsed = JSON.parse(value); } catch { parsed = value; }
+  const r = await fetch('/api/steer', { method: 'POST', body: JSON.stringify(
+    { member: b.dataset.member, key, value: parsed, why }) });
+  if ((await r.json()).ok) renderMembers(); else alert('failed — see server log');
+});
+
 async function boot() {
   const snap = await (await fetch('/api/snapshot')).json();
   snap.runs.slice().reverse().forEach(renderRun);
   renderGh(snap.gh);
+  renderMembers();
+  setInterval(renderMembers, 30000);
 
   const es = new EventSource('/api/stream');
   es.onopen = () => dot.classList.add('live');
   es.onerror = () => dot.classList.remove('live');
-  es.addEventListener('run', e => renderRun(JSON.parse(e.data)));
+  es.addEventListener('run', e => { renderRun(JSON.parse(e.data)); });
   es.addEventListener('gh', e => renderGh(JSON.parse(e.data)));
 }
 boot();
