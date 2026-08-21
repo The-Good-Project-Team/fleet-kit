@@ -35,6 +35,32 @@ because Cloudflare Tunnel's ingress matching supports `path` for BOTH HTTP and T
 services (this surprised us live -- see `setup-tunnel.sh`'s header for the exact API call that
 proved it, when the docs read ambiguous).
 
+## Naming: one word in, everything downstream matches
+
+Set `INFRA_NAME=lucky` once and every layer below is named from it -- say "the lucky box" and
+every artifact you'd go looking for (VM, ssh aliases, tunnel, keys) is `lucky` all the way
+down. Only two things are separate axes on purpose: `INFRA_DOMAIN` (your own choice of public
+hostname -- convention is `<name>.<your-domain>`, not enforced) and the podman CONTAINER name
+inside the box, which is fleet-kit's own `up.sh --name`, keyed to the *target repo* you're
+running, not the box -- one box can run several containers for several projects side by side.
+
+| Layer | Pattern | Example (`INFRA_NAME=lucky`) | Set by |
+|---|---|---|---|
+| multipass VM | `$INFRA_NAME` | `lucky` | `provision-vm.sh` |
+| host machine, ssh alias | `$INFRA_NAME-host` | `lucky-host` | `setup-ssh.sh` |
+| VM over the host's LAN, ssh alias | `$INFRA_NAME-vm` | `lucky-vm` | `setup-ssh.sh` |
+| VM over the internet (tunnel), ssh alias | `$INFRA_NAME` (bare -- same string as the VM itself) | `lucky` | `setup-ssh.sh` |
+| Cloudflare Tunnel object | `$INFRA_NAME` | `lucky` | `setup-tunnel.sh` |
+| public hostname | `$INFRA_DOMAIN` (free-standing, your call) | `lucky.example.com` | you set it |
+| ssh key files | `$INFRA_NAME-<role>_ed25519` | `lucky-host_ed25519`, `lucky-vm_ed25519` | `setup-ssh.sh` |
+| known_hosts file | `$INFRA_NAME-vm_known_hosts` | `lucky-vm_known_hosts` | `setup-ssh.sh` |
+| ingress paths (on the one hostname) | your choice per service | `/ssh`, `/webhook`, `/` | `setup-tunnel.sh`'s `INFRA_INGRESS_JSON` |
+| podman container *(fleet-kit's own `up.sh`, not this kit)* | `fleet-kit-<target-repo-name>` | `fleet-kit-nonprofit-atlas` | `up.sh --name` -- keyed to the PROJECT, not the box |
+| podman image *(same)* | fixed tag | `fleet-kit:latest` | one image, many containers |
+
+`ssh lucky-host` (direct), `ssh lucky-vm` (via the host's LAN), `ssh lucky` (via the internet) --
+three ways to the same box, one word decides all three names.
+
 ## The four pieces
 
 | Script | Does | Idempotent? |
