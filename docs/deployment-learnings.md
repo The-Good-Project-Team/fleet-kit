@@ -102,7 +102,30 @@ was left alone — it only reads and posts a status, no Bash execution needed.
 wall before assuming the model failed** — the fix may be sitting correct and untested in a
 worktree that already got cleaned up by the script's own `cleanup()` trap.
 
-## 7. `worktree_builder.sh`'s log goes silent on a hung subprocess — no heartbeat, no timeout
+## 7. Claiming a board item has no release path on failure — a killed/failed build leaves it
+   `fleet:claimed` forever
+
+`board_github.py`'s contract (see its own module docstring) is claim -> add label, done ->
+close issue. There is no `unclaim`/`release` call anywhere in `worktree_builder.sh` for the
+failure path — if the build subprocess is killed, times out, or exits non-zero, the item
+stays labeled `fleet:claimed` with no worker actually working it, permanently, until a human
+notices and manually strips the label. Hit this directly: killed a stuck build session by
+hand and the seed issue stayed claimed.
+
+This is NOT a theoretical risk — the exact same defect, independently discovered against a
+different (older, hand-rolled) fleet implementation on the same day, was nonprofit-atlas
+issue #3044: "the board's claim label is a ONE-WAY RATCHET: 374 of 374 open backlog items are
+fleet:claimed, no code path ever removes it." Two independent fleet implementations hit the
+identical failure mode, which suggests it's inherent to "claim by adding a label" rather than
+either implementation's bug specifically.
+
+**Not yet fixed here** — needs a `board_github.py release <id> <worker>` verb (strip the
+label, comment why) called from `worktree_builder.sh`'s failure branches (`RC -ne 0`, the
+"no PR URL found" branch, and ideally a trap on unexpected exit/kill too). Left as an open
+item for the next pass rather than rushed in without testing the failure-path plumbing
+properly.
+
+## 8. `worktree_builder.sh`'s log goes silent on a hung subprocess — no heartbeat, no timeout
    surfaced to the log
 
 When the builder's `claude -p` call hung on the stray-SSH issue above, `/tmp/builder_run.log`
