@@ -194,10 +194,18 @@ The source fleet had product-specific machinery this kit deliberately does not p
   self-graded, guardrail-paired, STALE-never-0) for when you build lane-specific health
   scouts; no scout scripts ship here since "what's a lane" is entirely product-specific.
 
-An operator still needs a shell on the fleet box from off its LAN, though — that one's not
-product-specific, and it's a recipe, not a script: see `docs/deployment-learnings.md` #14-15
-for the live-IP-resolution pattern (VMs move; never hardcode one) and the Cloudflare Tunnel setup
-(mint an account-scoped Tunnel:Edit token, no `cloudflared login` browser flow needed).
+An operator still needs a shell on the fleet box from off its LAN, though — see
+`docs/deployment-learnings.md` #14-15 for the live-IP-resolution pattern (VMs move; never
+hardcode one) and the Cloudflare Tunnel setup (mint an account-scoped Tunnel:Edit token, no
+`cloudflared login` browser flow needed).
+
+## Don't have a box yet? `infra-kit/`
+
+Product-agnostic, doesn't need fleet-kit itself: a multipass VM, podman inside it, a
+Cloudflare Tunnel reaching it from the internet on one hostname with path-scoped routes (no
+subdomain sprawl), and the ssh config to reach it three ways (direct, LAN, tunnel). Three
+scripts, run once each — see `infra-kit/README.md`. fleet-kit's own `up.sh` (below) is one
+thing you can point at the box once it exists.
 
 ## Install (target: under 15 minutes to first unattended PR)
 
