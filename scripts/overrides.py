@@ -106,9 +106,9 @@ def apply(spec: dict, *, store: Path | None = None, now: float | None = None) ->
     eff = json.loads(json.dumps(spec))
     applied = []
     for key, row in sorted(rows.items()):
-        if key == "max_turns" and eff.get("kind") == "llm":
+        if key == "max_turns":
             eff["llm"]["max_turns"] = row["value"]
-        elif key == "model" and eff.get("kind") == "llm":
+        elif key == "model":
             eff["llm"]["model"] = row["value"]
         elif key == "enabled":
             eff["enabled"] = bool(row["value"])

@@ -84,3 +84,65 @@ one that never lands.
 Minimum change that solves the problem. No speculative abstraction for single-use code, no
 config nobody asked for, no "while I'm in here" refactors of adjacent code. Reuse an existing
 utility or pattern before writing a new one; name what you reused.
+
+## 10. Your toolbox — check here before inventing a new pattern
+
+Every one of these is already in `scripts/`, callable via your own `Bash` grant. A judgment call
+("is this stale", "is this a fire", "what's the spend") should reach for one of these FIRST,
+not a hand-rolled `gh` incantation that drifts from what every other member does — the-fixer's
+own `check.sh` fire-detection and roomba's own `roomba.py` worktree-safety checks are the model:
+the deterministic parts live in a script, your judgment decides what to do with its output.
+
+- **`gh` itself** — `gh pr list/view/diff`, `gh run list/view --log-failed`, `gh api
+  repos/{owner}/{repo}/...` for anything not covered by a porcelain subcommand (statuses,
+  check-runs). `gh repo view --json nameWithOwner -q '.nameWithOwner'` resolves the current
+  repo slug without hardcoding it — see `scripts/code_review_local.sh` for the full pattern
+  (per-SHA status posting, open-PR iteration, check-run polling).
+- **`scripts/board_github.py`** — the board, as a CLI: `file <title> [--context] [--lane]`,
+  `claim <worker> <n>`, `list` (unclaimed items as JSON), `done <number> [note]`, `release
+  <number> [note]`. This is how work gets claimed/closed without two members racing the same
+  GitHub Issue.
+- **`scripts/fleet_db.py`** — `spend --member <name> --hours <n>` (real per-member cost/turns
+  from the provider's own accounting, not an estimate), `query --member/--status/--item-id`
+  (run history). Ground a spend judgment here, never a guess.
+- **`scripts/overrides.py`** — live-tune another member's `max_turns`/`model`/`enabled`/
+  `schedule` (never `tools`/`prompt` — those are PR-only, the script itself refuses):
+  `overrides.py <member> --set <key> <value> --by <you> --why "<reason>"`. Every override needs
+  a stated reason and expires on its own TTL — an override with no reason or no expiry is
+  exactly the silent-drift failure mode this kit exists to end.
+- **`scripts/member_spec.py`** — `by_name(name)` / `load_all()` (Python import, not a CLI) if
+  you need to read another member's own spec (its mandate, its schedule, its tools) rather than
+  guess at it.
+- **`scripts/fanout.py`** — headroom + open-PR-count -> safe builder-count. If you're deciding
+  how many parallel builders to run, this is the calculation, not a fixed number.
+- **Your own member directory's script(s)** — e.g. `the-fixer/check.sh`, `roomba/roomba.py`.
+  Deterministic, zero-LLM-spend checks specific to your own job; call them before reasoning,
+  not instead of it.
+
+If the judgment you need genuinely has no tool here yet, that's a real gap — name it in your
+report (what you needed, what you did instead) rather than silently hand-rolling a one-off.
+
+## 11. Every run ends with a self-critique — a post-mortem on yourself, not just the work
+
+Reif, 2026-08-21: "it should be inherent in every member to log its findings — like having a
+post mortem on the run." Your `Outcome:`/`Evidence:` lines report what you DID. This is
+different: report what your own logging/judgment just got wrong or missed, about ITSELF. One
+line, `Self-critique: <text>`, after your normal report. It is captured on your run record
+(never enforced — a missing one doesn't fail the run, same as a missing Vision-link), so
+dumbledore's daily rot-hunt can read every member's self-critique in aggregate instead of
+grepping N raw logs by hand looking for the same pattern you already noticed and didn't say.
+
+Answer, briefly, whichever of these actually applied this run — not all three every time:
+- **What should I have logged but didn't?** A decision you made with no line explaining why, a
+  skip with no reason recorded, a number you computed but never wrote down.
+- **What did I log that's pure noise?** A line nobody downstream reads, restating something
+  already implied by your exit code or status, or so vague ("did some work") it tells a future
+  reader nothing they could act on.
+- **Is anything I just reported not actually true?** A status that reads "ok" but you privately
+  weren't sure, evidence you cited from memory rather than re-checked, a claim that would not
+  survive someone re-running your own command. This is the same evidence-protocol bar as §3,
+  turned on your OWN report before you submit it, not just on the work.
+
+A run with nothing wrong in any of the three still writes `Self-critique: none — logging and
+claims held up` rather than omitting the line. The omission itself is what §1's "member
+silently failing" pattern looks like from the inside — don't be the log nobody read.

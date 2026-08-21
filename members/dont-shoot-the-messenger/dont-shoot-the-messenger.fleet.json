@@ -1,7 +1,6 @@
 {
   "name": "dont-shoot-the-messenger",
   "emoji": "📮",
-  "kind": "mechanical",
   "lane": "plumbing",
   "mandate": {
     "target": "every log file has shipped its new bytes and every pending transcript request is answered (found-or-explicitly-not-found), every tick",
@@ -10,7 +9,8 @@
       "call the driver's ship_logs against FLEET_LOG_DIR",
       "call the driver's relay_transcript for any pending request the driver's own state reports",
       "never let a driver failure change this script's own exit code -- best-effort, side channel only",
-      "a backlog beyond the driver's own cap ships bounded, never unbounded replay"
+      "a backlog beyond the driver's own cap ships bounded, never unbounded replay",
+      "skim the log's recent tail (not just this tick) for a repeating error a single run can't see"
     ],
     "limits": {"timeout_s": 300, "max_budget_usd": 0},
     "escalation": "the driver reports a config error (exit 2) rather than a transient failure -- log it loudly once per distinct error, do not retry-spam every tick on a misconfiguration nothing will fix by waiting."
@@ -20,7 +20,15 @@
   },
   "timeout_s": 300,
   "enabled": false,
-  "run_file": "dont-shoot-the-messenger.sh",
+  "llm": {
+    "model": "haiku",
+    "max_turns": 15,
+    "prompt_file": "dont-shoot-the-messenger.md",
+    "tools": {
+      "allow": ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "WebFetch", "TodoWrite"],
+      "deny": ["Bash(git push --force:*)", "Bash(git push origin main:*)"]
+    }
+  },
   "report": {
     "vision_link": "optional"
   }

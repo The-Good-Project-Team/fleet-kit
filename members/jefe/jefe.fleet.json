@@ -28,7 +28,7 @@
     "max_turns": 60,
     "prompt_file": "jefe.md",
     "tools": {
-      "allow": ["Read", "Grep", "Glob", "Edit", "Write", "Bash", "TodoWrite"],
+      "allow": ["Read", "Grep", "Glob", "Edit", "Write", "Bash", "WebFetch", "TodoWrite"],
       "deny": ["Bash(gh pr merge:*)", "Bash(git push --force:*)"]
     }
   },

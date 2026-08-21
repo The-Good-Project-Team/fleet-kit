@@ -27,9 +27,10 @@
     "model": "sonnet",
     "max_turns": 30,
     "prompt_file": "judge-judy.md",
+    "runner": "scripts/code_review_local.sh",
     "tools": {
-      "allow": ["Read", "Bash(gh pr:*)", "Bash(git diff:*)", "Bash(git log:*)", "Grep", "Glob", "TodoWrite"],
-      "deny": ["Bash(gh pr merge:*)", "Edit", "Write"]
+      "allow": ["none"],
+      "deny": ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "WebFetch"]
     }
   },
   "report": {

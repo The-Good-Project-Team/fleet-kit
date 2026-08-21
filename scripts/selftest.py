@@ -54,7 +54,7 @@ def _members_dir_default_is_right():
 
 def _member_specs_validate():
     for s in _members():
-        assert s["name"] and s["kind"] in ("llm", "mechanical")
+        assert s["name"] and s["llm"]["prompt_file"]
 
 
 def _report_contract():
@@ -77,8 +77,6 @@ def _overrides_are_narrow():
     with tempfile.TemporaryDirectory() as d:
         store = Path(d) / "ov.jsonl"
         spec = _members()[0]
-        if spec["kind"] != "llm":
-            return
         overrides.set_override(spec["name"], "max_turns", 7, by="selftest",
                                why="proving the dial works", store=store)
         eff, applied = overrides.apply(spec, store=store)

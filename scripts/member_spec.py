@@ -27,11 +27,22 @@ that is absent exactly where it has to work. `.fleet.json` keeps comments out bu
 nothing a reviewer needs.
 
 ONE PERSONA = ONE DIRECTORY, not one file. `members/<name>/<name>.fleet.json` sits alongside
-that persona's own behavior file (`prompt.md` for kind=llm, a runnable script for
-kind=mechanical) -- config never inlines the prompt text or the command logic, only a path to
-it. This is the actual modularity: adding or removing a persona is copying or deleting one
-self-contained folder, nothing else in the kit changes. A prompt or a script is independently
-readable, diffable, and (for mechanical members) independently testable without touching JSON.
+that persona's own charter (`<name>.md`) -- config never inlines the prompt text, only a path
+to it. This is the actual modularity: adding or removing a persona is copying or deleting one
+self-contained folder, nothing else in the kit changes.
+
+EVERY MEMBER IS AN LLM. Reif, 2026-08-21: "a persona has a capability, and a goal, its not
+about running a few scripts -- granted having those scripts available is nice, as a tool but
+not as its complete existence." The kit briefly had a `kind: mechanical` escape hatch (a
+member that just execs its own .py/.sh, no claude -p call, no reasoning) for roomba/the-fixer/
+messenger -- deterministic-looking work that seemed safer as code. That inverted the actual
+design: a script with no goal behind it can't notice when its own premise stops holding (a
+safety check that's gone stale, a new failure shape its checklist never anticipated), it can
+only execute the branch someone already wrote. The fix is not "run the script" as the member's
+whole existence -- it's "the member has a goal, and the script is one tool in its allowlist it
+reaches for," same as Bash or Read. roomba/the-fixer/messenger kept their scripts; they gained
+a charter and a goal that can call the script, read its output, and decide, rather than being
+the script.
 """
 from __future__ import annotations
 
@@ -41,15 +52,10 @@ from pathlib import Path
 
 MEMBERS_DIR = Path(__file__).resolve().parent.parent / "members"
 
-KINDS = ("llm", "mechanical")
-
-# A mechanical member runs its own script; an LLM member runs its own prompt through claude -p.
-# Both get the same lifecycle and the same report contract -- that is the whole point of one
-# schema. Both point OUT to a file in their own directory, never inline text/commands in the
-# JSON, so the actual behavior stays independently readable/diffable/testable.
-_REQUIRED = ("name", "emoji", "kind", "mandate", "schedule", "timeout_s", "enabled", "report")
+# Every member's behavior is a prompt run through claude -p. Tools (including a member's own
+# helper scripts, reached via Bash) are how it acts -- never a substitute for having a goal.
+_REQUIRED = ("name", "emoji", "mandate", "schedule", "timeout_s", "enabled", "report", "llm")
 _LLM_REQUIRED = ("model", "max_turns", "prompt_file", "tools")
-_MECHANICAL_REQUIRED = ("run_file",)
 
 
 class SpecError(ValueError):
@@ -83,9 +89,6 @@ def validate(spec: dict, *, filename: str = "<dict>") -> dict:
         _require(parent == name,
                  f"{where}parent directory must match name {name!r}, got {parent!r} "
                  f"(expected members/{name}/{name}.fleet.json)")
-
-    kind = spec["kind"]
-    _require(kind in KINDS, f"{where}kind must be one of {KINDS}, got {kind!r}")
 
     sched = spec["schedule"]
     _require(isinstance(sched, dict), f"{where}schedule must be an object")
@@ -145,25 +148,20 @@ def validate(spec: dict, *, filename: str = "<dict>") -> dict:
              f"checklist doesn't cover what this pass hit -- e.g. 'file a backlog item and "
              f"continue' vs 'stop and report, never act blind')")
 
-    if kind == "llm":
-        llm = spec.get("llm")
-        _require(isinstance(llm, dict), f"{where}kind=llm needs an llm block")
-        for key in _LLM_REQUIRED:
-            _require(key in llm, f"{where}llm.{key} is required for kind=llm")
-        # Tools are the reason the registry had to die: it had NO column for them, so every
-        # scout got one hardcoded allowlist. Requiring an explicit allow list here means a
-        # member's authority is reviewable in its own diff.
-        tools = llm["tools"]
-        _require(isinstance(tools, dict) and isinstance(tools.get("allow"), list) and tools["allow"],
-                 f"{where}llm.tools.allow must be a non-empty list")
-        _require(isinstance(tools.get("deny", []), list), f"{where}llm.tools.deny must be a list")
-        _require(isinstance(llm["max_turns"], int) and llm["max_turns"] > 0,
-                 f"{where}llm.max_turns must be a positive int")
-    else:
-        for key in _MECHANICAL_REQUIRED:
-            _require(key in spec, f"{where}{key} is required for kind=mechanical")
-        _require(isinstance(spec["run_file"], str) and spec["run_file"],
-                 f"{where}run_file must be a non-empty relative path (e.g. 'run.sh')")
+    llm = spec.get("llm")
+    _require(isinstance(llm, dict), f"{where}llm block is required -- every member is an llm")
+    for key in _LLM_REQUIRED:
+        _require(key in llm, f"{where}llm.{key} is required")
+    # Tools are the reason the registry had to die: it had NO column for them, so every
+    # scout got one hardcoded allowlist. Requiring an explicit allow list here means a
+    # member's authority is reviewable in its own diff. A member's own helper script (roomba.py,
+    # the-fixer.sh) is just another entry here, reached through Bash like any other tool.
+    tools = llm["tools"]
+    _require(isinstance(tools, dict) and isinstance(tools.get("allow"), list) and tools["allow"],
+             f"{where}llm.tools.allow must be a non-empty list")
+    _require(isinstance(tools.get("deny", []), list), f"{where}llm.tools.deny must be a list")
+    _require(isinstance(llm["max_turns"], int) and llm["max_turns"] > 0,
+             f"{where}llm.max_turns must be a positive int")
 
     report = spec["report"]
     _require(isinstance(report, dict), f"{where}report must be an object")
@@ -202,11 +200,10 @@ def by_name(name: str, members_dir: str | os.PathLike | None = None) -> dict:
 
 
 def behavior_path(spec: dict, members_dir: str | os.PathLike | None = None) -> Path:
-    """Resolve a member's prompt_file (llm) or run_file (mechanical) to an absolute path,
-    relative to ITS OWN directory -- never the repo root or cwd. This is what keeps a persona
-    folder copy/paste-portable: the spec never needs to know where members/ itself lives."""
+    """Resolve a member's charter (llm.prompt_file) to an absolute path, relative to ITS OWN
+    directory -- never the repo root or cwd. This is what keeps a persona folder
+    copy/paste-portable: the spec never needs to know where members/ itself lives."""
     d = Path(members_dir or MEMBERS_DIR) / spec["name"]
-    rel = spec["llm"]["prompt_file"] if spec["kind"] == "llm" else spec["run_file"]
-    p = d / rel
-    _require(p.exists(), f"{spec['name']}: behavior file not found at {p}")
+    p = d / spec["llm"]["prompt_file"]
+    _require(p.exists(), f"{spec['name']}: charter not found at {p}")
     return p
