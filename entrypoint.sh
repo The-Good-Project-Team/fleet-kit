@@ -19,7 +19,7 @@ set -euo pipefail
 # container layer). A fresh container with only FLEET_REPO=/repo and no mount clones for you --
 # matches the "point this at a repo" pitch without a manual clone step per box.
 if [ ! -d "$FLEET_REPO/.git" ]; then
-  FLEET_REPO_URL="${FLEET_REPO_URL:?FLEET_REPO ($FLEET_REPO) doesn't exist yet -- set FLEET_REPO_URL to clone it}"
+  FLEET_REPO_URL="${FLEET_REPO_URL:?FLEET_REPO ($FLEET_REPO) does not exist yet -- set FLEET_REPO_URL to clone it}"
   echo "[entrypoint] cloning $FLEET_REPO_URL -> $FLEET_REPO"
   gh repo clone "$FLEET_REPO_URL" "$FLEET_REPO"
 fi
