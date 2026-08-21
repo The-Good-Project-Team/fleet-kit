@@ -155,7 +155,45 @@ warning does at container boot, but it only checks the file EXISTS, not that it'
 working credential. Worth hardening `entrypoint.sh` to make that same live call, not just a
 file-existence check, next time this surface gets touched.
 
-## 10. `worktree_builder.sh`'s log goes silent on a hung subprocess — no heartbeat, no timeout
+## 11. A target repo's own CLAUDE.md/persona convention silently hijacks an unattended
+   `claude -p` call — the REAL cause of three "did nothing" build attempts
+
+Three straight attempts against a real backlog item (nonprofit-atlas #3050) all "did
+nothing": no file changes, no PR, no error, log frozen right after worktree creation.
+Chased it through a permission-flag bug (real, fixed, learning #6) and a stale-credential
+bug (real, fixed, learning #9) before finding the actual cause on attempt 4: the TARGET
+repo's own `CLAUDE.md` instructs any Claude Code session with no persona explicitly
+assigned to become "M," its own orchestrator persona — and that repo's own PreToolUse hook
+then correctly BLOCKS "M" from editing code (by that repo's own design, M is meant to
+delegate, never write). So every build session correctly, silently became a persona that
+was correctly, silently forbidden from doing the job -- with no error at any layer, because
+every layer was working exactly as its own repo intended.
+
+Proven live:
+```
+$ claude -p "who are you, one line" --dangerously-skip-permissions          # project settings loaded
+I am **M** — the orchestrator for 990 Scout. ...
+
+$ claude -p "who are you, one line" --dangerously-skip-permissions --setting-sources user
+I'm Claude, an AI agent built by Anthropic to help you with software engineering tasks...
+```
+`--settings '{"hooks":{}}'` was tried first and did NOT fix it — the identity comes from
+CLAUDE.md's own project instructions, not only the SessionStart hook that injects it, so
+suppressing hooks alone is insufficient.
+
+**Fix: `--setting-sources user` on every `claude -p` invocation in this kit.** Keeps
+user-level config (auth, model preference) while dropping project/local settings (the
+target repo's CLAUDE.md, hooks, `.claude/settings.json`) — so this kit's own injected
+charter (`builder.md` / the CEO/architect charter) is what actually governs the session,
+regardless of what identity convention the target repo happens to run. Applied to both
+`worktree_builder.sh` and `run_agent_pass.sh`.
+
+**This is a real trap for ANY multi-agent-fleet repo used as a build target, not specific
+to one project** — any repo whose CLAUDE.md says "you are persona X by default" will hit
+this exact failure mode against an external automation tool that doesn't know to disclaim
+that identity. Worth the flag on every invocation by default, not just as a fix-when-hit.
+
+## 12. `worktree_builder.sh`'s log goes silent on a hung subprocess — no heartbeat, no timeout
    surfaced to the log
 
 When the builder's `claude -p` call hung on the stray-SSH issue above, `/tmp/builder_run.log`
