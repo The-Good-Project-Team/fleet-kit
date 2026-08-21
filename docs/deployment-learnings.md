@@ -193,7 +193,26 @@ to one project** — any repo whose CLAUDE.md says "you are persona X by default
 this exact failure mode against an external automation tool that doesn't know to disclaim
 that identity. Worth the flag on every invocation by default, not just as a fix-when-hit.
 
-## 12. `worktree_builder.sh`'s log goes silent on a hung subprocess — no heartbeat, no timeout
+## 12. First confirmed real end-to-end success — and a cosmetic log-parsing gap alongside it
+
+First real PR from an unattended dino build: nonprofit-atlas #3055, built against real
+backlog item #3054, fully autonomous (claimed -> worktree -> `claude -p` -> commit -> push
+-> `gh pr create`), zero human in the path. Confirms the whole chain (credential-switch,
+`--dangerously-skip-permissions`, `--setting-sources user`) actually works end to end
+against a real task, not just a synthetic smoke test.
+
+One gap alongside it: `worktree_builder.sh`'s own log said "build session ended with no PR
+URL found in output" even though the PR genuinely opened — `PR_NUM=$(grep -oE
+'github\.com/[^ ]+/pull/[0-9]+' <<<"$OUT" ...)` didn't match whatever exact string `claude`
+printed at the end of that particular run (worktree was already cleaned up by the time this
+was investigated, so the exact raw string wasn't captured — likely a markdown-link or
+line-wrap variant the regex doesn't cover). Cosmetic only: the PR opened correctly and
+`worktree_builder.sh`'s failure-to-find-URL path doesn't block or corrupt anything, it just
+mislabels a success as "no PR found" in the log. Worth tightening the regex (or having the
+builder charter explicitly print the PR URL on its own line, unambiguously) next time this
+script gets touched — not urgent since the actual build/PR mechanism works regardless.
+
+## 13. `worktree_builder.sh`'s log goes silent on a hung subprocess — no heartbeat, no timeout
    surfaced to the log
 
 When the builder's `claude -p` call hung on the stray-SSH issue above, `/tmp/builder_run.log`
