@@ -15,7 +15,7 @@
     "escalation": "a worktree or branch is ambiguous under the safety checks (age unknown, merge-base undeterminable because gh/network is unreachable) -- always KEEP, never guess toward removal. File a backlog item for a ghost that persists past N consecutive runs instead of alerting forever on the same one."
   },
   "schedule": {
-    "interval_s": 3600
+    "hourly_at_minute": 40
   },
   "timeout_s": 600,
   "enabled": false,

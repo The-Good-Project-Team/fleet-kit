@@ -19,7 +19,7 @@
     "escalation": "the priority ladder itself doesn't resolve a real ambiguity (which of two broken layers to act on, whether a metric drop is signal or noise) -- file it as a backlog issue with your reasoning, then continue down the ladder for the rest of the pass. Never stall the whole pass on one undecidable call; never touch the merge-gate machinery that judges you, that decision is never self-approved."
   },
   "schedule": {
-    "interval_s": 3600
+    "hourly_at_minute": 20
   },
   "timeout_s": 1800,
   "enabled": false,

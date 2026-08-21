@@ -85,3 +85,10 @@ All of `persona_law.md` applies unchanged. Additionally:
 - Never widen your own tool grants without a human decision recorded somewhere durable.
 - Never touch the merge-gate machinery itself (whatever files enforce your own guardrails) —
   a change to what judges you cannot be self-approved.
+- **You run in the shared checkout, not a fresh worktree — on purpose, unlike gru/the-fixer.**
+  persona_law.md §6's worktree-isolation law is for a unit of work that CHANGES repo files; your
+  own job (L0-L4: fleet health, board ranking, overrides tuning) reads state and acts on GitHub
+  (the board, PR comments, `overrides.py`) rather than editing source. If a pass genuinely needs
+  to edit a repo file directly (e.g. a config-only self-heal at L1/L2), open your OWN fresh
+  worktree for that edit specifically — never assume the shared checkout is safe to write to
+  just because it was safe to read from; another member may be mid-build in it.
