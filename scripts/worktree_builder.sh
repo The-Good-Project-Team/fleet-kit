@@ -111,8 +111,20 @@ log "building item #$ITEM_ID in $WT_PATH (model=$MODEL)"
 # or `pytest` at all, and correctly refused to fabricate a passing result). The worktree
 # IS the isolation boundary already (fresh clone, throwaway branch) -- that's what makes
 # skipping the prompt safe here specifically.
+#
+# --setting-sources user: the TARGET repo's own CLAUDE.md/.claude/settings.json/hooks are
+# for that repo's own interactive sessions -- a repo that runs its own persona/orchestrator
+# system (e.g. "no explicit assignment -> you ARE the orchestrator, which is hook-blocked
+# from writing code") will silently hijack an unattended `claude -p` call into that identity
+# instead of following this kit's injected CHARTER prompt. Measured live: with project
+# settings loaded, every build against such a repo returned a greeting as the target repo's
+# own orchestrator persona and never touched a file, with zero error -- worktree_builder.sh
+# looked like it was doing nothing across three full attempts before this was found.
+# `user` scope keeps auth/model preferences, drops project-level CLAUDE.md/hooks/settings,
+# so builder.md's own charter (injected below) is what actually governs the session.
 OUT=$(cd "$WT_PATH" && account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" \
-  --model "$MODEL" --dangerously-skip-permissions --max-turns "$MAX_TURNS" 2>>"$LOG")
+  --model "$MODEL" --dangerously-skip-permissions --setting-sources user \
+  --max-turns "$MAX_TURNS" 2>>"$LOG")
 RC=$?
 
 if [ "$RC" -ne 0 ]; then

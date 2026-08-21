@@ -57,8 +57,13 @@ log "pass start (charter=$CHARTER_NAME model=$MODEL max_turns=$MAX_TURNS)"
 # acceptEdits alone still gates Bash execution behind an interactive approval prompt that
 # nothing here can answer. A CEO/architect pass runs unattended and needs to run real
 # commands (tests, self-heal, investigation), not just edit files.
+# --setting-sources user: see worktree_builder.sh's comment -- a target repo that runs its
+# own persona/orchestrator convention via CLAUDE.md/hooks will hijack this pass's identity
+# and ignore $CHARTER_NAME's instructions entirely, with no error. `user` scope drops
+# project-level CLAUDE.md/hooks so this kit's own charter actually governs the session.
 OUT=$(account_pool_run timeout "$((MAX_TURNS * 60))" claude -p "$PROMPT" \
-  --model "$MODEL" --dangerously-skip-permissions --max-turns "$MAX_TURNS" 2>>"$LOG")
+  --model "$MODEL" --dangerously-skip-permissions --setting-sources user \
+  --max-turns "$MAX_TURNS" 2>>"$LOG")
 RC=$?
 SUMMARY=$(tail -c 400 <<<"$OUT" | tr '\n' ' ' | tail -c 300)
 if [ "$RC" -eq 0 ]; then
