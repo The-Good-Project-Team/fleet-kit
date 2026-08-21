@@ -63,8 +63,16 @@ podman build -t "$IMAGE_TAG" .
 #    an operator's existing edits (kill-switch toggles, tuned budgets) on a re-run.
 if [ ! -f "$ENV_FILE" ]; then
   echo "[up] writing $ENV_FILE from fleet.env.example (edit this file to configure $NAME)"
+  # FLEET_LOG_DIR: the template default (~/Library/Logs/fleet-kit) is a macOS-host path.
+  # Inside the container it must be /var/log/fleet-kit — the exact path `-v
+  # "$INSTANCE_DIR/logs:/var/log/fleet-kit"` mounts below — or run_member.sh (which sources
+  # fleet.env fresh, unlike entrypoint.sh's crontab lines which hardcode $LOG_DIR themselves)
+  # writes under root's un-mounted $HOME instead, invisible to the host and to
+  # fleet_view_server.py. Found live on dino, 2026-08-21: a real pass's log silently landed at
+  # /root/Library/Logs/fleet-kit inside the container, never on the mounted volume.
   sed -e "s|^FLEET_REPO=.*|FLEET_REPO=/repo|" \
       -e "s|^FLEET_ACCOUNTS=.*|FLEET_ACCOUNTS=\"$ACCOUNTS\"|" \
+      -e "s|^FLEET_LOG_DIR=.*|FLEET_LOG_DIR=/var/log/fleet-kit|" \
       fleet.env.example > "$ENV_FILE"
 fi
 
