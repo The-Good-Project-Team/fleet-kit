@@ -20,6 +20,14 @@
 #
 # Env: FLEET_ACCOUNTS (default "primary" — one account still gets the classification/logging
 # benefit, it just never has anywhere to fail over TO).
+#
+# CREDENTIAL SWITCHING: each account name in FLEET_ACCOUNTS is used verbatim as a
+# CLAUDE_CONFIG_DIR suffix — account "foo" runs under $HOME/.claude-foo. Log in each account
+# once, by hand, before scheduling anything:
+#   CLAUDE_CONFIG_DIR="$HOME/.claude-foo" claude setup-token
+# Without this, every account in the pool shares whatever is logged into the CLI's default
+# config dir, and failover is theater — the pool "tries" N names but only ever authenticates
+# as one identity.
 set -uo pipefail
 
 ACCOUNT_POOL_ORDER="${FLEET_ACCOUNTS:-primary}"
@@ -67,7 +75,7 @@ account_pool_run() {
         continue
         ;;
     esac
-    out=$("$@" 2>&1)
+    out=$(CLAUDE_CONFIG_DIR="$HOME/.claude-$account" "$@" 2>&1)
     rc=$?
     if [ "$rc" -eq 0 ]; then
       export ACCOUNT_POOL_SELECTED="$account"
