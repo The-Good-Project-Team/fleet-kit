@@ -54,21 +54,30 @@ case "${1:-cron-foreground}" in
         >> "$LOG_DIR/fleet_view.log" 2>&1 ) &
     echo "[entrypoint] fleet_view_server started on :${FLEET_VIEW_PORT:-8420} (pid $!)"
 
+    # GH_TOKEN lives in its own root-only file, never inline in the crontab -- /etc/cron.d
+    # entries are world-readable by design (0644, so cron itself and any exec'd user can read
+    # them) and `cat`/`podman logs`/a debugging session dumping the crontab for cadence review
+    # would otherwise reprint the live token in plaintext every time. Each cron job sources
+    # this file itself instead.
+    TOKEN_FILE=/root/.gh_token
+    umask 077
+    printf '%s' "$GH_TOKEN" > "$TOKEN_FILE"
+
     CRONTAB=/etc/cron.d/fleet-kit
     {
       echo "FLEET_ENV_FILE=/fleet-kit/fleet.env"
       echo "PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-      echo "GH_TOKEN=${GH_TOKEN}"
       echo "HOME=/root"
       echo
       # Cadences match schedulers/README.md's table. gitpull only matters for a persistent
-      # container across restarts within one run -- harmless no-op on a fresh clone.
-      echo "*/10 * * * * root cd $FLEET_REPO && git pull --ff-only >> $LOG_DIR/gitpull.log 2>&1"
-      echo "0 * * * * root bash /fleet-kit/scripts/worktree_builder.sh >> $LOG_DIR/builder.log 2>&1"
-      echo "*/15 * * * * root bash /fleet-kit/scripts/code_review_local.sh >> $LOG_DIR/review.log 2>&1"
+      # container across restarts within one run -- harmless no-op on a fresh clone. Each job
+      # exports GH_TOKEN from the root-only file right before running, in its own subshell.
+      echo "*/10 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && cd $FLEET_REPO && git pull --ff-only >> $LOG_DIR/gitpull.log 2>&1"
+      echo "0 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/worktree_builder.sh >> $LOG_DIR/builder.log 2>&1"
+      echo "*/15 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/code_review_local.sh >> $LOG_DIR/review.log 2>&1"
     } > "$CRONTAB"
     chmod 0644 "$CRONTAB"
-    echo "[entrypoint] installed crontab:"
+    echo "[entrypoint] installed crontab (token redacted, stored separately at $TOKEN_FILE, mode 600):"
     cat "$CRONTAB"
     cron -f
     ;;
