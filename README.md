@@ -182,6 +182,11 @@ The source fleet had product-specific machinery this kit deliberately does not p
   self-graded, guardrail-paired, STALE-never-0) for when you build lane-specific health
   scouts; no scout scripts ship here since "what's a lane" is entirely product-specific.
 
+An operator still needs a shell on the fleet box from off its LAN, though — that one's not
+product-specific, and it's a recipe, not a script: see `docs/deployment-learnings.md` #14-15
+for the live-IP-resolution pattern (VMs move; never hardcode one) and the Cloudflare Tunnel setup
+(mint an account-scoped Tunnel:Edit token, no `cloudflared login` browser flow needed).
+
 ## Install (target: under 15 minutes to first unattended PR)
 
 1. **Copy this kit** into the target repo as `.fleet/` (or clone it as a sibling and point

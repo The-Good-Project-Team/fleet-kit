@@ -220,3 +220,67 @@ simply stopped growing — no "still running", no partial-timeout warning, nothi
 distinguishing "working on something slow" from "wedged". Worth hardening in a future pass:
 periodic heartbeat lines while the build subprocess runs, and an explicit log line the moment
 `$TIMEOUT_S` is hit rather than only the process disappearing.
+
+## 14. "The box is dead" and "the box moved" are different failure classes — a hardcoded VM IP
+    silently breaks, and it looks identical to a dead box until you check
+
+A VM host's own reach-script (`dino`, one layer above this kit — the thing an operator types to
+get a shell on the fleet box at all) hardcoded the multipass guest's IP in a static ssh config
+file. The VM was never down. It had just been rebuilt overnight (routine — multipass reassigns a
+new DHCP lease on every rebuild) and moved from `.3` to `.4`. The reach script's own health check
+reported "not reachable" — same message a truly-dead box would produce — and cost real
+troubleshooting time before the actual cause (stale cached IP, not a dead machine) surfaced.
+
+**Fix: never cache a multipass/cloud-VM's IP to a file. Resolve it live, every connection**, by
+running `multipass info <vm> | awk '/IPv4:/ {print $2; exit}'` ON THE HOST (via one hop of SSH to
+the host if you're off-box), then pass it to the actual connection with `ssh -o HostName=$ip` (or
+a `ProxyJump` to the host plus that override) rather than writing it into `Host <vm>` /
+`HostName` in a static config block. A static IP in a config file is exactly the same class of
+bug as the credential/config drift the rest of this doc is about — something that was true once,
+silently stopped being true, and nothing re-validated it before trusting it.
+
+**Second, sharper trap found chasing this: an ssh_config `ProxyCommand` does NOT tokenize the
+same way a real shell does.** An identical command string (`ssh host -W "$(subshell):22"`) ran
+byte-for-byte clean when executed directly in bash, but corrupted the SSH handshake stream
+(`Bad packet length`, decodable as the ASCII start of the peer's own error text) when the exact
+same string was ssh_config's own `ProxyCommand` value. **Fix: never put a nested
+command-substitution string inline as a `ProxyCommand` — put it in its own script file and point
+`ProxyCommand` at the file**, or better, use `ProxyJump host` (a real ssh primitive, not a
+hand-rolled `-W` pipe) plus a live `-o HostName=$(resolve-ip.sh)` override at connect time. The
+built-in primitive is not just cleaner, it is measurably more reliable than reimplementing it with
+`-W`.
+
+## 15. "Reachable from the fleet operator's LAN" and "reachable at all" are different guarantees
+    — a Cloudflare Tunnel closes the gap, and it does NOT need `cloudflared login`
+
+This kit's README explicitly punts on reachability/dashboards ("wire your own"). In practice the
+very first thing worth wiring is: can the operator get a shell on the fleet box from anywhere,
+not just the LAN it happens to be plugged into. Proven live, repeatable, no local
+`cloudflared login` browser flow required:
+
+1. Mint an **account-scoped** API token with `Cloudflare Tunnel:Edit` (+`Read`) permission —
+   separate from any existing DNS-only token, least-privilege, doesn't touch what the DNS token
+   can do. (`POST /accounts/{id}/cfd_tunnel` needs Tunnel scope; a Zone-DNS-only token gets a
+   bare `"Authentication error"` with no other detail, easy to misread as a token that's simply
+   invalid rather than under-scoped.)
+2. `POST /accounts/{id}/cfd_tunnel` with a client-generated `tunnel_secret` (32 random bytes,
+   base64) and `"config_src":"cloudflare"` (remote-managed ingress — no config file needed on the
+   box). Response includes a one-shot connector `token` — save it immediately, it is not
+   retrievable again.
+3. `PUT .../cfd_tunnel/{id}/configurations` to set ingress: `{"hostname":
+   "<name>.yourzone.com","service":"ssh://localhost:22"}` then a catch-all `http_status:404`.
+4. DNS: `POST /zones/{zone}/dns_records`, `CNAME <name> -> <tunnel-id>.cfargotunnel.com`,
+   `proxied:true`. The regular DNS-edit token is sufficient for this step alone.
+5. On the box: install `cloudflared` from Cloudflare's own apt repo, then
+   `cloudflared service install <connector-token>` — this both writes the token to
+   `/etc/cloudflared/token` and registers+enables a systemd unit in one command. No manual
+   systemd unit file, no manual config.yml.
+6. From anywhere: `ssh -o ProxyCommand='cloudflared access ssh --hostname <name>.yourzone.com'
+   user@<name>.yourzone.com` — no VPN, no port-forward, works off the box's LAN entirely.
+
+**The token boundary that matters:** the *minting* credential (Tunnel:Edit API token) stays on
+the operator's own machine only — it's overpowered for any single service and should never ship
+anywhere. The *runtime* credential (the one-shot connector token, already consumed into
+`/etc/cloudflared/token` by step 5) lives only on the box running the tunnel, scoped to just that
+tunnel. Don't copy the minting token to the fleet box, and don't copy the fleet box's runtime
+token back to the operator's machine — each stays exactly where its job is.
