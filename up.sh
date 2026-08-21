@@ -41,7 +41,7 @@ if [ -z "$REPO_URL" ] || [ -z "$NAME" ]; then
 fi
 
 INSTANCE_DIR="$(pwd)/instances/$NAME"
-mkdir -p "$INSTANCE_DIR"
+mkdir -p "$INSTANCE_DIR/repo" "$INSTANCE_DIR/logs"
 ENV_FILE="$INSTANCE_DIR/fleet.env"
 CREDS_DIR="$HOME/.claude-$ACCOUNT"
 
