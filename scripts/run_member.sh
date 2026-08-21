@@ -102,11 +102,18 @@ if [ -n "$CUSTOM_RUNNER" ]; then
   exit "$RC"
 fi
 
-BEHAVIOR=$(python3 -c "
+# $SPEC is piped via stdin, never string-interpolated into a python literal -- a member's
+# mandate/checklist text is free-form English and WILL contain apostrophes (found live on
+# dino, 2026-08-21: marie's charter has several -- "repo's own", "pass's vision" -- each one
+# terminated the python triple-quote early when $SPEC was substituted inline, corrupting the
+# JSON and silently emptying BEHAVIOR downstream. gru's charter happened to have zero
+# apostrophes in its mandate text, so this bug shipped invisible until a second member with
+# ordinary prose hit it.
+BEHAVIOR=$(echo "$SPEC" | python3 -c "
 import sys, json
 sys.path.insert(0, '$KIT_DIR/scripts')
 import member_spec
-spec = json.loads('''$SPEC''')
+spec = json.load(sys.stdin)
 print(member_spec.behavior_path(spec))
 ")
 
