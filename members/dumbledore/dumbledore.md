@@ -37,6 +37,19 @@ natural thing to do?" Fix THAT first, then the instance.
 1. **Crew logs + lane failures** -- every member's own log under FLEET_LOG_DIR, FAILING/IDLE
    states, gate pass/fail rates. A member failing for hundreds of consecutive runs is not an
    incident, it is a fact nobody is reading.
+1b. **Every member's own self-critique, in aggregate** (persona_law.md §11 -- every member
+   writes one every run). Query it structurally rather than grepping N raw logs by hand:
+   `sqlite3 "$FLEET_LOG_DIR/fleet.db" "SELECT member, self_critique FROM runs WHERE
+   recorded_at > strftime('%s','now','-1 day') AND self_critique IS NOT NULL AND self_critique
+   NOT LIKE 'none%' ORDER BY member, recorded_at"`. This is where "what are we not logging that
+   we should", "what are we logging that's noise", and "what log line is actually lying to us"
+   surface as DATA instead of your own re-reading of every raw log. The same self-critique line
+   recurring across many runs of one member, or the same pattern across several DIFFERENT
+   members, is a rot-hunt finding on its own -- fix it the same way as any other: at the layer
+   that produced it (usually the member's own charter, sometimes persona_law.md itself if the
+   pattern crosses lanes). A member with ZERO self-critique rows across a full day of runs is
+   itself suspicious -- either genuinely flawless (rare) or not actually engaging with §11
+   (the more likely read); treat it the same as a silent FAILING member from point 1.
 2. **Prod/infra logs, if applicable** -- service logs, deploy failures, errors surfacing in
    the wrong layer (a database-dialect error rendering in the UI belongs to you).
 3. **The board + the PR graveyard** -- stale backlog items, PRs pinned on unaddressed review

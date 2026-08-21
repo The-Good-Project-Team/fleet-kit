@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS runs (
   outcome                    TEXT,
   evidence                    TEXT,
   vision_link                  TEXT,
+  self_critique                 TEXT,
   cost_usd                      REAL,
   num_turns                      INTEGER,
   input_tokens                    INTEGER,
@@ -82,7 +83,7 @@ def _row_from_record(rec: dict) -> tuple:
     return (
         rec.get("run_id"), rec.get("member"), rec.get("kind"),
         rec.get("item_id"), rec.get("pr"), rec.get("status"), rec.get("exit_code"),
-        rec.get("outcome"), rec.get("evidence"), rec.get("vision_link"),
+        rec.get("outcome"), rec.get("evidence"), rec.get("vision_link"), rec.get("self_critique"),
         tokens.get("cost_usd"), tokens.get("num_turns"),
         tokens.get("input_tokens"), tokens.get("output_tokens"),
         tokens.get("cache_read_input_tokens"), tokens.get("cache_creation_input_tokens"),
@@ -116,9 +117,9 @@ def sync(conn: sqlite3.Connection, runs_file: Path | None = None) -> int:
             conn.execute(
                 """INSERT OR REPLACE INTO runs
                    (run_id, member, kind, item_id, pr, status, exit_code, outcome, evidence,
-                    vision_link, cost_usd, num_turns, input_tokens, output_tokens,
+                    vision_link, self_critique, cost_usd, num_turns, input_tokens, output_tokens,
                     cache_read_tokens, cache_creation_tokens, duration_ms, stop_reason, recorded_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 _row_from_record(rec),
             )
             n += 1

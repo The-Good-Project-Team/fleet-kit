@@ -52,6 +52,13 @@ def _vision_claim(text: str):
 _FIELD = {
     "outcome": re.compile(r"^[ \t]*Outcome[ \t]*:[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
     "evidence": re.compile(r"^[ \t]*Evidence[ \t]*:[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
+    # Captured, never enforced -- a missing self-critique never changes `status` the way a
+    # missing outcome does. Reif, 2026-08-21: "it should be inherent in every member to log
+    # its findings -- like having a post mortem on the run." persona_law.md §11 is what tells
+    # every member to write this line; this is just where it lands structurally, in the same
+    # runs.jsonl every other leg of the report already lands in, so dumbledore's rot-hunt can
+    # read every member's self-critique in aggregate instead of grepping N raw logs by hand.
+    "self_critique": re.compile(r"^[ \t]*Self-critique[ \t]*:[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
 }
 
 # An outcome must name something a human can open. "I looked at the dashboard" is not an
@@ -107,6 +114,7 @@ def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
         "outcome": report["outcome"],
         "evidence": report["evidence"],
         "vision_link": report["vision_link"],
+        "self_critique": report["self_critique"],
         # Deterministic, not regex-parsed from prose -- the caller already knows these when it
         # writes the record (worktree_builder.sh resolves PR_NUM itself before calling this).
         # Optional: a mechanical member or an early-exit ("no unclaimed items") has neither.
