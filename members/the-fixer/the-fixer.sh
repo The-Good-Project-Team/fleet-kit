@@ -130,7 +130,7 @@ fi
 cd "$WDT"
 claude -p "$PROMPT" --model "$MODEL" --max-turns "$MAX_TURNS" \
   --setting-sources user --dangerously-skip-permissions \
-  --allowedTools "Read,Edit,Write,Bash,Grep,Glob" \
+  --allowedTools "Read,Edit,Write,Bash,Grep,Glob,TodoWrite" \
   >>"$LOG" 2>&1
 
 echo "red $FIRE_SHA" > "$STATE"

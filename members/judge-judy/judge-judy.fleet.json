@@ -28,7 +28,7 @@
     "max_turns": 30,
     "prompt_file": "judge-judy.md",
     "tools": {
-      "allow": ["Read", "Bash(gh pr:*)", "Bash(git diff:*)", "Bash(git log:*)", "Grep", "Glob"],
+      "allow": ["Read", "Bash(gh pr:*)", "Bash(git diff:*)", "Bash(git log:*)", "Grep", "Glob", "TodoWrite"],
       "deny": ["Bash(gh pr merge:*)", "Edit", "Write"]
     }
   },
