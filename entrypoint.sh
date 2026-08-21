@@ -54,6 +54,20 @@ case "${1:-cron-foreground}" in
         >> "$LOG_DIR/fleet_view.log" 2>&1 ) &
     echo "[entrypoint] fleet_view_server started on :${FLEET_VIEW_PORT:-8420} (pid $!)"
 
+    # Webhook receiver, same pattern -- event-driven the-fixer trigger (a red CI/deploy run
+    # fires it directly instead of waiting on its own poll interval). Only starts if a secret
+    # is actually provisioned; a container with none just doesn't offer this path, same as any
+    # other optional driver in this kit (messenger, prod-diag).
+    if [ -s /fleet-kit/.webhook_secret ]; then
+      ( cd /fleet-kit && FLEET_WEBHOOK_SECRET="$(cat /fleet-kit/.webhook_secret)" \
+          FLEET_REPO="$FLEET_REPO" FLEET_LOG_DIR="$LOG_DIR" \
+          exec python3 scripts/webhook_receiver.py --port "${FLEET_WEBHOOK_PORT:-8562}" \
+          >> "$LOG_DIR/webhook_receiver.log" 2>&1 ) &
+      echo "[entrypoint] webhook_receiver started on :${FLEET_WEBHOOK_PORT:-8562} (pid $!)"
+    else
+      echo "[entrypoint] no .webhook_secret found -- webhook_receiver not started (poll-only mode)"
+    fi
+
     # GH_TOKEN lives in its own root-only file, never inline in the crontab -- /etc/cron.d
     # entries are world-readable by design (0644, so cron itself and any exec'd user can read
     # them) and `cat`/`podman logs`/a debugging session dumping the crontab for cadence review
@@ -63,18 +77,27 @@ case "${1:-cron-foreground}" in
     umask 077
     printf '%s' "$GH_TOKEN" > "$TOKEN_FILE"
 
+    # Every real member runs through run_member.sh now (2026-08-21 -- this crontab previously
+    # only ever ran worktree_builder.sh + judge-judy.sh directly, predating run_member.sh and
+    # missing gru/jefe/roomba/dumbledore/messenger entirely; a container built from this image
+    # would have silently run 2 of 7 members forever). Cadences match each member's own
+    # schedule in members/*/*.fleet.json -- see schedulers/README.md for the human-readable
+    # table. the-fixer keeps a coarse poll here as the prod-down backstop (no GitHub event
+    # exists for "the site is dark with no failing workflow run") even with the webhook wired.
     CRONTAB=/etc/cron.d/fleet-kit
     {
       echo "FLEET_ENV_FILE=/fleet-kit/fleet.env"
       echo "PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
       echo "HOME=/root"
       echo
-      # Cadences match schedulers/README.md's table. gitpull only matters for a persistent
-      # container across restarts within one run -- harmless no-op on a fresh clone. Each job
-      # exports GH_TOKEN from the root-only file right before running, in its own subshell.
       echo "*/10 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && cd $FLEET_REPO && git pull --ff-only >> $LOG_DIR/gitpull.log 2>&1"
-      echo "0 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/worktree_builder.sh >> $LOG_DIR/builder.log 2>&1"
-      echo "*/15 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/members/judge-judy/judge-judy.sh >> $LOG_DIR/review.log 2>&1"
+      echo "*/2 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh the-fixer >> $LOG_DIR/the-fixer.log 2>&1"
+      echo "*/5 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dont-shoot-the-messenger >> $LOG_DIR/dont-shoot-the-messenger.log 2>&1"
+      echo "*/15 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh judge-judy >> $LOG_DIR/judge-judy.log 2>&1"
+      echo "0 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh gru >> $LOG_DIR/gru.log 2>&1"
+      echo "20 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh jefe >> $LOG_DIR/jefe.log 2>&1"
+      echo "40 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh roomba >> $LOG_DIR/roomba.log 2>&1"
+      echo "10 15 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dumbledore >> $LOG_DIR/dumbledore.log 2>&1"
     } > "$CRONTAB"
     chmod 0644 "$CRONTAB"
     echo "[entrypoint] installed crontab (token redacted, stored separately at $TOKEN_FILE, mode 600):"
