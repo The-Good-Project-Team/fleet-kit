@@ -79,7 +79,30 @@ If migrating a repo from one fleet implementation to another, retire the old sch
 first (`launchctl unload` / `systemctl disable`, don't delete — reversible) and confirm zero
 processes running before pointing the new one at the same board.
 
-## 6. `worktree_builder.sh`'s log goes silent on a hung subprocess — no heartbeat, no timeout
+## 6. `--permission-mode acceptEdits` still gates Bash execution — an unattended builder needs
+   `--dangerously-skip-permissions`
+
+First real end-to-end build attempt (issue #3047, nonprofit-atlas) wrote a correct fix and a
+correct test — file reads and edits went through fine — then hard-blocked on every actual
+command: `bash -n`, `python3`, `git add`, even `echo hello > file` all returned "This command
+requires approval." A dispatched sub-persona hit the identical wall independently. The model
+did the right thing: it did not fabricate a passing test result or a fake PR, it reported the
+blocker plainly and stopped (see rule 1 of this kit's persona charter — paste real output,
+never fabricate).
+
+Root cause: `--permission-mode acceptEdits` only auto-approves `Write`/`Edit` tool calls. It
+does NOT cover `Bash` — that stays gated behind an interactive approval prompt, and a
+worktree with no human attached has no one to answer it. `worktree_builder.sh` and
+`run_agent_pass.sh` both fixed to use `--dangerously-skip-permissions` instead: the fresh,
+throwaway worktree IS the isolation boundary (per this kit's own `persona_law.md`), which is
+what makes skipping the interactive prompt safe specifically here. `code_review_local.sh`
+was left alone — it only reads and posts a status, no Bash execution needed.
+
+**If you see a build session report a completed fix but no commit/PR, check for this exact
+wall before assuming the model failed** — the fix may be sitting correct and untested in a
+worktree that already got cleaned up by the script's own `cleanup()` trap.
+
+## 7. `worktree_builder.sh`'s log goes silent on a hung subprocess — no heartbeat, no timeout
    surfaced to the log
 
 When the builder's `claude -p` call hung on the stray-SSH issue above, `/tmp/builder_run.log`

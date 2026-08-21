@@ -53,8 +53,12 @@ cd "$REPO" 2>/dev/null || { log "FATAL: repo missing at $REPO"; exit 1; }
 command -v account_pool_run >/dev/null 2>&1 || account_pool_run() { "$@"; }
 
 log "pass start (charter=$CHARTER_NAME model=$MODEL max_turns=$MAX_TURNS)"
+# --dangerously-skip-permissions: see worktree_builder.sh's comment on the same flag --
+# acceptEdits alone still gates Bash execution behind an interactive approval prompt that
+# nothing here can answer. A CEO/architect pass runs unattended and needs to run real
+# commands (tests, self-heal, investigation), not just edit files.
 OUT=$(account_pool_run timeout "$((MAX_TURNS * 60))" claude -p "$PROMPT" \
-  --model "$MODEL" --permission-mode acceptEdits --max-turns "$MAX_TURNS" 2>>"$LOG")
+  --model "$MODEL" --dangerously-skip-permissions --max-turns "$MAX_TURNS" 2>>"$LOG")
 RC=$?
 SUMMARY=$(tail -c 400 <<<"$OUT" | tr '\n' ' ' | tail -c 300)
 if [ "$RC" -eq 0 ]; then

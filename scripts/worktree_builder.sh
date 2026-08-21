@@ -102,8 +102,17 @@ Context: $ITEM_CONTEXT
 You are in a fresh worktree at $WT_PATH on branch $WT_BRANCH. Commit + push from here."
 
 log "building item #$ITEM_ID in $WT_PATH (model=$MODEL)"
+# --dangerously-skip-permissions, not --permission-mode acceptEdits: acceptEdits only
+# auto-approves file Write/Edit, it still gates Bash execution behind an interactive
+# approval prompt. An unattended builder in an isolated fresh worktree has no human to
+# answer that prompt -- it hard-blocks forever (or, if the model is well-behaved, gives up
+# and reports the wall instead of faking a result, which is what surfaced this: a real run
+# against nonprofit-atlas wrote a correct fix + test, then couldn't run `bash -n`, `git add`,
+# or `pytest` at all, and correctly refused to fabricate a passing result). The worktree
+# IS the isolation boundary already (fresh clone, throwaway branch) -- that's what makes
+# skipping the prompt safe here specifically.
 OUT=$(cd "$WT_PATH" && account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" \
-  --model "$MODEL" --permission-mode acceptEdits --max-turns "$MAX_TURNS" 2>>"$LOG")
+  --model "$MODEL" --dangerously-skip-permissions --max-turns "$MAX_TURNS" 2>>"$LOG")
 RC=$?
 
 if [ "$RC" -ne 0 ]; then
