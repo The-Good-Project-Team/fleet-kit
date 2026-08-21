@@ -18,7 +18,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 REPO_URL=""
 NAME=""
-ACCOUNT="${FLEET_ACCOUNT:-primary}"
+# Space-separated, same shape as FLEET_ACCOUNTS itself -- account_pool.sh already tries these
+# in order and fails over; up.sh's job is just mounting creds for EVERY name in the list, not
+# only the first. `--account` (singular) still works as an alias for one name.
+ACCOUNTS="${FLEET_ACCOUNTS:-primary}"
 IMAGE_TAG="fleet-kit:latest"
 VIEW_PORT=""
 
@@ -26,25 +29,25 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO_URL="$2"; shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
-    --account) ACCOUNT="$2"; shift 2 ;;
+    --account|--accounts) ACCOUNTS="$2"; shift 2 ;;
     --port) VIEW_PORT="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 --repo <git-url> --name <project-name> [--account <claude-account>] [--port <n>]"
+      echo "Usage: $0 --repo <git-url> --name <project-name> [--accounts \"primary other\"] [--port <n>]"
       exit 0 ;;
     *) echo "Unknown flag: $1" >&2; exit 1 ;;
   esac
 done
 
 if [ -z "$REPO_URL" ] || [ -z "$NAME" ]; then
-  echo "Usage: $0 --repo <git-url> --name <project-name> [--account <claude-account>] [--port <n>]" >&2
+  echo "Usage: $0 --repo <git-url> --name <project-name> [--accounts \"primary other\"] [--port <n>]" >&2
   exit 1
 fi
 
 INSTANCE_DIR="$(pwd)/instances/$NAME"
 mkdir -p "$INSTANCE_DIR/repo" "$INSTANCE_DIR/logs"
 ENV_FILE="$INSTANCE_DIR/fleet.env"
-CREDS_DIR="$HOME/.claude-$ACCOUNT"
 WEBHOOK_SECRET_FILE="$INSTANCE_DIR/webhook_secret"
+read -ra ACCOUNT_LIST <<< "$ACCOUNTS"
 
 # 1. Build (or rebuild) the image every run -- podman's own layer cache makes an unchanged
 #    build fast, so this costs nothing on a re-run with no source changes. The PREVIOUS shape
@@ -61,18 +64,24 @@ podman build -t "$IMAGE_TAG" .
 if [ ! -f "$ENV_FILE" ]; then
   echo "[up] writing $ENV_FILE from fleet.env.example (edit this file to configure $NAME)"
   sed -e "s|^FLEET_REPO=.*|FLEET_REPO=/repo|" \
-      -e "s|^FLEET_ACCOUNTS=.*|FLEET_ACCOUNTS=\"$ACCOUNT\"|" \
+      -e "s|^FLEET_ACCOUNTS=.*|FLEET_ACCOUNTS=\"$ACCOUNTS\"|" \
       fleet.env.example > "$ENV_FILE"
 fi
 
-# 3. Verify the named Claude account actually has credentials mounted before handing this to
+# 3. Verify EVERY named Claude account actually has credentials mounted before handing this to
 #    cron for hours — same check entrypoint.sh does at boot, but loud and BEFORE `podman run`
-#    instead of buried in container logs a human has to go find.
-if [ ! -f "$CREDS_DIR/.credentials.json" ] && [ ! -f "$CREDS_DIR/.claude.json" ]; then
-  echo "[up] WARNING: no credentials found at $CREDS_DIR for account '$ACCOUNT'."
-  echo "[up]          copy your whole .credentials.json there before this fleet can build anything:"
-  echo "[up]          mkdir -p $CREDS_DIR && cp ~/.claude/.credentials.json $CREDS_DIR/"
-fi
+#    instead of buried in container logs a human has to go find. Build the -v mount flags here
+#    too, one per account, so account_pool.sh's failover has somewhere real to fail over TO.
+CREDS_MOUNT_ARGS=()
+for acct in "${ACCOUNT_LIST[@]}"; do
+  acct_creds_dir="$HOME/.claude-$acct"
+  if [ ! -f "$acct_creds_dir/.credentials.json" ] && [ ! -f "$acct_creds_dir/.claude.json" ]; then
+    echo "[up] WARNING: no credentials found at $acct_creds_dir for account '$acct'."
+    echo "[up]          copy your whole .credentials.json there before this fleet can build anything:"
+    echo "[up]          mkdir -p $acct_creds_dir && cp ~/.claude/.credentials.json $acct_creds_dir/"
+  fi
+  CREDS_MOUNT_ARGS+=(-v "$acct_creds_dir:/root/.claude-$acct:ro")
+done
 
 # 4. Check for a GitHub token the container can read (gh CLI reads GH_TOKEN directly).
 GH_TOKEN_VAL="${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}"
@@ -111,7 +120,7 @@ if [ -z "$VIEW_PORT" ]; then
 fi
 WEBHOOK_PORT=$(( VIEW_PORT + 1 ))
 
-echo "[up] starting fleet '$NAME' -> $REPO_URL (image $IMAGE_TAG, account $ACCOUNT, view port $VIEW_PORT, webhook port $WEBHOOK_PORT)"
+echo "[up] starting fleet '$NAME' -> $REPO_URL (image $IMAGE_TAG, accounts [${ACCOUNT_LIST[*]}], view port $VIEW_PORT, webhook port $WEBHOOK_PORT)"
 exec podman run -d \
   --name "fleet-kit-$NAME" \
   --replace \
@@ -123,7 +132,7 @@ exec podman run -d \
   -e "FLEET_WEBHOOK_PORT=$WEBHOOK_PORT" \
   -v "$ENV_FILE:/fleet-kit/fleet.env:ro" \
   -v "$WEBHOOK_SECRET_FILE:/fleet-kit/.webhook_secret:ro" \
-  -v "$CREDS_DIR:/root/.claude-$ACCOUNT:ro" \
+  "${CREDS_MOUNT_ARGS[@]}" \
   -v "$INSTANCE_DIR/repo:/repo" \
   -v "$INSTANCE_DIR/logs:/var/log/fleet-kit" \
   -p "$VIEW_PORT:$VIEW_PORT" \
