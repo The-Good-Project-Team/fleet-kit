@@ -46,11 +46,15 @@ ENV_FILE="$INSTANCE_DIR/fleet.env"
 CREDS_DIR="$HOME/.claude-$ACCOUNT"
 WEBHOOK_SECRET_FILE="$INSTANCE_DIR/webhook_secret"
 
-# 1. Build the image if it doesn't exist yet (idempotent — podman skips unchanged layers).
-if ! podman image exists "$IMAGE_TAG"; then
-  echo "[up] building $IMAGE_TAG (first run only, subsequent runs reuse cached layers)..."
-  podman build -t "$IMAGE_TAG" .
-fi
+# 1. Build (or rebuild) the image every run -- podman's own layer cache makes an unchanged
+#    build fast, so this costs nothing on a re-run with no source changes. The PREVIOUS shape
+#    here (`if ! podman image exists`) only ever built ONCE per box: a `git pull` picking up
+#    real fixes (entrypoint.sh, a member's charter, run_member.sh itself) would silently keep
+#    running the stale image forever, because the tag already existed. Found live on dino,
+#    2026-08-21 -- the running container was 13 commits behind despite `up.sh` having been run
+#    after those commits landed in the checkout.
+echo "[up] building $IMAGE_TAG (podman reuses cached layers for anything unchanged)..."
+podman build -t "$IMAGE_TAG" .
 
 # 2. Generate this project's fleet.env from the template on first run only — never overwrite
 #    an operator's existing edits (kill-switch toggles, tuned budgets) on a re-run.
