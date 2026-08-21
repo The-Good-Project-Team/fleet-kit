@@ -130,6 +130,20 @@ def validate(spec: dict, *, filename: str = "<dict>") -> dict:
              f"{where}mandate.checklist items must all be non-empty strings")
     _require(isinstance(mandate.get("limits"), dict),
              f"{where}mandate.limits must be an object (turns/timeout/budget, restated for review)")
+    # The checklist is what makes a member reviewable and prunable -- it is NOT a task tracker
+    # to reimplement. An llm member runs its checklist through Claude Code's own TodoWrite
+    # (already in its tools if granted); this schema only owns the list a human/reviewer reads,
+    # never a second progress-tracking mechanism competing with the one already in the harness.
+    #
+    # `escalation` is the bounded-but-agentic valve: every checklist is finite and every real
+    # pass eventually hits something the list didn't anticipate. Without a stated valve a
+    # member either silently improvises past its scope (unbounded) or hard-stops on anything
+    # unlisted (brittle). Naming the valve up front makes "go outside the checklist" a decision
+    # the spec author made on purpose, not a default a model invents mid-run.
+    _require(isinstance(mandate.get("escalation"), str) and mandate["escalation"],
+             f"{where}mandate.escalation must be a non-empty string (what to do when the "
+             f"checklist doesn't cover what this pass hit -- e.g. 'file a backlog item and "
+             f"continue' vs 'stop and report, never act blind')")
 
     if kind == "llm":
         llm = spec.get("llm")

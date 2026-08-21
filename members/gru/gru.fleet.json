@@ -15,7 +15,8 @@
       "open the PR referencing the claimed issue number",
       "arm auto-merge (`gh pr merge --auto --squash`) unconditionally before finishing"
     ],
-    "limits": {"max_turns": 60, "timeout_s": 2400, "max_budget_usd": 5}
+    "limits": {"max_turns": 60, "timeout_s": 2400, "max_budget_usd": 5},
+    "escalation": "hit something the checklist doesn't cover mid-build (a conflict beyond you, a gate failing identically on sibling PRs) -- say so plainly in the PR body and stop; an honest 'needs a human/investigation' beats a broken push. Never silently improvise past the checklist's own file-safety rules (explicit paths, never blanket add)."
   },
   "schedule": {
     "hourly_at_minute": 0
@@ -27,7 +28,7 @@
     "max_turns": 60,
     "prompt_file": "gru.md",
     "tools": {
-      "allow": ["Read", "Edit", "Write", "Bash", "Grep", "Glob"],
+      "allow": ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "TodoWrite"],
       "deny": ["Bash(git stash:*)", "Bash(git push --force:*)"]
     }
   },
