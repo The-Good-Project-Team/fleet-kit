@@ -50,12 +50,18 @@ _account_pool_budget_verdict() {
 # report exhaustion/auth failure in human-readable text on stderr; there is no structured
 # error code from the CLI to key off instead. Extend the patterns below if your provider's
 # wording differs.
+#
+# Patterns confirmed against REAL CLI output, live on dino 2026-08-21: the original
+# "reached your (weekly|usage) limit" missed the CLI's actual wording ("You've HIT your weekly
+# limit"), and neither auth pattern matched "OAuth access token has been revoked" — both real
+# failures were silently misclassified as "other", which the caller then retries every account
+# for every single tick instead of logging the true, actionable reason once.
 _account_pool_classify_failure() {
   local out="$1"
-  if grep -qiE "reached your (weekly|usage) limit|rate.?limit|quota exceeded" <<<"$out"; then
+  if grep -qiE "(reached|hit) your (weekly|usage) limit|rate.?limit|quota exceeded" <<<"$out"; then
     echo "exhausted"; return
   fi
-  if grep -qiE "not logged in|please (log|sign) in|invalid api key|unauthorized" <<<"$out"; then
+  if grep -qiE "not logged in|please (log|sign) in|invalid api key|unauthorized|token (has been )?revoked|401" <<<"$out"; then
     echo "unauthenticated"; return
   fi
   echo "other"
