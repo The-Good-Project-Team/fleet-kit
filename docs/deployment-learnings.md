@@ -125,7 +125,37 @@ label, comment why) called from `worktree_builder.sh`'s failure branches (`RC -n
 item for the next pass rather than rushed in without testing the failure-path plumbing
 properly.
 
-## 8. `worktree_builder.sh`'s log goes silent on a hung subprocess — no heartbeat, no timeout
+## 9. A copied credentials file with `expiresAt: 0` fails auth-refresh silently and
+   `worktree_builder.sh` swallows the error entirely
+
+Copying `~/.claude/.credentials.json` off macOS Keychain by piping through
+`python3 -c "print(json.load(...)['claudeAiOauth']['accessToken'])"` and writing ONLY that
+one field loses `refreshToken` and `expiresAt`. A partial reconstruction later can still
+LOOK complete (has a `refreshToken` key) while `expiresAt` reads `0` -- and `claude` treats
+`0` as "already expired," attempts a refresh, and on ANY refresh failure just prints
+`Failed to authenticate: OAuth session expired and could not be refreshed` and exits 1. No
+retry, no fallback account tried (because `account_pool_run`'s own subshell already
+absorbed the exit code before classification), and worse: `worktree_builder.sh`'s
+`log "item #$ID: build session failed rc=$RC"` line never even fired in one observed run --
+the failure happened fast enough, and early enough in the pipeline, that the log write and
+the `claude` process both raced the parent script's exit. Net effect: the builder silently
+did nothing, twice, with zero trace beyond "no PR found."
+
+**Fix: copy the WHOLE credentials file, never reconstruct a subset of fields.**
+`security find-generic-password -s "Claude Code-credentials" -w` on macOS (or the plain
+`~/.claude/.credentials.json` file on Linux) dumped verbatim to
+`$HOME/.claude-<account>/.credentials.json` on the target box. Verify with:
+```
+python3 -c "import json; c=json.load(open(PATH)); o=c['claudeAiOauth']; print(o.get('expiresAt'), 'refreshToken' in o)"
+```
+A real `expiresAt` (a large future epoch-ms integer, not `0`) is the tell that the copy is
+whole. Sanity-check with a live `claude -p "say OK" --model haiku` call before trusting the
+credential for anything unattended -- this is the same check `entrypoint.sh`'s per-account
+warning does at container boot, but it only checks the file EXISTS, not that it's a complete,
+working credential. Worth hardening `entrypoint.sh` to make that same live call, not just a
+file-existence check, next time this surface gets touched.
+
+## 10. `worktree_builder.sh`'s log goes silent on a hung subprocess — no heartbeat, no timeout
    surfaced to the log
 
 When the builder's `claude -p` call hung on the stray-SSH issue above, `/tmp/builder_run.log`
