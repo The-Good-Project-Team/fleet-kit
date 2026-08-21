@@ -151,6 +151,13 @@ log "pass start (kind=llm charter=$BEHAVIOR model=$MODEL max_turns=$MAX_TURNS bu
 # into the member's own log AS THEY HAPPEN, piped straight to `log` so a human tailing the log
 # (or dumbledore reading it back) sees the pass unfold, not just its outcome.
 RESULT_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_result.XXXXXX")
+# IS_SANDBOX=1: claude CLI refuses --dangerously-skip-permissions when running as root/sudo
+# (a laptop-safety guard -- root there means "someone escalated"). Inside this container root
+# IS the only user, by design (see Dockerfile header) -- there's no separate human account the
+# guard is protecting. IS_SANDBOX is the CLI's own documented escape hatch for exactly this
+# case. Found live on dino 2026-08-21: every real member pass failed rc=1 "other" silently
+# (account_pool.sh had no pattern for this error text) until traced to this guard directly.
+export IS_SANDBOX=1
 account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" \
   --model "$MODEL" --dangerously-skip-permissions --setting-sources user \
   --max-turns "$MAX_TURNS" --output-format stream-json --verbose \
