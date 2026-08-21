@@ -4,17 +4,21 @@
   "kind": "llm",
   "lane": "hygiene",
   "mandate": {
-    "target": "the fleet:claimed label is trustworthy -- every issue wearing it has a live, matching, open PR",
+    "target": "the open-issue backlog is trustworthy -- every fleet:claimed label has a live matching PR, and every open issue is real, current work, not cruft",
     "checklist": [
-      "list every open issue labeled fleet:claimed",
+      "PART A -- claim hygiene: list every open issue labeled fleet:claimed",
       "for each, check for an open PR that actually references/fixes it",
-      "no matching open PR -> the claim is stale (a builder pass died mid-work, or claimed and never started) -- remove fleet:claimed, leave a one-line comment saying why",
+      "no matching open PR -> stale claim (a builder pass died mid-work, or claimed and never started) -- remove fleet:claimed, comment once saying why",
       "a matching open PR exists -> leave the label alone, it is correct",
-      "never touch fleet:claimed on an issue with a genuinely in-progress PR",
-      "never close or edit the issue body itself -- label + comment only"
+      "PART B -- cruft prune: walk the rest of the open backlog (not just fleet:claimed ones)",
+      "an issue is cruft if: a merged/closed PR already fixed it, it duplicates another still-open issue, the thing it describes no longer exists in the repo (renamed/deleted file, retired feature), or it's been superseded by a newer issue on the same topic -- verify each with a real check (gh pr list --search, grep the repo, read the newer issue), never close on a hunch",
+      "confirmed cruft -> gh issue close <n> --reason \"not planned\" --comment \"marie: closing as cruft -- <one-line evidence: which PR/commit/newer issue fixed or superseded this>\"",
+      "genuinely still-relevant work, even if old or vague -> leave it open, do not touch",
+      "never close or edit the issue body itself -- labels + close + comment only, body is the author's record",
+      "never close two issues into each other in a loop -- if A and B both claim to supersede the other, leave both open and flag the conflict in your report"
     ],
-    "limits": {"max_turns": 40, "timeout_s": 1800, "max_budget_usd": 4},
-    "escalation": "can't tell if a PR is stale vs genuinely still in progress (e.g. draft PR, recent commits) -- leave the label alone and say so in the report rather than guessing wrong. A false stale-clear is worse than a missed one: it lets two builders claim the same item."
+    "limits": {"max_turns": 60, "timeout_s": 2400, "max_budget_usd": 6},
+    "escalation": "can't tell if a PR/claim is stale vs genuinely still in progress, or can't find hard evidence an issue is cruft -- leave it alone and say so in the report rather than guessing wrong. A false stale-clear or false close is worse than a missed one: one lets two builders claim the same item, the other silently deletes real signal a human hasn't seen yet."
   },
   "schedule": {
     "hourly_at_minute": 30
@@ -27,7 +31,7 @@
     "prompt_file": "marie.md",
     "tools": {
       "allow": ["Read", "Bash", "Grep", "Glob", "TodoWrite"],
-      "deny": ["Bash(gh pr merge:*)", "Bash(gh issue close:*)", "Bash(git push --force:*)"]
+      "deny": ["Bash(gh pr merge:*)", "Bash(git push --force:*)"]
     }
   },
   "report": {
