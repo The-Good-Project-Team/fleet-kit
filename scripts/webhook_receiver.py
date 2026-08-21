@@ -152,7 +152,13 @@ def main() -> int:
     if "--port" in sys.argv:
         port = int(sys.argv[sys.argv.index("--port") + 1])
     log(f"listening on :{port}, watching {WATCHED_WORKFLOWS}")
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    # 0.0.0.0, not 127.0.0.1: inside a container, podman's port-forward connects from OUTSIDE
+    # the container's own loopback -- a receiver bound to 127.0.0.1 is unreachable through
+    # `-p PORT:PORT` even though `podman exec ... curl localhost` finds it fine. Same reasoning
+    # as fleet_view_server.py's own bind (see that file). Found live: this exact bug produced a
+    # 502 through the Cloudflare Tunnel while the receiver tested healthy from inside its own
+    # container namespace the whole time.
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     server.serve_forever()
     return 0
 
