@@ -18,17 +18,17 @@
       "never close or edit the issue body itself -- labels + close + comment only, body is the author's record",
       "never close two issues into each other in a loop -- if A and B both claim to supersede the other, leave both open and flag the conflict in your report"
     ],
-    "limits": {"max_turns": 60, "timeout_s": 2400, "max_budget_usd": 6},
+    "limits": {"max_turns": 80, "timeout_s": 3000, "max_budget_usd": 8},
     "escalation": "can't tell if a PR/claim is stale vs genuinely still in progress, or can't find hard evidence an issue is cruft -- leave it alone and say so in the report rather than guessing wrong. A false stale-clear or false close is worse than a missed one: one lets two builders claim the same item, the other silently deletes real signal a human hasn't seen yet."
   },
   "schedule": {
     "hourly_at_minute": 30
   },
-  "timeout_s": 1800,
+  "timeout_s": 3000,
   "enabled": true,
   "llm": {
     "model": "sonnet",
-    "max_turns": 40,
+    "max_turns": 80,
     "prompt_file": "marie.md",
     "tools": {
       "allow": ["Read", "Bash", "Grep", "Glob", "TodoWrite"],
