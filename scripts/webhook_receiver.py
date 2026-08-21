@@ -84,10 +84,23 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         event = self.headers.get("X-GitHub-Event", "")
+        # GitHub's webhook config offers "application/json" vs "application/x-www-form-urlencoded"
+        # content types, and this kit's setup always requests json -- but a real delivery was
+        # observed arriving form-urlencoded anyway (config.content_type correctly saved as
+        # "application/json" on GitHub's side, Content-Type header on the actual POST said
+        # x-www-form-urlencoded regardless). Unwrap defensively rather than trust the config
+        # matches the wire format: form-encoded wraps the JSON as one field named `payload`.
+        ctype = self.headers.get("Content-Type", "")
+        raw_json = body
+        if "x-www-form-urlencoded" in ctype:
+            from urllib.parse import parse_qs
+
+            parsed = parse_qs(body.decode("utf-8", errors="replace"))
+            raw_json = (parsed.get("payload") or [""])[0].encode("utf-8")
         try:
-            payload = json.loads(body)
+            payload = json.loads(raw_json)
         except json.JSONDecodeError:
-            log("REJECTED: unparseable JSON body")
+            log(f"REJECTED: unparseable body (content-type={ctype!r})")
             self.send_response(400)
             self.end_headers()
             return
