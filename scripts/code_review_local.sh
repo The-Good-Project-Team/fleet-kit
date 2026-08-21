@@ -48,6 +48,16 @@ mkdir -p "$LOG_DIR" "$STRIKE_DIR"
 ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
 
+# Master kill switch, then this member's own switch -- see fleet_enabled.sh's header for why
+# both are the same fleet.env-flag mechanism.
+# shellcheck source=/dev/null
+[ -f "$(dirname "$0")/fleet_enabled.sh" ] && . "$(dirname "$0")/fleet_enabled.sh"
+fleet_enabled_or_exit "reviewer"
+if [ "${FLEET_RUN_NOW:-0}" != "1" ] && [ "${FLEET_REVIEWER_ENABLED:-false}" != "true" ]; then
+  log "reviewer: FLEET_REVIEWER_ENABLED != true -- exiting without doing anything"
+  exit 0
+fi
+
 cd "$REPO" 2>/dev/null || { log "FATAL: repo missing at $REPO"; exit 1; }
 # shellcheck source=/dev/null
 [ -f "$(dirname "$0")/account_pool.sh" ] && . "$(dirname "$0")/account_pool.sh"

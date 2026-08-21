@@ -62,6 +62,20 @@ def build_done_cmd(number: int, note: str) -> list[str]:
     return ["gh", "issue", "close", str(number), "--comment", note or "done"]
 
 
+def build_release_cmds(number: int, note: str) -> list[list[str]]:
+    """Strip the claimed label + say why. The counterpart claim() never had: a build that gets
+    killed, times out, or exits non-zero left the item fleet:claimed forever, with no worker
+    actually working it -- confirmed live as nonprofit-atlas issue #3044 ("374 of 374 open
+    backlog items are fleet:claimed, no code path ever removes it") and independently in this
+    kit's own deployment-learnings.md #7. Comment first, label second: same ordering as
+    code_review_local.sh's findings-then-status (a state change with no explanation attached
+    is worse than the stuck state)."""
+    return [
+        ["gh", "issue", "comment", str(number), "--body", note or "released: build did not finish"],
+        ["gh", "issue", "edit", str(number), "--remove-label", LABEL_CLAIMED],
+    ]
+
+
 def is_claimed(issue: dict) -> bool:
     return any(lb.get("name") == LABEL_CLAIMED for lb in issue.get("labels") or [])
 
@@ -119,6 +133,17 @@ def list_unclaimed() -> list[dict]:
     return [to_board_item(i) for i in issues if not is_claimed(i)]
 
 
+def release_item(number: int, note: str) -> bool:
+    """Undo a claim on the failure path. Returns True iff both steps succeeded."""
+    ok = True
+    for cmd in build_release_cmds(number, note):
+        rc, out = _run(cmd)
+        if rc != 0:
+            print(f"board_github: release #{number} step FAILED: {out[:200]}", file=sys.stderr)
+            ok = False
+    return ok
+
+
 def claim_next_n(worker: str, n: int) -> list[dict]:
     """Sequential claim of up to n unclaimed items — stops the moment the queue runs dry
     rather than padding the result (a short queue is the real state, not an error)."""
@@ -142,7 +167,8 @@ def main() -> int:
     args = sys.argv[1:]
     if not args:
         print("usage: board_github.py file <title> [--context <body>] [--lane <lane>] | "
-              "claim <worker> <n> | list | done <number> [note]", file=sys.stderr)
+              "claim <worker> <n> | list | done <number> [note] | release <number> [note]",
+              file=sys.stderr)
         return 2
     cmd = args[0]
     if cmd == "file":
@@ -178,6 +204,11 @@ def main() -> int:
         if rc != 0:
             print(f"board_github: done FAILED: {out[:200]}", file=sys.stderr)
         return rc
+    if cmd == "release":
+        if len(args) < 2:
+            print("release needs <number> [note]", file=sys.stderr)
+            return 2
+        return 0 if release_item(int(args[1]), " ".join(args[2:])) else 1
     print(f"unknown command {cmd!r}", file=sys.stderr)
     return 2
 

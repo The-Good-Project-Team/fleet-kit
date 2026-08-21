@@ -38,6 +38,8 @@
   button:hover { border-color: var(--accent); }
   .actions { margin-top: 4px; display: flex; gap: 6px; }
   #empty { padding: 20px; color: var(--dim); text-align: center; }
+  button.on { border-color: var(--ok); color: var(--ok); }
+  button.off { border-color: var(--bad); color: var(--bad); }
   .checks-green { color: var(--ok); } .checks-pending { color: var(--warn); } .checks-failing { color: var(--bad); }
 </style>
 </head>
@@ -46,6 +48,8 @@
   <span id="dot"></span>
   <h1>fleet-kit</h1>
   <span id="repo" style="color:var(--dim)"></span>
+  <span style="flex:1"></span>
+  <button id="masterToggle" style="font-weight:600"></button>
 </header>
 <div class="layout">
   <div class="col">
@@ -155,13 +159,45 @@ function dialValue(eff, key) {
   return (eff.llm || {})[key];
 }
 
+const RUNNABLE_MEMBERS = ['builder', 'reviewer'];  // mirrors fleet_view_server.py's MEMBERS
+
+async function renderFleetState() {
+  const state = await (await fetch('/api/fleet_state')).json();
+  const btn = document.getElementById('masterToggle');
+  btn.textContent = state.FLEET_ENABLED ? '● fleet ON — click to stop everything' : '○ fleet OFF';
+  btn.className = state.FLEET_ENABLED ? 'on' : 'off';
+  btn.onclick = async () => {
+    if (state.FLEET_ENABLED && !confirm('stop the WHOLE fleet? every member exits on its next tick.')) return;
+    await fetch('/api/fleet_toggle', { method: 'POST', body: JSON.stringify(
+      { target: 'fleet', value: !state.FLEET_ENABLED }) });
+    renderFleetState(); renderRunnableMembers();
+  };
+  return state;
+}
+
+async function renderRunnableMembers() {
+  const state = await (await fetch('/api/fleet_state')).json();
+  document.getElementById('runnable').innerHTML = RUNNABLE_MEMBERS.map(name => {
+    const on = !!state[name];
+    return `<div class="row">
+      <b>${name}</b>
+      <div class="actions">
+        <button class="${on ? 'on' : 'off'}" data-act="toggle-member" data-member="${name}" data-on="${on}">
+          ${on ? '● enabled' : '○ disabled'}
+        </button>
+        <button data-act="run-now" data-member="${name}">run now</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 async function renderMembers() {
   const [{ members }, { spend }] = await Promise.all([
     fetch('/api/members').then(r => r.json()),
     fetch('/api/spend?hours=24').then(r => r.json()),
   ]);
   const spendByMember = Object.fromEntries((spend || []).map(s => [s.member, s]));
-  membersEl.innerHTML = members.map(m => {
+  const specRows = members.map(m => {
     const name = m.spec.name;
     const s = spendByMember[name];
     const spendLine = s
@@ -181,27 +217,50 @@ async function renderMembers() {
       ${overrideNote}
       <div class="actions" style="flex-wrap:wrap">${dials}</div>
     </div>`;
-  }).join('') || '<div id="empty">no members/*.fleet.json found</div>';
+  }).join('');
+  membersEl.innerHTML = (specRows || '<div id="empty">no members/*.fleet.json found</div>')
+    + '<div class="col-head" style="margin-top:8px">On / off / run now</div><div id="runnable"></div>';
+  renderRunnableMembers();
 }
 
 document.body.addEventListener('click', async (e) => {
-  const b = e.target.closest('button[data-act="edit-dial"]');
-  if (!b) return;
-  const key = b.dataset.key;
-  const value = prompt(`new value for ${b.dataset.member}.${key} (JSON):`);
-  if (value === null) return;
-  const why = prompt('why? (required)', 'tuned from fleet-view');
-  if (!why) return;
-  let parsed; try { parsed = JSON.parse(value); } catch { parsed = value; }
-  const r = await fetch('/api/steer', { method: 'POST', body: JSON.stringify(
-    { member: b.dataset.member, key, value: parsed, why }) });
-  if ((await r.json()).ok) renderMembers(); else alert('failed — see server log');
+  const dial = e.target.closest('button[data-act="edit-dial"]');
+  if (dial) {
+    const key = dial.dataset.key;
+    const value = prompt(`new value for ${dial.dataset.member}.${key} (JSON):`);
+    if (value === null) return;
+    const why = prompt('why? (required)', 'tuned from fleet-view');
+    if (!why) return;
+    let parsed; try { parsed = JSON.parse(value); } catch { parsed = value; }
+    const r = await fetch('/api/steer', { method: 'POST', body: JSON.stringify(
+      { member: dial.dataset.member, key, value: parsed, why }) });
+    if ((await r.json()).ok) renderMembers(); else alert('failed — see server log');
+    return;
+  }
+  const toggle = e.target.closest('button[data-act="toggle-member"]');
+  if (toggle) {
+    const willBeOn = toggle.dataset.on !== 'true';
+    await fetch('/api/fleet_toggle', { method: 'POST', body: JSON.stringify(
+      { target: toggle.dataset.member, value: willBeOn }) });
+    renderRunnableMembers();
+    return;
+  }
+  const runNow = e.target.closest('button[data-act="run-now"]');
+  if (runNow) {
+    const name = runNow.dataset.member;
+    if (!confirm(`run ${name} right now, off-cron?`)) return;
+    const r = await fetch('/api/run_now', { method: 'POST', body: JSON.stringify({ member: name }) });
+    const j = await r.json();
+    alert(j.ok ? `${name} started — watch the Runs column` : `failed: ${j.error || 'see server log'}`);
+    return;
+  }
 });
 
 async function boot() {
   const snap = await (await fetch('/api/snapshot')).json();
   snap.runs.slice().reverse().forEach(renderRun);
   renderGh(snap.gh);
+  renderFleetState();
   renderMembers();
   setInterval(renderMembers, 30000);
 

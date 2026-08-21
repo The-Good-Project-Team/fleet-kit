@@ -29,6 +29,18 @@ mkdir -p "$LOG_DIR"
 ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
 
+# Master kill switch, then this member's own switch -- both checked BEFORE anything that costs
+# money or touches the board (no worktree, no claim, nothing). Two flags, same file
+# (fleet.env), same mechanism: FLEET_ENABLED for the whole fleet, FLEET_BUILDER_ENABLED for
+# just this member -- so "turn everything off" and "turn off just the builder" are the same
+# kind of edit, not two different systems.
+. "$KIT_DIR/scripts/fleet_enabled.sh"
+fleet_enabled_or_exit "builder"
+if [ "${FLEET_RUN_NOW:-0}" != "1" ] && [ "${FLEET_BUILDER_ENABLED:-false}" != "true" ]; then
+  log "builder: FLEET_BUILDER_ENABLED != true -- exiting without doing anything"
+  exit 0
+fi
+
 cd "$REPO" 2>/dev/null || { log "FATAL: repo missing at $REPO"; exit 1; }
 [ -f "$KIT_DIR/scripts/account_pool.sh" ] && . "$KIT_DIR/scripts/account_pool.sh"
 command -v account_pool_run >/dev/null 2>&1 || account_pool_run() { "$@"; }
@@ -86,7 +98,22 @@ if ! create_build_worktree; then
   log "FATAL: could not create worktree for item #$ITEM_ID"
   exit 1
 fi
-cleanup() { git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true; git -C "$REPO" worktree prune >/dev/null 2>&1 || true; rm -f "${USAGE_FILE:-}"; }
+# BUILD_SUCCEEDED flips to 1 only once a PR genuinely opens (STEP 4, below). Any exit before
+# that -- RC != 0, timeout, kill signal, an uncaught error in this script itself -- releases
+# the claim so the item goes back in the pool instead of sitting fleet:claimed forever with no
+# worker on it. This is the gap deployment-learnings.md #7 names as "not yet fixed": found for
+# real blocking dino's own first deploy (nonprofit-atlas issue #3044 -- 20/20 open backlog
+# items already stuck claimed from an earlier run that had no release path).
+BUILD_SUCCEEDED=0
+cleanup() {
+  git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
+  git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+  rm -f "${USAGE_FILE:-}"
+  if [ "$BUILD_SUCCEEDED" -ne 1 ]; then
+    python3 "$KIT_DIR/scripts/board_github.py" release "$ITEM_ID" \
+      "released by worktree_builder.sh: build did not produce a PR (see $LOG)" >>"$LOG" 2>&1
+  fi
+}
 trap cleanup EXIT
 
 # --- STEP 3: build ------------------------------------------------------------------------------
@@ -163,6 +190,8 @@ echo "$OUT" | python3 "$KIT_DIR/scripts/run_report.py" \
   --item-id "$ITEM_ID" --usage-file "$USAGE_FILE" ${PR_NUM:+--pr "$PR_NUM"} >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
 
 if [ -n "$PR_NUM" ]; then
+  BUILD_SUCCEEDED=1   # a real PR exists; the claim now belongs to that PR's review/merge cycle,
+                       # not to this build pass -- cleanup() must not release it back to the pool.
   BODY=$(gh pr view "$PR_NUM" --json body -q '.body' 2>/dev/null || echo "")
   if ! grep -qE 'Backlog:[[:space:]]*#[0-9]+' <<<"$BODY"; then
     printf '%s\n\nBacklog: #%s\n' "$BODY" "$ITEM_ID" | gh pr edit "$PR_NUM" --body-file - >/dev/null 2>&1
@@ -170,6 +199,6 @@ if [ -n "$PR_NUM" ]; then
   gh pr merge "$PR_NUM" --auto --squash >/dev/null 2>&1
   log "item #$ITEM_ID: opened PR #$PR_NUM, auto-merge armed"
 else
-  log "item #$ITEM_ID: build session ended with no PR URL found in output"
+  log "item #$ITEM_ID: build session ended with no PR URL found in output -- releasing claim"
 fi
 exit 0

@@ -48,6 +48,18 @@ PORT = int(os.environ.get("FLEET_VIEW_PORT", "8420"))
 GH_POLL_S = int(os.environ.get("FLEET_VIEW_GH_POLL_S", "20"))
 MAX_RUNS = 500  # bound memory; this is a window, not an archive -- runs.jsonl on disk is the archive
 
+# The ONE file the master switch and every per-member switch live in -- same file a human
+# would hand-edit, same file every cron script sources. This server's toggle button and a
+# human's text editor are the same mechanism, never two that can disagree.
+ENV_FILE = Path(os.environ.get("FLEET_ENV_FILE", KIT_DIR / "fleet.env"))
+
+# Real, runnable members in this kit today (agents/ceo.md and architect.md are bring-your-own
+# scripts per the README -- nothing to toggle/run-now until a project wires its own driver).
+MEMBERS = {
+    "builder": {"script": "worktree_builder.sh", "enabled_var": "FLEET_BUILDER_ENABLED"},
+    "reviewer": {"script": "code_review_local.sh", "enabled_var": "FLEET_REVIEWER_ENABLED"},
+}
+
 
 def _gh(*args: str, timeout: int = 15) -> str:
     try:
@@ -55,6 +67,43 @@ def _gh(*args: str, timeout: int = 15) -> str:
         return p.stdout if p.returncode == 0 else ""
     except (subprocess.TimeoutExpired, OSError):
         return ""
+
+
+def read_env_flags() -> dict:
+    """FLEET_ENABLED + every member's own enabled var, read straight from fleet.env text --
+    not from this process's environment, which was only a snapshot taken at start. A toggle
+    must be visible on the very next page load, not after a restart."""
+    text = ENV_FILE.read_text(errors="ignore") if ENV_FILE.exists() else ""
+    values = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        values[k.strip()] = v.strip()
+    out = {"FLEET_ENABLED": values.get("FLEET_ENABLED", "true") == "true"}
+    for name, m in MEMBERS.items():
+        out[name] = values.get(m["enabled_var"], "false") == "true"
+    return out
+
+
+def write_env_flag(key: str, value: bool) -> None:
+    """Set KEY=true|false in fleet.env, preserving every other line. Appends the key if it
+    isn't present yet (a fresh fleet.env copied from fleet.env.example already has it, but
+    don't assume)."""
+    line_val = "true" if value else "false"
+    text = ENV_FILE.read_text(errors="ignore") if ENV_FILE.exists() else ""
+    lines = text.splitlines()
+    found = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith(f"{key}=") or stripped.startswith(f"{key} ="):
+            lines[i] = f"{key}={line_val}"
+            found = True
+            break
+    if not found:
+        lines.append(f"{key}={line_val}")
+    ENV_FILE.write_text("\n".join(lines) + "\n")
 
 
 def poll_gh_state() -> dict:
@@ -223,6 +272,9 @@ class Handler(BaseHTTPRequestHandler):
                 limit=int(qs.get("limit", ["100"])[0]))
             self._json({"runs": rows})
             return
+        if path == "/api/fleet_state":
+            self._json(read_env_flags())
+            return
         if path == "/api/members":
             # Every member's reviewed spec + whatever's currently overridden on top of it --
             # the same effective config a running pass would get (member_spec.load + overrides.apply,
@@ -291,23 +343,20 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": p.returncode == 0, "out": p.stdout, "err": p.stderr})
             return
 
-        # --- prune: release a stuck claim back to the board (the exact gap learning #7 in
-        # deployment-learnings.md names as not-yet-fixed -- this button calls board_github.py's
-        # `done`/label edit directly via gh so a human can unstick one without shelling in). ----
+        # --- prune: release a stuck claim back to the board, via board_github.py's own release
+        # verb (the exact gap learning #7 in deployment-learnings.md names as not-yet-fixed --
+        # this button is the same code path worktree_builder.sh's own failure trap now calls,
+        # not a second hand-rolled implementation of "what does release mean"). ---------------
         if path == "/api/prune":
             number = body.get("issue")
             note = body.get("note", "released from fleet-view: stuck claim")
             if not number:
                 self._json({"ok": False, "error": "issue number required"}, 400)
                 return
-            prefix = os.environ.get("FLEET_LABEL_PREFIX", "fleet:")
-            p1 = subprocess.run(["gh", "issue", "edit", str(number), "--remove-label",
-                                  f"{prefix}claimed"], cwd=REPO or None,
-                                 capture_output=True, text=True, timeout=15)
-            p2 = subprocess.run(["gh", "issue", "comment", str(number), "--body", note],
-                                 cwd=REPO or None, capture_output=True, text=True, timeout=15)
-            self._json({"ok": p1.returncode == 0, "out": p1.stdout + p2.stdout,
-                       "err": p1.stderr + p2.stderr})
+            p = subprocess.run([sys.executable, str(KIT_DIR / "scripts" / "board_github.py"),
+                               "release", str(number), note],
+                               cwd=REPO or None, capture_output=True, text=True, timeout=15)
+            self._json({"ok": p.returncode == 0, "out": p.stdout, "err": p.stderr})
             return
 
         # --- close a PR outright (steering the fleet away from a bad direction, not just a
@@ -320,6 +369,49 @@ class Handler(BaseHTTPRequestHandler):
             p = subprocess.run(["gh", "pr", "close", str(number)], cwd=REPO or None,
                                capture_output=True, text=True, timeout=15)
             self._json({"ok": p.returncode == 0, "out": p.stdout, "err": p.stderr})
+            return
+
+        # --- master + per-member kill switches. Same fleet.env file a human would edit and
+        # every cron script sources -- see fleet_enabled.sh's header. ------------------------
+        if path == "/api/fleet_toggle":
+            target = body.get("target", "")  # "fleet" or a name from MEMBERS
+            value = bool(body.get("value"))
+            if target == "fleet":
+                write_env_flag("FLEET_ENABLED", value)
+            elif target in MEMBERS:
+                write_env_flag(MEMBERS[target]["enabled_var"], value)
+            else:
+                self._json({"ok": False, "error": f"unknown toggle target {target!r}"}, 400)
+                return
+            self._json({"ok": True, "state": read_env_flags()})
+            return
+
+        # --- run a member right now, off-cron, for watching one in the wild before flipping
+        # the next one on. Runs in the BACKGROUND (Popen, not run) -- a real builder pass can
+        # take many minutes and this HTTP request must return immediately; the pass's own
+        # result shows up on the live runs feed the same way a cron-fired one does, because it
+        # writes to the same runs.jsonl through the same run_report.py call the script always
+        # makes. FLEET_RUN_NOW=1 tells the script to skip its own kill-switch checks (see
+        # fleet_enabled.sh) -- a manual click is an explicit human action, not the thing those
+        # switches exist to gate; without this, testing a member you deliberately keep off
+        # cron would be impossible. ------------------------------------------------------------
+        if path == "/api/run_now":
+            name = body.get("member", "")
+            if name not in MEMBERS:
+                self._json({"ok": False, "error": f"unknown member {name!r}"}, 400)
+                return
+            script = KIT_DIR / "scripts" / MEMBERS[name]["script"]
+            env = dict(os.environ)
+            env.setdefault("FLEET_ENV_FILE", str(ENV_FILE))
+            env["FLEET_RUN_NOW"] = "1"
+            try:
+                subprocess.Popen(["bash", str(script)], cwd=REPO or None, env=env,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+            except OSError as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+                return
+            self._json({"ok": True, "started": name})
             return
 
         self.send_response(404)
