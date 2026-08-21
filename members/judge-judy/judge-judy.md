@@ -1,4 +1,4 @@
-# Reviewer prompt
+# judge-judy prompt
 
 Provenance: the prompt template embedded in `scripts/code_review_local.sh`, pulled out here
 so it's readable/editable without touching the shell script. The script substitutes the diff

@@ -47,7 +47,7 @@ KINDS = ("llm", "mechanical")
 # Both get the same lifecycle and the same report contract -- that is the whole point of one
 # schema. Both point OUT to a file in their own directory, never inline text/commands in the
 # JSON, so the actual behavior stays independently readable/diffable/testable.
-_REQUIRED = ("name", "kind", "schedule", "timeout_s", "enabled", "report")
+_REQUIRED = ("name", "emoji", "kind", "schedule", "timeout_s", "enabled", "report")
 _LLM_REQUIRED = ("model", "max_turns", "prompt_file", "tools")
 _MECHANICAL_REQUIRED = ("run_file",)
 
@@ -69,6 +69,10 @@ def validate(spec: dict, *, filename: str = "<dict>") -> dict:
 
     name = spec["name"]
     _require(isinstance(name, str) and name, f"{where}name must be a non-empty string")
+    # "🪖 gru" for a dashboard tile or a log line -- same reasoning as nonprofit-atlas's own
+    # roster.py: a named crew is legible at a glance, a bare launchd/JSON slug is not.
+    _require(isinstance(spec.get("emoji"), str) and spec["emoji"],
+              f"{where}emoji must be a non-empty string")
     if filename not in ("<dict>",):
         stem = Path(filename).name.replace(".fleet.json", "")
         _require(stem == name, f"{where}filename must match name {name!r}, got {stem!r}")

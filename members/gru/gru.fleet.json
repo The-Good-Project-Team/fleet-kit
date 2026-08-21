@@ -1,5 +1,6 @@
 {
-  "name": "builder",
+  "name": "gru",
+  "emoji": "🪖",
   "kind": "llm",
   "lane": "build",
   "schedule": {
@@ -10,7 +11,7 @@
   "llm": {
     "model": "sonnet",
     "max_turns": 60,
-    "prompt_file": "prompt.md",
+    "prompt_file": "gru.md",
     "tools": {
       "allow": ["Read", "Edit", "Write", "Bash", "Grep", "Glob"],
       "deny": ["Bash(git stash:*)", "Bash(git push --force:*)"]
