@@ -64,9 +64,19 @@ _account_pool_classify_failure() {
 # account_pool_run <cmd...> — the main entry point. Sets ACCOUNT_POOL_SELECTED,
 # ACCOUNT_POOL_LAST_REASON on return. Return codes: 0 success, 2 exhausted-this-account (only
 # meaningful mid-loop), 3 ALL_ACCOUNTS_EXHAUSTED, 4 unauthenticated, 1 other failure.
+#
+# STREAMS LIVE, still classifies failure: output goes to stdout AS THE COMMAND PRODUCES IT
+# (via `tee`, not `out=$(...)` capture-then-replay) so a caller piping this into stream_log.py
+# for a live-tailed log actually sees lines in real time -- capturing the whole command's
+# output into a variable first (the kit's original shape) defeats that entirely, the caller
+# would see nothing until the command exits. A copy still lands in a temp file for
+# `_account_pool_classify_failure` to read after the command exits, same classification logic
+# as before, just sourced from a file `tee` also wrote instead of a buffered variable.
 account_pool_run() {
-  local account verdict out rc
+  local account verdict rc capture
   export ACCOUNT_POOL_SELECTED="" ACCOUNT_POOL_LAST_REASON=""
+  capture=$(mktemp "${TMPDIR:-/tmp}/account_pool_out.XXXXXX")
+  trap 'rm -f "$capture"' RETURN
   for account in $ACCOUNT_POOL_ORDER; do
     verdict=$(_account_pool_budget_verdict "$account" 2>/dev/null || echo "unknown")
     case "$verdict" in
@@ -75,15 +85,15 @@ account_pool_run() {
         continue
         ;;
     esac
-    out=$(CLAUDE_CONFIG_DIR="$HOME/.claude-$account" "$@" 2>&1)
-    rc=$?
+    : > "$capture"
+    CLAUDE_CONFIG_DIR="$HOME/.claude-$account" "$@" 2>&1 | tee "$capture"
+    rc=${PIPESTATUS[0]}
     if [ "$rc" -eq 0 ]; then
       export ACCOUNT_POOL_SELECTED="$account"
       export ACCOUNT_POOL_LAST_REASON=""
-      printf '%s\n' "$out"
       return 0
     fi
-    reason=$(_account_pool_classify_failure "$out")
+    reason=$(_account_pool_classify_failure "$(cat "$capture")")
     _account_pool_log "account=$account command failed rc=$rc reason=$reason"
     export ACCOUNT_POOL_LAST_REASON="$reason"
     case "$reason" in

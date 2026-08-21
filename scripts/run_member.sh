@@ -144,11 +144,23 @@ log "pass start (kind=llm charter=$BEHAVIOR model=$MODEL max_turns=$MAX_TURNS bu
 # -- an unattended pass can't answer an interactive approval prompt, and a target repo's own
 # CLAUDE.md/hooks would silently hijack this member's identity otherwise. See that script's
 # comment for the measured incident (three full attempts that looked like no-ops).
-RAW=$(account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" \
+#
+# --output-format stream-json + stream_log.py: logs are cheap, and the wrapper previously only
+# recorded pass-start/pass-end -- everything in between was invisible until the whole pass
+# finished. This streams "thinking: ...", "tool call: Bash -- ...", "tool result: ..." lines
+# into the member's own log AS THEY HAPPEN, piped straight to `log` so a human tailing the log
+# (or dumbledore reading it back) sees the pass unfold, not just its outcome.
+RESULT_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_result.XXXXXX")
+account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" \
   --model "$MODEL" --dangerously-skip-permissions --setting-sources user \
-  --max-turns "$MAX_TURNS" --output-format json \
-  --max-budget-usd "$MAX_BUDGET" "${TOOL_ARGS[@]}" 2>>"$LOG")
-RC=$?
+  --max-turns "$MAX_TURNS" --output-format stream-json --verbose \
+  --max-budget-usd "$MAX_BUDGET" "${TOOL_ARGS[@]}" 2>>"$LOG" \
+  | python3 "$KIT_DIR/scripts/stream_log.py" --result-out "$RESULT_FILE" \
+  | while IFS= read -r line; do log "$line"; done
+RC=${PIPESTATUS[0]}
+
+RAW=$(cat "$RESULT_FILE" 2>/dev/null)
+rm -f "$RESULT_FILE"
 OUT=$(printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" text)
 USAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_usage.XXXXXX")
 printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" usage > "$USAGE_FILE" 2>/dev/null
