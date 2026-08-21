@@ -77,12 +77,15 @@ GitHub Issues (board)  ->  rank (RICE)  ->  build (fresh worktree, claude -p)
   GitHub already serializes it.
 - **Deploy** — a 3-function driver contract (`scripts/deploy_driver.md`): `current_sha`,
   `deploy`, `health`. Bring your own — how you deploy is the most product-specific thing here.
-- **CEO pass** — a recurring deep session (`agents/ceo.md`) that keeps the fleet's own guardrails
-  intact and unblocks stalled work, on a priority ladder (self → tools → policy → prod → backlog)
-  so it never polishes features while its own tooling is broken.
-- **Architect pass** — a daily session (`agents/architect.md`) that decomposes a product vision
-  into ONE epic at a time: a PRD plus PR-sized, builder-executable issues. Without this layer a
-  fleet only ever produces increments.
+- **jefe** (`members/jefe/jefe.md`) — a recurring deep session that keeps the fleet's own
+  guardrails intact and unblocks stalled work, on a priority ladder (self → tools → policy →
+  prod → backlog) so it never polishes features while its own tooling is broken. Never gates a
+  merge — that's judge-judy's job, via auto-merge on green checks.
+- **dumbledore** (`members/dumbledore/dumbledore.md`) — a once-daily opus pass with two jobs:
+  find what's ROTTING and fix it at the causal layer (persona/flag/gate/prompt, not the
+  symptom), and — the architect's job, folded in — decompose the product vision into ONE epic
+  at a time when the board has room: a PRD plus PR-sized, builder-executable issues. Without
+  this layer a fleet only ever produces increments.
 
 ## The four things that make it survivable
 
