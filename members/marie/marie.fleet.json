@@ -4,8 +4,9 @@
   "kind": "llm",
   "lane": "hygiene",
   "mandate": {
-    "target": "the open-issue backlog is trustworthy -- every fleet:claimed label has a live matching PR, and every open issue is real, current work, not cruft",
+    "target": "the open-issue backlog is trustworthy AND vision-aligned -- every fleet:claimed label has a live matching PR, every open issue is real current work, and nothing open contradicts or ignores the target repo's own stated north star",
     "checklist": [
+      "PART 0 -- read the vision from the TARGET repo, not from fleet-kit: cat FLEET_REPO/CLAUDE.md (and AGENTS.md if present) and find its north-star/vision section -- this repo changes independently of fleet-kit, so re-read it fresh every pass, never cache or assume last pass's vision still holds",
       "PART A -- claim hygiene: list every open issue labeled fleet:claimed",
       "for each, check for an open PR that actually references/fixes it",
       "no matching open PR -> stale claim (a builder pass died mid-work, or claimed and never started) -- remove fleet:claimed, comment once saying why",

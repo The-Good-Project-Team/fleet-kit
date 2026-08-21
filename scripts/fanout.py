@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""fanout — pure headroom-and-queue -> builder-count N mapping.
+"""fanout — pure headroom -> builder-count N mapping.
 
 Provenance: genericized from nonprofit-atlas's `scripts/mac/mbuild_fanout.py` (source
 directive: "N should be the number of builders you can safely spawn given current token
-availability — never limit it," later revised to add gate-throughput backpressure after a
-real incident where fanout kept spawning builders into a merge-gate queue nothing was
-draining).
+availability — never limit it").
 
-Two decisions, composed:
-  1. n_from_headroom  — token budget -> ambition, via a Fibonacci ladder (never a hard cap;
-     more headroom always maps to a higher rung, however far the ladder has to walk).
-  2. n_with_backpressure — the open-PR queue subtracts from that ambition. NOT a ceiling on
-     ambition itself: with a drained queue this returns n_budget unchanged; it only accounts
-     for gate capacity the queue has not yet absorbed. Zero is a legitimate answer (queue at
-     cap) — that pass should build nothing, not silently build one anyway.
+Originally also carried gate-throughput backpressure (open-PR queue subtracting from
+ambition), added after an incident where fanout kept spawning builders into a merge-gate
+queue nothing was draining. Removed 2026-08-21 (Reif) once the underlying deploy-side clog
+that caused that was fixed — the queue itself no longer backs up, so the extra dial was
+dead weight. If a similar clog ever recurs, re-add backpressure at the layer that's actually
+clogged (the deploy pipeline), not by throttling ambition here again.
 
-Kept pure (no network, no filesystem) so both are unit-testable without touching your CI
-or GitHub. The caller (`worktree_builder.sh`'s orchestrator, or your own script) supplies
-real headroom/queue numbers.
+n_from_headroom — token budget -> ambition, via a Fibonacci ladder (never a hard cap; more
+headroom always maps to a higher rung, however far the ladder has to walk).
+
+Kept pure (no network, no filesystem) so it's unit-testable without touching your CI or
+GitHub. The caller (`worktree_builder.sh`'s orchestrator, or your own script) supplies the
+real headroom number.
 
 Env (read at import; see fleet.env.example): FLEET_HEADROOM_FRACTION (default 0.5) — the
 fraction of reported token headroom to plan against; the rest is reserve for other
@@ -71,42 +71,16 @@ def n_from_headroom(
     return max(n, floor)
 
 
-def n_with_backpressure(n_budget: int, open_pr_count: int, queue_cap: int) -> int:
-    """Gate-throughput backpressure: budget sets the AMBITION, the merge-gate queue sets
-    what the pipe can absorb. NOT an upper clamp on ambition — with a drained queue this
-    returns n_budget unchanged, however large the ladder walked; the next tick re-walks the
-    ladder as gates drain. Subtracts the work the gates have not yet absorbed:
-    min(n_budget, queue_cap - open_pr_count), floored at 0. Zero is a legitimate answer (a
-    queue at cap builds nothing this pass and says so), distinct from the budget floor of 1
-    (which applies when the QUEUE has room but the budget itself is thin).
-    """
-    if queue_cap <= 0:
-        raise ValueError(f"queue_cap must be > 0, got {queue_cap!r}")
-    return max(0, min(n_budget, queue_cap - max(0, open_pr_count)))
-
-
 def main() -> int:
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    flags: dict[str, int] = {}
-    it = iter(sys.argv[1:])
-    for a in it:
-        if a in ("--queue-len", "--queue-cap"):
-            try:
-                flags[a] = int(next(it))
-            except (StopIteration, ValueError):
-                print(f"ERROR: {a} needs an integer value", file=sys.stderr)
-                return 2
+    args = sys.argv[1:]
     if len(args) not in (2, 3):
-        print("usage: fanout.py <headroom_tokens> <spend_per_build> [floor] "
-              "[--queue-len N --queue-cap M]", file=sys.stderr)
+        print("usage: fanout.py <headroom_tokens> <spend_per_build> [floor]", file=sys.stderr)
         return 2
     headroom_tokens = float(args[0])
     spend_per_build = float(args[1])
     floor = int(args[2]) if len(args) == 3 else 1
     try:
         n = n_from_headroom(headroom_tokens, spend_per_build, floor=floor)
-        if "--queue-len" in flags and "--queue-cap" in flags:
-            n = n_with_backpressure(n, flags["--queue-len"], flags["--queue-cap"])
         print(n)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
