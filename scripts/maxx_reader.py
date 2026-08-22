@@ -15,8 +15,9 @@ session_advised_pct/session_used_pct, real numbers, HTTP 200.
 FAILS OPEN, ALWAYS. A meter that cannot be read must never stop a fleet -- same law
 m_budget_maxx.py's header documents from real incident (26h dark fleet from a meter
 misclassified as over-budget). Any read failure (network, bad JSON, missing fields, non-ok
-verdict this module doesn't recognize) returns a result that fanout.py's caller can only use
-to CONSERVE ambition, never to invent an outage-shaped hard stop of its own.
+verdict this module doesn't recognize) returns a result the caller (gru, reading this
+directly per its own charter) can only use to CONSERVE ambition, never to invent an
+outage-shaped hard stop of its own.
 
 Env:
   FLEET_MAXX_URL     base URL, e.g. https://api.meetmaxx.co (no trailing /mcp)

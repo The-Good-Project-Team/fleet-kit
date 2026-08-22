@@ -18,7 +18,7 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# git: worktree builder. python3: board_github.py/fanout.py/run_report.py. curl+ca-certs: gh
+# git: worktree builder. python3: board_github.py/run_report.py/maxx_reader.py. curl+ca-certs: gh
 # CLI install + claude CLI install. cron: schedule cadences inside the container without a
 # host-level launchd/systemd dependency (schedulers/ templates remain for host-native installs).
 RUN apt-get update -qq && apt-get install -y -qq \

@@ -1,0 +1,39 @@
+{
+  "name": "minion",
+  "emoji": "👥",
+  "kind": "llm",
+  "lane": "build",
+  "mandate": {
+    "target": "one item, pre-claimed and handed to you by gru -> one open, mergeable PR with auto-merge armed",
+    "checklist": [
+      "read the exact item number named in your prompt via gh issue view -- never pick a different one",
+      "check for an existing open PR that already fixes it -- stop if so",
+      "write tests first when practical; follow existing code style; reuse before building new",
+      "run the repo's real test command locally before pushing",
+      "merge origin/<default-branch> into your worktree and re-test if it moved under you",
+      "stage explicit changed paths only -- never a blanket add",
+      "open the PR referencing your issue number",
+      "arm auto-merge (`gh pr merge --auto --squash`) unconditionally before finishing",
+      "report honestly if you cannot complete the item -- gru is reading this back"
+    ],
+    "limits": {"max_turns": 60, "timeout_s": 2400, "max_budget_usd": 5},
+    "escalation": "hit something the checklist doesn't cover mid-build (a conflict beyond you, a gate failing identically on sibling PRs) -- say so plainly in the PR body AND your final report and stop; an honest 'needs a human/investigation' beats a broken push. Never silently improvise past the checklist's own file-safety rules (explicit paths, never blanket add). Never claim or work an item other than the one you were handed."
+  },
+  "schedule": {
+    "hourly_at_minute": 0
+  },
+  "timeout_s": 2400,
+  "enabled": false,
+  "llm": {
+    "model": "sonnet",
+    "max_turns": 60,
+    "prompt_file": "minion.md",
+    "tools": {
+      "allow": ["Read", "Edit", "Write", "Bash", "Grep", "Glob"],
+      "deny": ["Bash(git stash:*)", "Bash(git push --force:*)", "Bash(gh issue edit:*)"]
+    }
+  },
+  "report": {
+    "vision_link": "optional"
+  }
+}

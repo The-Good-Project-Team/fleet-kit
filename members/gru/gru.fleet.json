@@ -4,31 +4,32 @@
   "kind": "llm",
   "lane": "build",
   "mandate": {
-    "target": "one claimed backlog item -> one open, mergeable PR with auto-merge armed, per invocation",
+    "target": "one pass -> runway computed, N items chosen from marie's priority ranking and claimed, N minions spawned and their real reports collected into one combined result",
     "checklist": [
-      "read the claimed item's title + body as the spec",
-      "check for an existing open PR that already fixes it -- stop if so",
-      "write tests first when practical; follow existing code style; reuse before building new",
-      "run the repo's real test command locally before pushing",
-      "merge origin/<default-branch> into your worktree and re-test if it moved under you",
-      "stage explicit changed paths only -- never a blanket add",
-      "open the PR referencing the claimed issue number",
-      "arm auto-merge (`gh pr merge --auto --squash`) unconditionally before finishing"
+      "read real runway: maxx_reader.py's pacing if configured (fail-open), plus this box's own real cost history for a minion pass (fleet_db.py spend --member minion)",
+      "read the open backlog filtered by fleet:priority-high first, falling back to -medium then -low only once the tier above is exhausted -- never re-rank yourself, that is marie's job",
+      "size N to the smaller of what runway affords and how many genuinely claimable high-tier items exist -- don't pad with low-tier items just to spend the full budget, but don't spawn fewer than runway affords if a lower tier can fill the gap",
+      "claim your chosen N items yourself, serially, before spawning anything (gh issue edit --add-label fleet:claimed + a claimed-by comment naming gru)",
+      "spawn one minion per claimed item in the background, each told its EXACT issue number, with FLEET_RUN_NOW=1 (minion ships enabled:false since it never self-fires on cron)",
+      "wait for every minion to finish before reporting -- poll, respect your own timeout, never assume a fixed sleep is long enough",
+      "read each minion's real result back (its run record, or the PR it should have opened) and report explicitly on every one -- a minion that never reported is a named failure, not a silent gap",
+      "never build, edit, or write code yourself -- if you want to change a file, that means you should have handed the item to a minion instead",
+      "never assign a fleet:priority-* label yourself -- flag a miss to marie in a comment, don't correct it"
     ],
-    "limits": {"max_turns": 60, "timeout_s": 2400, "max_budget_usd": 5},
-    "escalation": "hit something the checklist doesn't cover mid-build (a conflict beyond you, a gate failing identically on sibling PRs) -- say so plainly in the PR body and stop; an honest 'needs a human/investigation' beats a broken push. Never silently improvise past the checklist's own file-safety rules (explicit paths, never blanket add)."
+    "limits": {"max_turns": 60, "timeout_s": 3600, "max_budget_usd": 8},
+    "escalation": "a minion never reports back (crashed, hung past its own timeout) -- name it explicitly as a failure in your report, do not silently omit it or guess at its result. Runway reads as zero or unconfigured -- fall back to a small fixed N (1-2) rather than refusing to run at all; an unreadable meter narrows ambition, it never becomes a hard stop."
   },
   "schedule": {
     "hourly_at_minute": 0
   },
-  "timeout_s": 2400,
+  "timeout_s": 3600,
   "enabled": true,
   "llm": {
     "model": "sonnet",
     "max_turns": 60,
     "prompt_file": "gru.md",
     "tools": {
-      "allow": ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "TodoWrite"],
+      "allow": ["Read", "Bash", "Grep", "Glob", "TodoWrite"],
       "deny": ["Bash(git stash:*)", "Bash(git push --force:*)"]
     }
   },

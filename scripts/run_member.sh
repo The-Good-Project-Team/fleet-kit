@@ -18,9 +18,10 @@
 # own helper script (roomba.py, the-fixer.sh) as one Bash-reachable tool among its allowlist,
 # same as any other tool, rather than the script BEING the member's whole behavior.
 #
-# Usage: run_member.sh <member-name> [--dry-run]
+# Usage: run_member.sh <member-name> [--dry-run] [--item <issue-number>]
 #   e.g.  run_member.sh dumbledore
 #         run_member.sh roomba --dry-run     # print the resolved command, run nothing
+#         run_member.sh minion --item 3072   # gru spawns minion this way -- see gru.md
 set -uo pipefail
 
 [ -f "${FLEET_ENV_FILE:-./fleet.env}" ] && . "${FLEET_ENV_FILE:-./fleet.env}"
@@ -30,10 +31,17 @@ REPO="${FLEET_REPO:?set FLEET_REPO in fleet.env}"
 LOG_DIR="${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}"
 mkdir -p "$LOG_DIR"
 
-MEMBER="${1:?usage: run_member.sh <member-name> [--dry-run]}"
+MEMBER="${1:?usage: run_member.sh <member-name> [--dry-run] [--item <issue-number>]}"
 shift || true
 DRY_RUN=0
-[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+ITEM=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --item) ITEM="${2:?--item needs an issue number}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
 
 LOG="$LOG_DIR/${MEMBER}.log"
 ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
@@ -79,7 +87,7 @@ if [ "$ENABLED" != "True" ] && [ "${FLEET_RUN_NOW:-0}" != "1" ]; then
   exit 0
 fi
 
-RUN_ID="${MEMBER}-$$-$(date +%s)"
+RUN_ID="${MEMBER}${ITEM:+-item$ITEM}-$$-$(date +%s)"
 
 # A member MAY declare its own runner (e.g. judge-judy's judge-judy.sh, which reviews a
 # diff as untrusted TEXT with zero tools -- a shape the generic claude -p path below can't
@@ -131,6 +139,15 @@ PROMPT=$(awk 'BEGIN{d=0} /^---$/{d++; next} d>=2{print}' "$BEHAVIOR")
 if [ -z "$PROMPT" ]; then
   log "FATAL: charter empty after frontmatter strip ($BEHAVIOR)"
   exit 2
+fi
+
+# --item is how gru hands a minion its pre-claimed issue number -- prepended as the very
+# first thing the minion reads, before its own charter, so "which item" is never ambiguous
+# even though every concurrently-spawned minion runs the exact same charter file.
+if [ -n "$ITEM" ]; then
+  PROMPT="Your assigned issue number for this run is #$ITEM. Do not work any other issue.
+
+$PROMPT"
 fi
 
 # Tool flags are the member's AUTHORITY (overrides.py refuses to tune these live, on purpose)
