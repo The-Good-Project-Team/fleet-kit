@@ -20,7 +20,7 @@
     "escalation": "a minion never reports back (crashed, hung past its own timeout) -- name it explicitly as a failure in your report, do not silently omit it or guess at its result. Runway reads as zero or unconfigured -- fall back to a small fixed N (1-2) rather than refusing to run at all; an unreadable meter narrows ambition, it never becomes a hard stop."
   },
   "schedule": {
-    "hourly_at_minute": 0
+    "hourly_at_minute": 3
   },
   "timeout_s": 3600,
   "enabled": true,
