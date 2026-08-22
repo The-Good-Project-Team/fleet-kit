@@ -33,23 +33,39 @@ minion processes and coordinates before finishing (proposed)**.
 1. **`run_gru_fanout.sh` no longer computes N and spawns gru N times.** It spawns exactly
    ONE `run_member.sh gru` per tick. Gru becomes the orchestrator, not one of N identical
    racers.
-2. **Gru's job, one pass:**
-   - Read headroom (maxx_reader.py's real signal, same as today) + the board.
-   - Decide how many minions it can afford this pass and pick that many DISTINCT claimable
-     items up front, in its own context, avoiding two minions racing for the same item (the
-     thing today's design tolerates via git-merge-and-retry — this removes the collision
-     class entirely instead of recovering from it).
-   - Claim all N items itself (one `gh issue edit --add-label fleet:claimed` per item,
-     serially, in its own turns — cheap, no subprocess needed for this part).
-   - Spawn N `run_member.sh minion` processes in the background (`Bash` tool, backgrounded),
-     one per claimed item, passing the item number explicitly (minions do NOT re-claim from
-     the board — they're handed a specific pre-claimed item, removing the claim race
-     entirely).
-   - Wait for all N to finish (poll, don't block synchronously past its own timeout budget).
-   - Read back each minion's result (PR opened? failed? conflict?) and write ONE combined
-     outcome/self_critique to its own run record — this is the fix for the "5 identical rows"
-     dashboard noise Reif flagged: one gru pass = one row, with the real N-minion breakdown
-     inside it, instead of N separate `reported_nothing` rows that read as noise.
+2. **Gru's job, one pass (Reif, 2026-08-21 — this is the actual decision loop, spelled out
+   because it's the whole point of gru existing as a session rather than a bash script):**
+   - **Runway.** Read real headroom (maxx_reader.py's live pacing signal) and this box's own
+     observed cost-per-build (fleet_db.py spend history) — how much work can genuinely be
+     afforded this pass, in dollars, not a fixed guess.
+   - **Priority.** Pull the open, unclaimed backlog and RANK it — not "first N unclaimed",
+     an actual judgment call on what's MOST IMPORTANT to build right now given the runway
+     just computed (RICE-shaped: impact, confidence, effort, same reasoning `board_rice.py`
+     already encodes for the human-facing board in the source project — gru should read and
+     apply that same logic, not invent a second ranking scheme). This is the step that
+     doesn't exist at all today (today's fanout picks blind, first-claimable-wins).
+   - **Size N to fit BOTH constraints** — the runway ceiling AND how many genuinely
+     high-priority items actually exist this pass (never pad N with low-value items just to
+     spend the full budget — an empty or thin high-value queue means a small N, not "spend
+     it all anyway").
+   - **Claim.** Claim the chosen N items itself, serially, in its own turns (cheap, no
+     subprocess needed) — this also removes the collision class entirely (today's design
+     tolerates two workers racing the same item via git-merge-and-retry; gru claiming
+     up front in one context never lets that race start).
+   - **Spawn.** Launch N `run_member.sh minion` processes in the background (`Bash` +
+     backgrounding), each in its OWN fresh worktree (unchanged from today's per-worker
+     isolation — cheap, proven, no reason to share one tree across minions), each handed its
+     specific pre-claimed item number explicitly. Minions never touch the claim step or the
+     priority call — that authority stays with gru.
+   - **Require reports.** Wait for every minion to actually wind down (poll, don't block past
+     gru's own timeout budget) and READ each one's real result before gru's own pass is
+     allowed to finish — a minion that's still running when gru would otherwise report is not
+     a report gru gets to skip.
+   - **Synthesize.** Write ONE combined outcome/self_critique — this pass's runway, the
+     priority call gru made and why, and each minion's real result (PR opened / failed /
+     found already-fixed) — to gru's own run record. Fixes the "5 identical rows" dashboard
+     noise Reif flagged: one gru pass = one legible row with the real breakdown inside it,
+     not N indistinguishable `reported_nothing` blocks.
 3. **`minion` is a new member** (`members/minion/minion.fleet.json` + `minion.md`), a near-
    copy of gru's current charter (build/test/PR/auto-merge rules 1-10 are unchanged — they're
    already worker-shaped) MINUS the claim step (gru already claimed the item for it) and minus
@@ -75,12 +91,18 @@ minion processes and coordinates before finishing (proposed)**.
   self-claim could still race another minion; removing the capability removes the risk, not
   just discourages it).
 
-## Open questions for Reif before building
+## Resolved (Reif, 2026-08-21)
 
-- Does minion get its OWN worktree per item (yes, almost certainly — same collision-avoidance
-  reasoning gru's charter already documents for concurrent workers), or does gru manage one
-  shared worktree tree and dispatch minions into subdirectories of it? (Recommend: own
-  worktree per minion, unchanged from today — cheap, already proven, no reason to share.)
-- Does gru's own pass get a bigger budget/timeout ceiling than a single minion (it's now
-  doing claim-coordination AND waiting on N children within one invocation)? Needs its own
-  `max_budget_usd`/`timeout_s` tuned separately from minion's.
+- **Own worktree per minion.** Confirmed — same collision-avoidance reasoning gru's charter
+  already documents for concurrent workers. No shared tree.
+- **Gru's job is explicitly: runway -> priority -> spawn -> require reports.** Not "pick N
+  unclaimed items and go" — an actual judgment call on what's most important to build given
+  what this pass can afford, and gru does not get to finish its own pass without reading back
+  a real result from every minion it spawned.
+
+## Open question still standing
+
+- Gru's own budget/timeout ceiling needs to be bigger than a single minion's (it's now doing
+  runway-read + priority-ranking + claim-coordination + waiting on N children, all within one
+  invocation, on top of its own turns). Needs its own `max_budget_usd`/`timeout_s` tuned
+  separately from minion's, not inherited from today's gru numbers unchanged.
