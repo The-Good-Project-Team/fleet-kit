@@ -43,6 +43,29 @@ import overrides as ov   # noqa: E402  ('overrides' shadows nothing here; keep t
 
 REPO = os.environ.get("FLEET_REPO", "")
 LOG_DIR = Path(os.environ.get("FLEET_LOG_DIR", Path.home() / "Library" / "Logs" / "fleet-kit")).expanduser()
+
+
+def _resolve_repo_url() -> str:
+    """https://github.com/<owner>/<repo> for this fleet's target repo, so the dashboard can
+    link a bare PR/issue number straight to GitHub -- resolved ONCE at boot (a repo's remote
+    doesn't change while this process runs) rather than shelling out on every request. Works
+    whether origin is an https or git@ remote; empty string (link renders as plain text, not
+    a broken href) if there's no repo, no remote, or git isn't on PATH.
+    """
+    try:
+        p = subprocess.run(["git", "remote", "get-url", "origin"], cwd=REPO or None,
+                            capture_output=True, text=True, timeout=5)
+        url = p.stdout.strip()
+        if not url:
+            return ""
+        if url.startswith("git@github.com:"):
+            url = "https://github.com/" + url[len("git@github.com:"):]
+        return url[:-4] if url.endswith(".git") else url
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+REPO_URL = _resolve_repo_url()
 RUNS_FILE = LOG_DIR / "runs.jsonl"
 PORT = int(os.environ.get("FLEET_VIEW_PORT", "8420"))
 GH_POLL_S = int(os.environ.get("FLEET_VIEW_GH_POLL_S", "20"))
@@ -152,7 +175,7 @@ def read_env_flags() -> dict:
             continue
         k, _, v = line.partition("=")
         values[k.strip()] = v.strip()
-    out = {"FLEET_ENABLED": values.get("FLEET_ENABLED", "true") == "true"}
+    out = {"FLEET_ENABLED": values.get("FLEET_ENABLED", "true") == "true", "REPO_URL": REPO_URL}
     try:
         for spec in member_spec.load_all():
             eff, _ = ov.apply(spec)
