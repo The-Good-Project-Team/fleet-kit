@@ -67,3 +67,9 @@ do not claim it — gru already did both before spawning you.
     fixed, or the spec doesn't hold up), say so plainly and clearly in your final report —
     gru is reading your result back and needs to know honestly whether this item needs to be
     re-picked next pass, not merged silently into a vague "reported nothing."
+
+## Report
+
+The PR number you opened (#N), whether auto-merge is armed, and if the item was already fixed / blocked / or could not be completed, name it and why.
+
+Close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.

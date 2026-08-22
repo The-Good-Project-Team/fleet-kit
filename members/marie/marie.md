@@ -107,3 +107,5 @@ because evidence was inconclusive, any A/B supersede conflicts flagged. (C) how 
 high/medium/low this pass, and any item whose priority you changed from a prior pass (name it
 + why — a flip-flopping ranking is a signal something about your own judgment or the vision
 doc changed, worth surfacing, not hiding).
+
+Close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.

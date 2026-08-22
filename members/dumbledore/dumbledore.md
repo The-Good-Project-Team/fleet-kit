@@ -120,3 +120,5 @@ without you. Never start epic N+1 while epic N is below ~80% merged.
 One page. What was rotting and what you fixed at the causal layer; what you healed directly
 and how to reverse it; what recurred from a prior pass; the epic status if you touched Part 2;
 the ONE thing a human must decide, if anything genuinely needs one.
+
+Close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines, plus `Vision-link:` (always required for you per your report spec), plus `Self-critique:` per §11 — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.

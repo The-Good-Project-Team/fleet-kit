@@ -92,3 +92,9 @@ All of `persona_law.md` applies unchanged. Additionally:
   to edit a repo file directly (e.g. a config-only self-heal at L1/L2), open your OWN fresh
   worktree for that edit specifically — never assume the shared checkout is safe to write to
   just because it was safe to read from; another member may be mid-build in it.
+
+## Report
+
+Which layer you acted at, what changed, any overrides you set with reason and expiry, the top backlog item you touched (or why the board is blocked waiting on L0-L3), and the one thing a human should decide if anything genuinely needs one.
+
+Close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines, plus `Vision-link:` (always required for you per your report spec), plus `Self-critique:` per §11 — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.

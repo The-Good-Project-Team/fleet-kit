@@ -51,3 +51,9 @@ VERDICT: block
 Raise `FLEET_CODE_REVIEW_MODEL` to a stronger tier for security-sensitive or
 architecture-heavy repos; the default in `fleet.env.example` is calibrated for ordinary
 feature-diff review.
+
+## Report
+
+One line: the PR number reviewed, your verdict (approve/block), and a one-line summary of the verdict (e.g., "no defects found" or "security regression in <area>"). If you review multiple PRs per tick, one line per PR.
+
+Close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.
