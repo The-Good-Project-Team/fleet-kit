@@ -50,7 +50,8 @@ case "${1:-cron-foreground}" in
     # Start the live dashboard in the background -- this is the whole point of exposing a
     # port from the container. Without this, cron-foreground runs the loop with nothing
     # observable from outside except raw log files inside the container.
-    ( cd /fleet-kit && FLEET_ENV_FILE=/fleet-kit/fleet.env exec python3 scripts/fleet_view_server.py \
+    ( cd /fleet-kit && FLEET_ENV_FILE=/fleet-kit/fleet.env FLEET_LOG_DIR="$LOG_DIR" \
+        exec python3 scripts/fleet_view_server.py \
         >> "$LOG_DIR/fleet_view.log" 2>&1 ) &
     echo "[entrypoint] fleet_view_server started on :${FLEET_VIEW_PORT:-8420} (pid $!)"
 

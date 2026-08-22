@@ -323,6 +323,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            # No caching -- this page has genuinely gone stale in a browser across a redeploy
+            # before (a button acting on backend logic that changed underneath the old JS,
+            # looking like the button was just broken). It's a live status page, never worth
+            # a byte of caching.
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
             return
