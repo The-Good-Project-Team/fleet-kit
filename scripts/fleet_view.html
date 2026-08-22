@@ -16,7 +16,7 @@
   header h1 { font-size: 14px; margin: 0; font-weight: 600; }
   #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
   #dot.live { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
-  .layout { display: grid; grid-template-columns: 1.1fr 0.9fr 0.9fr 1fr; gap: 1px; background: var(--border);
+  .layout { display: grid; grid-template-columns: 1.1fr 0.9fr 0.9fr 0.7fr 1fr; gap: 1px; background: var(--border);
     min-height: calc(100vh - 41px); }
   .col { background: var(--bg); overflow: auto; max-height: calc(100vh - 41px); }
   .col-head { padding: 8px 12px; font-weight: 600; color: var(--dim); text-transform: uppercase;
@@ -62,7 +62,12 @@
   </div>
   <div class="col">
     <div class="col-head">Backlog (issues)</div>
+    <div class="row"><button id="newIssue">+ new issue</button></div>
     <div id="issues"></div>
+  </div>
+  <div class="col">
+    <div class="col-head">Cron queue (next fire)</div>
+    <div id="queue"></div>
   </div>
   <div class="col">
     <div class="col-head">Members &amp; spend (24h)</div>
@@ -120,8 +125,28 @@ function renderGh(gh) {
       <a href="#" class="meta">#${i.number}</a>
       <div>${esc(i.title)}</div>
       <div class="meta">${i._claimed ? '<span class="pill quiet">claimed</span>' : '<span class="pill ok">open</span>'} · ${ago(i.updatedAt)}</div>
-      ${i._claimed ? `<div class="actions"><button data-act="prune" data-issue="${i.number}">release claim</button></div>` : ''}
+      <div class="actions">
+        ${i._claimed ? `<button data-act="prune" data-issue="${i.number}">release claim</button>` : ''}
+        <button data-act="comment_issue" data-issue="${i.number}">comment</button>
+        <button data-act="close_issue" data-issue="${i.number}">close</button>
+      </div>
     </div>`).join('') || '<div id="empty">backlog empty</div>';
+}
+
+function fmtIn(s) {
+  if (s === null || s === undefined) return '—';
+  if (s <= 0) return 'due now';
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.round(s / 60) + 'm';
+  return (s / 3600).toFixed(1) + 'h';
+}
+
+async function renderQueue() {
+  const { next_fires } = await (await fetch('/api/next_fires')).json();
+  document.getElementById('queue').innerHTML = (next_fires || []).map(f => `<div class="row">
+      <b>${esc(f.member)}</b> ${f.enabled ? '' : '<span class="pill quiet">off</span>'}
+      <div class="meta">in ${fmtIn(f.in_s)}${f.next_at ? ' · ' + esc(f.next_at) : ''}</div>
+    </div>`).join('') || '<div id="empty">no members</div>';
 }
 
 document.body.addEventListener('click', async (e) => {
@@ -147,7 +172,28 @@ document.body.addEventListener('click', async (e) => {
     if (!confirm(`close PR #${b.dataset.pr}?`)) return;
     const r = await fetch('/api/close_pr', { method: 'POST', body: JSON.stringify({ pr: b.dataset.pr }) });
     alert((await r.json()).ok ? 'closed' : 'failed — see server log');
+  } else if (act === 'comment_issue') {
+    const text = prompt(`comment on issue #${b.dataset.issue}:`);
+    if (!text) return;
+    const r = await fetch('/api/comment_issue', { method: 'POST', body: JSON.stringify(
+      { issue: b.dataset.issue, body: text }) });
+    alert((await r.json()).ok ? 'commented' : 'failed — see server log');
+  } else if (act === 'close_issue') {
+    if (!confirm(`close issue #${b.dataset.issue}?`)) return;
+    const reason = confirm('mark "not planned" (cancel = "completed")?') ? 'not planned' : 'completed';
+    const r = await fetch('/api/close_issue', { method: 'POST', body: JSON.stringify(
+      { issue: b.dataset.issue, reason }) });
+    alert((await r.json()).ok ? 'closed' : 'failed — see server log');
   }
+});
+
+document.getElementById('newIssue').addEventListener('click', async () => {
+  const title = prompt('issue title:');
+  if (!title) return;
+  const lane = prompt('lane label (e.g. devops, ui, fleet) — optional:', '');
+  const body = prompt('body — optional:', '');
+  const r = await fetch('/api/create_issue', { method: 'POST', body: JSON.stringify({ title, lane, body }) });
+  alert((await r.json()).ok ? 'filed' : 'failed — see server log');
 });
 
 const membersEl = document.getElementById('members');
@@ -159,8 +205,6 @@ function dialValue(eff, key) {
   return (eff.llm || {})[key];
 }
 
-const RUNNABLE_MEMBERS = ['builder', 'reviewer'];  // mirrors fleet_view_server.py's MEMBERS
-
 async function renderFleetState() {
   const state = await (await fetch('/api/fleet_state')).json();
   const btn = document.getElementById('masterToggle');
@@ -170,22 +214,26 @@ async function renderFleetState() {
     if (state.FLEET_ENABLED && !confirm('stop the WHOLE fleet? every member exits on its next tick.')) return;
     await fetch('/api/fleet_toggle', { method: 'POST', body: JSON.stringify(
       { target: 'fleet', value: !state.FLEET_ENABLED }) });
-    renderFleetState(); renderRunnableMembers();
+    renderFleetState(); renderMembers();
   };
   return state;
 }
 
-async function renderRunnableMembers() {
-  const state = await (await fetch('/api/fleet_state')).json();
-  document.getElementById('runnable').innerHTML = RUNNABLE_MEMBERS.map(name => {
-    const on = !!state[name];
+// on/off + run-now render straight off /api/members (the real spec.enabled per member) --
+// no second hardcoded name list to drift out of sync with the real members/*.fleet.json files
+// (the old ['builder','reviewer'] list did exactly that the moment run_member.sh + the other
+// 6 charters landed 2026-08-21 and every button here 400'd silently).
+async function renderRunnableMembers(members) {
+  document.getElementById('runnable').innerHTML = members.map(m => {
+    const name = m.spec.name;
+    const on = !!m.effective.enabled;
     return `<div class="row">
-      <b>${name}</b>
+      <b>${esc(name)}</b>
       <div class="actions">
-        <button class="${on ? 'on' : 'off'}" data-act="toggle-member" data-member="${name}" data-on="${on}">
+        <button class="${on ? 'on' : 'off'}" data-act="toggle-member" data-member="${esc(name)}" data-on="${on}">
           ${on ? '● enabled' : '○ disabled'}
         </button>
-        <button data-act="run-now" data-member="${name}">run now</button>
+        <button data-act="run-now" data-member="${esc(name)}">run now</button>
       </div>
     </div>`;
   }).join('');
@@ -220,7 +268,7 @@ async function renderMembers() {
   }).join('');
   membersEl.innerHTML = (specRows || '<div id="empty">no members/*.fleet.json found</div>')
     + '<div class="col-head" style="margin-top:8px">On / off / run now</div><div id="runnable"></div>';
-  renderRunnableMembers();
+  renderRunnableMembers(members);
 }
 
 document.body.addEventListener('click', async (e) => {
@@ -242,7 +290,8 @@ document.body.addEventListener('click', async (e) => {
     const willBeOn = toggle.dataset.on !== 'true';
     await fetch('/api/fleet_toggle', { method: 'POST', body: JSON.stringify(
       { target: toggle.dataset.member, value: willBeOn }) });
-    renderRunnableMembers();
+    renderMembers();
+    renderQueue();
     return;
   }
   const runNow = e.target.closest('button[data-act="run-now"]');
@@ -262,7 +311,9 @@ async function boot() {
   renderGh(snap.gh);
   renderFleetState();
   renderMembers();
+  renderQueue();
   setInterval(renderMembers, 30000);
+  setInterval(renderQueue, 15000);
 
   const es = new EventSource('/api/stream');
   es.onopen = () => dot.classList.add('live');

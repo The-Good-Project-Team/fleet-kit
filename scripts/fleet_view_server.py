@@ -53,15 +53,82 @@ MAX_RUNS = 500  # bound memory; this is a window, not an archive -- runs.jsonl o
 # human's text editor are the same mechanism, never two that can disagree.
 ENV_FILE = Path(os.environ.get("FLEET_ENV_FILE", KIT_DIR / "fleet.env"))
 
-# TODO: stale -- predates the 7 real members (members/*/*.fleet.json) and run_member.sh
-# (2026-08-21). Still wired to the two oldest standalone scripts; doesn't know about
-# dumbledore/gru/jefe/judge-judy/roomba/the-fixer/dont-shoot-the-messenger at all. Real fix is
-# to build this table from member_spec.load_all() instead of a hand-maintained dict -- filed as
-# a follow-up, not fixed here (out of scope for a rename).
-MEMBERS = {
-    "builder": {"script": "worktree_builder.sh", "enabled_var": "FLEET_BUILDER_ENABLED"},
-    "judge-judy": {"script": "../members/judge-judy/judge-judy.sh", "enabled_var": "FLEET_REVIEWER_ENABLED"},
-}
+def _load_members() -> dict:
+    """Build the toggle/run-now table from the real members/*.fleet.json files instead of a
+    hand-maintained dict -- that dict drifted to 2 of 8 real members (builder/judge-judy only)
+    the moment run_member.sh + the other 6 charters landed 2026-08-21, silently 400ing every
+    fleet_toggle/run_now call for gru/marie/dumbledore/roomba/the-fixer/jefe/messenger. Every
+    member except judge-judy (a custom non-agentic runner, see its own .fleet.json) runs via
+    the one generic run_member.sh <name> entry point.
+    """
+    out = {}
+    try:
+        specs = member_spec.load_all()
+    except Exception:
+        return out
+    for spec in specs:
+        name = spec["name"]
+        script = (f"../members/{name}/{name}.sh" if name == "judge-judy"
+                  else "run_member.sh")
+        out[name] = {
+            "script": script,
+            "args": [] if name == "judge-judy" else [name],
+            "enabled_var": f"FLEET_{name.upper().replace('-', '_')}_ENABLED",
+            "schedule": spec.get("schedule", {}),
+        }
+    return out
+
+
+MEMBERS = _load_members()
+
+
+def next_fires() -> list[dict]:
+    """When does each enabled member fire next -- pure math off each spec's own schedule (one
+    of interval_s / hourly_at_minute / daily_at, see member_spec.py's validation), no cron
+    daemon queried, because there isn't one to query: entrypoint.sh's crontab lines and these
+    schedule fields are meant to agree by construction, not by a second source of truth. A
+    disabled member (or one with an override applied to disable it) shows here too, marked
+    inactive, so a click-off is visibly reflected rather than just vanishing from the list.
+    """
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    out = []
+    try:
+        specs = member_spec.load_all()
+    except Exception:
+        return out
+    for spec in specs:
+        eff, _ = ov.apply(spec)
+        sched = eff.get("schedule", {})
+        enabled = bool(eff.get("enabled"))
+        next_at = None
+        if "interval_s" in sched:
+            secs = int(sched["interval_s"])
+            # next boundary of a fixed-interval tick since epoch -- matches cron's own "every
+            # N minutes/seconds" semantics (aligned to :00, not to whenever this request runs)
+            epoch = int(now.timestamp())
+            next_at = now + _dt.timedelta(seconds=(secs - epoch % secs))
+        elif "hourly_at_minute" in sched:
+            minute = int(sched["hourly_at_minute"])
+            candidate = now.replace(minute=minute, second=0, microsecond=0)
+            if candidate <= now:
+                candidate += _dt.timedelta(hours=1)
+            next_at = candidate
+        elif "daily_at" in sched:
+            hh, mm = (int(x) for x in str(sched["daily_at"]).split(":"))
+            candidate = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if candidate <= now:
+                candidate += _dt.timedelta(days=1)
+            next_at = candidate
+        out.append({
+            "member": spec["name"],
+            "enabled": enabled,
+            "schedule": sched,
+            "next_at": next_at.isoformat() if next_at else None,
+            "in_s": int((next_at - now).total_seconds()) if next_at else None,
+        })
+    out.sort(key=lambda m: (m["in_s"] is None, m["in_s"]))
+    return out
 
 
 def _gh(*args: str, timeout: int = 15) -> str:
@@ -293,6 +360,9 @@ class Handler(BaseHTTPRequestHandler):
                 out.append({"spec": spec, "effective": eff, "overrides": applied})
             self._json({"members": out})
             return
+        if path == "/api/next_fires":
+            self._json({"next_fires": next_fires()})
+            return
         if path == "/api/stream":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -374,15 +444,66 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": p.returncode == 0, "out": p.stdout, "err": p.stderr})
             return
 
-        # --- master + per-member kill switches. Same fleet.env file a human would edit and
-        # every cron script sources -- see fleet_enabled.sh's header. ------------------------
+        # --- issue CRUD, straight `gh` calls same as close_pr above -- a human filing/closing
+        # a backlog item from the page is the same action as typing the command, never a second
+        # authority. create ALWAYS applies fleet:backlog (the board-first LAW: nothing is worked
+        # without an item) plus whatever lane label the caller names. ------------------------
+        if path == "/api/create_issue":
+            title = (body.get("title") or "").strip()
+            issue_body = body.get("body", "")
+            lane = body.get("lane", "")
+            if not title:
+                self._json({"ok": False, "error": "title required"}, 400)
+                return
+            labels = "fleet:backlog" + (f",lane:{lane}" if lane else "")
+            p = subprocess.run(["gh", "issue", "create", "--title", title, "--body", issue_body,
+                                "--label", labels], cwd=REPO or None,
+                                capture_output=True, text=True, timeout=15)
+            self._json({"ok": p.returncode == 0, "out": p.stdout, "err": p.stderr})
+            return
+
+        if path == "/api/comment_issue":
+            number = body.get("issue")
+            text = (body.get("body") or "").strip()
+            if not (number and text):
+                self._json({"ok": False, "error": "issue and body required"}, 400)
+                return
+            p = subprocess.run(["gh", "issue", "comment", str(number), "--body", text],
+                               cwd=REPO or None, capture_output=True, text=True, timeout=15)
+            self._json({"ok": p.returncode == 0, "out": p.stdout, "err": p.stderr})
+            return
+
+        if path == "/api/close_issue":
+            number = body.get("issue")
+            reason = body.get("reason", "")  # "" | "completed" | "not planned"
+            if not number:
+                self._json({"ok": False, "error": "issue number required"}, 400)
+                return
+            cmd = ["gh", "issue", "close", str(number)]
+            if reason:
+                cmd += ["--reason", reason]
+            p = subprocess.run(cmd, cwd=REPO or None, capture_output=True, text=True, timeout=15)
+            self._json({"ok": p.returncode == 0, "out": p.stdout, "err": p.stderr})
+            return
+
+        # --- master kill switch (fleet.env's FLEET_ENABLED, read by fleet_enabled.sh on every
+        # invocation) vs a per-member kill switch (each member's OWN spec.enabled field, read
+        # by run_member.sh -- there is no per-member env var; fleet_enabled_or_exit only ever
+        # checks the global one). Two different mechanisms because they gate two different
+        # things: the whole fleet vs one member's own schedule. ------------------------------
         if path == "/api/fleet_toggle":
             target = body.get("target", "")  # "fleet" or a name from MEMBERS
             value = bool(body.get("value"))
             if target == "fleet":
                 write_env_flag("FLEET_ENABLED", value)
             elif target in MEMBERS:
-                write_env_flag(MEMBERS[target]["enabled_var"], value)
+                cmd = [sys.executable, str(KIT_DIR / "scripts" / "overrides.py"), target,
+                       "--set", "enabled", json.dumps(value), "--by", "fleet-view",
+                       "--why", "dashboard toggle"]
+                p = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                if p.returncode != 0:
+                    self._json({"ok": False, "error": p.stderr or p.stdout}, 500)
+                    return
             else:
                 self._json({"ok": False, "error": f"unknown toggle target {target!r}"}, 400)
                 return
@@ -408,7 +529,8 @@ class Handler(BaseHTTPRequestHandler):
             env.setdefault("FLEET_ENV_FILE", str(ENV_FILE))
             env["FLEET_RUN_NOW"] = "1"
             try:
-                subprocess.Popen(["bash", str(script)], cwd=REPO or None, env=env,
+                subprocess.Popen(["bash", str(script), *MEMBERS[name].get("args", [])],
+                                 cwd=REPO or None, env=env,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  start_new_session=True)
             except OSError as exc:
