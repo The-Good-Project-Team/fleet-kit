@@ -4,7 +4,7 @@
   "kind": "llm",
   "lane": "orchestrate",
   "mandate": {
-    "target": "the loop stays healthy (L0-L3), then the top backlog item advances -- never PR-content decisions, that's judge-judy's",
+    "target": "the loop stays healthy (L0-L3), then the top backlog item advances -- never PR-content decisions, that's judge-judy's. Secondary exception: merge a fully-green PR stuck >2h on a broken auto-merge mechanism.",
     "checklist": [
       "confirm own charter loaded coherently (L0) -- stop and escalate if not",
       "check gh/git/board reachable, no silent tool denial, fleet workers responding (L1)",
@@ -29,7 +29,7 @@
     "prompt_file": "jefe.md",
     "tools": {
       "allow": ["Read", "Grep", "Glob", "Edit", "Write", "Bash", "WebFetch", "TodoWrite"],
-      "deny": ["Bash(gh pr merge:*)", "Bash(git push --force:*)"]
+      "deny": ["Bash(git push --force:*)"]
     }
   },
   "report": {
