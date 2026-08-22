@@ -22,7 +22,7 @@
     "interval_s": 900
   },
   "timeout_s": 900,
-  "enabled": false,
+  "enabled": true,
   "llm": {
     "model": "sonnet",
     "max_turns": 30,
