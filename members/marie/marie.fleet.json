@@ -26,7 +26,7 @@
     "escalation": "can't tell if a PR/claim is stale vs genuinely still in progress, can't find hard evidence an issue is cruft, or genuinely can't judge an item's priority -- leave it alone / rank it medium and say so in the report rather than guessing wrong. A false stale-clear or false close is worse than a missed one: one lets two builders claim the same item, the other silently deletes real signal a human hasn't seen yet. A wrong priority just means gru builds the wrong thing next -- less catastrophic, but say so anyway."
   },
   "schedule": {
-    "hourly_at_minute": 30
+    "hourly_at_minute": 33
   },
   "timeout_s": 3600,
   "enabled": true,
