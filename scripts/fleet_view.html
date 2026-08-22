@@ -42,6 +42,15 @@
   button.on { border-color: var(--ok); color: var(--ok); }
   button.off { border-color: var(--bad); color: var(--bad); }
   .checks-green { color: var(--ok); } .checks-pending { color: var(--warn); } .checks-failing { color: var(--bad); }
+  .logfeed { border-top: 1px solid var(--border); }
+  .logfeed select, .logfeed button { background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 3px; padding: 2px 8px; font-size: 11px;
+    font-family: inherit; }
+  #logLines { max-height: 320px; overflow-y: auto; padding: 6px 12px; font-size: 12px;
+    white-space: pre-wrap; word-break: break-all; }
+  #logLines .logline { padding: 1px 0; border-bottom: 1px solid rgba(255,255,255,.02); }
+  #logLines .logline b { color: var(--accent); }
+  #logLines .logline.hidden { display: none; }
 </style>
 </head>
 <body>
@@ -74,6 +83,18 @@
     <div class="col-head">Members &amp; spend (24h)</div>
     <div id="members"></div>
   </div>
+</div>
+<div class="logfeed">
+  <div class="col-head" style="display:flex;align-items:center;gap:8px">
+    <span>Raw log feed (live)</span>
+    <select id="logFilter"><option value="">all members</option></select>
+    <span style="flex:1"></span>
+    <label style="font-weight:normal;text-transform:none;font-size:11px;color:var(--dim)">
+      <input type="checkbox" id="logAutoscroll" checked> autoscroll
+    </label>
+    <button id="logClear">clear</button>
+  </div>
+  <div id="logLines"></div>
 </div>
 <script>
 const runsEl = document.getElementById('runs');
@@ -346,6 +367,44 @@ document.body.addEventListener('click', async (e) => {
   }
 });
 
+// Raw log feed -- Reif: "we are piping everything, i want to see it in a feed". Every
+// member's stream_log.py output (thinking:/tool call:/tool result:/pass start/end lines)
+// lands here live via SSE, tagged by member. Capped at MAX_LOG_LINES DOM nodes -- this is a
+// live window, not a log archive (the .log files on disk are the archive).
+const MAX_LOG_LINES = 1000;
+const logLinesEl = document.getElementById('logLines');
+const logFilterEl = document.getElementById('logFilter');
+const knownLogMembers = new Set();
+
+function applyLogFilter() {
+  const want = logFilterEl.value;
+  logLinesEl.querySelectorAll('.logline').forEach(el => {
+    el.classList.toggle('hidden', want !== '' && el.dataset.member !== want);
+  });
+}
+
+function renderLogLine(rec) {
+  if (!knownLogMembers.has(rec.member)) {
+    knownLogMembers.add(rec.member);
+    const opt = document.createElement('option');
+    opt.value = rec.member; opt.textContent = rec.member;
+    logFilterEl.appendChild(opt);
+  }
+  const div = document.createElement('div');
+  div.className = 'logline';
+  div.dataset.member = rec.member;
+  if (logFilterEl.value !== '' && logFilterEl.value !== rec.member) div.classList.add('hidden');
+  div.innerHTML = `<b>${esc(rec.member)}</b> ${esc(rec.line)}`;
+  logLinesEl.appendChild(div);
+  while (logLinesEl.children.length > MAX_LOG_LINES) logLinesEl.removeChild(logLinesEl.firstChild);
+  if (document.getElementById('logAutoscroll').checked) {
+    logLinesEl.scrollTop = logLinesEl.scrollHeight;
+  }
+}
+
+logFilterEl.addEventListener('change', applyLogFilter);
+document.getElementById('logClear').addEventListener('click', () => { logLinesEl.innerHTML = ''; });
+
 async function boot() {
   const snap = await (await fetch('/api/snapshot')).json();
   snap.runs.slice().reverse().forEach(renderRun);
@@ -361,6 +420,7 @@ async function boot() {
   es.onerror = () => dot.classList.remove('live');
   es.addEventListener('run', e => { renderRun(JSON.parse(e.data)); });
   es.addEventListener('gh', e => renderGh(JSON.parse(e.data)));
+  es.addEventListener('logline', e => { renderLogLine(JSON.parse(e.data)); });
 }
 boot();
 </script>
