@@ -22,7 +22,7 @@
     "hourly_at_minute": 0
   },
   "timeout_s": 2400,
-  "enabled": false,
+  "enabled": true,
   "llm": {
     "model": "sonnet",
     "max_turns": 60,
