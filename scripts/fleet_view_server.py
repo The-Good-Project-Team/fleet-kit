@@ -73,7 +73,6 @@ def _load_members() -> dict:
         out[name] = {
             "script": script,
             "args": [] if name == "judge-judy" else [name],
-            "enabled_var": f"FLEET_{name.upper().replace('-', '_')}_ENABLED",
             "schedule": spec.get("schedule", {}),
         }
     return out
@@ -140,9 +139,11 @@ def _gh(*args: str, timeout: int = 15) -> str:
 
 
 def read_env_flags() -> dict:
-    """FLEET_ENABLED + every member's own enabled var, read straight from fleet.env text --
-    not from this process's environment, which was only a snapshot taken at start. A toggle
-    must be visible on the very next page load, not after a restart."""
+    """FLEET_ENABLED from fleet.env text (not this process's environment, which was only a
+    snapshot taken at start -- a toggle must be visible on the very next page load, not after
+    a restart) + every member's REAL enabled state, which lives in its own spec.enabled field
+    (post-overrides), not an env var -- see fleet_toggle's own comment for why there is no
+    such env var for a run_member.sh member."""
     text = ENV_FILE.read_text(errors="ignore") if ENV_FILE.exists() else ""
     values = {}
     for line in text.splitlines():
@@ -152,8 +153,12 @@ def read_env_flags() -> dict:
         k, _, v = line.partition("=")
         values[k.strip()] = v.strip()
     out = {"FLEET_ENABLED": values.get("FLEET_ENABLED", "true") == "true"}
-    for name, m in MEMBERS.items():
-        out[name] = values.get(m["enabled_var"], "false") == "true"
+    try:
+        for spec in member_spec.load_all():
+            eff, _ = ov.apply(spec)
+            out[spec["name"]] = bool(eff.get("enabled"))
+    except Exception:
+        pass
     return out
 
 
