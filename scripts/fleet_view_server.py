@@ -181,6 +181,33 @@ def write_env_flag(key: str, value: bool) -> None:
     ENV_FILE.write_text("\n".join(lines) + "\n")
 
 
+def read_pass_block(member: str, n: int) -> list[str]:
+    """Return the Nth-most-recent 'pass start' ... 'pass end' block from <member>.log, n=0 is
+    the latest. A judge-judy-style pass with no explicit 'pass start' line (see that member's
+    own log shape) has no block boundary to find -- returns [] and the frontend falls back to
+    the run record's own outcome/evidence fields, which is all there ever was for that member.
+    Bounded read: this kit's whole reason to exist is not shipping a second product to watch
+    the first one, so this stays a plain file scan, no index, no DB.
+    """
+    log_path = LOG_DIR / f"{member}.log"
+    if not log_path.exists():
+        return []
+    try:
+        lines = log_path.read_text(errors="ignore").splitlines()
+    except OSError:
+        return []
+    starts = [i for i, ln in enumerate(lines) if "pass start" in ln]
+    if not starts:
+        return []
+    starts.sort()
+    if n >= len(starts):
+        return []
+    start_i = starts[-(n + 1)]
+    # end = next pass start after this one, or the end of the file
+    end_i = starts[-n] if n > 0 else len(lines)
+    return lines[start_i:end_i]
+
+
 def poll_gh_state() -> dict:
     prs_raw = _gh("pr", "list", "--state", "open", "--json",
                    "number,title,isDraft,headRefName,url,statusCheckRollup,updatedAt")
@@ -409,6 +436,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/next_fires":
             self._json({"next_fires": next_fires()})
+            return
+        if path == "/api/pass_log":
+            qs = parse_qs(urlparse(self.path).query)
+            member = qs.get("member", [""])[0]
+            # nth-from-end: the feed row and the log block are both written in chronological
+            # order by the SAME pass, one record per pass -- so "the Nth most recent run for
+            # this member" and "the Nth most recent pass start/end block in this member's log"
+            # name the same pass without needing a shared run_id in the log lines themselves.
+            n = int(qs.get("n", ["0"])[0])
+            self._json({"lines": read_pass_block(member, n)})
             return
         if path == "/api/stream":
             self.send_response(200)

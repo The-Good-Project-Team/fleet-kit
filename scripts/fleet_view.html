@@ -16,20 +16,32 @@
   header h1 { font-size: 14px; margin: 0; font-weight: 600; }
   #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
   #dot.live { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
-  .layout { display: grid; grid-template-columns: 1.1fr 0.9fr 0.9fr 0.7fr 1fr; gap: 1px; background: var(--border);
-    min-height: calc(100vh - 41px); }
-  .col { background: var(--bg); overflow: auto; max-height: calc(100vh - 41px); }
+
+  /* feed (main) + rail (sidebar) -- was a 5-column grid, hard to read as a feed of events.
+     Reif: "feed style -- sidebar: fleet runs / open PRs / backlog. in fleet runs we show
+     what's upcoming too, but mostly every run, when it ran, and its full transcript." So the
+     runs column becomes the ONE thing you scan top-to-bottom; everything else (PRs, backlog,
+     members, cron queue) is reference material living in a narrower rail beside it. */
+  .layout { display: flex; min-height: calc(100vh - 41px); }
+  .feed { flex: 1; min-width: 0; overflow: auto; max-height: calc(100vh - 41px); }
+  .rail { width: 320px; flex: none; border-left: 1px solid var(--border); overflow: auto;
+    max-height: calc(100vh - 41px); background: var(--panel); }
+  .rail-section { border-bottom: 1px solid var(--border); }
+  .rail-section:last-child { border-bottom: none; }
+
   .col-head { padding: 8px 12px; font-weight: 600; color: var(--dim); text-transform: uppercase;
     font-size: 11px; letter-spacing: .05em; position: sticky; top: 0; background: var(--bg);
     border-bottom: 1px solid var(--border); }
+  .rail .col-head { background: var(--panel); }
   .row { padding: 8px 12px; border-bottom: 1px solid var(--border); }
   .row:hover { background: var(--panel); }
+  .feed .row:hover { background: rgba(255,255,255,.02); }
   .pill { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px;
     font-weight: 600; text-transform: uppercase; }
   .pill.ok { background: rgba(62,155,92,.18); color: var(--ok); }
   .pill.quiet { background: rgba(201,162,39,.18); color: var(--warn); }
   .pill.reported_nothing, .pill.no_vision_link, .pill.fail { background: rgba(201,70,62,.18); color: var(--bad); }
-  .pill.pending { background: rgba(107,116,128,.18); color: var(--dim); }
+  .pill.pending, .pill.upcoming { background: rgba(107,116,128,.18); color: var(--dim); }
   .pill.dedup-count { background: rgba(74,143,214,.18); color: var(--accent); margin-left: 4px; }
   .row .meta { color: var(--dim); font-size: 11px; margin-top: 2px; }
   .row .outcome { margin-top: 4px; }
@@ -37,20 +49,29 @@
   button { background: var(--panel); color: var(--text); border: 1px solid var(--border);
     border-radius: 3px; padding: 2px 8px; font-size: 11px; cursor: pointer; font-family: inherit; }
   button:hover { border-color: var(--accent); }
-  .actions { margin-top: 4px; display: flex; gap: 6px; }
+  .rail button { background: var(--bg); }
+  .actions { margin-top: 4px; display: flex; gap: 6px; flex-wrap: wrap; }
   #empty { padding: 20px; color: var(--dim); text-align: center; }
   button.on { border-color: var(--ok); color: var(--ok); }
   button.off { border-color: var(--bad); color: var(--bad); }
   .checks-green { color: var(--ok); } .checks-pending { color: var(--warn); } .checks-failing { color: var(--bad); }
-  .logfeed { border-top: 1px solid var(--border); }
-  .logfeed select, .logfeed button { background: var(--panel); color: var(--text);
-    border: 1px solid var(--border); border-radius: 3px; padding: 2px 8px; font-size: 11px;
-    font-family: inherit; }
-  #logLines { max-height: 320px; overflow-y: auto; padding: 6px 12px; font-size: 12px;
-    white-space: pre-wrap; word-break: break-all; }
-  #logLines .logline { padding: 1px 0; border-bottom: 1px solid rgba(255,255,255,.02); }
-  #logLines .logline b { color: var(--accent); }
-  #logLines .logline.hidden { display: none; }
+
+  /* upcoming (cron queue) rows at the top of the feed -- same row shape as a completed run so
+     the eye doesn't context-switch, just dimmer and unexpandable (nothing happened yet). */
+  .row.upcoming { opacity: .55; }
+  .row.upcoming:hover { opacity: .85; }
+
+  /* transcript expand -- click a run row to pull its pass start/end log block inline instead
+     of a separate bottom strip nobody scrolled to. */
+  .row.run { cursor: pointer; }
+  .transcript { display: none; margin-top: 6px; padding: 8px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 3px; max-height: 420px; overflow-y: auto;
+    white-space: pre-wrap; word-break: break-all; font-size: 11.5px; color: var(--text); }
+  .transcript.open { display: block; }
+  .transcript .tline { padding: 1px 0; border-bottom: 1px solid rgba(255,255,255,.02); }
+  .transcript .tline.live { color: var(--accent); }
+  .transcript .loading, .transcript .none { color: var(--dim); }
+  .expand-hint { color: var(--dim); font-size: 11px; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -62,42 +83,30 @@
   <button id="masterToggle" style="font-weight:600"></button>
 </header>
 <div class="layout">
-  <div class="col">
-    <div class="col-head">Runs (live)</div>
+  <div class="feed">
+    <div class="col-head">Fleet runs</div>
+    <div id="queue"></div>
     <div id="runs"><div id="empty">waiting for the first pass…</div></div>
   </div>
-  <div class="col">
-    <div class="col-head">Open PRs</div>
-    <div id="prs"></div>
+  <div class="rail">
+    <div class="rail-section">
+      <div class="col-head">Open PRs</div>
+      <div id="prs"></div>
+    </div>
+    <div class="rail-section">
+      <div class="col-head">Backlog (issues)</div>
+      <div class="row"><button id="newIssue">+ new issue</button></div>
+      <div id="issues"></div>
+    </div>
+    <div class="rail-section">
+      <div class="col-head">Members &amp; spend (24h)</div>
+      <div id="members"></div>
+    </div>
   </div>
-  <div class="col">
-    <div class="col-head">Backlog (issues)</div>
-    <div class="row"><button id="newIssue">+ new issue</button></div>
-    <div id="issues"></div>
-  </div>
-  <div class="col">
-    <div class="col-head">Cron queue (next fire)</div>
-    <div id="queue"></div>
-  </div>
-  <div class="col">
-    <div class="col-head">Members &amp; spend (24h)</div>
-    <div id="members"></div>
-  </div>
-</div>
-<div class="logfeed">
-  <div class="col-head" style="display:flex;align-items:center;gap:8px">
-    <span>Raw log feed (live)</span>
-    <select id="logFilter"><option value="">all members</option></select>
-    <span style="flex:1"></span>
-    <label style="font-weight:normal;text-transform:none;font-size:11px;color:var(--dim)">
-      <input type="checkbox" id="logAutoscroll" checked> autoscroll
-    </label>
-    <button id="logClear">clear</button>
-  </div>
-  <div id="logLines"></div>
 </div>
 <script>
 const runsEl = document.getElementById('runs');
+const queueEl = document.getElementById('queue');
 const prsEl = document.getElementById('prs');
 const issuesEl = document.getElementById('issues');
 const dot = document.getElementById('dot');
@@ -121,9 +130,35 @@ function costFlag(tok) {
   return perTurn > 1 ? ' <span class="pill fail" title="high $/turn -- likely a retry or error, not real work">$/turn high</span>' : '';
 }
 
+// Per-member "how many runs have we rendered so far" -- lets a transcript fetch say "the Nth
+// most recent pass for this member" without a run_id shared between runs.jsonl and the raw
+// .log files (see fleet_view_server.py's read_pass_block for why that's the correlation key).
+const memberRunSeq = {};
+
+async function toggleTranscript(row, member) {
+  const box = row.querySelector('.transcript');
+  if (!box) return;
+  const willOpen = !box.classList.contains('open');
+  box.classList.toggle('open', willOpen);
+  if (willOpen && !box.dataset.loaded) {
+    box.dataset.loaded = '1';
+    box.innerHTML = '<div class="loading">loading transcript…</div>';
+    try {
+      const r = await fetch(`/api/pass_log?member=${encodeURIComponent(member)}&n=${row.dataset.seq}`);
+      const { lines } = await r.json();
+      box.innerHTML = (lines && lines.length)
+        ? lines.map(l => `<div class="tline">${esc(l)}</div>`).join('')
+        : '<div class="none">no transcript recorded for this pass</div>';
+      box.scrollTop = box.scrollHeight;
+    } catch {
+      box.innerHTML = '<div class="none">failed to load transcript</div>';
+    }
+  }
+}
+
 function renderRun(rec) {
   const div = document.createElement('div');
-  div.className = 'row';
+  div.className = 'row run';
   const status = rec.status || 'pending';
   const pr = rec.pr ? `<a href="#" data-pr="${esc(rec.pr)}">PR #${esc(rec.pr)}</a>` : '';
   // reported_nothing covers two very different real cases (#2999/#3015 already track this at
@@ -143,7 +178,7 @@ function renderRun(rec) {
   // status) always gets its own row.
   const dedupKey = `${rec.member}|${status}|${rec.outcome || ''}`;
   const top = runsEl.firstElementChild;
-  if (top && top.dataset.dedupKey === dedupKey) {
+  if (top && top.classList.contains('run') && top.dataset.dedupKey === dedupKey) {
     const n = parseInt(top.dataset.count || '1', 10) + 1;
     top.dataset.count = n;
     let badge = top.querySelector('.dedup-count');
@@ -157,6 +192,10 @@ function renderRun(rec) {
   }
   div.dataset.dedupKey = dedupKey;
   div.dataset.count = '1';
+  const seq = memberRunSeq[rec.member] || 0;
+  memberRunSeq[rec.member] = seq + 1;
+  div.dataset.seq = seq;
+  div.dataset.member = rec.member;
   div.innerHTML = `
     <span class="pill ${esc(status)}">${esc(status)}</span>
     <b>${esc(rec.member)}</b>
@@ -164,9 +203,15 @@ function renderRun(rec) {
     <div class="outcome">${esc(rec.outcome || noOutcomeHint)}</div>
     ${rec.evidence ? `<div class="meta">${esc(rec.evidence)}</div>` : ''}
     ${rec.tokens && rec.tokens.cost_usd ? `<div class="meta">$${Number(rec.tokens.cost_usd).toFixed(3)} · ${esc(rec.tokens.num_turns)} turns${costFlag(rec.tokens)}</div>` : ''}
+    <div class="expand-hint">click to view full transcript ▾</div>
+    <div class="transcript"></div>
     <div class="actions">
       <button data-act="steer" data-member="${esc(rec.member)}">throttle ${esc(rec.member)}</button>
     </div>`;
+  div.addEventListener('click', (e) => {
+    if (e.target.closest('button') || e.target.closest('a')) return;
+    toggleTranscript(div, rec.member);
+  });
   document.getElementById('empty')?.remove();
   runsEl.prepend(div);
   while (runsEl.children.length > 300) runsEl.removeChild(runsEl.lastChild);
@@ -203,12 +248,16 @@ function fmtIn(s) {
   return (s / 3600).toFixed(1) + 'h';
 }
 
+// Upcoming fires render at the top of the SAME feed as completed runs -- "what's about to
+// happen" flowing straight into "what just happened", one scannable stream instead of a
+// separate cron-queue column the eye has to jump to.
 async function renderQueue() {
   const { next_fires } = await (await fetch('/api/next_fires')).json();
-  document.getElementById('queue').innerHTML = (next_fires || []).map(f => `<div class="row">
-      <b>${esc(f.member)}</b> ${f.enabled ? '' : '<span class="pill quiet">off</span>'}
+  queueEl.innerHTML = (next_fires || []).filter(f => f.enabled).slice(0, 6).map(f => `<div class="row upcoming">
+      <span class="pill upcoming">next</span>
+      <b>${esc(f.member)}</b>
       <div class="meta">in ${fmtIn(f.in_s)}${f.next_at ? ' · ' + esc(f.next_at) : ''}</div>
-    </div>`).join('') || '<div id="empty">no members</div>';
+    </div>`).join('');
 }
 
 document.body.addEventListener('click', async (e) => {
@@ -362,48 +411,30 @@ document.body.addEventListener('click', async (e) => {
     if (!confirm(`run ${name} right now, off-cron?`)) return;
     const r = await fetch('/api/run_now', { method: 'POST', body: JSON.stringify({ member: name }) });
     const j = await r.json();
-    alert(j.ok ? `${name} started — watch the Runs column` : `failed: ${j.error || 'see server log'}`);
+    alert(j.ok ? `${name} started — watch the feed` : `failed: ${j.error || 'see server log'}`);
     return;
   }
 });
 
-// Raw log feed -- Reif: "we are piping everything, i want to see it in a feed". Every
-// member's stream_log.py output (thinking:/tool call:/tool result:/pass start/end lines)
-// lands here live via SSE, tagged by member. Capped at MAX_LOG_LINES DOM nodes -- this is a
-// live window, not a log archive (the .log files on disk are the archive).
-const MAX_LOG_LINES = 1000;
-const logLinesEl = document.getElementById('logLines');
-const logFilterEl = document.getElementById('logFilter');
-const knownLogMembers = new Set();
-
-function applyLogFilter() {
-  const want = logFilterEl.value;
-  logLinesEl.querySelectorAll('.logline').forEach(el => {
-    el.classList.toggle('hidden', want !== '' && el.dataset.member !== want);
-  });
-}
-
-function renderLogLine(rec) {
-  if (!knownLogMembers.has(rec.member)) {
-    knownLogMembers.add(rec.member);
-    const opt = document.createElement('option');
-    opt.value = rec.member; opt.textContent = rec.member;
-    logFilterEl.appendChild(opt);
-  }
+// Live loglines while a pass is IN FLIGHT -- append straight into that run's own transcript box
+// if it's open, so an expanded row updates in real time instead of only showing history. A run
+// not yet in the feed (still running, no runs.jsonl record yet) has nowhere to land these; that
+// arrives as its own 'run' event the moment the pass finishes and gets a row.
+function appendLiveLine(rec) {
+  const openBoxes = runsEl.querySelectorAll(`.row.run[data-member="${CSS.escape(rec.member)}"] .transcript.open`);
+  if (!openBoxes.length) return;
+  // only the most recent row for this member is "in flight" -- older expanded rows are history
+  const row = runsEl.querySelector(`.row.run[data-member="${CSS.escape(rec.member)}"]`);
+  const box = row && row.querySelector('.transcript.open');
+  if (!box || row.dataset.seq !== '0') return;
+  box.querySelector('.loading')?.remove();
+  box.querySelector('.none')?.remove();
   const div = document.createElement('div');
-  div.className = 'logline';
-  div.dataset.member = rec.member;
-  if (logFilterEl.value !== '' && logFilterEl.value !== rec.member) div.classList.add('hidden');
-  div.innerHTML = `<b>${esc(rec.member)}</b> ${esc(rec.line)}`;
-  logLinesEl.appendChild(div);
-  while (logLinesEl.children.length > MAX_LOG_LINES) logLinesEl.removeChild(logLinesEl.firstChild);
-  if (document.getElementById('logAutoscroll').checked) {
-    logLinesEl.scrollTop = logLinesEl.scrollHeight;
-  }
+  div.className = 'tline live';
+  div.textContent = rec.line;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
 }
-
-logFilterEl.addEventListener('change', applyLogFilter);
-document.getElementById('logClear').addEventListener('click', () => { logLinesEl.innerHTML = ''; });
 
 async function boot() {
   const snap = await (await fetch('/api/snapshot')).json();
@@ -418,9 +449,9 @@ async function boot() {
   const es = new EventSource('/api/stream');
   es.onopen = () => dot.classList.add('live');
   es.onerror = () => dot.classList.remove('live');
-  es.addEventListener('run', e => { renderRun(JSON.parse(e.data)); });
+  es.addEventListener('run', e => { renderRun(JSON.parse(e.data)); renderQueue(); });
   es.addEventListener('gh', e => renderGh(JSON.parse(e.data)));
-  es.addEventListener('logline', e => { renderLogLine(JSON.parse(e.data)); });
+  es.addEventListener('logline', e => { appendLiveLine(JSON.parse(e.data)); });
 }
 boot();
 </script>
