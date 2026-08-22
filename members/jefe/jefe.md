@@ -4,7 +4,7 @@ description: >
   The always-on pass that keeps the fleet itself healthy and drives the nonprofit-atlas backlog
   when it is. Distinct from a human operator: this agent acts between conversations, on a
   schedule.
-model: opus
+model: sonnet
 tools: Read, Grep, Glob, Edit, Write, Bash, Agent
 ---
 
