@@ -30,6 +30,7 @@
   .pill.quiet { background: rgba(201,162,39,.18); color: var(--warn); }
   .pill.reported_nothing, .pill.no_vision_link, .pill.fail { background: rgba(201,70,62,.18); color: var(--bad); }
   .pill.pending { background: rgba(107,116,128,.18); color: var(--dim); }
+  .pill.dedup-count { background: rgba(74,143,214,.18); color: var(--accent); margin-left: 4px; }
   .row .meta { color: var(--dim); font-size: 11px; margin-top: 2px; }
   .row .outcome { margin-top: 4px; }
   a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
@@ -90,18 +91,58 @@ function ago(iso_or_epoch) {
   return Math.round(s / 3600) + 'h ago';
 }
 
+function costFlag(tok) {
+  if (!tok || !tok.cost_usd) return '';
+  const perTurn = tok.cost_usd / Math.max(1, tok.num_turns);
+  // a real pass runs many cheap turns; a high dollar-per-turn number is almost always a
+  // retry storm or an error path, not real work -- worth a glance-level red flag, not just
+  // buried in the fine print.
+  return perTurn > 1 ? ' <span class="pill fail" title="high $/turn -- likely a retry or error, not real work">$/turn high</span>' : '';
+}
+
 function renderRun(rec) {
   const div = document.createElement('div');
   div.className = 'row';
   const status = rec.status || 'pending';
   const pr = rec.pr ? `<a href="#" data-pr="${esc(rec.pr)}">PR #${esc(rec.pr)}</a>` : '';
+  // reported_nothing covers two very different real cases (#2999/#3015 already track this at
+  // the run_report.classify() layer): a genuine crash (exit_code != 0) vs a member that ran
+  // fine and found no eligible work -- self_critique/outcome is usually the clearest hint
+  // available in the record today, so surface THAT instead of a flat "(no outcome reported)"
+  // that reads identically for both.
+  const noOutcomeHint = rec.exit_code && rec.exit_code !== 0
+    ? `(exit code ${esc(rec.exit_code)} -- crashed, not "found nothing")`
+    : (rec.self_critique || '(ran fine, reported no outcome)');
+
+  // A fanout spawns N instances of the same member for the same reason (see
+  // run_gru_fanout.sh) -- when they land the same status+outcome back to back, that's one
+  // fact ("the fanout found nothing 5 times"), not 5 rows a human has to notice are
+  // duplicates of each other. Collapse into the existing top row with a "×N" count instead of
+  // stacking identical blocks -- a genuinely different outcome (a PR opened, a different
+  // status) always gets its own row.
+  const dedupKey = `${rec.member}|${status}|${rec.outcome || ''}`;
+  const top = runsEl.firstElementChild;
+  if (top && top.dataset.dedupKey === dedupKey) {
+    const n = parseInt(top.dataset.count || '1', 10) + 1;
+    top.dataset.count = n;
+    let badge = top.querySelector('.dedup-count');
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'pill dedup-count';
+      top.querySelector('b').after(badge);
+    }
+    badge.textContent = `×${n}`;
+    return;
+  }
+  div.dataset.dedupKey = dedupKey;
+  div.dataset.count = '1';
   div.innerHTML = `
     <span class="pill ${esc(status)}">${esc(status)}</span>
     <b>${esc(rec.member)}</b>
     <span class="meta">${esc(rec.kind || '')} · item ${esc(rec.item_id || '—')} ${pr ? '· ' + pr : ''}</span>
-    <div class="outcome">${esc(rec.outcome || '(no outcome reported)')}</div>
+    <div class="outcome">${esc(rec.outcome || noOutcomeHint)}</div>
     ${rec.evidence ? `<div class="meta">${esc(rec.evidence)}</div>` : ''}
-    ${rec.tokens && rec.tokens.cost_usd ? `<div class="meta">$${Number(rec.tokens.cost_usd).toFixed(3)} · ${esc(rec.tokens.num_turns)} turns</div>` : ''}
+    ${rec.tokens && rec.tokens.cost_usd ? `<div class="meta">$${Number(rec.tokens.cost_usd).toFixed(3)} · ${esc(rec.tokens.num_turns)} turns${costFlag(rec.tokens)}</div>` : ''}
     <div class="actions">
       <button data-act="steer" data-member="${esc(rec.member)}">throttle ${esc(rec.member)}</button>
     </div>`;
