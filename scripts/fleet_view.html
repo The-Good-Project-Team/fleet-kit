@@ -5,8 +5,8 @@
 <title>fleet-kit — live</title>
 <style>
   :root {
-    --bg: #0b0d10; --panel: #14171c; --border: #262b33; --text: #d7dce2; --dim: #6b7480;
-    --ok: #3e9b5c; --warn: #c9a227; --bad: #c9463e; --accent: #4a8fd6;
+    --bg: #f7f7f5; --panel: #ffffff; --border: #dcdcd6; --text: #2a2a26; --dim: #83837a;
+    --ok: #2f7d46; --warn: #a1791f; --bad: #b23b32; --accent: #2f6fa8;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
@@ -17,13 +17,11 @@
   #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
   #dot.live { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
 
-  /* feed (main) + rail (sidebar) -- was a 5-column grid, hard to read as a feed of events.
-     Reif: "feed style -- sidebar: fleet runs / open PRs / backlog. in fleet runs we show
-     what's upcoming too, but mostly every run, when it ran, and its full transcript." So the
-     runs column becomes the ONE thing you scan top-to-bottom; everything else (PRs, backlog,
-     members, cron queue) is reference material living in a narrower rail beside it. */
+  /* feed (main) + rail (sidebar) -- runs column is the ONE thing you scan; PRs/backlog/members
+     are reference material in a narrower rail beside it. */
   .layout { display: flex; min-height: calc(100vh - 41px); }
-  .feed { flex: 1; min-width: 0; overflow: auto; max-height: calc(100vh - 41px); }
+  .feed { flex: 1; min-width: 0; overflow: auto; max-height: calc(100vh - 41px);
+    display: flex; flex-direction: column; }
   .rail { width: 320px; flex: none; border-left: 1px solid var(--border); overflow: auto;
     max-height: calc(100vh - 41px); background: var(--panel); }
   .rail-section { border-bottom: 1px solid var(--border); }
@@ -31,18 +29,20 @@
 
   .col-head { padding: 8px 12px; font-weight: 600; color: var(--dim); text-transform: uppercase;
     font-size: 11px; letter-spacing: .05em; position: sticky; top: 0; background: var(--bg);
-    border-bottom: 1px solid var(--border); }
+    border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 6px; }
   .rail .col-head { background: var(--panel); }
+  .col-head .count { background: var(--border); color: var(--text); border-radius: 10px;
+    padding: 0 7px; font-size: 10.5px; font-weight: 700; }
   .row { padding: 8px 12px; border-bottom: 1px solid var(--border); }
   .row:hover { background: var(--panel); }
-  .feed .row:hover { background: rgba(255,255,255,.02); }
+  .feed .row:hover { background: rgba(0,0,0,.02); }
   .pill { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px;
     font-weight: 600; text-transform: uppercase; }
-  .pill.ok { background: rgba(62,155,92,.18); color: var(--ok); }
-  .pill.quiet { background: rgba(201,162,39,.18); color: var(--warn); }
-  .pill.reported_nothing, .pill.no_vision_link, .pill.fail { background: rgba(201,70,62,.18); color: var(--bad); }
-  .pill.pending, .pill.upcoming { background: rgba(107,116,128,.18); color: var(--dim); }
-  .pill.dedup-count { background: rgba(74,143,214,.18); color: var(--accent); margin-left: 4px; }
+  .pill.ok { background: rgba(47,125,70,.14); color: var(--ok); }
+  .pill.quiet { background: rgba(161,121,31,.14); color: var(--warn); }
+  .pill.reported_nothing, .pill.no_vision_link, .pill.fail { background: rgba(178,59,50,.14); color: var(--bad); }
+  .pill.pending, .pill.upcoming { background: rgba(131,131,122,.14); color: var(--dim); }
+  .pill.dedup-count { background: rgba(47,111,168,.14); color: var(--accent); margin-left: 4px; }
   .row .meta { color: var(--dim); font-size: 11px; margin-top: 2px; }
   .row .outcome { margin-top: 4px; }
   a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
@@ -56,21 +56,25 @@
   button.off { border-color: var(--bad); color: var(--bad); }
   .checks-green { color: var(--ok); } .checks-pending { color: var(--warn); } .checks-failing { color: var(--bad); }
 
-  /* upcoming (cron queue) rows at the top of the feed -- same row shape as a completed run so
-     the eye doesn't context-switch, just dimmer and unexpandable (nothing happened yet). */
+  /* upcoming (cron queue) rows -- Reif: "feeding bottom first, with the next in queue on the
+     bottom most part". The feed reads top (oldest) to bottom (most recent), so "what happens
+     next" belongs at the very bottom too, right where a chat/log feed's newest content lands. */
+  #runs { display: flex; flex-direction: column; }
   .row.upcoming { opacity: .55; }
   .row.upcoming:hover { opacity: .85; }
 
-  /* transcript expand -- click a run row to pull its pass start/end log block inline instead
-     of a separate bottom strip nobody scrolled to. */
+  /* transcript expand -- click a run row to pull its pass start/end log block inline. The
+     throttle action moved OUT of the row's face and into this panel -- it's a rare, deliberate
+     action, not something that should compete with the outcome text for attention. */
   .row.run { cursor: pointer; }
   .transcript { display: none; margin-top: 6px; padding: 8px; background: var(--bg);
     border: 1px solid var(--border); border-radius: 3px; max-height: 420px; overflow-y: auto;
     white-space: pre-wrap; word-break: break-all; font-size: 11.5px; color: var(--text); }
   .transcript.open { display: block; }
-  .transcript .tline { padding: 1px 0; border-bottom: 1px solid rgba(255,255,255,.02); }
+  .transcript .tline { padding: 1px 0; border-bottom: 1px solid rgba(0,0,0,.04); }
   .transcript .tline.live { color: var(--accent); }
   .transcript .loading, .transcript .none { color: var(--dim); }
+  .transcript .transcript-actions { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
   .expand-hint { color: var(--dim); font-size: 11px; margin-top: 4px; }
 </style>
 </head>
@@ -83,18 +87,18 @@
   <button id="masterToggle" style="font-weight:600"></button>
 </header>
 <div class="layout">
-  <div class="feed">
+  <div class="feed" id="feedScroll">
     <div class="col-head">Fleet runs</div>
-    <div id="queue"></div>
     <div id="runs"><div id="empty">waiting for the first pass…</div></div>
+    <div id="queue"></div>
   </div>
   <div class="rail">
     <div class="rail-section">
-      <div class="col-head">Open PRs</div>
+      <div class="col-head">Open PRs <span class="count" id="prCount">0</span></div>
       <div id="prs"></div>
     </div>
     <div class="rail-section">
-      <div class="col-head">Backlog (issues)</div>
+      <div class="col-head">Backlog (issues) <span class="count" id="issueCount">0</span></div>
       <div class="row"><button id="newIssue">+ new issue</button></div>
       <div id="issues"></div>
     </div>
@@ -107,6 +111,7 @@
 <script>
 const runsEl = document.getElementById('runs');
 const queueEl = document.getElementById('queue');
+const feedScrollEl = document.getElementById('feedScroll');
 const prsEl = document.getElementById('prs');
 const issuesEl = document.getElementById('issues');
 const dot = document.getElementById('dot');
@@ -130,10 +135,19 @@ function costFlag(tok) {
   return perTurn > 1 ? ' <span class="pill fail" title="high $/turn -- likely a retry or error, not real work">$/turn high</span>' : '';
 }
 
+// Was near-bottom before a render -- if so, a new row/queue update should keep the view pinned
+// to the bottom (chat/log feed convention: only auto-scroll if the human hasn't scrolled up to
+// read history). 40px slack for sub-pixel/rounding.
+function nearBottom() {
+  return feedScrollEl.scrollHeight - feedScrollEl.scrollTop - feedScrollEl.clientHeight < 40;
+}
+function scrollToBottom() { feedScrollEl.scrollTop = feedScrollEl.scrollHeight; }
+
 // Per-member "how many runs have we rendered so far" -- lets a transcript fetch say "the Nth
 // most recent pass for this member" without a run_id shared between runs.jsonl and the raw
 // .log files (see fleet_view_server.py's read_pass_block for why that's the correlation key).
-const memberRunSeq = {};
+// Counts from the END (most recent = 0) regardless of the feed's oldest-to-newest DOM order.
+const memberRunTotal = {};
 
 async function toggleTranscript(row, member) {
   const box = row.querySelector('.transcript');
@@ -144,12 +158,15 @@ async function toggleTranscript(row, member) {
     box.dataset.loaded = '1';
     box.innerHTML = '<div class="loading">loading transcript…</div>';
     try {
-      const r = await fetch(`/api/pass_log?member=${encodeURIComponent(member)}&n=${row.dataset.seq}`);
+      const r = await fetch(`/api/pass_log?member=${encodeURIComponent(member)}&n=${row.dataset.seqFromEnd}`);
       const { lines } = await r.json();
       box.innerHTML = (lines && lines.length)
         ? lines.map(l => `<div class="tline">${esc(l)}</div>`).join('')
         : '<div class="none">no transcript recorded for this pass</div>';
-      box.scrollTop = box.scrollHeight;
+      const actions = document.createElement('div');
+      actions.className = 'transcript-actions';
+      actions.innerHTML = `<button data-act="steer" data-member="${esc(member)}">throttle ${esc(member)}</button>`;
+      box.appendChild(actions);
     } catch {
       box.innerHTML = '<div class="none">failed to load transcript</div>';
     }
@@ -173,29 +190,28 @@ function renderRun(rec) {
   // A fanout spawns N instances of the same member for the same reason (see
   // run_gru_fanout.sh) -- when they land the same status+outcome back to back, that's one
   // fact ("the fanout found nothing 5 times"), not 5 rows a human has to notice are
-  // duplicates of each other. Collapse into the existing top row with a "×N" count instead of
-  // stacking identical blocks -- a genuinely different outcome (a PR opened, a different
-  // status) always gets its own row.
+  // duplicates of each other. Feed now reads oldest-to-newest (Reif: "feeding bottom first"),
+  // so the row a fresh duplicate collapses into is the LAST child, not the first.
   const dedupKey = `${rec.member}|${status}|${rec.outcome || ''}`;
-  const top = runsEl.firstElementChild;
-  if (top && top.classList.contains('run') && top.dataset.dedupKey === dedupKey) {
-    const n = parseInt(top.dataset.count || '1', 10) + 1;
-    top.dataset.count = n;
-    let badge = top.querySelector('.dedup-count');
+  const last = runsEl.lastElementChild;
+  if (last && last.classList.contains('run') && last.dataset.dedupKey === dedupKey) {
+    const n = parseInt(last.dataset.count || '1', 10) + 1;
+    last.dataset.count = n;
+    let badge = last.querySelector('.dedup-count');
     if (!badge) {
       badge = document.createElement('span');
       badge.className = 'pill dedup-count';
-      top.querySelector('b').after(badge);
+      last.querySelector('b').after(badge);
     }
     badge.textContent = `×${n}`;
     return;
   }
   div.dataset.dedupKey = dedupKey;
   div.dataset.count = '1';
-  const seq = memberRunSeq[rec.member] || 0;
-  memberRunSeq[rec.member] = seq + 1;
-  div.dataset.seq = seq;
+  memberRunTotal[rec.member] = (memberRunTotal[rec.member] || 0) + 1;
   div.dataset.member = rec.member;
+  // seqFromEnd is finalized in reindexSeq() below, once every row for this member is known --
+  // while streaming live, each new run for a member is "0" until the next one supersedes it.
   div.innerHTML = `
     <span class="pill ${esc(status)}">${esc(status)}</span>
     <b>${esc(rec.member)}</b>
@@ -204,21 +220,33 @@ function renderRun(rec) {
     ${rec.evidence ? `<div class="meta">${esc(rec.evidence)}</div>` : ''}
     ${rec.tokens && rec.tokens.cost_usd ? `<div class="meta">$${Number(rec.tokens.cost_usd).toFixed(3)} · ${esc(rec.tokens.num_turns)} turns${costFlag(rec.tokens)}</div>` : ''}
     <div class="expand-hint">click to view full transcript ▾</div>
-    <div class="transcript"></div>
-    <div class="actions">
-      <button data-act="steer" data-member="${esc(rec.member)}">throttle ${esc(rec.member)}</button>
-    </div>`;
+    <div class="transcript"></div>`;
   div.addEventListener('click', (e) => {
     if (e.target.closest('button') || e.target.closest('a')) return;
     toggleTranscript(div, rec.member);
   });
   document.getElementById('empty')?.remove();
-  runsEl.prepend(div);
-  while (runsEl.children.length > 300) runsEl.removeChild(runsEl.lastChild);
+  const wasAtBottom = nearBottom();
+  runsEl.appendChild(div);
+  while (runsEl.children.length > 300) runsEl.removeChild(runsEl.firstChild);
+  reindexSeq(rec.member);
+  if (wasAtBottom) scrollToBottom();
+}
+
+// After appending, every row for this member needs its "Nth most recent" index recomputed --
+// the newest (last in DOM) is 0, counting backwards. Cheap: at most a few dozen rows per member.
+function reindexSeq(member) {
+  const rows = Array.from(runsEl.querySelectorAll(`.row.run[data-member="${CSS.escape(member)}"]`));
+  rows.reverse().forEach((row, i) => { row.dataset.seqFromEnd = i; });
 }
 
 function renderGh(gh) {
-  prsEl.innerHTML = (gh.prs || []).map(pr => {
+  const prs = gh.prs || [];
+  const issues = gh.issues || [];
+  document.getElementById('prCount').textContent = prs.length;
+  document.getElementById('issueCount').textContent = issues.length;
+
+  prsEl.innerHTML = prs.map(pr => {
     const cls = pr._rollup === 'green' ? 'checks-green' : pr._rollup === 'failing' ? 'checks-failing' : 'checks-pending';
     return `<div class="row">
       <a href="${esc(pr.url)}" target="_blank">#${pr.number}</a> ${pr.isDraft ? '<span class="meta">draft</span>' : ''}
@@ -228,7 +256,7 @@ function renderGh(gh) {
     </div>`;
   }).join('') || '<div id="empty">no open PRs</div>';
 
-  issuesEl.innerHTML = (gh.issues || []).map(i => `<div class="row">
+  issuesEl.innerHTML = issues.map(i => `<div class="row">
       <a href="#" class="meta">#${i.number}</a>
       <div>${esc(i.title)}</div>
       <div class="meta">${i._claimed ? '<span class="pill quiet">claimed</span>' : '<span class="pill ok">open</span>'} · ${ago(i.updatedAt)}</div>
@@ -248,16 +276,19 @@ function fmtIn(s) {
   return (s / 3600).toFixed(1) + 'h';
 }
 
-// Upcoming fires render at the top of the SAME feed as completed runs -- "what's about to
-// happen" flowing straight into "what just happened", one scannable stream instead of a
-// separate cron-queue column the eye has to jump to.
+// Upcoming fires render at the very BOTTOM of the feed, below every completed run -- Reif:
+// "feeding bottom first, with the next in queue on the bottom most part". The feed reads like
+// a log: oldest history at top, most recent completed run above this, and "what's about to
+// happen" is the natural next line after that.
 async function renderQueue() {
   const { next_fires } = await (await fetch('/api/next_fires')).json();
+  const wasAtBottom = nearBottom();
   queueEl.innerHTML = (next_fires || []).filter(f => f.enabled).slice(0, 6).map(f => `<div class="row upcoming">
       <span class="pill upcoming">next</span>
       <b>${esc(f.member)}</b>
       <div class="meta">in ${fmtIn(f.in_s)}${f.next_at ? ' · ' + esc(f.next_at) : ''}</div>
     </div>`).join('');
+  if (wasAtBottom) scrollToBottom();
 }
 
 document.body.addEventListener('click', async (e) => {
@@ -421,33 +452,31 @@ document.body.addEventListener('click', async (e) => {
 // not yet in the feed (still running, no runs.jsonl record yet) has nowhere to land these; that
 // arrives as its own 'run' event the moment the pass finishes and gets a row.
 function appendLiveLine(rec) {
-  const openBoxes = runsEl.querySelectorAll(`.row.run[data-member="${CSS.escape(rec.member)}"] .transcript.open`);
-  if (!openBoxes.length) return;
-  // only the most recent row for this member is "in flight" -- older expanded rows are history
-  const row = runsEl.querySelector(`.row.run[data-member="${CSS.escape(rec.member)}"]`);
+  // the most recent row for this member is the LAST one in DOM order now (feed reads oldest
+  // at top, newest at bottom) -- querySelectorAll preserves DOM order so the last match is it.
+  const rows = runsEl.querySelectorAll(`.row.run[data-member="${CSS.escape(rec.member)}"]`);
+  const row = rows[rows.length - 1];
   const box = row && row.querySelector('.transcript.open');
-  if (!box || row.dataset.seq !== '0') return;
+  if (!box || row.dataset.seqFromEnd !== '0') return;
   box.querySelector('.loading')?.remove();
   box.querySelector('.none')?.remove();
+  const actions = box.querySelector('.transcript-actions');
   const div = document.createElement('div');
   div.className = 'tline live';
   div.textContent = rec.line;
-  box.appendChild(div);
-  box.scrollTop = box.scrollHeight;
+  if (actions) box.insertBefore(div, actions); else box.appendChild(div);
 }
 
 async function boot() {
   const snap = await (await fetch('/api/snapshot')).json();
-  // snap.runs is oldest-first (runs.jsonl append order) and renderRun PREPENDS each row --
-  // process oldest-to-newest so the newest ends up on top. A .reverse() here was a real,
-  // long-standing bug (predates the feed redesign, traced via live snapshot vs rendered DOM
-  // diverging on dino 2026-08-22): processing newest-first while prepending pushes the
-  // newest DOWN and leaves the oldest run sitting at the top of the feed forever.
+  // snap.runs is oldest-first (runs.jsonl append order) -- render in that order and APPEND
+  // each row so the feed reads top (oldest) to bottom (newest), Reif: "feeding bottom first".
   snap.runs.forEach(renderRun);
   renderGh(snap.gh);
   renderFleetState();
   renderMembers();
   renderQueue();
+  scrollToBottom();
   setInterval(renderMembers, 30000);
   setInterval(renderQueue, 15000);
 
