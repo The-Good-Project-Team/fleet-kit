@@ -43,6 +43,19 @@ DEPLOY_STATE=$(read_latest "${FIXER_DEPLOY_WORKFLOW:-deploy.yml}")
 CI_CONC="${CI_STATE%% *}";      CI_SHA="${CI_STATE#* }"
 DEP_CONC="${DEPLOY_STATE%% *}"; DEP_SHA="${DEPLOY_STATE#* }"
 
+# main-only CI/deploy checks above miss a red PR branch entirely -- it never touches main, so
+# it just sits BLOCKED forever with nobody watching (real case: PR #3071, RESUME_BRIEF.md fails
+# its own docs-linter, filed 2026-08-21, never actioned). One extra call: the oldest open PR
+# with a failing required check, if any -- oldest first so a stale block gets found before a
+# fresh one, same "one fire at a time" shape as CI/deploy above.
+read_stale_pr() { # -> "pr-number sha" of oldest open PR with a FAILURE check, or "none none"
+  gh pr list --state open --limit 30 --json number,headRefOid,statusCheckRollup \
+    -q 'sort_by(.number) | [.[] | select([.statusCheckRollup[]? | select(.conclusion == "FAILURE")] | length > 0)][0] | if . then "\(.number) \(.headRefOid)" else "none none" end' \
+    2>>"$LOG" || echo "none none"
+}
+PR_STATE=$(read_stale_pr)
+PR_NUM="${PR_STATE%% *}"; PR_SHA="${PR_STATE#* }"
+
 # Optional: is the deployed product actually serving? Set FIXER_HEALTH_URL/FIXER_PAGE_URL to
 # enable. Both must fail before this counts as a fire -- a single timeout is a blip, not an
 # outage.
@@ -69,6 +82,10 @@ FIRE_SHA=""
 FIRE_WHAT=""
 if [ "$DEP_CONC" = "failure" ]; then FIRE_SHA="$DEP_SHA"; FIRE_WHAT="${FIXER_DEPLOY_WORKFLOW:-deploy.yml}"; fi
 if [ "$CI_CONC" = "failure" ]; then FIRE_SHA="$CI_SHA"; FIRE_WHAT="${FIRE_WHAT:+$FIRE_WHAT+}${FIXER_CI_WORKFLOW:-ci.yml}(${FIXER_DEFAULT_BRANCH:-main})"; fi
+if [ "$PR_NUM" != "none" ] && [ -z "$FIRE_SHA" ]; then
+  # main/deploy fires outrank a stale PR -- a red main is the bigger emergency either way.
+  FIRE_SHA="$PR_SHA"; FIRE_WHAT="stale-pr(#$PR_NUM)"
+fi
 if [ -n "$PROD_DOWN" ]; then
   # No single commit is necessarily guilty (an outage can be a resource threshold crossed, not
   # a bad deploy) -- bucket by time so dedup has something stable while a live outage re-fires.
