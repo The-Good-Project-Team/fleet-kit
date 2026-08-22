@@ -131,6 +131,14 @@ function ago(iso_or_epoch) {
   return Math.round(s / 3600) + 'h ago';
 }
 
+// Clock time a run actually happened, in the viewer's own local timezone -- Reif: "I want to
+// know what time this thing ran, and how long ago that was". Pairs with ago() on the same row:
+// one absolute, one relative.
+function clockTime(epoch) {
+  if (!epoch) return '';
+  return new Date(epoch * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
 function costFlag(tok) {
   if (!tok || !tok.cost_usd) return '';
   const perTurn = tok.cost_usd / Math.max(1, tok.num_turns);
@@ -226,7 +234,8 @@ function renderRun(rec) {
   div.innerHTML = `
     <span class="pill ${esc(status)}">${esc(status)}</span>
     <b>${esc(rec.member)}</b>
-    <span class="meta">${esc(rec.kind || '')} · item ${esc(rec.item_id || '—')} ${pr ? '· ' + pr : ''}</span>
+    <span class="meta">${esc(rec.kind || '')} · item ${esc(rec.item_id || '—')} ${pr ? '· ' + pr : ''}
+      ${rec.ts ? `· ${clockTime(rec.ts)} (${ago(rec.ts)})` : ''}</span>
     <div class="outcome">${esc(rec.outcome || noOutcomeHint)}</div>
     ${rec.evidence ? `<div class="meta">${esc(rec.evidence)}</div>` : ''}
     ${rec.tokens && rec.tokens.cost_usd ? `<div class="meta">$${Number(rec.tokens.cost_usd).toFixed(3)} · ${esc(rec.tokens.num_turns)} turns${costFlag(rec.tokens)}</div>` : ''}
