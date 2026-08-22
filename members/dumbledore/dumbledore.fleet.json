@@ -23,7 +23,7 @@
     "daily_at": "15:10"
   },
   "timeout_s": 3600,
-  "enabled": false,
+  "enabled": true,
   "llm": {
     "model": "sonnet",
     "max_turns": 100,
