@@ -48,9 +48,21 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 MEMBERS_DIR = Path(__file__).resolve().parent.parent / "members"
+
+# {{TOKEN}} in a charter is either (a) a template slot nobody filled in for this product --
+# jefe.md shipped with {{VISION}}/{{NORTH_STAR_METRIC}} unfilled and ran silently as a no-op on
+# every hourly tick for its entire life, since "explain your task" reads as a coherent LLM
+# response, not an error -- or (b) a runtime slot a member's own `runner` script fills in per
+# invocation (judge-judy's {{PR_BODY}}/{{DIFF}}/{{TRUNCATION_NOTE}}, substituted by
+# judge-judy.sh before claude -p ever sees the prompt). Only (a) is a defect: a charter with NO
+# runner has nothing left to fill the slot, ever, so an unfilled {{TOKEN}} there is permanent,
+# not "not yet". A charter WITH a runner is assumed to have its placeholders covered by that
+# script -- this check only distinguishes the two cases, it doesn't parse the runner itself.
+_PLACEHOLDER_RE = re.compile(r"\{\{[A-Z_]+\}\}")
 
 # Every member's behavior is a prompt run through claude -p. Tools (including a member's own
 # helper scripts, reached via Bash) are how it acts -- never a substitute for having a goal.
@@ -176,7 +188,25 @@ def load(path: str | os.PathLike) -> dict:
         spec = json.loads(p.read_text())
     except json.JSONDecodeError as exc:
         raise SpecError(f"{p.name}: not valid JSON ({exc})") from exc
-    return validate(spec, filename=str(p))
+    spec = validate(spec, filename=str(p))
+    _check_charter(spec, p.parent)
+    return spec
+
+
+def _check_charter(spec: dict, member_dir: Path) -> None:
+    """A charter with no `runner` has no mechanism to ever fill a {{TOKEN}} slot -- catch the
+    jefe.md class of bug (a template placeholder that ships live and runs as a silent no-op
+    forever) at load time, the same place every other structural mistake here gets caught."""
+    if "runner" in spec["llm"]:
+        return
+    charter = member_dir / spec["llm"]["prompt_file"]
+    if not charter.exists():
+        return  # behavior_path() raises the "charter not found" error for this case
+    hits = sorted(set(_PLACEHOLDER_RE.findall(charter.read_text())))
+    _require(not hits,
+              f"{spec['name']}: charter {charter.name} has unfilled placeholder(s) {hits} and "
+              f"no llm.runner to fill them at runtime -- fill them in or the member silently "
+              f"no-ops every pass (see jefe #22 for the real incident)")
 
 
 def load_all(members_dir: str | os.PathLike | None = None) -> list[dict]:
