@@ -18,6 +18,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 REPO_URL=""
 NAME=""
+CONTAINER_NAME=""
 # Space-separated, same shape as FLEET_ACCOUNTS itself -- account_pool.sh already tries these
 # in order and fails over; up.sh's job is just mounting creds for EVERY name in the list, not
 # only the first. `--account` (singular) still works as an alias for one name.
@@ -29,17 +30,31 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO_URL="$2"; shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
+    --container-name) CONTAINER_NAME="$2"; shift 2 ;;
     --account|--accounts) ACCOUNTS="$2"; shift 2 ;;
     --port) VIEW_PORT="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 --repo <git-url> --name <project-name> [--accounts \"primary other\"] [--port <n>]"
+      echo "Usage: $0 --repo <git-url> --name <project-name> [--container-name <name>] [--accounts \"primary other\"] [--port <n>]"
       exit 0 ;;
     *) echo "Unknown flag: $1" >&2; exit 1 ;;
   esac
 done
 
+# --container-name overrides the podman container's own name (default: fleet-kit-$NAME). --name
+# still drives instance-state paths, image build, ports -- this ONLY renames the container
+# itself, for a project that wants a name matching what the repo is actually called (e.g.
+# nonprofit-atlas's fleet running as container "philanthropy", the app's real product name)
+# rather than the fleet-kit-prefixed default. Falls back to FLEET_CONTAINER_NAME from the
+# instance's own fleet.env (sourced below, once NAME is known) so a re-run on the same box
+# remembers the choice instead of reverting to the default -- same persistence pattern as
+# FLEET_ACCOUNTS.
+if [ -z "$CONTAINER_NAME" ] && [ -f "instances/$NAME/fleet.env" ]; then
+  CONTAINER_NAME="$(grep -oE '^FLEET_CONTAINER_NAME=.*' "instances/$NAME/fleet.env" 2>/dev/null | cut -d= -f2-)"
+fi
+CONTAINER_NAME="${CONTAINER_NAME:-fleet-kit-$NAME}"
+
 if [ -z "$REPO_URL" ] || [ -z "$NAME" ]; then
-  echo "Usage: $0 --repo <git-url> --name <project-name> [--accounts \"primary other\"] [--port <n>]" >&2
+  echo "Usage: $0 --repo <git-url> --name <project-name> [--container-name <name>] [--accounts \"primary other\"] [--port <n>]" >&2
   exit 1
 fi
 
@@ -128,9 +143,9 @@ if [ -z "$VIEW_PORT" ]; then
 fi
 WEBHOOK_PORT=$(( VIEW_PORT + 1 ))
 
-echo "[up] starting fleet '$NAME' -> $REPO_URL (image $IMAGE_TAG, accounts [${ACCOUNT_LIST[*]}], view port $VIEW_PORT, webhook port $WEBHOOK_PORT)"
+echo "[up] starting fleet '$NAME' as container '$CONTAINER_NAME' -> $REPO_URL (image $IMAGE_TAG, accounts [${ACCOUNT_LIST[*]}], view port $VIEW_PORT, webhook port $WEBHOOK_PORT)"
 exec podman run -d \
-  --name "fleet-kit-$NAME" \
+  --name "$CONTAINER_NAME" \
   --replace \
   -e "FLEET_REPO=/repo" \
   -e "FLEET_REPO_URL=$REPO_URL" \
