@@ -438,7 +438,12 @@ function appendLiveLine(rec) {
 
 async function boot() {
   const snap = await (await fetch('/api/snapshot')).json();
-  snap.runs.slice().reverse().forEach(renderRun);
+  // snap.runs is oldest-first (runs.jsonl append order) and renderRun PREPENDS each row --
+  // process oldest-to-newest so the newest ends up on top. A .reverse() here was a real,
+  // long-standing bug (predates the feed redesign, traced via live snapshot vs rendered DOM
+  // diverging on dino 2026-08-22): processing newest-first while prepending pushes the
+  // newest DOWN and leaves the oldest run sitting at the top of the feed forever.
+  snap.runs.forEach(renderRun);
   renderGh(snap.gh);
   renderFleetState();
   renderMembers();
