@@ -92,7 +92,12 @@ case "${1:-cron-foreground}" in
       echo "HOME=/root"
       echo
       echo "*/10 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && cd $FLEET_REPO && git pull --ff-only >> $LOG_DIR/gitpull.log 2>&1"
-      echo "*/2 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh the-fixer >> $LOG_DIR/the-fixer.log 2>&1"
+      # Backstop poll widened */2 -> hourly (2026-08-22, Reif: "don't want to see it crying so
+      # much, costs 20 cents a run") -- every tick spawns a real claude -p turn even on green
+      # (check.sh gates the reasoning depth, not the LLM spin-up cost itself), and the webhook
+      # above already covers the fast CI/deploy-red path in near-real-time. This tick only needs
+      # to catch prod-down-with-no-failing-workflow-run, which doesn't need sub-hour latency.
+      echo "47 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh the-fixer >> $LOG_DIR/the-fixer.log 2>&1"
       echo "*/5 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dont-shoot-the-messenger >> $LOG_DIR/dont-shoot-the-messenger.log 2>&1"
       echo "*/15 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh judge-judy >> $LOG_DIR/judge-judy.log 2>&1"
       # Hourly/daily anchors nudged OFF the-fixer's even-minute grid (*/2) and gitpull's
