@@ -264,6 +264,43 @@ class State:
                 self.gh = gh
             time.sleep(GH_POLL_S)
 
+    def tail_member_logs_forever(self):
+        """Raw log lines, live, per member -- Reif: 'we are piping everything, i want to see
+        it in a feed'. run_member.sh already streams thinking:/tool call:/tool result: lines
+        into each member's own <name>.log AS THEY HAPPEN (stream_log.py, piped through `log`)
+        -- this loop is the missing other half: it existed on disk the whole time, nothing
+        ever tailed it for the dashboard. runs.jsonl (tailed above) only carries the FINAL
+        summary once a pass ends; this is the live, in-progress detail a human watching the
+        page actually asked to see.
+        """
+        offsets: dict[str, int] = {}
+        while True:
+            try:
+                for log_path in sorted(LOG_DIR.glob("*.log")):
+                    member = log_path.stem
+                    try:
+                        size = log_path.stat().st_size
+                    except OSError:
+                        continue
+                    seen = offsets.get(member, size)  # first sight of a file: start at EOF,
+                    # never replay a whole historical log as if it just happened
+                    if member not in offsets:
+                        offsets[member] = size
+                        continue
+                    if size < seen:
+                        seen = 0  # rotated/truncated underneath us
+                    if size > seen:
+                        with log_path.open(errors="ignore") as fh:
+                            fh.seek(seen)
+                            new = fh.read()
+                            offsets[member] = fh.tell()
+                        for line in new.splitlines():
+                            if line.strip():
+                                broadcast("logline", {"member": member, "line": line})
+            except OSError:
+                pass
+            time.sleep(1)
+
     def snapshot(self) -> dict:
         with self.lock:
             return {"runs": list(self.runs), "gh": dict(self.gh)}
@@ -560,6 +597,7 @@ def main() -> int:
     STATE.load_existing_runs()
     threading.Thread(target=STATE.tail_runs_forever, daemon=True).start()
     threading.Thread(target=STATE.poll_gh_forever, daemon=True).start()
+    threading.Thread(target=STATE.tail_member_logs_forever, daemon=True).start()
     threading.Thread(target=watch_and_broadcast, daemon=True).start()
     STATE.gh = poll_gh_state()  # one synchronous poll so the first page load isn't empty
 
