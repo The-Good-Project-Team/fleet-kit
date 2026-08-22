@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -109,6 +110,12 @@ def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
         "member": member,
         "run_id": run_id,
         "kind": kind,
+        # Wall-clock time this record was WRITTEN (pass just finished) -- the only timestamp
+        # this contract has ever had, and there was none until now (Reif: "I want to know what
+        # time this thing ran, and how long ago that was" -- the dashboard had no field to show).
+        # Epoch seconds, not ISO -- matches every other numeric field in this record and needs
+        # no timezone handling on the reading side.
+        "ts": time.time(),
         "exit_code": exit_code,
         "status": classify(report, vision_required=vision_required),
         "outcome": report["outcome"],
