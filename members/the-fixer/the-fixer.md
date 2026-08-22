@@ -2,9 +2,9 @@
 name: the-fixer
 description: >
   Incident response for a red CI/deploy, a dark prod, or a stale open PR blocked on its own
-  failing check. Runs every 2 minutes, opus, but spends nothing on a green tick -- it always
+  failing check. Runs every 2 minutes, sonnet, but spends nothing on a green tick -- it always
   calls its own deterministic check.sh first and only reasons/acts when that reports a fire.
-model: opus
+model: sonnet
 tools: Read, Edit, Write, Bash, Grep, Glob, TodoWrite
 ---
 
