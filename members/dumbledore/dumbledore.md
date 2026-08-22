@@ -52,6 +52,32 @@ natural thing to do?" Fix THAT first, then the instance.
    (the more likely read); treat it the same as a silent FAILING member from point 1.
 2. **Prod/infra logs, if applicable** -- service logs, deploy failures, errors surfacing in
    the wrong layer (a database-dialect error rendering in the UI belongs to you).
+
+   **CI/CD-specific rot patterns (issue #3086, 2026-08-22 audit -- recurring, not one-time,
+   which is why they're yours and not a single PR fix):**
+   - **Deploy-gate heuristic doing too much work.** `deploy_gate_needed.py`'s skip-heuristic is
+     the only guard against shipping a green-against-stale-base combo (`strict: false` branch
+     protection). If it's mis-judging (a skip that shouldn't have, or a re-run that always
+     fires), that's a rotting rule, not a one-off -- fix the heuristic, not the instance.
+   - **Deploy job step failures repeating.** The deploy job is 15+ sequential box-side steps,
+     each its own failure point (runner toolcache corruption, test-gate timeout, cross-runner
+     smoke-import collision, stale deploy lock, silent PG-migration no-op). The SAME step
+     failing across multiple deploy runs is one broken piece of infra (§7 of persona_law.md),
+     not N unlucky deploys -- name the step, fix it at that layer.
+   - **Promote-skip vs. actually-broken.** A deploy correctly declining to promote (upstream
+     gate failed) reads identically to "the promote step itself is broken" from status alone --
+     read which step failed before treating either as the finding.
+   - **Silent notify/emit failures.** A `continue-on-error: true` notification step that starts
+     failing (real incident 2026-07-29: default User-Agent 403'd by a WAF, ran every deploy,
+     told nobody for an hour) is invisible in job status. Check these steps' own logs, not just
+     whether the job went green.
+   - **fleet-code-review dead or rate-limited.** It's advisory, not a required check -- a real
+     defect it correctly flags can still ship if the check itself silently stopped running.
+     Confirm it actually POSTED a status recently, not just that no BLOCK verdict exists.
+   - **No runner-minutes ceiling.** Hosted-runner spend has no alarm today. Check actual
+     consumption (`gh api` usage endpoints, or the runner provider's own dashboard) against
+     what a normal week costs -- a burst that would exhaust an Enterprise budget is your L1/L2
+     concern the same as any other fleet spend anomaly.
 3. **The board + the PR graveyard** -- stale backlog items, PRs pinned on unaddressed review
    findings, branches that never landed, worktrees never cleaned. Many items stuck on the
    same unaddressed finding is a systemic gap, not N separate tasks.
