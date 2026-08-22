@@ -8,13 +8,13 @@
 # ever called it -- cron fired exactly one run_member.sh gru per hour, hardcoded, regardless of
 # how much headroom was actually available. Found live on dino, 2026-08-21.
 #
-# HEADROOM: fleet-kit has no real weekly-usage/rate-limit API wired in (the source fleet's
-# "maxx" budget-verdict service is a documented extension point account_pool.sh drops on
-# purpose -- see that script's header). Until you wire a real one, FLEET_GRU_HEADROOM_USD is a
-# conservative fixed dollar assumption, override it in fleet.env once you have a real number
-# to plan against. Both sides of fanout.py's division must be the SAME unit -- dollars here,
-# matched against gru's own real per-pass dollar cost below, never a token count against a
-# dollar figure.
+# HEADROOM: real usage/pacing signal via scripts/maxx_reader.py when FLEET_MAXX_URL/HANDLE/KEY
+# are set (maxx's real MCP endpoint, verified live 2026-08-22 -- see that module's header; the
+# REST-shaped endpoint account_pool.sh's header originally pointed at 404s, this is the real
+# one). When unconfigured (most fleet-kit consumers), falls back to the fixed dollar ceiling
+# below, unchanged. maxx's own read FAILS OPEN by design (never a hard stop from an unreadable
+# meter) -- an unconfigured or failing maxx read only ever narrows this pass's ambition, never
+# invents a stop this script wouldn't otherwise make.
 set -uo pipefail
 
 [ -f "${FLEET_ENV_FILE:-./fleet.env}" ] && . "${FLEET_ENV_FILE:-./fleet.env}"
@@ -26,6 +26,24 @@ ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
 
 HEADROOM_USD="${FLEET_GRU_HEADROOM_USD:-50}"
+
+# Real maxx pacing, when configured: scales the fixed ceiling by the fraction of this window's
+# advised spend still unused, rather than replacing the ceiling outright -- this keeps
+# FLEET_GRU_HEADROOM_USD as the hard cap an operator set on purpose, with maxx only ever
+# narrowing it further when the account is already burning fast.
+MAXX_RESULT=$(python3 "$KIT_DIR/scripts/maxx_reader.py" 2>/dev/null)
+MAXX_RC=$?
+if [ "$MAXX_RC" -eq 0 ]; then
+  MAXX_FRACTION=$(echo "$MAXX_RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)['headroom_fraction'])" 2>/dev/null)
+  MAXX_LABEL=$(echo "$MAXX_RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)['label'])" 2>/dev/null)
+  if [ -n "$MAXX_FRACTION" ] && [ "$MAXX_FRACTION" != "None" ]; then
+    HEADROOM_USD=$(python3 -c "print(round($HEADROOM_USD * $MAXX_FRACTION, 2))")
+    log "maxx: real pacing read ($MAXX_LABEL) -- scaled headroom to \$$HEADROOM_USD"
+  fi
+else
+  MAXX_LABEL=$(echo "$MAXX_RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('label','unknown'))" 2>/dev/null || echo "unreadable")
+  [ "$MAXX_LABEL" != "not_configured" ] && log "maxx: read failed ($MAXX_LABEL) -- using fixed ceiling unchanged, per fail-open design"
+fi
 
 # Real spend-per-build from this box's own run history (fleet_db.py's own accounting, not an
 # estimate) -- falls back to gru's own configured max_budget_usd if there's no run history yet
