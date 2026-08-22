@@ -171,6 +171,26 @@ overrides tune dials and refuse authority, `fleet.env` is yours and untracked, a
 exist for both platforms. This caught a real break during the port — `run_report.py` imported a
 scoring module that was never copied, so a fresh clone crashed on import and nothing noticed.
 
+## Edited fleet.env but the container didn't notice?
+
+`fleet.env` is bind-mounted `:ro` into the container. Most edits (append a line, change a
+value with an editor that truncates-and-rewrites) show up immediately — the container reads
+the file fresh on every member invocation, no restart needed. But `sed -i` and some editors
+replace-then-rename instead, which swaps the underlying inode; a mount that already resolved
+the old one can keep serving stale content until the mount itself is torn down and recreated.
+If a value you just edited doesn't show up inside the container (`podman exec <name> cat
+/fleet-kit/fleet.env` still shows the old value), that's this — restart the container:
+
+```
+scripts/refresh_container.sh fleet-kit-<name>
+```
+
+Use this instead of a bare `podman restart` — on a box with rootless podman and published
+ports, a plain restart can race its own port cleanup (`rootlessport listen tcp ...: address
+already in use`) if the new instance binds before the kernel releases the old one's port. This
+script retries via `podman start` automatically when that happens, instead of leaving the
+container down.
+
 ## What's NOT in this kit (extension points)
 
 The source fleet had product-specific machinery this kit deliberately does not port:
