@@ -38,12 +38,12 @@ minion processes and coordinates before finishing (proposed)**.
    - **Runway.** Read real headroom (maxx_reader.py's live pacing signal) and this box's own
      observed cost-per-build (fleet_db.py spend history) — how much work can genuinely be
      afforded this pass, in dollars, not a fixed guess.
-   - **Priority.** Pull the open, unclaimed backlog and RANK it — not "first N unclaimed",
-     an actual judgment call on what's MOST IMPORTANT to build right now given the runway
-     just computed (RICE-shaped: impact, confidence, effort, same reasoning `board_rice.py`
-     already encodes for the human-facing board in the source project — gru should read and
-     apply that same logic, not invent a second ranking scheme). This is the step that
-     doesn't exist at all today (today's fanout picks blind, first-claimable-wins).
+   - **Priority — gru CHOOSES, marie RANKS (Reif's correction, 2026-08-21).** gru does not
+     rank the backlog itself. Marie (the backlog PM, `members/marie/marie.md` Part C) scores
+     every open item RICE-style against the target repo's own vision and writes it as a
+     `fleet:priority-high/medium/low` label. gru reads that label, filtering high first, then
+     medium, then low, and picks what fits its runway. An unlabeled item is lowest priority
+     by default, not something gru corrects on its own judgment.
    - **Size N to fit BOTH constraints** — the runway ceiling AND how many genuinely
      high-priority items actually exist this pass (never pad N with low-value items just to
      spend the full budget — an empty or thin high-value queue means a small N, not "spend
@@ -67,9 +67,10 @@ minion processes and coordinates before finishing (proposed)**.
      noise Reif flagged: one gru pass = one legible row with the real breakdown inside it,
      not N indistinguishable `reported_nothing` blocks.
 3. **`minion` is a new member** (`members/minion/minion.fleet.json` + `minion.md`), a near-
-   copy of gru's current charter (build/test/PR/auto-merge rules 1-10 are unchanged — they're
+   copy of gru's ORIGINAL charter (build/test/PR/auto-merge rules 1-10 are unchanged — they're
    already worker-shaped) MINUS the claim step (gru already claimed the item for it) and minus
-   the fanout/headroom awareness (that's gru's job now, not the worker's).
+   the runway/priority awareness (that's gru's job now, not the worker's). minion's own
+   `gh issue edit` is tool-denied entirely — it has no legitimate reason to touch a label.
 4. **Cost/efficiency note**: this does NOT reduce total `claude -p` process count for a full
    pass (still 1 gru + N minions = N+1 processes, vs today's N gru processes) — gru's own
    pass adds one session's worth of overhead on top. The efficiency win is elsewhere: no
@@ -95,14 +96,31 @@ minion processes and coordinates before finishing (proposed)**.
 
 - **Own worktree per minion.** Confirmed — same collision-avoidance reasoning gru's charter
   already documents for concurrent workers. No shared tree.
-- **Gru's job is explicitly: runway -> priority -> spawn -> require reports.** Not "pick N
-  unclaimed items and go" — an actual judgment call on what's most important to build given
-  what this pass can afford, and gru does not get to finish its own pass without reading back
-  a real result from every minion it spawned.
+- **Gru's job is explicitly: runway -> choose (from marie's ranking) -> claim -> spawn ->
+  require reports.** Not "pick N unclaimed items and go" — a real choice, bounded by runway,
+  of WHICH already-ranked items to build now — and gru does not get to finish its own pass
+  without reading back a real result from every minion it spawned.
+- **Marie ranks, gru chooses, minion builds.** Marie's charter gained a Part C: RICE-shaped
+  priority scoring against the target repo's own vision, written as `fleet:priority-*`
+  labels. gru never re-ranks; an item marie hasn't labeled is lowest priority by default.
+- **Gru's own budget/timeout is bigger than a single minion's** — `max_budget_usd: 8`,
+  `timeout_s: 3600` (vs minion's 5/2400) since it's now doing runway-read + choosing +
+  claim-coordination + waiting on N children, all in one invocation.
 
-## Open question still standing
+## Built (2026-08-21)
 
-- Gru's own budget/timeout ceiling needs to be bigger than a single minion's (it's now doing
-  runway-read + priority-ranking + claim-coordination + waiting on N children, all within one
-  invocation, on top of its own turns). Needs its own `max_budget_usd`/`timeout_s` tuned
-  separately from minion's, not inherited from today's gru numbers unchanged.
+- `members/minion/{minion.fleet.json,minion.md}` — new worker member.
+- `members/gru/{gru.fleet.json,gru.md}` — rewritten as pure orchestrator (Edit/Write removed
+  from its tool allowlist — if gru wants to touch a file, that's a bug in this design).
+- `members/marie/{marie.fleet.json,marie.md}` — Part C added (priority ranking), turn/timeout/
+  budget bumped (120/3600/$10) for the added scope of ranking the full backlog every pass.
+- `scripts/run_member.sh` — `--item <n>` flag, prepended to the charter prompt so a minion
+  knows its assigned issue even though every concurrently-spawned minion shares one charter
+  file. `RUN_ID` includes the item number so gru's own report-reading grep can find it.
+- `scripts/run_gru_fanout.sh` — collapsed to a one-line `exec run_member.sh gru`; all N-sizing
+  logic moved into gru's own reasoning per its charter.
+- `scripts/fanout.py` — DELETED (Reif, 2026-08-21: "dead code we kill, if writing is cheap
+  then deleting has to be a law"). Its Fibonacci-ladder logic is superseded by gru's own
+  in-context runway reasoning; nothing else called it. `fleet.env.example`'s
+  `FLEET_HEADROOM_FRACTION`/`FLEET_GRU_HEADROOM_USD` removed alongside it (both dead the
+  moment nothing read them).

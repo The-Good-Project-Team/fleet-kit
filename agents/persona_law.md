@@ -113,8 +113,6 @@ the deterministic parts live in a script, your judgment decides what to do with 
 - **`scripts/member_spec.py`** — `by_name(name)` / `load_all()` (Python import, not a CLI) if
   you need to read another member's own spec (its mandate, its schedule, its tools) rather than
   guess at it.
-- **`scripts/fanout.py`** — headroom + open-PR-count -> safe builder-count. If you're deciding
-  how many parallel builders to run, this is the calculation, not a fixed number.
 - **Your own member directory's script(s)** — e.g. `the-fixer/check.sh`, `roomba/roomba.py`.
   Deterministic, zero-LLM-spend checks specific to your own job; call them before reasoning,
   not instead of it.
