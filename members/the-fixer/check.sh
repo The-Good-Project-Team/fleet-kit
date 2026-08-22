@@ -45,16 +45,58 @@ DEP_CONC="${DEPLOY_STATE%% *}"; DEP_SHA="${DEPLOY_STATE#* }"
 
 # main-only CI/deploy checks above miss a red PR branch entirely -- it never touches main, so
 # it just sits BLOCKED forever with nobody watching (real case: PR #3071, RESUME_BRIEF.md fails
-# its own docs-linter, filed 2026-08-21, never actioned). One extra call: the oldest open PR
-# with a failing required check, if any -- oldest first so a stale block gets found before a
-# fresh one, same "one fire at a time" shape as CI/deploy above.
-read_stale_pr() { # -> "pr-number sha" of oldest open PR with a FAILURE check, or "none none"
-  gh pr list --state open --limit 30 --json number,headRefOid,statusCheckRollup \
-    -q 'sort_by(.number) | [.[] | select([.statusCheckRollup[]? | select(.conclusion == "FAILURE")] | length > 0)][0] | if . then "\(.number) \(.headRefOid)" else "none none" end' \
-    2>>"$LOG" || echo "none none"
+# its own docs-linter, filed 2026-08-21, never actioned).
+#
+# Reif, 2026-08-22: "if a PR is stuck, who fixes it... if we have N issues we can deploy N
+# independent units" -- an EARLIER version of this only surfaced the single oldest stale PR, so
+# a genuinely hard one sat first in line and every easier PR behind it waited its turn forever,
+# even though nothing links them. List ALL stale PRs (not just the oldest); the-fixer's own
+# charter decides how many to fight this pass and fans out one independent sub-pass per PR,
+# same "orchestrator decides N, spawns one per unit" shape as gru's own minions
+# (docs/gru-minions.md) -- these PRs share no state, there is no reason to serialize them.
+#
+# "FAILURE" is not the only way a PR gets stuck (Reif, 2026-08-22: "what happens if there's
+# another type of failure -- is that covered"). Live proof case: PR #3059 has every check
+# SUCCESS and is stuck purely on a merge conflict (mergeStateStatus=DIRTY) -- invisible to a
+# FAILURE-only sweep. Three shapes checked, none of them a guess at a threshold that hasn't
+# been seen fail yet:
+#   1. a genuine FAILURE conclusion on any required check (already covered above)
+#   2. mergeStateStatus == DIRTY -- a real merge conflict, no amount of waiting resolves it
+#   3. a check still IN_PROGRESS/QUEUED past a generous age (default 2h) -- a hung runner or a
+#      wedged job never posts a conclusion at all, so it can sit "pending" forever with nothing
+#      ever going red. STALE_PENDING_HOURS is deliberately coarse (a 90-minute e2e suite is not
+#      stuck at minute 91) -- this catches "still running after lunch," not "running long."
+STALE_PENDING_HOURS="${FIXER_STALE_PENDING_HOURS:-2}"
+read_stale_prs() { # -> space-separated "num:sha:reason" triples, oldest first, or nothing
+  # `gh ... -q/--jq` is a plain expression string, NOT the real jq CLI -- it has no --arg flag
+  # to bind the cutoff safely, so it's computed here and interpolated as a quoted ISO-8601
+  # literal into the expression itself (a timestamp string, not attacker-controlled input).
+  local cutoff
+  cutoff=$(date -u -d "-${STALE_PENDING_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+           || date -u -v-"${STALE_PENDING_HOURS}"H +%Y-%m-%dT%H:%M:%SZ)
+  gh pr list --state open --limit 30 \
+    --json number,headRefOid,mergeStateStatus,statusCheckRollup \
+    -q '
+      sort_by(.number) | .[] |
+      ( [.statusCheckRollup[]? | select(.conclusion == "FAILURE")] | length > 0 ) as $failed |
+      ( .mergeStateStatus == "DIRTY" ) as $conflict |
+      ( [.statusCheckRollup[]?
+          | select(.status != null and .status != "COMPLETED" and .startedAt != null and .startedAt < "'"$cutoff"'")
+        ] | length > 0 ) as $wedged |
+      select($failed or $conflict or $wedged) |
+      "\(.number):\(.headRefOid):\(if $failed then "check-failed" elif $conflict then "merge-conflict" else "wedged-check" end)"
+    ' 2>>"$LOG" | tr '\n' ' '
 }
-PR_STATE=$(read_stale_pr)
-PR_NUM="${PR_STATE%% *}"; PR_SHA="${PR_STATE#* }"
+STALE_PRS=$(read_stale_prs)
+# Kept for the single-value fire-dedup state file below: the OLDEST stale PR's sha is still
+# what "already-fighting" dedupes against, so a run that only ever fixes the oldest one doesn't
+# re-fire every tick on the same head -- but FIRE_WHAT below now names every stale PR (with each
+# one's own reason), not just that one, so the-fixer's own pass sees the whole list to fan out
+# over. Each entry is "num:sha:reason"; only the first entry's num/sha feed the dedup state.
+FIRST_PR="${STALE_PRS%% *}"
+PR_NUM="${FIRST_PR%%:*}"
+PR_REST="${FIRST_PR#*:}"; PR_SHA="${PR_REST%%:*}"
+[ -z "$STALE_PRS" ] && PR_NUM="none"
 
 # Optional: is the deployed product actually serving? Set FIXER_HEALTH_URL/FIXER_PAGE_URL to
 # enable. Both must fail before this counts as a fire -- a single timeout is a blip, not an
@@ -83,8 +125,10 @@ FIRE_WHAT=""
 if [ "$DEP_CONC" = "failure" ]; then FIRE_SHA="$DEP_SHA"; FIRE_WHAT="${FIXER_DEPLOY_WORKFLOW:-deploy.yml}"; fi
 if [ "$CI_CONC" = "failure" ]; then FIRE_SHA="$CI_SHA"; FIRE_WHAT="${FIRE_WHAT:+$FIRE_WHAT+}${FIXER_CI_WORKFLOW:-ci.yml}(${FIXER_DEFAULT_BRANCH:-main})"; fi
 if [ "$PR_NUM" != "none" ] && [ -z "$FIRE_SHA" ]; then
-  # main/deploy fires outrank a stale PR -- a red main is the bigger emergency either way.
-  FIRE_SHA="$PR_SHA"; FIRE_WHAT="stale-pr(#$PR_NUM)"
+  # main/deploy fires outrank stale PRs -- a red main is the bigger emergency either way.
+  # FIRE_WHAT carries every stale PR (num:sha pairs), not just one -- the-fixer's charter fans
+  # out a sub-pass per PR named here rather than fighting one and leaving the rest queued.
+  FIRE_SHA="$PR_SHA"; FIRE_WHAT="stale-prs($STALE_PRS)"
 fi
 if [ -n "$PROD_DOWN" ]; then
   # No single commit is necessarily guilty (an outage can be a resource threshold crossed, not
