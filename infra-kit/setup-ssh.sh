@@ -102,6 +102,15 @@ Host $NAME
   IdentitiesOnly yes
   UserKnownHostsFile $KH_FILE
   StrictHostKeyChecking accept-new
+  # Multiplexing -- this path pays a full cloudflared negotiation on EVERY separate ssh
+  # invocation with no reuse (measured on dino, 2026-08-22: ~1.5-2.6s per call vs ~180ms for
+  # the LAN path). Sharing one underlying connection across commands run within 10 minutes of
+  # each other makes every call after the first near-instant. Socket lives in /tmp, not under
+  # this repo -- a stale one surviving a VM rebuild would otherwise silently connect to
+  # nothing, or the wrong thing, until ControlPersist expires.
+  ControlMaster auto
+  ControlPath /tmp/${NAME}-ssh-%r@%h:%p
+  ControlPersist 10m
 # --- end $NAME -------------------------------------------------------------------------------
 EOF
 
@@ -110,3 +119,5 @@ log "append the block above to ~/.ssh/config, then test:"
 log "  ssh $NAME-host true   # direct"
 log "  ssh $NAME-vm true     # via host's LAN"
 log "  ssh $NAME true        # via the internet, needs local cloudflared"
+log "  (the first '$NAME' call pays the full tunnel-negotiation cost; every call after it"
+log "   within 10 minutes reuses the same connection via ControlMaster and is near-instant)"
