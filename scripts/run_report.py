@@ -19,6 +19,13 @@ The third leg needs the member to actually say something, so the enforcement is 
 ABSENCE is recorded as a status, not as silence. `reported_nothing` and `no_vision_link` are
 outcomes you can query and count. Neither FAILS the run -- a member must not be rewarded for
 skipping, and must not be killed for honest maintenance work.
+
+An empty third leg has more than one cause, though, and they are not the same event:
+`reported_nothing` is a pass that ran to completion and said nothing, but `budget_declined`
+(exit_code 3, account_pool.sh's ALL_ACCOUNTS_EXHAUSTED) is a pass that never got to run at
+all -- zero tokens spent -- and `timed_out` (exit_code 124) is a pass killed mid-run. Collapsing
+all three into one status is how #3015 happened: a token_efficiency.py throttle decision
+counted zero-spend budget declines as evidence of a barren member.
 """
 from __future__ import annotations
 
@@ -70,6 +77,16 @@ STATUS_OK = "ok"
 STATUS_QUIET = "quiet"
 STATUS_NOTHING = "reported_nothing"
 STATUS_NO_VISION = "no_vision_link"
+STATUS_BUDGET_DECLINED = "budget_declined"
+STATUS_TIMED_OUT = "timed_out"
+
+# account_pool.sh's account_pool_run returns 3 for ALL_ACCOUNTS_EXHAUSTED: every account was
+# gated before a single `claude` call was made, so this pass spent ZERO tokens.
+# `timeout "$TIMEOUT" claude -p ...` (run_member.sh) returns 124 when the pass was killed
+# mid-run -- it may have spent tokens, but never got to write a FLEET-REPORT block. Both cases
+# produce an empty `outcome`, exactly like a pass that ran to completion and simply said
+# nothing -- without exit_code, classify() cannot tell them apart (issue #3015).
+_EXIT_CODE_STATUS = {3: STATUS_BUDGET_DECLINED, 124: STATUS_TIMED_OUT}
 
 
 def parse_report(text: str) -> dict:
@@ -85,11 +102,14 @@ def parse_report(text: str) -> dict:
     return out
 
 
-def classify(report: dict, *, vision_required: bool) -> str:
+def classify(report: dict, *, vision_required: bool, exit_code: int | None = None) -> str:
     """The status that goes on the run record."""
     outcome = (report.get("outcome") or "").strip()
     if not outcome:
-        return STATUS_NOTHING
+        # A budget decline or a timeout never gets the chance to write a FLEET-REPORT block --
+        # that empty outcome must not read the same as a pass that ran to completion and
+        # genuinely filed nothing (#3015).
+        return _EXIT_CODE_STATUS.get(exit_code, STATUS_NOTHING)
     if outcome.upper().startswith("QUIET"):
         # A quiet pass is legitimate, but only with evidence -- otherwise it is the
         # "looked at the same dashboards and gave up" pass that rotted the board for 20 days.
@@ -117,7 +137,7 @@ def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
         # no timezone handling on the reading side.
         "ts": time.time(),
         "exit_code": exit_code,
-        "status": classify(report, vision_required=vision_required),
+        "status": classify(report, vision_required=vision_required, exit_code=exit_code),
         "outcome": report["outcome"],
         "evidence": report["evidence"],
         "vision_link": report["vision_link"],
