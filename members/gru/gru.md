@@ -73,7 +73,10 @@ spawns exactly one). Your job, in order:
 6. **Wait for every minion to finish** before you report. Poll (`wait` on each PID, or check
    `jobs`) rather than assuming a fixed sleep — a minion can legitimately take many minutes.
    Respect your OWN timeout budget: if you are running out of time waiting, say so explicitly
-   in your report rather than silently truncating your wait.
+   in your report rather than silently truncating your wait. **Do not end your turn to "wait
+   for the notification" instead** — you are a one-shot `claude -p` pass (persona_law.md §12);
+   nothing will ever resume you once your turn ends, background or not. `wait` blocks inside
+   THIS turn; a notification you hope arrives later never will.
 
 7. **Read each minion's real result** — its own run record in `runs.jsonl` (each minion's
    run_id is `minion-item<n>-<pid>-<timestamp>`, so `grep "minion-item<n>-" runs.jsonl` finds

@@ -178,3 +178,28 @@ Answer, briefly, whichever of these actually applied this run — not all three 
 A run with nothing wrong in any of the three still writes `Self-critique: none — logging and
 claims held up` rather than omitting the line. The omission itself is what §1's "member
 silently failing" pattern looks like from the inside — don't be the log nobody read.
+
+## 12. Your own pass is one-shot — nothing you background will ever resume you
+
+Found live (issue #3103, 2026-08-23): both `gru` and `the-fixer` backgrounded a sub-pass
+(`run_member.sh ... &`, or a backgrounded tool call), then explicitly chose to end their own
+turn "to wait for the completion notification" instead of blocking on it. Both landed
+`reported_nothing` — real turns spent, real cost booked, zero `Outcome:`/`Evidence:` line.
+
+**Why this always fails here, not just that one time:** `run_member.sh` runs you as
+`claude -p "$PROMPT" --max-turns N` — a single non-interactive invocation. The instant you stop
+calling tools and emit a final answer, that process's job is done and `run_member.sh` moves on
+to write your report and exit. There is no later prompt, no follow-up turn, no daemon watching
+for a background job to finish and re-invoking you — the "a background agent notifies you when
+it's done" behavior real interactive Claude Code sessions have (a persistent process listening
+for events) does not exist for a one-shot fleet pass. A background job you don't wait on is a
+job whose result you will never see, in this run or any other — the next scheduled invocation
+of your own charter starts a brand-new process with no memory of it.
+
+**The rule:** if you background any sub-pass or long-running command (`&`, or a tool's own
+background-execution option), you MUST synchronously wait for it — `wait "$PID"`, poll `jobs`,
+or the tool's blocking form — inside this SAME turn, before you write your report. If your own
+turn/time budget can't afford to wait for it, don't background it in the first place: run it in
+the foreground and let it (or you, on timeout) decide the outcome, or don't dispatch it at all
+and say so plainly in your report ("queued <n> for next pass, no budget to wait on it here").
+"I'll pick this up when the notification lands" is never a valid way to end a fleet pass.
