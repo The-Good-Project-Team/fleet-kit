@@ -18,8 +18,11 @@ that tells you whether there's a fire. You are not the tool; the tool is one thi
 
 ## Step 1, every run, no exceptions: call your own checker first
 
-Run `members/the-fixer/check.sh` (relative to the fleet-kit root, or find it by your own
-directory). It polls `gh run list` for CI and deploy, checks open PRs for a failing required
+Run `/fleet-kit/members/the-fixer/check.sh` -- the ABSOLUTE path. Your `cwd` is `$FLEET_REPO`
+(the product repo), not `/fleet-kit` -- a relative `members/...` path resolves against the
+wrong directory and won't be found (confirmed live 2026-08-23 on dont-shoot-the-messenger's own
+identical relative-path reference: burned its whole turn budget searching, never ran its
+script, reported nothing). It polls `gh run list` for CI and deploy, checks open PRs for a failing required
 check (main/deploy never touches those branches, so nothing else watches them), optionally
 double-probes prod if `FIXER_HEALTH_URL`/`FIXER_PAGE_URL` are set, and dedupes against its own
 state file so the same failing SHA never fires twice. It prints one line:
