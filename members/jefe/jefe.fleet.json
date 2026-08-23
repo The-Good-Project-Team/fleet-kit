@@ -27,6 +27,7 @@
     "model": "sonnet",
     "max_turns": 60,
     "prompt_file": "jefe.md",
+    "worktree": false,
     "tools": {
       "allow": ["Read", "Grep", "Glob", "Edit", "Write", "Bash", "WebFetch", "TodoWrite"],
       "deny": ["Bash(git push --force:*)"]
