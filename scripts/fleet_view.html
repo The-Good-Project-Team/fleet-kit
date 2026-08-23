@@ -44,6 +44,8 @@
   .pill.pending, .pill.upcoming { background: rgba(131,131,122,.14); color: var(--dim); }
   .pill.dedup-count { background: rgba(47,111,168,.14); color: var(--accent); margin-left: 4px; }
   .row .meta { color: var(--dim); font-size: 11px; margin-top: 2px; }
+  .row .run-id { font-family: "SF Mono", ui-monospace, monospace; cursor: copy; }
+  .row .run-id:hover { color: var(--accent); text-decoration: underline; }
   .row .outcome { margin-top: 4px; }
   a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
   button { background: var(--panel); color: var(--text); border: 1px solid var(--border);
@@ -122,6 +124,17 @@ const issuesEl = document.getElementById('issues');
 const dot = document.getElementById('dot');
 
 function esc(s) { return (s ?? '').toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// run_id is the one stable handle a human can paste into chat/an issue to point at an exact
+// run (member name + timestamp alone collide across the same-minute fanout dedup above) --
+// click-to-copy so referencing a run doesn't mean selecting text by hand off a monospace row.
+function copyRunId(id, el) {
+  navigator.clipboard?.writeText(id).then(() => {
+    const prev = el.textContent;
+    el.textContent = 'copied ✓';
+    setTimeout(() => { el.textContent = prev; }, 1000);
+  });
+}
 function ago(iso_or_epoch) {
   if (!iso_or_epoch) return '';
   const t = typeof iso_or_epoch === 'number' ? iso_or_epoch * 1000 : Date.parse(iso_or_epoch);
@@ -236,6 +249,7 @@ function renderRun(rec) {
     <b>${esc(rec.member)}</b>
     <span class="meta">${esc(rec.kind || '')} · item ${esc(rec.item_id || '—')} ${pr ? '· ' + pr : ''}
       ${rec.ts ? `· ${clockTime(rec.ts)} (${ago(rec.ts)})` : ''}</span>
+    ${rec.run_id ? `<span class="meta run-id" title="click to copy run_id">${esc(rec.run_id)}</span>` : ''}
     <div class="outcome">${esc(rec.outcome || noOutcomeHint)}</div>
     ${rec.evidence ? `<div class="meta">${esc(rec.evidence)}</div>` : ''}
     ${rec.tokens && rec.tokens.cost_usd ? `<div class="meta">$${Number(rec.tokens.cost_usd).toFixed(3)} · ${esc(rec.tokens.num_turns)} turns${costFlag(rec.tokens)}</div>` : ''}
@@ -243,6 +257,8 @@ function renderRun(rec) {
     <div class="transcript"></div>`;
   div.addEventListener('click', (e) => {
     if (e.target.closest('button') || e.target.closest('a')) return;
+    const runIdEl = e.target.closest('.run-id');
+    if (runIdEl) { copyRunId(rec.run_id, runIdEl); return; }
     toggleTranscript(div, rec.member);
   });
   document.getElementById('empty')?.remove();
