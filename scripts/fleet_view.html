@@ -5,9 +5,9 @@
 <title>fleet-kit console</title>
 <style>
   :root {
-    --bg: #16171a; --panel: #1d1f23; --panel-2: #24262b; --border: #2e3138;
-    --text: #d8dadf; --dim: #7a7d86; --dimmer: #52545c;
-    --ok: #4caf6f; --warn: #d9a441; --bad: #e0645a; --accent: #5b9fd9;
+    --bg: #f5f6f8; --panel: #ffffff; --panel-2: #eef0f3; --border: #d8dce2;
+    --text: #1c1e21; --dim: #6b6f76; --dimmer: #9a9ea6;
+    --ok: #1f8b4c; --warn: #a6720f; --bad: #c13a2e; --accent: #2166c4;
     --mono: "SF Mono", ui-monospace, "Cascadia Code", Menlo, monospace;
   }
   * { box-sizing: border-box; }
@@ -38,7 +38,7 @@
   .btn.primary { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
   .btn.primary:hover { filter: brightness(1.1); }
 
-  .body { display: grid; grid-template-columns: 220px 1fr 300px; min-height: 0; }
+  .body { display: grid; grid-template-columns: 220px 1fr; min-height: 0; }
 
   /* ---------- sidebar: the agent roster, always visible, one click to switch ---------- */
   .sidebar { border-right: 1px solid var(--border); background: var(--panel); overflow-y: auto; }
@@ -99,18 +99,28 @@
   .transcript .tline.live { color: var(--accent); }
   .row.upcoming, .run-row.upcoming { opacity: .5; cursor: default; }
 
-  /* ---------- right rail: PRs / backlog, reference only, doesn't compete with agent detail ---------- */
-  .rail { border-left: 1px solid var(--border); background: var(--panel); overflow-y: auto;
-    display: flex; flex-direction: column; min-height: 0; }
+  /* ---------- pages: PRs+backlog and settings, now sidebar-selected views inside .detail ---------- */
   .rail-section { border-bottom: 1px solid var(--border); }
-  .rail-head { padding: 9px 12px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em;
+  .rail-head { padding: 9px 16px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em;
     color: var(--dimmer); display: flex; align-items: center; gap: 6px; position: sticky; top: 0;
     background: var(--panel); }
   .count-badge { background: var(--panel-2); border-radius: 8px; padding: 0 6px; font-size: 10px; color: var(--dim); }
-  .rail-row { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .rail-row { padding: 8px 16px; border-bottom: 1px solid var(--border); font-size: 12px; }
   .rail-row .rmeta { color: var(--dim); font-size: 10.5px; margin-top: 2px; }
   .rail-row .actions { margin-top: 5px; display: flex; gap: 5px; flex-wrap: wrap; }
   .checks-green { color: var(--ok); } .checks-pending { color: var(--warn); } .checks-failing { color: var(--bad); }
+
+  /* ---------- sidebar nav items: PRs/Backlog + Settings, same list as agents, separated ---------- */
+  .side-nav-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer;
+    border-left: 2px solid transparent; color: var(--text); }
+  .side-nav-item:hover { background: var(--panel-2); }
+  .side-nav-item.active { background: var(--panel-2); border-left-color: var(--accent); }
+  .side-nav-item .count-badge { margin-left: auto; }
+  .side-sep { border-top: 1px solid var(--border); margin: 6px 0; }
+
+  .settings-block { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .settings-block h3 { margin: 0 0 8px; font-size: 12.5px; text-transform: uppercase;
+    letter-spacing: .05em; color: var(--dim); }
 
   ::-webkit-scrollbar { width: 9px; height: 9px; }
   ::-webkit-scrollbar-thumb { background: var(--panel-2); border-radius: 5px; border: 2px solid var(--panel); }
@@ -125,27 +135,20 @@
     <span class="stat" id="repo"></span>
     <span class="spacer"></span>
     <span class="stat" id="globalSpend"></span>
-    <button class="btn" id="masterToggle"></button>
   </div>
   <div class="body">
     <div class="sidebar">
       <div class="side-head">Agents</div>
       <div id="agentList"></div>
+      <div class="side-sep"></div>
+      <div class="side-nav-item" data-page="queue">
+        PRs &amp; Backlog <span class="count-badge" id="navQueueCount">0</span>
+      </div>
+      <div class="side-nav-item" data-page="settings">Settings</div>
     </div>
-    <div class="detail">
+    <div class="detail" id="detailPane">
       <div class="detail-head" id="detailHead"></div>
       <div class="run-list" id="runList"><div class="run-empty">select an agent</div></div>
-    </div>
-    <div class="rail">
-      <div class="rail-section">
-        <div class="rail-head">Open PRs <span class="count-badge" id="prCount">0</span></div>
-        <div id="prs"></div>
-      </div>
-      <div class="rail-section">
-        <div class="rail-head">Backlog <span class="count-badge" id="issueCount">0</span>
-          <button class="btn small" id="newIssue" style="margin-left:auto">+ new</button></div>
-        <div id="issues"></div>
-      </div>
     </div>
   </div>
 </div>
@@ -157,14 +160,15 @@
 let REPO_URL = '';
 let SPECS = [];          // from /api/members -- spec + effective + overrides, per agent
 let ALL_RUNS = [];        // oldest-first, matches runs.jsonl append order
-let SELECTED = null;      // currently open agent name, or null
+let SELECTED = null;      // currently open agent name, or null (only meaningful when PAGE==='agent')
+let PAGE = 'agent';       // 'agent' | 'queue' | 'settings' -- which sidebar item is active
+let GH = { prs: [], issues: [] };
+let FLEET_STATE = {};
 let NEXT_FIRES = [];
 const dot = document.getElementById('dot');
 const agentListEl = document.getElementById('agentList');
 const detailHeadEl = document.getElementById('detailHead');
-const runListEl = document.getElementById('runList');
-const prsEl = document.getElementById('prs');
-const issuesEl = document.getElementById('issues');
+const runListEl = document.getElementById('runList'); // reused as the generic page-body region
 
 function esc(s) { return (s ?? '').toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function ago(iso_or_epoch) {
@@ -213,26 +217,42 @@ function statusClass(status) {
 }
 
 function renderSidebar() {
-  agentListEl.innerHTML = SPECS.map(m => {
+  // Most-recently-run agent first -- a console should surface what just happened, not an
+  // arbitrary spec-discovery order. Agents with no runs yet sort to the bottom.
+  const ranked = SPECS.slice().sort((a, b) => {
+    const la = lastRunFor(a.spec.name)?.ts ?? -1;
+    const lb = lastRunFor(b.spec.name)?.ts ?? -1;
+    return lb - la;
+  });
+  agentListEl.innerHTML = ranked.map(m => {
     const name = m.spec.name;
     const enabled = !!m.effective.enabled;
     const last = lastRunFor(name);
     const cls = !enabled ? 'off' : statusClass(last?.status);
-    return `<div class="agent-item ${name === SELECTED ? 'active' : ''} ${!enabled ? 'disabled-agent' : ''}"
+    const active = PAGE === 'agent' && name === SELECTED;
+    return `<div class="agent-item ${active ? 'active' : ''} ${!enabled ? 'disabled-agent' : ''}"
         data-agent="${esc(name)}">
       <span class="astatus ${cls}"></span>
       <div class="atext">
         <div class="aname">${esc(name)}</div>
-        <div class="aago">${last ? ago(last.ts) : ''}</div>
+        <div class="aago">${last ? ago(last.ts) : 'never run'}</div>
       </div>
     </div>`;
   }).join('');
+  document.querySelectorAll('.side-nav-item').forEach(el => {
+    el.classList.toggle('active', PAGE === el.dataset.page);
+  });
+  document.getElementById('navQueueCount').textContent = (GH.prs?.length || 0) + (GH.issues?.length || 0);
 }
 
 agentListEl.addEventListener('click', e => {
   const row = e.target.closest('.agent-item');
   if (!row) return;
   selectAgent(row.dataset.agent);
+});
+
+document.querySelectorAll('.side-nav-item').forEach(el => {
+  el.addEventListener('click', () => selectPage(el.dataset.page));
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -372,23 +392,31 @@ runListEl.addEventListener('click', e => {
 });
 
 function selectAgent(name) {
+  PAGE = 'agent';
   SELECTED = name;
   renderSidebar();
   renderDetailHead();
   renderRunList();
 }
 
-// ---------------------------------------------------------------------------------------------
-// Right rail: PRs + backlog, unchanged in spirit from before -- reference material, not the
-// thing you're actively scanning.
-// ---------------------------------------------------------------------------------------------
-function renderGh(gh) {
-  const prs = gh.prs || [];
-  const issues = gh.issues || [];
-  document.getElementById('prCount').textContent = prs.length;
-  document.getElementById('issueCount').textContent = issues.length;
+function selectPage(page) {
+  PAGE = page;
+  renderSidebar();
+  if (page === 'queue') renderQueuePage();
+  else if (page === 'settings') renderSettingsPage();
+}
 
-  prsEl.innerHTML = prs.map(pr => {
+// ---------------------------------------------------------------------------------------------
+// Queue page (sidebar item): PRs + backlog, now a full page instead of an always-visible rail --
+// it's reference material you check, not something that should compete for space every screen.
+// ---------------------------------------------------------------------------------------------
+function renderQueuePage() {
+  if (PAGE !== 'queue') return;
+  const prs = GH.prs || [];
+  const issues = GH.issues || [];
+  detailHeadEl.innerHTML = `<div class="title-row"><h2>PRs &amp; Backlog</h2></div>`;
+
+  const prsHtml = prs.map(pr => {
     const cls = pr._rollup === 'green' ? 'checks-green' : pr._rollup === 'failing' ? 'checks-failing' : 'checks-pending';
     return `<div class="rail-row">
       <a href="${esc(pr.url)}" target="_blank">#${pr.number}</a> ${pr.isDraft ? '<span class="rmeta">draft</span>' : ''}
@@ -398,7 +426,7 @@ function renderGh(gh) {
     </div>`;
   }).join('') || '<div class="run-empty">no open PRs</div>';
 
-  issuesEl.innerHTML = issues.map(i => `<div class="rail-row">
+  const issuesHtml = issues.map(i => `<div class="rail-row">
       <a href="${REPO_URL ? REPO_URL + '/issues/' + i.number : '#'}" target="_blank">#${i.number}</a>
       <div>${esc(i.title)}</div>
       <div class="rmeta">${i._claimed ? 'claimed' : 'open'} · ${ago(i.updatedAt)}</div>
@@ -408,16 +436,48 @@ function renderGh(gh) {
         <button class="btn small" data-act="close_issue" data-issue="${i.number}">close</button>
       </div>
     </div>`).join('') || '<div class="run-empty">backlog empty</div>';
+
+  runListEl.innerHTML = `
+    <div class="rail-section">
+      <div class="rail-head">Open PRs <span class="count-badge">${prs.length}</span></div>
+      ${prsHtml}
+    </div>
+    <div class="rail-section">
+      <div class="rail-head">Backlog <span class="count-badge">${issues.length}</span>
+        <button class="btn small" id="newIssue" style="margin-left:auto">+ new</button></div>
+      ${issuesHtml}
+    </div>`;
+  document.getElementById('newIssue')?.addEventListener('click', async () => {
+    const title = prompt('issue title:');
+    if (!title) return;
+    const lane = prompt('lane label (e.g. devops, ui, fleet) — optional:', '');
+    const body = prompt('body — optional:', '');
+    const r = await fetch('/api/create_issue', { method: 'POST', body: JSON.stringify({ title, lane, body }) });
+    alert((await r.json()).ok ? 'filed' : 'failed — see server log');
+  });
 }
 
-document.getElementById('newIssue').addEventListener('click', async () => {
-  const title = prompt('issue title:');
-  if (!title) return;
-  const lane = prompt('lane label (e.g. devops, ui, fleet) — optional:', '');
-  const body = prompt('body — optional:', '');
-  const r = await fetch('/api/create_issue', { method: 'POST', body: JSON.stringify({ title, lane, body }) });
-  alert((await r.json()).ok ? 'filed' : 'failed — see server log');
-});
+// ---------------------------------------------------------------------------------------------
+// Settings page (sidebar item): the fleet-wide master toggle -- pulled out of the topbar so the
+// topbar stays a status strip, not a place with a destructive action one misclick away.
+// ---------------------------------------------------------------------------------------------
+function renderSettingsPage() {
+  if (PAGE !== 'settings') return;
+  detailHeadEl.innerHTML = `<div class="title-row"><h2>Settings</h2></div>`;
+  const on = !!FLEET_STATE.FLEET_ENABLED;
+  runListEl.innerHTML = `
+    <div class="settings-block">
+      <h3>Fleet</h3>
+      <div class="rmeta" style="margin-bottom:8px">repo: ${esc(REPO_URL || '—')}</div>
+      <button class="btn ${on ? 'danger' : 'go'}" id="masterToggle">${on ? '■ stop fleet' : '● start fleet'}</button>
+    </div>`;
+  document.getElementById('masterToggle').onclick = async () => {
+    if (on && !confirm('stop the WHOLE fleet? every member exits on its next tick.')) return;
+    await fetch('/api/fleet_toggle', { method: 'POST', body: JSON.stringify({ target: 'fleet', value: !on }) });
+    await renderFleetState();
+    renderSettingsPage();
+  };
+}
 
 // ---------------------------------------------------------------------------------------------
 // Action bar clicks (rerun / enable-disable / dial edit / PR+issue actions) -- one delegated
@@ -441,7 +501,7 @@ document.body.addEventListener('click', async (e) => {
   if (act === 'toggle-member') {
     const willBeOn = b.dataset.on !== 'true';
     await fetch('/api/fleet_toggle', { method: 'POST', body: JSON.stringify({ target: b.dataset.member, value: willBeOn }) });
-    await loadMembers(); renderSidebar(); renderDetailHead(); renderQueue();
+    await loadMembers(); renderSidebar(); renderDetailHead(); await renderQueue();
     return;
   }
   if (act === 'edit-dial') {
@@ -481,16 +541,9 @@ document.body.addEventListener('click', async (e) => {
 // ---------------------------------------------------------------------------------------------
 async function renderFleetState() {
   const state = await (await fetch('/api/fleet_state')).json();
+  FLEET_STATE = state;
   REPO_URL = state.REPO_URL || '';
   document.getElementById('repo').textContent = REPO_URL ? REPO_URL.replace(/^https?:\/\//, '') : '';
-  const btn = document.getElementById('masterToggle');
-  btn.textContent = state.FLEET_ENABLED ? '● fleet ON' : '○ fleet OFF';
-  btn.className = 'btn ' + (state.FLEET_ENABLED ? 'go' : 'danger');
-  btn.onclick = async () => {
-    if (state.FLEET_ENABLED && !confirm('stop the WHOLE fleet? every member exits on its next tick.')) return;
-    await fetch('/api/fleet_toggle', { method: 'POST', body: JSON.stringify({ target: 'fleet', value: !state.FLEET_ENABLED }) });
-    renderFleetState();
-  };
 }
 
 async function loadMembers() {
@@ -520,7 +573,7 @@ function onRunEvent(rec) {
   ALL_RUNS.push(rec);
   if (ALL_RUNS.length > 2000) ALL_RUNS.shift();
   renderSidebar();
-  if (rec.member === SELECTED) { renderRunList(); renderDetailHead(); }
+  if (PAGE === 'agent' && rec.member === SELECTED) { renderRunList(); renderDetailHead(); }
 }
 
 function appendLiveLine(rec) {
@@ -541,7 +594,7 @@ async function boot() {
     loadMembers(),
   ]);
   ALL_RUNS = snap.runs || [];
-  renderGh(snap.gh);
+  GH = snap.gh || { prs: [], issues: [] };
   renderSidebar();
   await renderQueue();
   selectAgent(SELECTED);
@@ -552,7 +605,7 @@ async function boot() {
   es.onopen = () => dot.classList.add('live');
   es.onerror = () => dot.classList.remove('live');
   es.addEventListener('run', e => { onRunEvent(JSON.parse(e.data)); renderQueue(); });
-  es.addEventListener('gh', e => renderGh(JSON.parse(e.data)));
+  es.addEventListener('gh', e => { GH = JSON.parse(e.data); renderSidebar(); renderQueuePage(); });
   es.addEventListener('logline', e => appendLiveLine(JSON.parse(e.data)));
 }
 boot();
