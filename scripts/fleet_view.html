@@ -216,14 +216,28 @@ function statusClass(status) {
   return 'bad'; // reported_nothing, no_vision_link, fail, etc.
 }
 
-function renderSidebar() {
+let SIDEBAR_ORDER = null; // cached agent-name order -- computed once per resort, not per render
+
+function resortSidebar() {
   // Most-recently-run agent first -- a console should surface what just happened, not an
   // arbitrary spec-discovery order. Agents with no runs yet sort to the bottom.
-  const ranked = SPECS.slice().sort((a, b) => {
+  SIDEBAR_ORDER = SPECS.slice().sort((a, b) => {
     const la = lastRunFor(a.spec.name)?.ts ?? -1;
     const lb = lastRunFor(b.spec.name)?.ts ?? -1;
     return lb - la;
-  });
+  }).map(m => m.spec.name);
+}
+
+function renderSidebar() {
+  // Re-render must NOT re-sort: a live tick reordering rows while the user is mid-click moves
+  // the row out from under the cursor (confirmed live -- a click on "marie" landed on
+  // "Settings" because the list resorted between mousedown and click). Order only changes on
+  // an explicit resortSidebar() call (boot, or a new agent appearing).
+  if (!SIDEBAR_ORDER) resortSidebar();
+  const byName = Object.fromEntries(SPECS.map(m => [m.spec.name, m]));
+  const ranked = SIDEBAR_ORDER.map(n => byName[n]).filter(Boolean);
+  // an agent /api/members returned that isn't in the cached order yet (newly added) -- append it
+  SPECS.forEach(m => { if (!SIDEBAR_ORDER.includes(m.spec.name)) ranked.push(m); });
   agentListEl.innerHTML = ranked.map(m => {
     const name = m.spec.name;
     const enabled = !!m.effective.enabled;
@@ -312,25 +326,44 @@ function reindexSeq(name) {
   runs.forEach((r, i) => { r._seqFromEnd = runs.length - 1 - i; });
 }
 
+let OPEN_TRANSCRIPT_RUN_ID = null; // survives renderRunList() rebuilds -- see restoreOpenTranscript()
+
+async function loadTranscriptInto(box, rec) {
+  box.dataset.loaded = '1';
+  box.innerHTML = '<div class="tline">loading transcript…</div>';
+  try {
+    const r = await fetch(`/api/pass_log?member=${encodeURIComponent(rec.member)}&n=${rec._seqFromEnd}`);
+    const { lines } = await r.json();
+    box.innerHTML = (lines && lines.length)
+      ? lines.map(l => `<div class="tline">${esc(l)}</div>`).join('')
+      : '<div class="tline">no transcript recorded for this pass</div>';
+  } catch {
+    box.innerHTML = '<div class="tline">failed to load transcript</div>';
+  }
+}
+
 async function toggleTranscript(rowEl, rec) {
   const box = rowEl.querySelector('.transcript');
   if (!box) return;
   const willOpen = !box.classList.contains('open');
   box.classList.toggle('open', willOpen);
   rowEl.classList.toggle('open', willOpen);
-  if (willOpen && !box.dataset.loaded) {
-    box.dataset.loaded = '1';
-    box.innerHTML = '<div class="tline">loading transcript…</div>';
-    try {
-      const r = await fetch(`/api/pass_log?member=${encodeURIComponent(rec.member)}&n=${rec._seqFromEnd}`);
-      const { lines } = await r.json();
-      box.innerHTML = (lines && lines.length)
-        ? lines.map(l => `<div class="tline">${esc(l)}</div>`).join('')
-        : '<div class="tline">no transcript recorded for this pass</div>';
-    } catch {
-      box.innerHTML = '<div class="tline">failed to load transcript</div>';
-    }
-  }
+  OPEN_TRANSCRIPT_RUN_ID = willOpen ? rec.run_id : null;
+  if (willOpen && !box.dataset.loaded) await loadTranscriptInto(box, rec);
+}
+
+// A live tick / new run event rebuilds the whole run list from scratch (renderRunList below) --
+// that used to silently close whatever transcript the user had open (confirmed live: "it closes
+// too quickly"). Re-open the same run's box, right after each rebuild, using the cached run_id.
+function restoreOpenTranscript() {
+  if (!OPEN_TRANSCRIPT_RUN_ID) return;
+  const rowEl = runListEl.querySelector(`.run-row[data-run-id="${CSS.escape(OPEN_TRANSCRIPT_RUN_ID)}"]`);
+  const box = rowEl?.querySelector('.transcript');
+  if (!box) return; // that run scrolled out of the (collapsed) group -- nothing to restore onto
+  box.classList.add('open');
+  rowEl.classList.add('open');
+  const rec = ALL_RUNS.find(r => r.run_id === OPEN_TRANSCRIPT_RUN_ID);
+  if (rec) loadTranscriptInto(box, rec); // re-fetch -- cheap, and the old dataset.loaded is gone
 }
 
 function noOutcomeHint(rec) {
@@ -378,6 +411,7 @@ function renderRunList() {
   runListEl.innerHTML = groups.map(g =>
     `<div class="run-row" data-run-id="${esc(g.rec.run_id || '')}">${runRowHtml(g.rec, g.count)}</div>`
   ).join('');
+  restoreOpenTranscript();
 }
 
 runListEl.addEventListener('click', e => {
@@ -392,6 +426,7 @@ runListEl.addEventListener('click', e => {
 });
 
 function selectAgent(name) {
+  if (name !== SELECTED) OPEN_TRANSCRIPT_RUN_ID = null; // switching agents, not just re-rendering
   PAGE = 'agent';
   SELECTED = name;
   renderSidebar();
@@ -595,6 +630,7 @@ async function boot() {
   ]);
   ALL_RUNS = snap.runs || [];
   GH = snap.gh || { prs: [], issues: [] };
+  resortSidebar();
   renderSidebar();
   await renderQueue();
   selectAgent(SELECTED);

@@ -28,9 +28,40 @@ import json
 import sys
 
 
-def _text_preview(text: str, limit: int = 160) -> str:
+def _text_preview(text: str, limit: int = 500) -> str:
     t = " ".join(text.split())
     return t if len(t) <= limit else t[:limit] + "…"
+
+
+# Tools whose payload IS code/file content -- for these, log what happened (path + shape),
+# never the content itself. Reif, 2026-08-23: "I want to know what it did, not the actual
+# code" -- the file is already on disk at that path, a human (or dumbledore) can open it;
+# the log's job is to say "Edit ran on x.py", not carry a second copy of the diff.
+_CODE_TOOLS = {"Edit", "Write", "NotebookEdit"}
+
+
+def _describe_tool_call(name: str, inp: dict) -> str:
+    if name in _CODE_TOOLS:
+        path = inp.get("file_path") or inp.get("notebook_path") or "?"
+        if name == "Write":
+            size = len(str(inp.get("content", "")))
+            return f"{path} (write, {size} chars)"
+        if name == "Edit":
+            old_lines = str(inp.get("old_string", "")).count("\n") + 1
+            return f"{path} (edit, ~{old_lines} line block)"
+        return f"{path} (notebook edit)"
+    if "command" in inp:
+        return _text_preview(str(inp["command"]))
+    if "file_path" in inp:
+        return str(inp["file_path"])
+    if "pattern" in inp:
+        extra = f" in {inp['path']}" if inp.get("path") else ""
+        return f"pattern={inp['pattern']!r}{extra}"
+    if "prompt" in inp:
+        return _text_preview(str(inp["prompt"]))
+    if "description" in inp:
+        return str(inp["description"])
+    return ""
 
 
 def render_event(evt: dict) -> str | None:
@@ -50,17 +81,7 @@ def render_event(evt: dict) -> str | None:
             if btype == "tool_use":
                 name = block.get("name", "?")
                 inp = block.get("input") or {}
-                # Keep this cheap and safe: name the tool + the one or two fields a human
-                # would want at a glance, never the full payload (could be a huge diff/file).
-                hint = ""
-                if "command" in inp:
-                    hint = _text_preview(str(inp["command"]), 100)
-                elif "file_path" in inp:
-                    hint = str(inp["file_path"])
-                elif "prompt" in inp:
-                    hint = _text_preview(str(inp["prompt"]), 100)
-                elif "description" in inp:
-                    hint = str(inp["description"])
+                hint = _describe_tool_call(name, inp)
                 return f"tool call: {name}" + (f" -- {hint}" if hint else "")
 
     if etype == "user":
@@ -73,7 +94,7 @@ def render_event(evt: dict) -> str | None:
                     content = " ".join(
                         c.get("text", "") for c in content if isinstance(c, dict)
                     )
-                preview = _text_preview(str(content or ""), 120)
+                preview = _text_preview(str(content or ""))
                 return f"tool result ({'ERROR' if is_err else 'ok'}): {preview}"
 
     if etype == "system" and evt.get("subtype") == "hook_started":
