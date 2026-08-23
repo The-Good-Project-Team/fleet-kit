@@ -14,7 +14,9 @@
 # FLEET_BUILDER_MAX_TURNS (default 60), FLEET_BUILDER_TIMEOUT seconds (default 2400).
 set -uo pipefail
 
-[ -f "${FLEET_ENV_FILE:-./fleet.env}" ] && . "${FLEET_ENV_FILE:-./fleet.env}"
+# set -a/+a: a plain . only sets local shell vars, invisible to claude -p (a separate
+# exec) -- see run_member.sh for the full incident writeup (2026-08-22 fleet-wide auth outage).
+[ -f "${FLEET_ENV_FILE:-./fleet.env}" ] && { set -a; . "${FLEET_ENV_FILE:-./fleet.env}"; set +a; }
 
 REPO="${FLEET_REPO:?set FLEET_REPO in fleet.env}"
 LOG_DIR="${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}"

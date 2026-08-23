@@ -24,7 +24,15 @@
 #         run_member.sh minion --item 3072   # gru spawns minion this way -- see gru.md
 set -uo pipefail
 
-[ -f "${FLEET_ENV_FILE:-./fleet.env}" ] && . "${FLEET_ENV_FILE:-./fleet.env}"
+# set -a/+a around the source: a plain `.` only sets these as local shell variables, which
+# `claude -p` (a separate exec, not this shell) never sees -- fleet.env's own vars were silently
+# invisible to every `claude` invocation this whole time, masked because GH_TOKEN happens to
+# ALSO be exported per-line in the crontab itself (entrypoint.sh) and every account
+# credential lives in its own CLAUDE_CONFIG_DIR, not an env var, so nothing needed this path
+# until CLAUDE_CODE_OAUTH_TOKEN did (real incident 2026-08-22: fleet-wide outage, every member
+# failing "OAuth session expired" for 2+ hours -- the token was correctly in fleet.env the
+# whole time, just never reached the process that needed it).
+[ -f "${FLEET_ENV_FILE:-./fleet.env}" ] && { set -a; . "${FLEET_ENV_FILE:-./fleet.env}"; set +a; }
 
 KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 REPO="${FLEET_REPO:?set FLEET_REPO in fleet.env}"
