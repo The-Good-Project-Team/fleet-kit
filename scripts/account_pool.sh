@@ -92,7 +92,23 @@ account_pool_run() {
         ;;
     esac
     : > "$capture"
-    CLAUDE_CONFIG_DIR="$HOME/.claude-$account" "$@" 2>&1 | tee "$capture"
+    # A pool account beyond the first needs ITS OWN token, not the one CLAUDE_CODE_OAUTH_TOKEN
+    # already holds globally (that's whichever account this file's fleet.env was written for --
+    # sharing it across every account defeats the whole point of a pool, same failure this
+    # header already warns about for a shared default CLAUDE_CONFIG_DIR). Reif, 2026-08-22:
+    # look up CLAUDE_CODE_OAUTH_TOKEN_<ACCOUNT> (account name upper-cased, non-alnum -> "_",
+    # e.g. account "claude-reif" -> CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_REIF) and use IT for this
+    # account's own CLAUDE_CONFIG_DIR if set; otherwise fall through to whatever
+    # CLAUDE_CODE_OAUTH_TOKEN already is (the single-account "primary" case, unchanged).
+    local var_name token_override
+    var_name="CLAUDE_CODE_OAUTH_TOKEN_$(echo "$account" | tr '[:lower:]-' '[:upper:]_')"
+    token_override="${!var_name:-}"
+    if [ -n "$token_override" ]; then
+      CLAUDE_CONFIG_DIR="$HOME/.claude-$account" CLAUDE_CODE_OAUTH_TOKEN="$token_override" \
+        "$@" 2>&1 | tee "$capture"
+    else
+      CLAUDE_CONFIG_DIR="$HOME/.claude-$account" "$@" 2>&1 | tee "$capture"
+    fi
     rc=${PIPESTATUS[0]}
     if [ "$rc" -eq 0 ]; then
       export ACCOUNT_POOL_SELECTED="$account"
