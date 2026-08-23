@@ -70,6 +70,14 @@ def _report_contract():
                                     pass_text="had a look around", usage=None,
                                     vision_required=False)
     assert quiet["status"] == "reported_nothing", quiet["status"]
+    # A budget decline or a timeout never gets to write a FLEET-REPORT block -- that empty
+    # outcome must not collapse into reported_nothing (#3015, #3083).
+    declined = run_report.build_record(member="t", run_id="r", kind="llm", exit_code=3,
+                                       pass_text="", usage=None, vision_required=False)
+    assert declined["status"] == "budget_declined", declined["status"]
+    timed_out = run_report.build_record(member="t", run_id="r", kind="llm", exit_code=124,
+                                        pass_text="", usage=None, vision_required=False)
+    assert timed_out["status"] == "timed_out", timed_out["status"]
 
 
 def _overrides_are_narrow():
