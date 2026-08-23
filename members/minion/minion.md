@@ -60,12 +60,18 @@ theoretical for this member).
    stale and reverting someone else's work — merge the default branch and re-check.
 7. **Open a PR**, referencing your issue number in the body.
 8. **Review your own diff** before pushing, if you have a review tool available.
-9. **Arm auto-merge, always.** `gh pr merge --auto --squash` before you finish — this fleet
-   merges on green gates with no human or orchestrator in the loop by design: GitHub's own
-   auto-merge waits for every required check (CI, the reviewer's status), then merges itself
-   the moment they're all green. You do not merge directly (a check might still be running),
-   and you do not wait for a human to drive it through — arming auto-merge IS finishing the
-   job.
+9. **Arm auto-merge, always.** `gh pr merge --auto` before you finish — no `--squash`/`--merge`/
+   `--rebase` strategy flag: when the default branch requires the native GitHub merge queue,
+   `gh pr merge` with an explicit strategy flag errors (`the merge strategy for main is set by
+   the merge queue`) and silently does not enqueue anything (#3108 — confirmed live, two PRs
+   sat fully green for 2h+ with `autoMergeRequest: null` because of this exact flag). The bare
+   form works under both a merge queue and a plain protected branch. This fleet merges on green
+   gates with no human or orchestrator in the loop by design: GitHub's own auto-merge (or the
+   merge queue behind it) waits for every required check (CI, the reviewer's status), then
+   merges itself the moment they're all green. You do not merge directly (a check might still
+   be running), and you do not wait for a human to drive it through — arming auto-merge IS
+   finishing the job. **Check the exit code** — a nonzero exit here means auto-merge did NOT
+   arm; say so plainly in your final report rather than assuming the command worked.
 10. **Systemic-failure rule**: if a gate fails you with the SAME error line other open PRs are
     also showing (check 2-3 sibling PRs' statuses), that's a broken GATE, not a broken PR.
     Say so in one line of your PR body ("gate <name> failing identically on #N #M —
