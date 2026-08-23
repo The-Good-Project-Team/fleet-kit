@@ -118,7 +118,45 @@ case "${1:-cron-foreground}" in
     chmod 0644 "$CRONTAB"
     echo "[entrypoint] installed crontab (token redacted, stored separately at $TOKEN_FILE, mode 600):"
     cat "$CRONTAB"
-    cron -f
+
+    # Watchdog around cron -f, not a bare foreground exec (2026-08-23, issue #3093): every
+    # scheduled member AND the account-independent */10 git-pull canary went silent
+    # fleet-wide for ~4h11m while `cron -f` stayed up the whole time (same pid, no crash, no
+    # restart) -- then resumed on its own with zero log trace explaining the gap. This image
+    # has no syslog daemon, so cron's own job-dispatch log (normally syslog's cron facility)
+    # goes nowhere either way; the canary's log file is the only externally-visible signal
+    # that cron is actually firing. This loop is that external signal's consumer: if the
+    # canary goes stale well past its own 10-minute cadence, restart cron rather than trust a
+    # human to notice the whole fleet went quiet.
+    cron -f &
+    CRON_PID=$!
+    echo "[entrypoint] cron started (pid $CRON_PID)"
+    CANARY="$LOG_DIR/gitpull.log"
+    STALL_THRESHOLD_S="${FLEET_CRON_STALL_THRESHOLD_S:-1800}"
+    WATCHDOG_LOG="$LOG_DIR/cron_watchdog.log"
+    while true; do
+      sleep 300
+      if ! kill -0 "$CRON_PID" 2>/dev/null; then
+        echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] cron pid $CRON_PID gone -- restarting" \
+          | tee -a "$WATCHDOG_LOG"
+        cron -f &
+        CRON_PID=$!
+        continue
+      fi
+      if [ -f "$CANARY" ]; then
+        age=$(( $(date +%s) - $(stat -c %Y "$CANARY") ))
+        if [ "$age" -gt "$STALL_THRESHOLD_S" ]; then
+          echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] CRITICAL: $CANARY stale ${age}s (> ${STALL_THRESHOLD_S}s) -- cron pid $CRON_PID alive but not firing jobs, restarting it" \
+            | tee -a "$WATCHDOG_LOG"
+          kill -9 "$CRON_PID" 2>/dev/null || true
+          wait "$CRON_PID" 2>/dev/null || true
+          cron -f &
+          CRON_PID=$!
+          echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] cron restarted (pid $CRON_PID)" \
+            | tee -a "$WATCHDOG_LOG"
+        fi
+      fi
+    done
     ;;
   *)
     exec "$@"
