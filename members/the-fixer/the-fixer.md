@@ -57,8 +57,14 @@ state file so the same failing SHA never fires twice. It prints one line:
   them; say in your report which you skipped and why, same as gru's own runway judgment), then
   spawn one independent sub-pass PER PR via `bash scripts/run_member.sh the-fixer --item
   <PR-number>` (the same `--item` flag gru's minions use) rather than working them one after
-  another yourself in this single pass. Each sub-pass reads its own `reason` and handles it
-  differently -- a stuck PR is not always a code problem:
+  another yourself in this single pass. **You are a one-shot `claude -p` pass, same as gru
+  (persona_law.md §12): if you background any of these sub-passes, you must `wait` on them
+  inside THIS turn before you report -- ending your turn to wait for a completion notification
+  means nobody ever sees that sub-pass's result. If you cannot afford to wait for all of them
+  in this pass's own budget, only dispatch as many as you CAN wait for and say in your report
+  which PRs you left for next pass and why**, rather than firing off ones you will never
+  confirm. Each sub-pass reads its own `reason` and handles it differently -- a stuck PR is not
+  always a code problem:
   - `check-failed` -- check out the PR's own branch (never a worktree off main), read the
     failing check's log (`gh run view --log-failed` on its head SHA, or `gh pr checks N`), push
     a fix commit straight onto the PR's branch (the one case where pushing to a non-default
