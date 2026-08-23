@@ -19,12 +19,18 @@ on FLEET_WEBHOOK_SECRET, verified with a constant-time compare -- same shape as 
 docs recommend, this is the one place forging a request would let an attacker spend fleet
 budget or spam the-fixer, so it is not optional.
 
+Also handles "pull_request" events (opened/synchronize/reopened/ready_for_review, non-draft
+only) -- judge-judy otherwise waits up to its own 15-minute poll to notice a fresh PR or a new
+push to one; this fires it immediately instead. Safe to fire repeatedly on rapid pushes:
+judge-judy's own checklist only reviews a head with no fresh fleet-code-review status, so a
+redundant trigger is a fast no-op pass, never a double review.
+
 Usage: FLEET_WEBHOOK_SECRET=<shared secret> FLEET_REPO=/path/to/target/repo \
          python3 webhook_receiver.py [--port 8562]
 Wire GitHub -> Settings -> Webhooks -> Add webhook, Payload URL = this server's public path
 (behind the Cloudflare Tunnel path ingress, e.g. https://dino.luckymachines.co/webhook),
 Content type = application/json, Secret = the same FLEET_WEBHOOK_SECRET, events = "Workflow
-runs" only.
+runs" and "Pull requests".
 """
 from __future__ import annotations
 
@@ -47,6 +53,10 @@ SECRET = os.environ.get("FLEET_WEBHOOK_SECRET", "")
 WATCHED_WORKFLOWS = set(
     os.environ.get("FLEET_WEBHOOK_WORKFLOWS", "ci.yml deploy.yml").split()
 )
+# judge-judy otherwise waits up to its own 15-minute poll interval to notice a brand-new or
+# freshly-pushed PR -- opened/synchronize are real GitHub events same as workflow_run, so fire
+# it immediately instead of leaving a fresh PR sitting unreviewed for up to a quarter hour.
+PR_TRIGGER_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review"}
 
 
 def log(msg: str) -> None:
@@ -112,6 +122,10 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"pong")
             return
 
+        if event == "pull_request":
+            self._handle_pull_request(payload)
+            return
+
         if event != "workflow_run":
             self.send_response(204)
             self.end_headers()
@@ -137,19 +151,40 @@ class Handler(BaseHTTPRequestHandler):
 
         sha = wr.get("head_sha", "?")[:12]
         log(f"FIRE: {wf_name} failed at {sha} -- launching the-fixer")
-        run_member = KIT_DIR / "scripts" / "run_member.sh"
-        try:
-            # Detached, best-effort: this receiver's job is to notice and hand off, not to
-            # wait out an incident-response pass (which can run up to the-fixer's own
-            # timeout_s). A failure to LAUNCH is logged; the-fixer's own log covers the rest.
-            subprocess.Popen(
-                [str(run_member), "the-fixer"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError as e:
-            log(f"FATAL: could not launch run_member.sh the-fixer: {e}")
+        _launch_member("the-fixer")
+
+    def _handle_pull_request(self, payload: dict) -> None:
+        self.send_response(200)  # ack immediately, same reasoning as the workflow_run path
+        self.end_headers()
+
+        action = payload.get("action", "")
+        pr = payload.get("pull_request", {})
+        if pr.get("draft"):
+            log(f"ignored: pull_request {action} on draft PR #{pr.get('number', '?')}")
+            return
+        if action not in PR_TRIGGER_ACTIONS:
+            log(f"ignored: pull_request action={action!r}, not in {PR_TRIGGER_ACTIONS}")
+            return
+
+        num = pr.get("number", "?")
+        log(f"FIRE: pull_request {action} on PR #{num} -- launching judge-judy")
+        _launch_member("judge-judy")
+
+
+def _launch_member(name: str) -> None:
+    run_member = KIT_DIR / "scripts" / "run_member.sh"
+    try:
+        # Detached, best-effort: this receiver's job is to notice and hand off, not to wait
+        # out a review/incident-response pass (which can run up to that member's own
+        # timeout_s). A failure to LAUNCH is logged; the member's own log covers the rest.
+        subprocess.Popen(
+            [str(run_member), name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as e:
+        log(f"FATAL: could not launch run_member.sh {name}: {e}")
 
 
 def main() -> int:
