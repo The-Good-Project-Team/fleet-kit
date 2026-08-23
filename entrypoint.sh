@@ -78,6 +78,15 @@ case "${1:-cron-foreground}" in
     umask 077
     printf '%s' "$GH_TOKEN" > "$TOKEN_FILE"
 
+    # GH_TOKEN in a cron job's shell only authenticates the `gh` CLI -- a bare `git pull`
+    # (the */10 canary above) has no credential path of its own and fails outright
+    # ("could not read Username for 'https://github.com'") even with a valid token exported
+    # right next to it (#3095: /repo sat 8 commits behind origin/main for ~24h before this
+    # was caught). Wiring the credential helper here, once at boot, covers every future
+    # `git` invocation under this HOME -- `gh auth git-credential` itself reads GH_TOKEN
+    # from the environment at call time, so it doesn't need a value baked in now.
+    git config --global credential.helper '!gh auth git-credential'
+
     # Every real member runs through run_member.sh now (2026-08-21 -- this crontab previously
     # only ever ran worktree_builder.sh + judge-judy.sh directly, predating run_member.sh and
     # missing gru/jefe/roomba/dumbledore/messenger entirely; a container built from this image
