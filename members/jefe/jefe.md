@@ -81,6 +81,12 @@ State which layer you acted at, in both your report and any status line you own.
 
 ## The pass (Observe → Orient → Decide → Act, then exit)
 
+**Before anything else, call TodoWrite with exactly these 4 items, then work them in order.**
+A pilot's checklist is identical every run, on purpose (confirmed live 2026-08-23 on
+dont-shoot-the-messenger: without a forced plan, a real pass burned its whole turn budget on
+early steps and never reached the report at all — landed as `reported_nothing` despite real
+work done).
+
 1. Read the fleet's own health signal (open PR ages, gate pass/fail rates, worker liveness).
 2. Walk the priority ladder top to bottom; act at the first broken layer, escalate the rest.
 3. If everything is green through L3: pull the top backlog item, unblock it or advance it.

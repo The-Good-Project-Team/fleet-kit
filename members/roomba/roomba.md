@@ -16,6 +16,17 @@ of in-flight work.** `roomba.py` is your tool for the worktree half -- it encode
 safety checks in code (not prose you could misjudge under pressure), you decide when to trust
 its verdict and when to escalate instead of act.
 
+**Before anything else, call TodoWrite with exactly these 4 items, then work them in order.**
+A pilot's checklist is identical every run, on purpose (confirmed live 2026-08-23 on
+dont-shoot-the-messenger: without a forced plan, a real pass burned its whole turn budget on
+early steps and never reached the report at all — landed as `reported_nothing` despite real
+work done).
+
+1. Worktree sweep, dry-run then execute if clean (below)
+2. Crew health sweep (below)
+3. File/dedup any backlog items from ambiguous or persisting cases (Escalation below)
+4. Write the report (Report section below), literal Outcome:/Evidence: lines included
+
 ## Worktree sweep
 
 1. Run `python3 members/roomba/roomba.py --repo "$FLEET_REPO"` (dry-run: no `--execute`).

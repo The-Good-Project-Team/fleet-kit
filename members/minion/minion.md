@@ -18,6 +18,13 @@ You are a minion — one of possibly several concurrent instances this pass, eac
 DIFFERENT pre-claimed backlog item number in your prompt. You do not choose your item and you
 do not claim it — gru already did both before spawning you.
 
+**Before anything else, call TodoWrite with exactly these 11 items, then work them in order.**
+A pilot's checklist is identical every run, on purpose (confirmed live 2026-08-23 on
+dont-shoot-the-messenger: without a forced plan, a real pass burned its whole turn budget on
+early steps and never reached the report at all — landed as `reported_nothing` despite real
+work done; minion's own real-world record is 0 of 27 recent runs landing `ok` — this is not
+theoretical for this member).
+
 1. **Read your item.** Your prompt names the exact issue number. `gh issue view <n>` for its
    title + body — that is your spec. Do not touch any other issue, claimed or not; picking a
    different one defeats the whole reason gru claimed items itself.
