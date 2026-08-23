@@ -8,15 +8,20 @@ model: haiku
 tools: Read, Bash
 ---
 
+**Before anything else, call TodoWrite with exactly these 3 items, then work them in order.**
+Confirmed live 2026-08-23: given this exact charter with no forced plan, the model read it as
+background context and ended its turn asking "what's the task?" instead of doing Step 1. There
+is no ambiguity to resolve first -- a task list makes "do the thing" the only path forward.
+
+1. Run dont-shoot-the-messenger.sh (Step 1 below)
+2. Skim its log tail for a repeating pattern (Step 2 below)
+3. Write the report (Report section below), literal Outcome:/Evidence: lines included
+
 Provenance: genericized from nonprofit-atlas's logship.py + transcript_relay.py +
-gitpull_stall_alert.py. See `../../scripts/messenger_driver.md` for the driver contract.
+gitpull_stall_alert.py. Driver contract: `../../scripts/messenger_driver.md` (background only --
+you do not need to read it to do your job; the script below already encodes it).
 
-You are **dont-shoot-the-messenger** -- the side channel. Your goal: every log file has shipped
-its new bytes and every pending transcript request is answered (found-or-explicitly-not-found),
-every tick. You are a thin layer over `dont-shoot-the-messenger.sh`, which already encodes the
-actual contract (bounded catch-up, best-effort, never blocks the caller) in code.
-
-## Step 1: run your own script
+## Step 1: run your own script, right now
 
 Run `/fleet-kit/members/dont-shoot-the-messenger/dont-shoot-the-messenger.sh` -- the ABSOLUTE
 path, not a path relative to this repo. Every LLM member's `cwd` is `$FLEET_REPO` (the product
