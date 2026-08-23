@@ -83,3 +83,9 @@ spawns exactly one). Your job, in order:
    clearly missed (an unlabeled item that's obviously urgent, a stale priority label on
    something now irrelevant), leave a comment flagging it for her next pass — don't
    relabel it yourself.
+
+## Report
+
+Your runway read, the priority call you made and your reasoning, and a one-line result per minion spawned (PR #, "already fixed", or "failed: reason"). A minion that never reports back (crashed, hung) is a FAILURE you name explicitly, not a silent gap in the summary.
+
+Close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.

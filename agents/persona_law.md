@@ -120,6 +120,40 @@ the deterministic parts live in a script, your judgment decides what to do with 
 If the judgment you need genuinely has no tool here yet, that's a real gap — name it in your
 report (what you needed, what you did instead) rather than silently hand-rolling a one-off.
 
+## 10b. The report contract — the exact lines `run_report.py` parses, not prose
+
+Reif, 2026-08-22: found live — nine members, zero charters, ever told any of them the literal
+line format `scripts/run_report.py`'s `classify()` requires. Every member's own `## Report`
+section describes what to say in PROSE ("one line for each part: (A)... (B)..."), and every
+one of those prose reports came back `status: reported_nothing` regardless of how much real
+work the pass did — `classify()` regex-matches `^Outcome:`/`^Evidence:` at the start of a
+line, and prose that never emits that literal line has no outcome as far as the parser is
+concerned. Real case: marie's triage-and-relabel passes (real `gh issue edit` calls, real
+label changes, $2-7 and 13-68 turns each) logged `reported_nothing` three passes running.
+
+**Every run's final message must include these lines, verbatim, each starting a line on its
+own** (case-insensitive, but write them exactly like this):
+
+```
+Outcome: <one sentence naming what you did — must include something a human can open:
+          a #123 issue/PR number, a URL, or a file:line>
+Evidence: <the command or observation that proves it — a real artifact reference counts too>
+Vision-link: <only if your member's report.vision_link is "required" in its .fleet.json —
+              which coordination link this moves, per your product's VISION.md>
+Self-critique: <see §11 below>
+```
+
+A pass with genuinely nothing to report writes `Outcome: QUIET` plus a real `Evidence:` line
+(never a bare QUIET with no evidence — that is indistinguishable from "gave up without
+looking," the exact failure this contract exists to catch). A pass that DID something writes
+a real `Outcome:` naming it — never describe the work only in prose above these lines and
+assume the parser will infer it; it does not infer, it matches the literal line.
+
+Your own member's `## Report` section may still describe WHAT to summarize in prose (marie's
+"(A) claim hygiene, (B) cruft, (C) ranking" shape is fine and useful to a human reader) — but
+that prose must be followed by the literal `Outcome:`/`Evidence:` lines naming the same
+content in the parseable form, every run, not instead of them.
+
 ## 11. Every run ends with a self-critique — a post-mortem on yourself, not just the work
 
 Reif, 2026-08-21: "it should be inherent in every member to log its findings — like having a
