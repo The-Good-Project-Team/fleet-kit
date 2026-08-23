@@ -60,7 +60,8 @@
 
   /* ---------- center: selected agent's detail -- header/actions fixed, run list scrolls ---------- */
   .detail { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-  .detail-head { padding: 12px 16px; border-bottom: 1px solid var(--border); flex: none; }
+  .detail-head { padding: 12px 16px; background: var(--panel-2); border-bottom: 2px solid var(--border);
+    box-shadow: 0 1px 3px rgba(0,0,0,.05); flex: none; }
   .detail-head .title-row { display: flex; align-items: center; gap: 10px; }
   .detail-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
   .detail-head .lane { color: var(--dim); font-size: 11.5px; }
@@ -72,8 +73,16 @@
   .override-note { color: var(--warn); font-size: 11px; margin-top: 6px; }
   .spend-line { color: var(--dim); font-size: 11.5px; margin-top: 6px; }
 
+  .hist-toggle { display: flex; gap: 4px; margin-top: 10px; }
+  .hist-toggle button { background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    padding: 3px 10px; font-size: 11.5px; color: var(--dim); cursor: pointer; }
+  .hist-toggle button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
   .run-list { flex: 1; overflow-y: auto; min-height: 0; }
   .run-empty { padding: 30px; color: var(--dimmer); text-align: center; }
+  .upcoming-card { margin: 16px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 6px; }
+  .upcoming-card .u-in { font-size: 20px; font-weight: 700; }
+  .upcoming-card .rmeta { color: var(--dim); font-size: 11.5px; margin-top: 6px; }
   .run-row { padding: 9px 16px; border-bottom: 1px solid var(--border); cursor: pointer; }
   .run-row:hover { background: var(--panel); }
   .run-row.open { background: var(--panel); }
@@ -86,7 +95,11 @@
   .badge.pending, .badge.upcoming { background: rgba(122,125,134,.16); color: var(--dim); }
   .run-row .rtime { color: var(--dimmer); font-size: 11px; margin-left: auto; flex: none; }
   .run-row .rmeta { color: var(--dim); font-size: 11px; margin-top: 2px; }
-  .run-row .routcome { margin-top: 3px; }
+  .run-row .routcome { margin-top: 5px; }
+  .run-row .o-tldr { font-size: 13px; font-weight: 600; line-height: 1.4; }
+  .run-row .o-detail { margin-top: 4px; color: var(--dim); font-size: 11.5px; line-height: 1.6; }
+  .run-row .routcome code, .run-row .rmeta code { font-family: var(--mono); background: var(--panel-2);
+    padding: 0 3px; border-radius: 3px; font-size: 11px; word-break: break-all; }
   .run-row .rid { color: var(--dimmer); font-size: 10.5px; margin-top: 2px; cursor: copy; }
   .run-row .rid:hover { color: var(--accent); }
   .dedup-badge { color: var(--accent); font-size: 10.5px; margin-left: 6px; }
@@ -312,7 +325,11 @@ function renderDetailHead() {
         ${enabled ? '■ disable' : '● enable'}
       </button>
     </div>
-    <div class="dial-row">${dials}</div>`;
+    <div class="dial-row">${dials}</div>
+    <div class="hist-toggle">
+      <button data-view="history" class="${RUN_VIEW === 'history' ? 'active' : ''}">history</button>
+      <button data-view="upcoming" class="${RUN_VIEW === 'upcoming' ? 'active' : ''}">upcoming</button>
+    </div>`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -327,6 +344,7 @@ function reindexSeq(name) {
 }
 
 let OPEN_TRANSCRIPT_RUN_ID = null; // survives renderRunList() rebuilds -- see restoreOpenTranscript()
+let RUN_VIEW = 'history'; // 'history' (past runs) | 'upcoming' (this member's single next scheduled fire)
 
 async function loadTranscriptInto(box, rec) {
   box.dataset.loaded = '1';
@@ -372,6 +390,19 @@ function noOutcomeHint(rec) {
     : esc(rec.self_critique || 'ran fine, reported no outcome');
 }
 
+// Outcome strings are one run-on sentence (semicolon-joined clauses, absolute paths inline) --
+// unreadable as a single paragraph (Reif, 2026-08-23 screenshot: "I cant read this"). Split into
+// a bold TLDR (first clause) + the rest as dimmed detail lines, monospacing path-like tokens.
+function formatOutcome(raw) {
+  if (!raw) return '';
+  const parts = raw.split(/;\s+/).map(p => p.trim()).filter(Boolean);
+  const mono = s => esc(s).replace(/(\/[\w.\-\/]+\.\w+(?::\d+)?|#\d{3,})/g, '<code>$1</code>');
+  const [tldr, ...rest] = parts;
+  let html = `<div class="o-tldr">${mono(tldr)}</div>`;
+  if (rest.length) html += `<div class="o-detail">${rest.map(mono).join('<br>')}</div>`;
+  return html;
+}
+
 function runRowHtml(rec, dupCount) {
   const status = rec.status || 'pending';
   const pr = rec.pr
@@ -386,15 +417,33 @@ function runRowHtml(rec, dupCount) {
       ${dup}
       <span class="rtime">${rec.ts ? clockTime(rec.ts) + ' · ' + ago(rec.ts) : ''}</span>
     </div>
-    <div class="routcome">${esc(rec.outcome) || noOutcomeHint(rec)}</div>
-    ${rec.evidence ? `<div class="rmeta">${esc(rec.evidence)}</div>` : ''}
+    <div class="routcome">${rec.outcome ? formatOutcome(rec.outcome) : noOutcomeHint(rec)}</div>
+    ${rec.evidence ? `<div class="rmeta">${formatOutcome(rec.evidence)}</div>` : ''}
     ${rec.tokens && rec.tokens.cost_usd ? `<div class="rmeta">$${Number(rec.tokens.cost_usd).toFixed(3)} · ${esc(rec.tokens.num_turns)} turns</div>` : ''}
     ${rec.run_id ? `<div class="rid" title="click to copy run_id">${esc(rec.run_id)}</div>` : ''}
     <div class="transcript"></div>`;
 }
 
+function renderUpcomingCard() {
+  const m = SPECS.find(s => s.spec.name === SELECTED);
+  const next = NEXT_FIRES.find(f => f.member === SELECTED);
+  if (!next || !next.enabled) {
+    runListEl.innerHTML = `<div class="run-empty">${m && !m.effective.enabled ? 'disabled — not scheduled' : 'no upcoming run scheduled'}</div>`;
+    return;
+  }
+  const sched = (m?.spec?.schedule && JSON.stringify(m.spec.schedule)) || '';
+  runListEl.innerHTML = `
+    <div class="upcoming-card">
+      <div class="u-in">next run in ${esc(fmtIn(next.in_s))}</div>
+      <div class="rmeta">${esc(m?.spec?.kind || '')}${m?.spec?.lane ? ' · ' + esc(m.spec.lane) : ''}</div>
+      ${sched ? `<div class="rmeta">schedule: <code>${esc(sched)}</code></div>` : ''}
+      <div class="rmeta">only the next fire is known -- schedule is interval-based, not a queue</div>
+    </div>`;
+}
+
 function renderRunList() {
   if (!SELECTED) { runListEl.innerHTML = '<div class="run-empty">select an agent</div>'; return; }
+  if (RUN_VIEW === 'upcoming') { renderUpcomingCard(); return; }
   reindexSeq(SELECTED);
   const runs = ALL_RUNS.filter(r => r.member === SELECTED).slice().reverse(); // newest first
   if (!runs.length) { runListEl.innerHTML = '<div class="run-empty">no runs recorded yet</div>'; return; }
@@ -426,13 +475,21 @@ runListEl.addEventListener('click', e => {
 });
 
 function selectAgent(name) {
-  if (name !== SELECTED) OPEN_TRANSCRIPT_RUN_ID = null; // switching agents, not just re-rendering
+  if (name !== SELECTED) { OPEN_TRANSCRIPT_RUN_ID = null; RUN_VIEW = 'history'; } // switching agents, not just re-rendering
   PAGE = 'agent';
   SELECTED = name;
   renderSidebar();
   renderDetailHead();
   renderRunList();
 }
+
+detailHeadEl.addEventListener('click', e => {
+  const btn = e.target.closest('.hist-toggle button');
+  if (!btn) return;
+  RUN_VIEW = btn.dataset.view;
+  renderDetailHead();
+  renderRunList();
+});
 
 function selectPage(page) {
   PAGE = page;
