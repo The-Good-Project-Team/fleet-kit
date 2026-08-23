@@ -12,11 +12,11 @@
       "a backlog beyond the driver's own cap ships bounded, never unbounded replay",
       "skim the log's recent tail (not just this tick) for a repeating error a single run can't see"
     ],
-    "limits": {"timeout_s": 300, "max_budget_usd": 0},
+    "limits": {"timeout_s": 300, "max_budget_usd": 0.10},
     "escalation": "the driver reports a config error (exit 2) rather than a transient failure -- log it loudly once per distinct error, do not retry-spam every tick on a misconfiguration nothing will fix by waiting."
   },
   "schedule": {
-    "interval_s": 300
+    "interval_s": 3600
   },
   "timeout_s": 300,
   "enabled": true,

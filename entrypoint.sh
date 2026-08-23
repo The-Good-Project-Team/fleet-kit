@@ -98,7 +98,12 @@ case "${1:-cron-foreground}" in
       # above already covers the fast CI/deploy-red path in near-real-time. This tick only needs
       # to catch prod-down-with-no-failing-workflow-run, which doesn't need sub-hour latency.
       echo "47 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh the-fixer >> $LOG_DIR/the-fixer.log 2>&1"
-      echo "*/5 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dont-shoot-the-messenger >> $LOG_DIR/dont-shoot-the-messenger.log 2>&1"
+      # Widened */5 -> hourly (2026-08-23, Reif): 215/215 runs at */5 had failed since it was
+      # enabled (own config set max_budget_usd=0 -- claude -p died before any work, fixed
+      # alongside this), so */5 was pure churn, not signal. Now that it does real work (the
+      # local messenger driver verifies transcripts are actually findable), hourly is plenty --
+      # nothing about "is a transcript readable" needs sub-hour latency.
+      echo "51 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dont-shoot-the-messenger >> $LOG_DIR/dont-shoot-the-messenger.log 2>&1"
       echo "*/15 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh judge-judy >> $LOG_DIR/judge-judy.log 2>&1"
       # Hourly/daily anchors nudged OFF the-fixer's even-minute grid (*/2) and gitpull's
       # ten-minute grid (*/10) -- :00/:20/:30/:40 all landed exactly on both, so every one of
