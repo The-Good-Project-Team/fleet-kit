@@ -89,6 +89,13 @@ ENABLED=$(jget "['enabled']")
 TIMEOUT_S=$(jget "['mandate']['limits'].get('timeout_s', $(jget "['timeout_s']"))")
 VISION=$(jget "['report']['vision_link']")
 VISION_FLAG=""; [ "$VISION" = "required" ] && VISION_FLAG="--vision-required"
+# persona_law.md #6 (worktree isolation) is LAW for any unit of work that CHANGES repo files
+# when a shared box runs several concurrent members -- opt out only for a member documented
+# as read-only-by-design (jefe.fleet.json sets llm.worktree=false; see jefe.md's own "shared
+# checkout, not a fresh worktree -- on purpose" bounds section). Default true for everyone else,
+# since the generic claude -p path below has no other isolation and gru already spawns N
+# concurrent minions into this exact script.
+WORKTREE_ENABLED=$(jget "['llm'].get('worktree', True)")
 
 if [ "$ENABLED" != "True" ] && [ "${FLEET_RUN_NOW:-0}" != "1" ]; then
   log "$MEMBER: enabled=false in spec -- exiting without doing anything"
@@ -136,6 +143,67 @@ print(member_spec.behavior_path(spec))
 cd "$REPO" 2>/dev/null || { log "FATAL: repo missing at $REPO"; exit 1; }
 [ -f "$KIT_DIR/scripts/account_pool.sh" ] && . "$KIT_DIR/scripts/account_pool.sh"
 command -v account_pool_run >/dev/null 2>&1 || account_pool_run() { "$@"; }
+
+# --- isolate this pass in its own worktree (#3092) -------------------------------------------
+# Every prior run of this script just `cd`ed into the ONE shared $REPO checkout with no
+# isolation at all -- fine for a single member ticking alone, a live race the moment gru
+# backgrounds N concurrent `run_member.sh minion` processes (each fetching/merging/committing/
+# pushing against the same HEAD, index, and working tree). worktree_builder.sh already proved
+# the fix (fresh `git worktree add` off origin/<default>, same mkdir-lock pattern reused
+# verbatim below) -- this just gives the generic member path the isolation persona_law.md #6
+# already calls LAW and minion's own charter already claims it gets.
+WT_PATH=""
+if [ "$WORKTREE_ENABLED" = "True" ] && [ "$DRY_RUN" -ne 1 ]; then
+  DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+  DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
+  WT_PATH="${TMPDIR:-/tmp}/fleet-run-${MEMBER}${ITEM:+-item$ITEM}-$$"
+  WT_BRANCH="member/${MEMBER}${ITEM:+-item$ITEM}-$$-$(date +%s)"
+  LOCK="${TMPDIR:-/tmp}/fleet-kit-worktree-add.lock"
+
+  create_run_worktree() {
+    local attempt rc=1 waited held
+    for attempt in 1 2 3; do
+      waited=0; held=0
+      while [ "$waited" -lt 120 ]; do
+        if mkdir "$LOCK" 2>/dev/null; then held=1; break; fi
+        # Steal a lock older than 5 min: a sibling killed mid-add would otherwise wedge every
+        # later attempt (this script's or worktree_builder.sh's -- same lock, same hazard).
+        if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
+          rmdir "$LOCK" 2>/dev/null || true; continue
+        fi
+        sleep 2; waited=$((waited + 2))
+      done
+      if [ "$held" -ne 1 ]; then
+        log "create_run_worktree: could not acquire lock within 120s (attempt $attempt)"
+        sleep $((attempt * 3)); continue
+      fi
+      git -C "$REPO" fetch origin "$DEFAULT_BRANCH" >/dev/null 2>&1
+      git -C "$REPO" worktree prune >/dev/null 2>&1
+      if git -C "$REPO" rev-parse --verify --quiet "refs/heads/$WT_BRANCH" >/dev/null 2>&1; then
+        git -C "$REPO" branch -D "$WT_BRANCH" >/dev/null 2>&1
+      fi
+      git -C "$REPO" worktree add "$WT_PATH" -b "$WT_BRANCH" "origin/$DEFAULT_BRANCH"
+      rc=$?
+      rmdir "$LOCK" 2>/dev/null || true   # safe: reached only when held=1
+      [ "$rc" -eq 0 ] && return 0
+      log "create_run_worktree: attempt $attempt failed (rc=$rc), retrying"
+      sleep $((attempt * 3))
+    done
+    return "$rc"
+  }
+
+  if ! create_run_worktree; then
+    log "FATAL: could not create isolated worktree for $MEMBER at $WT_PATH"
+    exit 1
+  fi
+  cleanup_run_worktree() {
+    git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
+    git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+  }
+  trap cleanup_run_worktree EXIT
+  cd "$WT_PATH" || { log "FATAL: worktree created but cd failed: $WT_PATH"; exit 1; }
+  log "$MEMBER: isolated in worktree $WT_PATH (branch $WT_BRANCH)"
+fi
 
 # Source the charter (frontmatter stripped), build --allowedTools/--disallowedTools from the
 # spec's own tools.allow/deny, run through the account pool, book real usage.
