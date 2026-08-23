@@ -2,139 +2,171 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>fleet-kit — live</title>
+<title>fleet-kit console</title>
 <style>
   :root {
-    --bg: #f7f7f5; --panel: #ffffff; --border: #dcdcd6; --text: #2a2a26; --dim: #83837a;
-    --ok: #2f7d46; --warn: #a1791f; --bad: #b23b32; --accent: #2f6fa8;
+    --bg: #16171a; --panel: #1d1f23; --panel-2: #24262b; --border: #2e3138;
+    --text: #d8dadf; --dim: #7a7d86; --dimmer: #52545c;
+    --ok: #4caf6f; --warn: #d9a441; --bad: #e0645a; --accent: #5b9fd9;
+    --mono: "SF Mono", ui-monospace, "Cascadia Code", Menlo, monospace;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body { margin: 0; background: var(--bg); color: var(--text);
-    font: 13px/1.5 -apple-system, "SF Mono", ui-monospace, monospace; }
-  header { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex;
-    align-items: center; gap: 12px; position: sticky; top: 0; background: var(--bg); z-index: 5; }
-  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
-  #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
-  #dot.live { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
-
-  /* feed (main) + rail (sidebar) -- runs column is the ONE thing you scan; PRs/backlog/members
-     are reference material in a narrower rail beside it. */
-  .layout { display: flex; min-height: calc(100vh - 41px); }
-  .feed { flex: 1; min-width: 0; overflow: auto; max-height: calc(100vh - 41px);
-    display: flex; flex-direction: column; }
-  .rail { width: 320px; flex: none; border-left: 1px solid var(--border); overflow: auto;
-    max-height: calc(100vh - 41px); background: var(--panel); }
-  .rail-section { border-bottom: 1px solid var(--border); }
-  .rail-section:last-child { border-bottom: none; }
-
-  .col-head { padding: 8px 12px; font-weight: 600; color: var(--dim); text-transform: uppercase;
-    font-size: 11px; letter-spacing: .05em; position: sticky; top: 0; background: var(--bg);
-    border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 6px; }
-  .rail .col-head { background: var(--panel); }
-  .col-head .count { background: var(--border); color: var(--text); border-radius: 10px;
-    padding: 0 7px; font-size: 10.5px; font-weight: 700; }
-  .row { padding: 8px 12px; border-bottom: 1px solid var(--border); }
-  .row:hover { background: var(--panel); }
-  .feed .row:hover { background: rgba(0,0,0,.02); }
-  .pill { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px;
-    font-weight: 600; text-transform: uppercase; }
-  .pill.ok { background: rgba(47,125,70,.14); color: var(--ok); }
-  .pill.quiet { background: rgba(161,121,31,.14); color: var(--warn); }
-  .pill.reported_nothing, .pill.no_vision_link, .pill.fail { background: rgba(178,59,50,.14); color: var(--bad); }
-  .pill.pending, .pill.upcoming { background: rgba(131,131,122,.14); color: var(--dim); }
-  .pill.dedup-count { background: rgba(47,111,168,.14); color: var(--accent); margin-left: 4px; }
-  .row .meta { color: var(--dim); font-size: 11px; margin-top: 2px; }
-  .row .run-id { font-family: "SF Mono", ui-monospace, monospace; cursor: copy; }
-  .row .run-id:hover { color: var(--accent); text-decoration: underline; }
-  .row .outcome { margin-top: 4px; }
+    font: 13px/1.45 var(--mono); overflow: hidden; }
+  button { font-family: inherit; font-size: 12px; cursor: pointer; }
   a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
-  button { background: var(--panel); color: var(--text); border: 1px solid var(--border);
-    border-radius: 3px; padding: 2px 8px; font-size: 11px; cursor: pointer; font-family: inherit; }
-  button:hover { border-color: var(--accent); }
-  .rail button { background: var(--bg); }
-  .actions { margin-top: 4px; display: flex; gap: 6px; flex-wrap: wrap; }
-  #empty { padding: 20px; color: var(--dim); text-align: center; }
-  button.on { border-color: var(--ok); color: var(--ok); }
-  button.off { border-color: var(--bad); color: var(--bad); }
+
+  /* ---------- shell: topbar + sidebar + detail, all fixed-height regions, only the
+     scrollable inner lists scroll -- no page-level scroll, ever. ---------- */
+  .shell { display: grid; grid-template-rows: 40px 1fr; height: 100vh; }
+  .topbar { display: flex; align-items: center; gap: 14px; padding: 0 14px;
+    border-bottom: 1px solid var(--border); background: var(--panel); }
+  .topbar .brand { font-weight: 600; letter-spacing: .02em; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dimmer); flex: none; }
+  .dot.live { background: var(--ok); box-shadow: 0 0 5px var(--ok); }
+  .topbar .spacer { flex: 1; }
+  .topbar .stat { color: var(--dim); font-size: 11.5px; }
+  .topbar .stat b { color: var(--text); }
+  .btn { background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 4px 10px; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.danger { border-color: var(--bad); color: var(--bad); }
+  .btn.go { border-color: var(--ok); color: var(--ok); }
+  .btn.small { padding: 2px 7px; font-size: 11px; }
+  .btn:disabled { opacity: .4; cursor: default; }
+  .btn.primary { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
+  .btn.primary:hover { filter: brightness(1.1); }
+
+  .body { display: grid; grid-template-columns: 220px 1fr 300px; min-height: 0; }
+
+  /* ---------- sidebar: the agent roster, always visible, one click to switch ---------- */
+  .sidebar { border-right: 1px solid var(--border); background: var(--panel); overflow-y: auto; }
+  .side-head { padding: 10px 12px 6px; font-size: 10.5px; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--dimmer); }
+  .agent-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px 12px;
+    cursor: pointer; border-left: 2px solid transparent; }
+  .agent-item:hover { background: var(--panel-2); }
+  .agent-item.active { background: var(--panel-2); border-left-color: var(--accent); }
+  .agent-item .astatus { width: 8px; height: 8px; border-radius: 50%; flex: none; margin-top: 5px; }
+  .astatus.ok { background: var(--ok); }
+  .astatus.bad { background: var(--bad); }
+  .astatus.warn { background: var(--warn); }
+  .astatus.off { background: var(--dimmer); }
+  .agent-item .atext { flex: 1; min-width: 0; }
+  .agent-item .aname { overflow-wrap: break-word; }
+  .agent-item.disabled-agent .aname { color: var(--dimmer); text-decoration: line-through; }
+  .agent-item .aago { color: var(--dimmer); font-size: 10.5px; margin-top: 1px; }
+
+  /* ---------- center: selected agent's detail -- header/actions fixed, run list scrolls ---------- */
+  .detail { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .detail-head { padding: 12px 16px; border-bottom: 1px solid var(--border); flex: none; }
+  .detail-head .title-row { display: flex; align-items: center; gap: 10px; }
+  .detail-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .detail-head .lane { color: var(--dim); font-size: 11.5px; }
+  .detail-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .dial-row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .dial { background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px;
+    padding: 2px 8px; font-size: 11px; color: var(--dim); cursor: pointer; }
+  .dial:hover { border-color: var(--accent); color: var(--text); }
+  .override-note { color: var(--warn); font-size: 11px; margin-top: 6px; }
+  .spend-line { color: var(--dim); font-size: 11.5px; margin-top: 6px; }
+
+  .run-list { flex: 1; overflow-y: auto; min-height: 0; }
+  .run-empty { padding: 30px; color: var(--dimmer); text-align: center; }
+  .run-row { padding: 9px 16px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .run-row:hover { background: var(--panel); }
+  .run-row.open { background: var(--panel); }
+  .run-row .rline1 { display: flex; align-items: baseline; gap: 8px; }
+  .badge { font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 1px 6px;
+    border-radius: 3px; flex: none; }
+  .badge.ok { background: rgba(76,175,111,.16); color: var(--ok); }
+  .badge.quiet { background: rgba(217,164,65,.16); color: var(--warn); }
+  .badge.reported_nothing, .badge.no_vision_link, .badge.fail { background: rgba(224,100,90,.16); color: var(--bad); }
+  .badge.pending, .badge.upcoming { background: rgba(122,125,134,.16); color: var(--dim); }
+  .run-row .rtime { color: var(--dimmer); font-size: 11px; margin-left: auto; flex: none; }
+  .run-row .rmeta { color: var(--dim); font-size: 11px; margin-top: 2px; }
+  .run-row .routcome { margin-top: 3px; }
+  .run-row .rid { color: var(--dimmer); font-size: 10.5px; margin-top: 2px; cursor: copy; }
+  .run-row .rid:hover { color: var(--accent); }
+  .dedup-badge { color: var(--accent); font-size: 10.5px; margin-left: 6px; }
+
+  .transcript { display: none; margin-top: 7px; padding: 8px 10px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 4px; max-height: 320px; overflow-y: auto;
+    white-space: pre-wrap; word-break: break-all; font-size: 11px; color: var(--dim); }
+  .transcript.open { display: block; }
+  .transcript .tline { padding: 1px 0; }
+  .transcript .tline.live { color: var(--accent); }
+  .row.upcoming, .run-row.upcoming { opacity: .5; cursor: default; }
+
+  /* ---------- right rail: PRs / backlog, reference only, doesn't compete with agent detail ---------- */
+  .rail { border-left: 1px solid var(--border); background: var(--panel); overflow-y: auto;
+    display: flex; flex-direction: column; min-height: 0; }
+  .rail-section { border-bottom: 1px solid var(--border); }
+  .rail-head { padding: 9px 12px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--dimmer); display: flex; align-items: center; gap: 6px; position: sticky; top: 0;
+    background: var(--panel); }
+  .count-badge { background: var(--panel-2); border-radius: 8px; padding: 0 6px; font-size: 10px; color: var(--dim); }
+  .rail-row { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .rail-row .rmeta { color: var(--dim); font-size: 10.5px; margin-top: 2px; }
+  .rail-row .actions { margin-top: 5px; display: flex; gap: 5px; flex-wrap: wrap; }
   .checks-green { color: var(--ok); } .checks-pending { color: var(--warn); } .checks-failing { color: var(--bad); }
 
-  /* upcoming (cron queue) rows -- Reif: "feeding bottom first, with the next in queue on the
-     bottom most part". The feed reads top (oldest) to bottom (most recent), so "what happens
-     next" belongs at the very bottom too, right where a chat/log feed's newest content lands. */
-  #runs { display: flex; flex-direction: column; }
-  .row.upcoming { opacity: .55; }
-  .row.upcoming:hover { opacity: .85; }
-
-  /* transcript expand -- click a run row to pull its pass start/end log block inline. The
-     throttle action moved OUT of the row's face and into this panel -- it's a rare, deliberate
-     action, not something that should compete with the outcome text for attention. */
-  .row.run { cursor: pointer; }
-  .transcript { display: none; margin-top: 6px; padding: 8px; background: var(--bg);
-    border: 1px solid var(--border); border-radius: 3px; max-height: 420px; overflow-y: auto;
-    white-space: pre-wrap; word-break: break-all; font-size: 11.5px; color: var(--text); }
-  .transcript.open { display: block; }
-  .transcript .tline { padding: 1px 0; border-bottom: 1px solid rgba(0,0,0,.04); }
-  .transcript .tline.live { color: var(--accent); }
-  .transcript .loading, .transcript .none { color: var(--dim); }
-  .transcript .transcript-actions { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
-  .expand-hint { color: var(--dim); font-size: 11px; margin-top: 4px; }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: var(--panel-2); border-radius: 5px; border: 2px solid var(--panel); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--dimmer); }
 </style>
 </head>
 <body>
-<header>
-  <span id="dot"></span>
-  <h1>fleet-kit</h1>
-  <span id="repo" style="color:var(--dim)"></span>
-  <span style="flex:1"></span>
-  <button id="masterToggle" style="font-weight:600"></button>
-</header>
-<div class="layout">
-  <div class="feed" id="feedScroll">
-    <div class="col-head">Fleet runs</div>
-    <div id="runs"><div id="empty">waiting for the first pass…</div></div>
-    <div id="queue"></div>
+<div class="shell">
+  <div class="topbar">
+    <span class="dot" id="dot"></span>
+    <span class="brand">fleet-kit</span>
+    <span class="stat" id="repo"></span>
+    <span class="spacer"></span>
+    <span class="stat" id="globalSpend"></span>
+    <button class="btn" id="masterToggle"></button>
   </div>
-  <div class="rail">
-    <div class="rail-section">
-      <div class="col-head">Open PRs <span class="count" id="prCount">0</span></div>
-      <div id="prs"></div>
+  <div class="body">
+    <div class="sidebar">
+      <div class="side-head">Agents</div>
+      <div id="agentList"></div>
     </div>
-    <div class="rail-section">
-      <div class="col-head">Backlog (issues) <span class="count" id="issueCount">0</span></div>
-      <div class="row"><button id="newIssue">+ new issue</button></div>
-      <div id="issues"></div>
+    <div class="detail">
+      <div class="detail-head" id="detailHead"></div>
+      <div class="run-list" id="runList"><div class="run-empty">select an agent</div></div>
     </div>
-    <div class="rail-section">
-      <div class="col-head">Members &amp; spend (24h)</div>
-      <div id="members"></div>
+    <div class="rail">
+      <div class="rail-section">
+        <div class="rail-head">Open PRs <span class="count-badge" id="prCount">0</span></div>
+        <div id="prs"></div>
+      </div>
+      <div class="rail-section">
+        <div class="rail-head">Backlog <span class="count-badge" id="issueCount">0</span>
+          <button class="btn small" id="newIssue" style="margin-left:auto">+ new</button></div>
+        <div id="issues"></div>
+      </div>
     </div>
   </div>
 </div>
 <script>
-const runsEl = document.getElementById('runs');
-const queueEl = document.getElementById('queue');
-// Resolved from the server's own `git remote get-url origin` at boot (see fleet_view_server.py
-// _resolve_repo_url) so a bare PR/issue number in the feed can link straight to GitHub instead
-// of a dead "#" href. Empty until renderFleetState()'s first fetch resolves; a PR/issue link
-// rendered before that just isn't clickable yet (first paint only, re-render never needed).
+// ---------------------------------------------------------------------------------------------
+// State: one flat run list (all agents, as they stream in) + a per-agent index into it, so
+// switching the sidebar selection never refetches -- it just re-filters what's already in memory.
+// ---------------------------------------------------------------------------------------------
 let REPO_URL = '';
-const feedScrollEl = document.getElementById('feedScroll');
+let SPECS = [];          // from /api/members -- spec + effective + overrides, per agent
+let ALL_RUNS = [];        // oldest-first, matches runs.jsonl append order
+let SELECTED = null;      // currently open agent name, or null
+let NEXT_FIRES = [];
+const dot = document.getElementById('dot');
+const agentListEl = document.getElementById('agentList');
+const detailHeadEl = document.getElementById('detailHead');
+const runListEl = document.getElementById('runList');
 const prsEl = document.getElementById('prs');
 const issuesEl = document.getElementById('issues');
-const dot = document.getElementById('dot');
 
 function esc(s) { return (s ?? '').toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-
-// run_id is the one stable handle a human can paste into chat/an issue to point at an exact
-// run (member name + timestamp alone collide across the same-minute fanout dedup above) --
-// click-to-copy so referencing a run doesn't mean selecting text by hand off a monospace row.
-function copyRunId(id, el) {
-  navigator.clipboard?.writeText(id).then(() => {
-    const prev = el.textContent;
-    el.textContent = 'copied ✓';
-    setTimeout(() => { el.textContent = prev; }, 1000);
-  });
-}
 function ago(iso_or_epoch) {
   if (!iso_or_epoch) return '';
   const t = typeof iso_or_epoch === 'number' ? iso_or_epoch * 1000 : Date.parse(iso_or_epoch);
@@ -143,139 +175,213 @@ function ago(iso_or_epoch) {
   if (s < 3600) return Math.round(s / 60) + 'm ago';
   return Math.round(s / 3600) + 'h ago';
 }
-
-// Clock time a run actually happened, in the viewer's own local timezone -- Reif: "I want to
-// know what time this thing ran, and how long ago that was". Pairs with ago() on the same row:
-// one absolute, one relative.
 function clockTime(epoch) {
   if (!epoch) return '';
   return new Date(epoch * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
-
-function costFlag(tok) {
-  if (!tok || !tok.cost_usd) return '';
-  const perTurn = tok.cost_usd / Math.max(1, tok.num_turns);
-  // a real pass runs many cheap turns; a high dollar-per-turn number is almost always a
-  // retry storm or an error path, not real work -- worth a glance-level red flag, not just
-  // buried in the fine print.
-  return perTurn > 1 ? ' <span class="pill fail" title="high $/turn -- likely a retry or error, not real work">$/turn high</span>' : '';
+function fmtIn(s) {
+  if (s === null || s === undefined) return '—';
+  if (s <= 0) return 'due now';
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.round(s / 60) + 'm';
+  return (s / 3600).toFixed(1) + 'h';
+}
+function copyText(text, el) {
+  navigator.clipboard?.writeText(text).then(() => {
+    const prev = el.textContent;
+    el.textContent = 'copied ✓';
+    setTimeout(() => { el.textContent = prev; }, 900);
+  });
 }
 
-// Was near-bottom before a render -- if so, a new row/queue update should keep the view pinned
-// to the bottom (chat/log feed convention: only auto-scroll if the human hasn't scrolled up to
-// read history). 40px slack for sub-pixel/rounding.
-function nearBottom() {
-  return feedScrollEl.scrollHeight - feedScrollEl.scrollTop - feedScrollEl.clientHeight < 40;
+// ---------------------------------------------------------------------------------------------
+// Sidebar: one row per agent from /api/members (real spec discovery, not a hand list -- the
+// old dashboard already learned that lesson the hard way once). Status dot reflects the most
+// recent run's status for that agent, not just "enabled/disabled".
+// ---------------------------------------------------------------------------------------------
+function lastRunFor(name) {
+  for (let i = ALL_RUNS.length - 1; i >= 0; i--) {
+    if (ALL_RUNS[i].member === name) return ALL_RUNS[i];
+  }
+  return null;
 }
-function scrollToBottom() { feedScrollEl.scrollTop = feedScrollEl.scrollHeight; }
+function statusClass(status) {
+  if (status === 'ok') return 'ok';
+  if (status === 'quiet') return 'warn';
+  if (!status) return 'off';
+  return 'bad'; // reported_nothing, no_vision_link, fail, etc.
+}
 
-// Per-member "how many runs have we rendered so far" -- lets a transcript fetch say "the Nth
-// most recent pass for this member" without a run_id shared between runs.jsonl and the raw
-// .log files (see fleet_view_server.py's read_pass_block for why that's the correlation key).
-// Counts from the END (most recent = 0) regardless of the feed's oldest-to-newest DOM order.
-const memberRunTotal = {};
+function renderSidebar() {
+  agentListEl.innerHTML = SPECS.map(m => {
+    const name = m.spec.name;
+    const enabled = !!m.effective.enabled;
+    const last = lastRunFor(name);
+    const cls = !enabled ? 'off' : statusClass(last?.status);
+    return `<div class="agent-item ${name === SELECTED ? 'active' : ''} ${!enabled ? 'disabled-agent' : ''}"
+        data-agent="${esc(name)}">
+      <span class="astatus ${cls}"></span>
+      <div class="atext">
+        <div class="aname">${esc(name)}</div>
+        <div class="aago">${last ? ago(last.ts) : ''}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
 
-async function toggleTranscript(row, member) {
-  const box = row.querySelector('.transcript');
+agentListEl.addEventListener('click', e => {
+  const row = e.target.closest('.agent-item');
+  if (!row) return;
+  selectAgent(row.dataset.agent);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Detail head: name, lane/kind, spend, live dials, and the action bar -- rerun/enable/disable
+// all live right here, next to the agent you're looking at, not buried in a separate rail.
+// ---------------------------------------------------------------------------------------------
+const DIAL_KEYS = ['max_turns', 'model', 'enabled', 'schedule'];
+function dialValue(eff, key) {
+  if (key === 'enabled') return eff.enabled;
+  if (key === 'schedule') return JSON.stringify(eff.schedule);
+  return (eff.llm || {})[key];
+}
+
+function renderDetailHead() {
+  const m = SPECS.find(s => s.spec.name === SELECTED);
+  if (!m) { detailHeadEl.innerHTML = ''; return; }
+  const name = m.spec.name;
+  const enabled = !!m.effective.enabled;
+  const spendEl = m._spend;
+  const spendLine = spendEl
+    ? `$${(spendEl.total_cost || 0).toFixed(2)} · ${spendEl.runs} runs · ${spendEl.total_turns || 0} turns (24h)`
+    : 'no runs in 24h';
+  const overrideNote = m.overrides.length
+    ? `<div class="override-note">live overrides: ${m.overrides.map(o => `${esc(o.key)}=${esc(JSON.stringify(o.value))} (${esc(o.why)})`).join(', ')}</div>`
+    : '';
+  const dials = DIAL_KEYS.map(key => {
+    const v = dialValue(m.effective, key);
+    return `<button class="dial" data-act="edit-dial" data-member="${esc(name)}" data-key="${key}">${key}=${esc(JSON.stringify(v))}</button>`;
+  }).join('');
+  const next = NEXT_FIRES.find(f => f.member === name);
+  const nextLine = next && next.enabled ? `next run in ${fmtIn(next.in_s)}` : (enabled ? '' : 'disabled — not scheduled');
+
+  detailHeadEl.innerHTML = `
+    <div class="title-row">
+      <h2>${esc(name)}</h2>
+      <span class="lane">${esc(m.spec.kind)}${m.spec.lane ? ' · ' + esc(m.spec.lane) : ''}</span>
+    </div>
+    <div class="spend-line">${esc(spendLine)}${nextLine ? ' · ' + esc(nextLine) : ''}</div>
+    ${overrideNote}
+    <div class="detail-actions">
+      <button class="btn primary" data-act="run-now" data-member="${esc(name)}">▶ rerun now</button>
+      <button class="btn ${enabled ? 'danger' : 'go'}" data-act="toggle-member" data-member="${esc(name)}" data-on="${enabled}">
+        ${enabled ? '■ disable' : '● enable'}
+      </button>
+    </div>
+    <div class="dial-row">${dials}</div>`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Run list: filtered to the selected agent, newest at top (a console reads status top-down,
+// unlike the old feed's chat-style bottom-anchor) -- own scroll region, page never scrolls.
+// ---------------------------------------------------------------------------------------------
+const memberRunTotal = {}; // per-member count for pass_log's seqFromEnd, same convention as before
+
+function reindexSeq(name) {
+  const runs = ALL_RUNS.filter(r => r.member === name);
+  runs.forEach((r, i) => { r._seqFromEnd = runs.length - 1 - i; });
+}
+
+async function toggleTranscript(rowEl, rec) {
+  const box = rowEl.querySelector('.transcript');
   if (!box) return;
   const willOpen = !box.classList.contains('open');
   box.classList.toggle('open', willOpen);
+  rowEl.classList.toggle('open', willOpen);
   if (willOpen && !box.dataset.loaded) {
     box.dataset.loaded = '1';
-    box.innerHTML = '<div class="loading">loading transcript…</div>';
+    box.innerHTML = '<div class="tline">loading transcript…</div>';
     try {
-      const r = await fetch(`/api/pass_log?member=${encodeURIComponent(member)}&n=${row.dataset.seqFromEnd}`);
+      const r = await fetch(`/api/pass_log?member=${encodeURIComponent(rec.member)}&n=${rec._seqFromEnd}`);
       const { lines } = await r.json();
       box.innerHTML = (lines && lines.length)
         ? lines.map(l => `<div class="tline">${esc(l)}</div>`).join('')
-        : '<div class="none">no transcript recorded for this pass</div>';
-      const actions = document.createElement('div');
-      actions.className = 'transcript-actions';
-      actions.innerHTML = `<button data-act="steer" data-member="${esc(member)}">throttle ${esc(member)}</button>`;
-      box.appendChild(actions);
+        : '<div class="tline">no transcript recorded for this pass</div>';
     } catch {
-      box.innerHTML = '<div class="none">failed to load transcript</div>';
+      box.innerHTML = '<div class="tline">failed to load transcript</div>';
     }
   }
 }
 
-function renderRun(rec) {
-  const div = document.createElement('div');
-  div.className = 'row run';
+function noOutcomeHint(rec) {
+  return rec.exit_code && rec.exit_code !== 0
+    ? `exit code ${esc(rec.exit_code)} — crashed, not "found nothing"`
+    : esc(rec.self_critique || 'ran fine, reported no outcome');
+}
+
+function runRowHtml(rec, dupCount) {
   const status = rec.status || 'pending';
-  // Opens the real PR on GitHub -- not just a same-page dead "#" href. Works for a closed or
-  // merged PR too (unlike joining against gh.prs, which only lists OPEN ones), since it's
-  // built from the repo URL + number rather than needing the PR to still be in that list.
   const pr = rec.pr
-    ? (REPO_URL ? `<a href="${REPO_URL}/pull/${esc(rec.pr)}" target="_blank">PR #${esc(rec.pr)}</a>`
+    ? (REPO_URL ? `<a href="${REPO_URL}/pull/${esc(rec.pr)}" target="_blank" onclick="event.stopPropagation()">PR #${esc(rec.pr)}</a>`
                 : `PR #${esc(rec.pr)}`)
     : '';
-  // reported_nothing covers two very different real cases (#2999/#3015 already track this at
-  // the run_report.classify() layer): a genuine crash (exit_code != 0) vs a member that ran
-  // fine and found no eligible work -- self_critique/outcome is usually the clearest hint
-  // available in the record today, so surface THAT instead of a flat "(no outcome reported)"
-  // that reads identically for both.
-  const noOutcomeHint = rec.exit_code && rec.exit_code !== 0
-    ? `(exit code ${esc(rec.exit_code)} -- crashed, not "found nothing")`
-    : (rec.self_critique || '(ran fine, reported no outcome)');
-
-  // A fanout spawns N instances of the same member for the same reason (see
-  // run_gru_fanout.sh) -- when they land the same status+outcome back to back, that's one
-  // fact ("the fanout found nothing 5 times"), not 5 rows a human has to notice are
-  // duplicates of each other. Feed now reads oldest-to-newest (Reif: "feeding bottom first"),
-  // so the row a fresh duplicate collapses into is the LAST child, not the first.
-  const dedupKey = `${rec.member}|${status}|${rec.outcome || ''}`;
-  const last = runsEl.lastElementChild;
-  if (last && last.classList.contains('run') && last.dataset.dedupKey === dedupKey) {
-    const n = parseInt(last.dataset.count || '1', 10) + 1;
-    last.dataset.count = n;
-    let badge = last.querySelector('.dedup-count');
-    if (!badge) {
-      badge = document.createElement('span');
-      badge.className = 'pill dedup-count';
-      last.querySelector('b').after(badge);
-    }
-    badge.textContent = `×${n}`;
-    return;
-  }
-  div.dataset.dedupKey = dedupKey;
-  div.dataset.count = '1';
-  memberRunTotal[rec.member] = (memberRunTotal[rec.member] || 0) + 1;
-  div.dataset.member = rec.member;
-  // seqFromEnd is finalized in reindexSeq() below, once every row for this member is known --
-  // while streaming live, each new run for a member is "0" until the next one supersedes it.
-  div.innerHTML = `
-    <span class="pill ${esc(status)}">${esc(status)}</span>
-    <b>${esc(rec.member)}</b>
-    <span class="meta">${esc(rec.kind || '')} · item ${esc(rec.item_id || '—')} ${pr ? '· ' + pr : ''}
-      ${rec.ts ? `· ${clockTime(rec.ts)} (${ago(rec.ts)})` : ''}</span>
-    ${rec.run_id ? `<span class="meta run-id" title="click to copy run_id">${esc(rec.run_id)}</span>` : ''}
-    <div class="outcome">${esc(rec.outcome || noOutcomeHint)}</div>
-    ${rec.evidence ? `<div class="meta">${esc(rec.evidence)}</div>` : ''}
-    ${rec.tokens && rec.tokens.cost_usd ? `<div class="meta">$${Number(rec.tokens.cost_usd).toFixed(3)} · ${esc(rec.tokens.num_turns)} turns${costFlag(rec.tokens)}</div>` : ''}
-    <div class="expand-hint">click to view full transcript ▾</div>
+  const dup = dupCount > 1 ? `<span class="dedup-badge">×${dupCount}</span>` : '';
+  return `
+    <div class="rline1">
+      <span class="badge ${esc(status)}">${esc(status)}</span>
+      <span class="rmeta">${esc(rec.kind || '')} · item ${esc(rec.item_id || '—')}${pr ? ' · ' + pr : ''}</span>
+      ${dup}
+      <span class="rtime">${rec.ts ? clockTime(rec.ts) + ' · ' + ago(rec.ts) : ''}</span>
+    </div>
+    <div class="routcome">${esc(rec.outcome) || noOutcomeHint(rec)}</div>
+    ${rec.evidence ? `<div class="rmeta">${esc(rec.evidence)}</div>` : ''}
+    ${rec.tokens && rec.tokens.cost_usd ? `<div class="rmeta">$${Number(rec.tokens.cost_usd).toFixed(3)} · ${esc(rec.tokens.num_turns)} turns</div>` : ''}
+    ${rec.run_id ? `<div class="rid" title="click to copy run_id">${esc(rec.run_id)}</div>` : ''}
     <div class="transcript"></div>`;
-  div.addEventListener('click', (e) => {
-    if (e.target.closest('button') || e.target.closest('a')) return;
-    const runIdEl = e.target.closest('.run-id');
-    if (runIdEl) { copyRunId(rec.run_id, runIdEl); return; }
-    toggleTranscript(div, rec.member);
-  });
-  document.getElementById('empty')?.remove();
-  const wasAtBottom = nearBottom();
-  runsEl.appendChild(div);
-  while (runsEl.children.length > 300) runsEl.removeChild(runsEl.firstChild);
-  reindexSeq(rec.member);
-  if (wasAtBottom) scrollToBottom();
 }
 
-// After appending, every row for this member needs its "Nth most recent" index recomputed --
-// the newest (last in DOM) is 0, counting backwards. Cheap: at most a few dozen rows per member.
-function reindexSeq(member) {
-  const rows = Array.from(runsEl.querySelectorAll(`.row.run[data-member="${CSS.escape(member)}"]`));
-  rows.reverse().forEach((row, i) => { row.dataset.seqFromEnd = i; });
+function renderRunList() {
+  if (!SELECTED) { runListEl.innerHTML = '<div class="run-empty">select an agent</div>'; return; }
+  reindexSeq(SELECTED);
+  const runs = ALL_RUNS.filter(r => r.member === SELECTED).slice().reverse(); // newest first
+  if (!runs.length) { runListEl.innerHTML = '<div class="run-empty">no runs recorded yet</div>'; return; }
+
+  // Collapse consecutive identical (status, outcome) runs same as before -- a fanout finding
+  // nothing 5x is one fact, not 5 rows.
+  const groups = [];
+  for (const r of runs) {
+    const key = `${r.status || ''}|${r.outcome || ''}`;
+    const last = groups[groups.length - 1];
+    if (last && last.key === key) { last.count++; last.rec = r; /* keep newest of the group */ }
+    else groups.push({ key, count: 1, rec: r });
+  }
+  runListEl.innerHTML = groups.map(g =>
+    `<div class="run-row" data-run-id="${esc(g.rec.run_id || '')}">${runRowHtml(g.rec, g.count)}</div>`
+  ).join('');
 }
 
+runListEl.addEventListener('click', e => {
+  const ridEl = e.target.closest('.rid');
+  if (ridEl) { copyText(ridEl.textContent, ridEl); return; }
+  if (e.target.closest('a') || e.target.closest('button')) return;
+  const row = e.target.closest('.run-row');
+  if (!row) return;
+  const rec = ALL_RUNS.slice().reverse().find(r => r.run_id === row.dataset.runId)
+           || ALL_RUNS.filter(r => r.member === SELECTED).slice(-1)[0];
+  toggleTranscript(row, rec);
+});
+
+function selectAgent(name) {
+  SELECTED = name;
+  renderSidebar();
+  renderDetailHead();
+  renderRunList();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Right rail: PRs + backlog, unchanged in spirit from before -- reference material, not the
+// thing you're actively scanning.
+// ---------------------------------------------------------------------------------------------
 function renderGh(gh) {
   const prs = gh.prs || [];
   const issues = gh.issues || [];
@@ -284,86 +390,25 @@ function renderGh(gh) {
 
   prsEl.innerHTML = prs.map(pr => {
     const cls = pr._rollup === 'green' ? 'checks-green' : pr._rollup === 'failing' ? 'checks-failing' : 'checks-pending';
-    return `<div class="row">
-      <a href="${esc(pr.url)}" target="_blank">#${pr.number}</a> ${pr.isDraft ? '<span class="meta">draft</span>' : ''}
+    return `<div class="rail-row">
+      <a href="${esc(pr.url)}" target="_blank">#${pr.number}</a> ${pr.isDraft ? '<span class="rmeta">draft</span>' : ''}
       <div>${esc(pr.title)}</div>
-      <div class="meta"><span class="${cls}">${esc(pr._rollup)}</span> · ${esc(pr.headRefName)} · ${ago(pr.updatedAt)}</div>
-      <div class="actions"><button data-act="close_pr" data-pr="${pr.number}">close</button></div>
+      <div class="rmeta"><span class="${cls}">${esc(pr._rollup)}</span> · ${esc(pr.headRefName)} · ${ago(pr.updatedAt)}</div>
+      <div class="actions"><button class="btn small" data-act="close_pr" data-pr="${pr.number}">close</button></div>
     </div>`;
-  }).join('') || '<div id="empty">no open PRs</div>';
+  }).join('') || '<div class="run-empty">no open PRs</div>';
 
-  issuesEl.innerHTML = issues.map(i => `<div class="row">
-      <a href="${REPO_URL ? REPO_URL + '/issues/' + i.number : '#'}" target="_blank" class="meta">#${i.number}</a>
+  issuesEl.innerHTML = issues.map(i => `<div class="rail-row">
+      <a href="${REPO_URL ? REPO_URL + '/issues/' + i.number : '#'}" target="_blank">#${i.number}</a>
       <div>${esc(i.title)}</div>
-      <div class="meta">${i._claimed ? '<span class="pill quiet">claimed</span>' : '<span class="pill ok">open</span>'} · ${ago(i.updatedAt)}</div>
+      <div class="rmeta">${i._claimed ? 'claimed' : 'open'} · ${ago(i.updatedAt)}</div>
       <div class="actions">
-        ${i._claimed ? `<button data-act="prune" data-issue="${i.number}">release claim</button>` : ''}
-        <button data-act="comment_issue" data-issue="${i.number}">comment</button>
-        <button data-act="close_issue" data-issue="${i.number}">close</button>
+        ${i._claimed ? `<button class="btn small" data-act="prune" data-issue="${i.number}">release</button>` : ''}
+        <button class="btn small" data-act="comment_issue" data-issue="${i.number}">comment</button>
+        <button class="btn small" data-act="close_issue" data-issue="${i.number}">close</button>
       </div>
-    </div>`).join('') || '<div id="empty">backlog empty</div>';
+    </div>`).join('') || '<div class="run-empty">backlog empty</div>';
 }
-
-function fmtIn(s) {
-  if (s === null || s === undefined) return '—';
-  if (s <= 0) return 'due now';
-  if (s < 60) return s + 's';
-  if (s < 3600) return Math.round(s / 60) + 'm';
-  return (s / 3600).toFixed(1) + 'h';
-}
-
-// Upcoming fires render at the very BOTTOM of the feed, below every completed run -- Reif:
-// "feeding bottom first, with the next in queue on the bottom most part". The feed reads like
-// a log: oldest history at top, most recent completed run above this, and "what's about to
-// happen" is the natural next line after that.
-async function renderQueue() {
-  const { next_fires } = await (await fetch('/api/next_fires')).json();
-  const wasAtBottom = nearBottom();
-  queueEl.innerHTML = (next_fires || []).filter(f => f.enabled).slice(0, 6).map(f => `<div class="row upcoming">
-      <span class="pill upcoming">next</span>
-      <b>${esc(f.member)}</b>
-      <div class="meta">in ${fmtIn(f.in_s)}${f.next_at ? ' · ' + esc(f.next_at) : ''}</div>
-    </div>`).join('');
-  if (wasAtBottom) scrollToBottom();
-}
-
-document.body.addEventListener('click', async (e) => {
-  const b = e.target.closest('button');
-  if (!b) return;
-  const act = b.dataset.act;
-  if (act === 'steer') {
-    const key = prompt('override key (max_turns, model, enabled, schedule):', 'max_turns');
-    if (!key) return;
-    const value = prompt('value (JSON, e.g. 20 or "sonnet" or false):');
-    if (value === null) return;
-    const why = prompt('why? (required)', 'throttled from fleet-view');
-    if (!why) return;
-    let parsed; try { parsed = JSON.parse(value); } catch { parsed = value; }
-    const r = await fetch('/api/steer', { method: 'POST', body: JSON.stringify(
-      { member: b.dataset.member, key, value: parsed, why }) });
-    alert((await r.json()).ok ? 'applied' : 'failed — see server log');
-  } else if (act === 'prune') {
-    if (!confirm(`release the claim on issue #${b.dataset.issue}?`)) return;
-    const r = await fetch('/api/prune', { method: 'POST', body: JSON.stringify({ issue: b.dataset.issue }) });
-    alert((await r.json()).ok ? 'released' : 'failed — see server log');
-  } else if (act === 'close_pr') {
-    if (!confirm(`close PR #${b.dataset.pr}?`)) return;
-    const r = await fetch('/api/close_pr', { method: 'POST', body: JSON.stringify({ pr: b.dataset.pr }) });
-    alert((await r.json()).ok ? 'closed' : 'failed — see server log');
-  } else if (act === 'comment_issue') {
-    const text = prompt(`comment on issue #${b.dataset.issue}:`);
-    if (!text) return;
-    const r = await fetch('/api/comment_issue', { method: 'POST', body: JSON.stringify(
-      { issue: b.dataset.issue, body: text }) });
-    alert((await r.json()).ok ? 'commented' : 'failed — see server log');
-  } else if (act === 'close_issue') {
-    if (!confirm(`close issue #${b.dataset.issue}?`)) return;
-    const reason = confirm('mark "not planned" (cancel = "completed")?') ? 'not planned' : 'completed';
-    const r = await fetch('/api/close_issue', { method: 'POST', body: JSON.stringify(
-      { issue: b.dataset.issue, reason }) });
-    alert((await r.json()).ok ? 'closed' : 'failed — see server log');
-  }
-});
 
 document.getElementById('newIssue').addEventListener('click', async () => {
   const title = prompt('issue title:');
@@ -374,161 +419,141 @@ document.getElementById('newIssue').addEventListener('click', async () => {
   alert((await r.json()).ok ? 'filed' : 'failed — see server log');
 });
 
-const membersEl = document.getElementById('members');
-const DIAL_KEYS = ['max_turns', 'model', 'enabled', 'schedule'];
+// ---------------------------------------------------------------------------------------------
+// Action bar clicks (rerun / enable-disable / dial edit / PR+issue actions) -- one delegated
+// listener on body covers detail head + run list + rail.
+// ---------------------------------------------------------------------------------------------
+document.body.addEventListener('click', async (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  const act = b.dataset.act;
 
-function dialValue(eff, key) {
-  if (key === 'enabled') return eff.enabled;
-  if (key === 'schedule') return JSON.stringify(eff.schedule);
-  return (eff.llm || {})[key];
-}
+  if (act === 'run-now') {
+    const name = b.dataset.member;
+    b.disabled = true; const prevText = b.textContent; b.textContent = 'starting…';
+    const r = await fetch('/api/run_now', { method: 'POST', body: JSON.stringify({ member: name }) });
+    const j = await r.json();
+    b.disabled = false; b.textContent = prevText;
+    if (!j.ok) alert(`failed: ${j.error || 'see server log'}`);
+    // no alert on success -- the new run appears in the list itself within seconds, that IS the confirmation
+    return;
+  }
+  if (act === 'toggle-member') {
+    const willBeOn = b.dataset.on !== 'true';
+    await fetch('/api/fleet_toggle', { method: 'POST', body: JSON.stringify({ target: b.dataset.member, value: willBeOn }) });
+    await loadMembers(); renderSidebar(); renderDetailHead(); renderQueue();
+    return;
+  }
+  if (act === 'edit-dial') {
+    const key = b.dataset.key;
+    const value = prompt(`new value for ${b.dataset.member}.${key} (JSON):`);
+    if (value === null) return;
+    const why = prompt('why? (required)', 'tuned from console');
+    if (!why) return;
+    let parsed; try { parsed = JSON.parse(value); } catch { parsed = value; }
+    const r = await fetch('/api/steer', { method: 'POST', body: JSON.stringify({ member: b.dataset.member, key, value: parsed, why }) });
+    if ((await r.json()).ok) { await loadMembers(); renderDetailHead(); } else alert('failed — see server log');
+    return;
+  }
+  if (act === 'prune') {
+    if (!confirm(`release the claim on issue #${b.dataset.issue}?`)) return;
+    const r = await fetch('/api/prune', { method: 'POST', body: JSON.stringify({ issue: b.dataset.issue }) });
+    alert((await r.json()).ok ? 'released' : 'failed — see server log');
+  } else if (act === 'close_pr') {
+    if (!confirm(`close PR #${b.dataset.pr}?`)) return;
+    const r = await fetch('/api/close_pr', { method: 'POST', body: JSON.stringify({ pr: b.dataset.pr }) });
+    alert((await r.json()).ok ? 'closed' : 'failed — see server log');
+  } else if (act === 'comment_issue') {
+    const text = prompt(`comment on issue #${b.dataset.issue}:`);
+    if (!text) return;
+    const r = await fetch('/api/comment_issue', { method: 'POST', body: JSON.stringify({ issue: b.dataset.issue, body: text }) });
+    alert((await r.json()).ok ? 'commented' : 'failed — see server log');
+  } else if (act === 'close_issue') {
+    if (!confirm(`close issue #${b.dataset.issue}?`)) return;
+    const reason = confirm('mark "not planned" (cancel = "completed")?') ? 'not planned' : 'completed';
+    const r = await fetch('/api/close_issue', { method: 'POST', body: JSON.stringify({ issue: b.dataset.issue, reason }) });
+    alert((await r.json()).ok ? 'closed' : 'failed — see server log');
+  }
+});
 
+// ---------------------------------------------------------------------------------------------
+// Fleet state (master toggle) + members (spec/effective/overrides/spend) + queue (next fires)
+// ---------------------------------------------------------------------------------------------
 async function renderFleetState() {
   const state = await (await fetch('/api/fleet_state')).json();
   REPO_URL = state.REPO_URL || '';
+  document.getElementById('repo').textContent = REPO_URL ? REPO_URL.replace(/^https?:\/\//, '') : '';
   const btn = document.getElementById('masterToggle');
-  btn.textContent = state.FLEET_ENABLED ? '● fleet ON — click to stop everything' : '○ fleet OFF';
-  btn.className = state.FLEET_ENABLED ? 'on' : 'off';
+  btn.textContent = state.FLEET_ENABLED ? '● fleet ON' : '○ fleet OFF';
+  btn.className = 'btn ' + (state.FLEET_ENABLED ? 'go' : 'danger');
   btn.onclick = async () => {
     if (state.FLEET_ENABLED && !confirm('stop the WHOLE fleet? every member exits on its next tick.')) return;
-    await fetch('/api/fleet_toggle', { method: 'POST', body: JSON.stringify(
-      { target: 'fleet', value: !state.FLEET_ENABLED }) });
-    renderFleetState(); renderMembers();
+    await fetch('/api/fleet_toggle', { method: 'POST', body: JSON.stringify({ target: 'fleet', value: !state.FLEET_ENABLED }) });
+    renderFleetState();
   };
-  return state;
 }
 
-// on/off + run-now render straight off /api/members (the real spec.enabled per member) --
-// no second hardcoded name list to drift out of sync with the real members/*.fleet.json files
-// (the old ['builder','reviewer'] list did exactly that the moment run_member.sh + the other
-// 6 charters landed 2026-08-21 and every button here 400'd silently).
-async function renderRunnableMembers(members) {
-  document.getElementById('runnable').innerHTML = members.map(m => {
-    const name = m.spec.name;
-    const on = !!m.effective.enabled;
-    return `<div class="row">
-      <b>${esc(name)}</b>
-      <div class="actions">
-        <button class="${on ? 'on' : 'off'}" data-act="toggle-member" data-member="${esc(name)}" data-on="${on}">
-          ${on ? '● enabled' : '○ disabled'}
-        </button>
-        <button data-act="run-now" data-member="${esc(name)}">run now</button>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-async function renderMembers() {
+async function loadMembers() {
   const [{ members }, { spend }] = await Promise.all([
     fetch('/api/members').then(r => r.json()),
     fetch('/api/spend?hours=24').then(r => r.json()),
   ]);
   const spendByMember = Object.fromEntries((spend || []).map(s => [s.member, s]));
-  const specRows = members.map(m => {
-    const name = m.spec.name;
-    const s = spendByMember[name];
-    const spendLine = s
-      ? `<span class="meta">$${(s.total_cost || 0).toFixed(2)} / ${s.runs} runs / ${s.total_turns || 0} turns (24h)</span>`
-      : `<span class="meta">no runs in 24h</span>`;
-    const overrideNote = m.overrides.length
-      ? `<div class="meta">live overrides: ${m.overrides.map(o => `${o.key}=${JSON.stringify(o.value)} (${esc(o.why)})`).join(', ')}</div>`
-      : '';
-    const dials = DIAL_KEYS.map(key => {
-      const v = dialValue(m.effective, key);
-      return `<button data-act="edit-dial" data-member="${esc(name)}" data-key="${key}"
-        title="click to change">${key}=${esc(JSON.stringify(v))}</button>`;
-    }).join(' ');
-    return `<div class="row">
-      <b>${esc(name)}</b> <span class="meta">${esc(m.spec.kind)}${m.spec.lane ? ' · ' + esc(m.spec.lane) : ''}</span>
-      <div>${spendLine}</div>
-      ${overrideNote}
-      <div class="actions" style="flex-wrap:wrap">${dials}</div>
-    </div>`;
-  }).join('');
-  membersEl.innerHTML = (specRows || '<div id="empty">no members/*.fleet.json found</div>')
-    + '<div class="col-head" style="margin-top:8px">On / off / run now</div><div id="runnable"></div>';
-  renderRunnableMembers(members);
+  members.forEach(m => { m._spend = spendByMember[m.spec.name]; });
+  SPECS = members;
+  const totalCost = (spend || []).reduce((sum, s) => sum + (s.total_cost || 0), 0);
+  document.getElementById('globalSpend').innerHTML = `$${totalCost.toFixed(2)} <b>today</b>`;
+  if (!SELECTED && SPECS.length) SELECTED = SPECS[0].spec.name;
 }
 
-document.body.addEventListener('click', async (e) => {
-  const dial = e.target.closest('button[data-act="edit-dial"]');
-  if (dial) {
-    const key = dial.dataset.key;
-    const value = prompt(`new value for ${dial.dataset.member}.${key} (JSON):`);
-    if (value === null) return;
-    const why = prompt('why? (required)', 'tuned from fleet-view');
-    if (!why) return;
-    let parsed; try { parsed = JSON.parse(value); } catch { parsed = value; }
-    const r = await fetch('/api/steer', { method: 'POST', body: JSON.stringify(
-      { member: dial.dataset.member, key, value: parsed, why }) });
-    if ((await r.json()).ok) renderMembers(); else alert('failed — see server log');
-    return;
-  }
-  const toggle = e.target.closest('button[data-act="toggle-member"]');
-  if (toggle) {
-    const willBeOn = toggle.dataset.on !== 'true';
-    await fetch('/api/fleet_toggle', { method: 'POST', body: JSON.stringify(
-      { target: toggle.dataset.member, value: willBeOn }) });
-    renderMembers();
-    renderQueue();
-    return;
-  }
-  const runNow = e.target.closest('button[data-act="run-now"]');
-  if (runNow) {
-    const name = runNow.dataset.member;
-    if (!confirm(`run ${name} right now, off-cron?`)) return;
-    const r = await fetch('/api/run_now', { method: 'POST', body: JSON.stringify({ member: name }) });
-    const j = await r.json();
-    alert(j.ok ? `${name} started — watch the feed` : `failed: ${j.error || 'see server log'}`);
-    return;
-  }
-});
+async function renderQueue() {
+  const { next_fires } = await (await fetch('/api/next_fires')).json();
+  NEXT_FIRES = next_fires || [];
+  renderDetailHead();
+}
 
-// Live loglines while a pass is IN FLIGHT -- append straight into that run's own transcript box
-// if it's open, so an expanded row updates in real time instead of only showing history. A run
-// not yet in the feed (still running, no runs.jsonl record yet) has nowhere to land these; that
-// arrives as its own 'run' event the moment the pass finishes and gets a row.
+// ---------------------------------------------------------------------------------------------
+// Live stream: new runs append to ALL_RUNS; re-render sidebar always (status dots), re-render
+// run list + detail head only if the event is for the currently selected agent.
+// ---------------------------------------------------------------------------------------------
+function onRunEvent(rec) {
+  ALL_RUNS.push(rec);
+  if (ALL_RUNS.length > 2000) ALL_RUNS.shift();
+  renderSidebar();
+  if (rec.member === SELECTED) { renderRunList(); renderDetailHead(); }
+}
+
 function appendLiveLine(rec) {
-  // the most recent row for this member is the LAST one in DOM order now (feed reads oldest
-  // at top, newest at bottom) -- querySelectorAll preserves DOM order so the last match is it.
-  const rows = runsEl.querySelectorAll(`.row.run[data-member="${CSS.escape(rec.member)}"]`);
-  const row = rows[rows.length - 1];
+  if (rec.member !== SELECTED) return;
+  const row = runListEl.querySelector('.run-row.open');
   const box = row && row.querySelector('.transcript.open');
-  if (!box || row.dataset.seqFromEnd !== '0') return;
-  box.querySelector('.loading')?.remove();
-  box.querySelector('.none')?.remove();
-  const actions = box.querySelector('.transcript-actions');
+  if (!box) return;
   const div = document.createElement('div');
   div.className = 'tline live';
   div.textContent = rec.line;
-  if (actions) box.insertBefore(div, actions); else box.appendChild(div);
+  box.appendChild(div);
 }
 
 async function boot() {
-  // fleet_state first (resolves REPO_URL) so the very first paint of the run feed already
-  // has a working PR link, not just re-renders after the fact.
-  const [state, snap] = await Promise.all([
-    fetch('/api/fleet_state').then(r => r.json()),
+  const [snap] = await Promise.all([
     fetch('/api/snapshot').then(r => r.json()),
+    renderFleetState(),
+    loadMembers(),
   ]);
-  REPO_URL = state.REPO_URL || '';
-  // snap.runs is oldest-first (runs.jsonl append order) -- render in that order and APPEND
-  // each row so the feed reads top (oldest) to bottom (newest), Reif: "feeding bottom first".
-  snap.runs.forEach(renderRun);
+  ALL_RUNS = snap.runs || [];
   renderGh(snap.gh);
-  renderFleetState();
-  renderMembers();
-  renderQueue();
-  scrollToBottom();
-  setInterval(renderMembers, 30000);
+  renderSidebar();
+  await renderQueue();
+  selectAgent(SELECTED);
+  setInterval(async () => { await loadMembers(); renderSidebar(); renderDetailHead(); }, 30000);
   setInterval(renderQueue, 15000);
 
   const es = new EventSource('/api/stream');
   es.onopen = () => dot.classList.add('live');
   es.onerror = () => dot.classList.remove('live');
-  es.addEventListener('run', e => { renderRun(JSON.parse(e.data)); renderQueue(); });
+  es.addEventListener('run', e => { onRunEvent(JSON.parse(e.data)); renderQueue(); });
   es.addEventListener('gh', e => renderGh(JSON.parse(e.data)));
-  es.addEventListener('logline', e => { appendLiveLine(JSON.parse(e.data)); });
+  es.addEventListener('logline', e => appendLiveLine(JSON.parse(e.data)));
 }
 boot();
 </script>

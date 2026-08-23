@@ -158,6 +158,30 @@ if [ -n "$ITEM" ]; then
 $PROMPT"
 fi
 
+# The report-contract literal-line block -- APPENDED to every prompt, not left as a one-line
+# "see persona_law.md §10b" pointer at the bottom of each charter (that WAS the fix in PR #26,
+# and it didn't work: confirmed live 2026-08-23, the-fixer and dont-shoot-the-messenger both
+# ran real turns/real cost and still landed `reported_nothing` -- their actual final text was
+# plain prose like "Checked, all green. No action taken.", never the literal `Outcome:`/
+# `Evidence:` lines run_report.py's classify() regex-matches. A charter TELLING a model to go
+# read a shared file for the exact format it must close with, after the model has already
+# formed its final answer, is not the same as the model actually reading it under a tight turn
+# budget -- it never did. Appending the literal block as the LAST thing in the prompt (the
+# thing most present when the model composes its final message) is the fix that can't be
+# skipped by not going and reading something else.
+#
+# Extracted from agents/persona_law.md §10b at RUN TIME (not copy-pasted here) so there is
+# exactly one source of truth for the exact wording -- editing that doc's §10b changes what
+# every member is told, with no second copy to fall out of sync.
+REPORT_CONTRACT=$(awk '/^## 10b\./{f=1} f{print} /^## 11\./{exit}' "$KIT_DIR/agents/persona_law.md" | sed '$d')
+if [ -n "$REPORT_CONTRACT" ]; then
+  PROMPT="$PROMPT
+
+---
+
+$REPORT_CONTRACT"
+fi
+
 # Tool flags are the member's AUTHORITY (overrides.py refuses to tune these live, on purpose)
 # -- built fresh from the git-reviewed spec every run, never from a cached or hand-edited list.
 ALLOWED=$(jget "['llm']['tools'].get('allow', [])" | python3 -c "import ast,sys; print(' '.join(ast.literal_eval(sys.stdin.read())))")

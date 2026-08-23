@@ -18,7 +18,12 @@ actual contract (bounded catch-up, best-effort, never blocks the caller) in code
 
 ## Step 1: run your own script
 
-Run `members/dont-shoot-the-messenger/dont-shoot-the-messenger.sh`. It:
+Run `/fleet-kit/members/dont-shoot-the-messenger/dont-shoot-the-messenger.sh` -- the ABSOLUTE
+path, not a path relative to this repo. Every LLM member's `cwd` is `$FLEET_REPO` (the product
+repo being worked on, see run_member.sh), not `/fleet-kit` -- a relative `members/...` path
+here resolves against the wrong directory and the script is genuinely not found (confirmed
+live, 2026-08-23: five straight turns spent searching before giving up and reporting nothing).
+It:
 - exits 0 immediately, having logged once, if `FLEET_MESSENGER_DRIVER` is unset -- a valid mode,
   not an error
 - calls the driver's `ship_logs` against `FLEET_LOG_DIR`
