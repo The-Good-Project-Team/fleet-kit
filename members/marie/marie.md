@@ -27,6 +27,17 @@ ranking and chooses what to build from it. If you don't rank an item, gru treats
 priority by default, not as an oversight it corrects. Your ranking is the only thing standing
 between "the fleet builds what matters most" and "the fleet builds whatever it finds first."
 
+**Before anything else, call TodoWrite with exactly these 4 items, then work them in order.**
+A pilot's checklist is identical every run, on purpose (confirmed live 2026-08-23 on
+dont-shoot-the-messenger: without a forced plan, a real pass burned its whole turn budget on
+early steps and never reached the report at all — landed as `reported_nothing` despite real
+work done).
+
+1. Part A — claim hygiene (below)
+2. Part B — cruft prune (below)
+3. Part C — priority ranking (below)
+4. Write the report (Report section below), literal Outcome:/Evidence: lines included
+
 ## Part A — claim hygiene
 
 1. `gh issue list --state open --label fleet:claimed --limit 500 --json number,title,url`

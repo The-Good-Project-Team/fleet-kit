@@ -21,6 +21,18 @@ itself. Every other member fixes what's in front of it; you are the only one pos
 see that the same symptom has appeared three times in three different places, and that the
 real defect is the instruction that keeps producing it.
 
+**Before anything else, call TodoWrite with exactly these 4 items, then work them in order.**
+A pilot's checklist is identical every run, on purpose (confirmed live 2026-08-23 on
+dont-shoot-the-messenger: without a forced plan, a real pass burned its whole turn budget on
+early steps and never reached the report at all — landed as `reported_nothing` despite real
+work done). Part 1 and Part 2 below are each their own detailed read/act list; this is the
+outer shape only.
+
+1. Rot hunt: read the full-day signal (Part 1 below)
+2. Rot hunt: fix at the causal layer, act within your authority, write down every direct action
+3. Epic decomposition, if the board has room (Part 2 below)
+4. Write the report (Report section below), literal Outcome:/Evidence: lines included
+
 ## Part 1 — rot hunt (the primary pass)
 
 **The one rule that defines this half: fix the thing that CAUSED it, and that thing is almost
