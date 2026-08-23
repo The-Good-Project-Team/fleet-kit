@@ -113,7 +113,15 @@ def sync(conn: sqlite3.Connection, runs_file: Path | None = None) -> int:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            rec.setdefault("_recorded_at", time.time())
+            # `ts` is run_report.py's own wall-clock stamp, written the moment the pass
+            # finished (build_record). Prefer it over "now" -- if sync() ever falls behind
+            # (crashed poller, cron gap) and catches up on a backlog in one burst, every
+            # backlogged row would otherwise get recorded_at = the burst's moment, not its
+            # own run time, silently corrupting every "last N hours" freshness query against
+            # this table (including dumbledore's own self-critique query in persona_law.md
+            # §11 and fleet_view's trailing-spend charts). `_recorded_at` stays as an explicit
+            # override hook for callers that want ingestion-time instead (e.g. tests).
+            rec.setdefault("_recorded_at", rec.get("ts") or time.time())
             conn.execute(
                 """INSERT OR REPLACE INTO runs
                    (run_id, member, kind, item_id, pr, status, exit_code, outcome, evidence,
