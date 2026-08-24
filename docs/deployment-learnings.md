@@ -284,3 +284,73 @@ anywhere. The *runtime* credential (the one-shot connector token, already consum
 `/etc/cloudflared/token` by step 5) lives only on the box running the tunnel, scoped to just that
 tunnel. Don't copy the minting token to the fleet box, and don't copy the fleet box's runtime
 token back to the operator's machine — each stays exactly where its job is.
+
+## 16. A prose "do these steps in order" charter is advisory, not enforced — force the plan with a real tool call
+
+A member charter that says "your job, in order: 1... 2... 3..." in prose can be skimmed,
+skipped, or reordered by the model under turn pressure — nothing makes it happen. Live proof:
+a real pass on dont-shoot-the-messenger did steps 1-6 correctly (real work, real tool calls)
+then ran out of its own turn budget before the report step, landing as `reported_nothing`
+despite genuine work done. Fix, now on every LLM member's charter: **`Before anything else,
+call TodoWrite with exactly these N items, then work them in order.`** A forced tool call is
+enforced; a checklist in prose is a suggestion. Same fix generalized across all 7 remaining
+LLM-tooled members once the pattern was confirmed live, sized to each member's own existing
+step count — the list is identical every run, on purpose, matching a pilot's checklist.
+
+## 17. `classify()` collapsing every non-zero exit code into `reported_nothing` hides real signal
+
+`run_report.py`'s original `classify()` had no exit-code awareness — a genuine account
+exhaustion (exit 3, `account_pool.sh`'s `ALL_ACCOUNTS_EXHAUSTED`), a hard timeout, and an LLM
+that legitimately found nothing to report all landed as the same identical `reported_nothing`
+status. That makes a real capacity problem indistinguishable from a member doing nothing, and
+buries the one signal (exit code) that would have separated them for free. Fix: `classify()`
+takes `exit_code` and maps known non-zero codes to their own named status
+(`budget_declined`, `timed_out`, etc.) before ever falling through to `reported_nothing`.
+
+## 18. Every member sharing one checkout with zero worktree isolation is a live race, not a theoretical one
+
+`run_member.sh`'s generic path did a bare `cd "$REPO"` for every spawned member — gru's own
+concurrent minions, and any other member touching the working tree, all shared the exact same
+files with no isolation. Confirmed live: the shared checkout accumulated uncommitted duplicate
+diffs from 5+ unrelated branches, stuck on a stale feature branch, actively confusing gru's own
+passes (it would boot, see the dirty tree, and burn its whole turn budget trying to figure out
+what task it was even mid-way through). The mitigation (`git stash push -u`, never discard) buys
+time; the real fix is `git worktree add` per generic-path invocation, same isolation
+`worktree_builder.sh` already had for its own dedicated flow — the gap was every OTHER member
+path never getting it.
+
+## 19. GitHub reports a check failure two different ways, and a text-match sweep can silently miss one of them
+
+`gh pr view --json statusCheckRollup` returns two distinct shapes for a "red X" on a PR: a
+GitHub Actions check is typed `CheckRun` and carries its result in `.conclusion`; a status
+posted via the legacy commit-status API (what a custom review bot like `judge-judy` may use) is
+typed `StatusContext` and carries its result in `.state` instead — same field name pattern,
+different key, and nothing marks which type an entry is unless you check `__typename`. A sweep
+that only tests `.conclusion == "FAILURE"` will report `green` on a PR a StatusContext check has
+genuinely blocked, silently, for as long as nobody looks by hand. Fix: test both
+`.conclusion == "FAILURE" or .state == "FAILURE"`. Live proof: a real PR sat judge-judy-BLOCKed
+for 4+ hours while `the-fixer`'s 2-minute cadence reported clean every single pass.
+
+## 20. A background-dispatch-then-wait pattern needs the pass to actually END TURN correctly, or it silently reports nothing
+
+A member that backgrounds a sub-task (`run_member.sh ... &`) and then decides "I'll wait for
+the notification" can call end_turn believing that's a legitimate pause — but if the harness's
+own pass-lifecycle treats end_turn as "this pass is done," the backgrounded work's real result
+never gets folded into a report at all. It isn't that the work fails; the member's own turn
+ends before it can read the result back, so a genuine PR/fix gets attributed to nobody in
+`runs.jsonl`. `persona_law.md` now explicitly forbids ending a pass this way — either poll
+(bounded) inside the same turn, or don't background at all for anything whose result the report
+needs to name.
+
+## 21. `fleet:claimed` on an issue with a real, live, review-blocked PR is a workflow dead end, not a stale claim
+
+`fleet:claimed` exists to mean "someone's actively on this" and gets correctly cleared only
+when NO open PR references the issue — which is right for an abandoned claim, but leaves a real
+gap: an issue whose PR exists, is genuinely still open, and is legitimately blocked by a failing
+review gate stays claimed forever, because the claim-hygiene sweep (rightly) sees it as live
+work, not abandonment. Nothing in any charter currently re-triggers a builder to go push a fix
+COMMIT onto that existing PR's branch — every member's mental model is "claim new item -> build
+-> open PR -> done," with no step for "a PR I (or someone) opened got blocked by review, go fix
+it in place." Needs a charter addition (the-fixer or gru) treating a review-BLOCK on an open PR
+as the same class of fire as a failing CI check, pushing to that PR's own branch rather than
+opening a competing one.
