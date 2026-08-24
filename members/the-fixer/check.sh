@@ -66,6 +66,14 @@ DEP_CONC="${DEPLOY_STATE%% *}"; DEP_SHA="${DEPLOY_STATE#* }"
 #      wedged job never posts a conclusion at all, so it can sit "pending" forever with nothing
 #      ever going red. STALE_PENDING_HOURS is deliberately coarse (a 90-minute e2e suite is not
 #      stuck at minute 91) -- this catches "still running after lunch," not "running long."
+# A FAILURE conclusion only ever comes back on GitHub Actions checks (typename CheckRun).
+# judge-judy's own fleet-code-review gate posts through the legacy commit-status API instead
+# (typename StatusContext) -- same red X on the PR, but its failure lands in the `state` field,
+# never `conclusion`. Live proof case: PR #3127, judge-judy BLOCKed it 4+ hours, every shape
+# checked here still read $failed=false the whole time (Reif, 2026-08-24, driving fleet
+# unattended -- traced check.sh live, reproduced the miss, confirmed the schema split by
+# diffing gh pr view --json statusCheckRollup for a CheckRun vs a StatusContext entry). Both
+# fields are checked below now, not just one.
 STALE_PENDING_HOURS="${FIXER_STALE_PENDING_HOURS:-2}"
 read_stale_prs() { # -> space-separated "num:sha:reason" triples, oldest first, or nothing
   # `gh ... -q/--jq` is a plain expression string, NOT the real jq CLI -- it has no --arg flag
@@ -78,7 +86,7 @@ read_stale_prs() { # -> space-separated "num:sha:reason" triples, oldest first, 
     --json number,headRefOid,mergeStateStatus,statusCheckRollup \
     -q '
       sort_by(.number) | .[] |
-      ( [.statusCheckRollup[]? | select(.conclusion == "FAILURE")] | length > 0 ) as $failed |
+      ( [.statusCheckRollup[]? | select(.conclusion == "FAILURE" or .state == "FAILURE")] | length > 0 ) as $failed |
       ( .mergeStateStatus == "DIRTY" ) as $conflict |
       ( [.statusCheckRollup[]?
           | select(.status != null and .status != "COMPLETED" and .startedAt != null and .startedAt < "'"$cutoff"'")
