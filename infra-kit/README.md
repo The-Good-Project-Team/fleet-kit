@@ -73,6 +73,16 @@ three ways to the same box, one word decides all three names.
 Run in that order. Each is a standalone bash script, stdlib tools only (`ssh`, `curl`, `jq`) --
 same "whatever runs this needs it already" reasoning as the rest of fleet-kit.
 
+## An agent driving this install? Read AGENT_INSTALL.md first
+
+The quickstart below is written for a human reading docs and running commands by hand.
+[`AGENT_INSTALL.md`](AGENT_INSTALL.md) is the same install as a literal turn-by-turn: when to
+stop and ask the human for a credential, exactly what to tell them to go create, where the
+answer is allowed to live, and a verify step after the one that most commonly fails silently
+wrong (an under-scoped Cloudflare token). Follow that file if you were asked to "set up
+infra-kit" or "add water" to a new box; read on below for the human-facing version of the
+same steps.
+
 ## Quickstart
 
 ```bash
