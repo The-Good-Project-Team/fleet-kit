@@ -21,7 +21,14 @@ set -uo pipefail
 
 REPO="${FLEET_REPO:?set FLEET_REPO}"
 LOG="${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}/the-fixer.log"
-STATE="$HOME/.cache/fleet-kit/the-fixer.state"
+# FIXER_STATE_FILE override exists so a human/agent can dry-run this script against a real PR
+# to verify a fix (exactly what happened testing PR #46's own StatusContext detection fix,
+# 2026-08-24) without corrupting the fleet's real dedup state -- before this, a manual run wrote
+# "red <sha>" to the SAME file cron uses, so the next real the-fixer pass saw "already-fighting"
+# and no-op'd on a fire nobody had actually fought yet. Verification runs now pass
+# FIXER_STATE_FILE=/tmp/whatever; cron's real invocation is unaffected (falls through to the
+# same default path as before).
+STATE="${FIXER_STATE_FILE:-$HOME/.cache/fleet-kit/the-fixer.state}"
 HB_STAMP="$HOME/.cache/fleet-kit/the-fixer.hb"
 
 mkdir -p "$(dirname "$LOG")" "$(dirname "$STATE")"
