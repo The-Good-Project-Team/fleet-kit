@@ -229,6 +229,12 @@ thing you can point at the box once it exists.
 
 ## Install (target: under 15 minutes to first unattended PR)
 
+**Need a box first?** This whole install assumes a container-capable box already exists and
+is reachable. If it doesn't yet, run `infra-kit/` first (its own `AGENT_INSTALL.md` if
+you're an agent driving it) -- infra-kit stands up the VM/podman/tunnel, THIS install points
+fleet-kit at it once it's up. Already have a box (existing server, another project's VM with
+room for one more podman container)? Skip straight to step 1 below.
+
 1. **Copy this kit** into the target repo as `.fleet/` (or clone it as a sibling and point
    `FLEET_REPO` at the target — either layout works, nothing here assumes a specific path).
 2. **Fill `fleet.env`** — copy `fleet.env.example`, set `FLEET_REPO`, `FLEET_LABEL_PREFIX`,
