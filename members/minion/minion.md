@@ -30,7 +30,14 @@ theoretical for this member).
    different one defeats the whole reason gru claimed items itself.
 2. **Build.** Tests first when practical. Follow the codebase's existing style. Reuse before
    you build — check for an existing utility or pattern before writing a new one.
-3. **Test locally** before you push — run whatever this repo's test command is.
+3. **Test locally** before you push — run whatever this repo's test command is. **You are a
+   one-shot `claude -p` pass, same as gru and the-fixer (persona_law.md §12): if you background
+   that test command (`&`, or a tool's own background-execution option), you MUST wait on it —
+   `wait "$PID"`, poll, or the tool's blocking form — inside THIS turn before you push or
+   report. Ending your turn to "wait for the completion notification" instead means nobody ever
+   sees the result; there is no later turn that resumes you. If you can't afford to wait for a
+   full suite in this pass's budget, run a narrower, faster command you CAN wait for (targeted
+   tests for what you touched) rather than backgrounding a slow one you won't see finish.**
 4. **Check for duplicates.** `gh pr diff <n>` on any suspicious open PR before writing new
    code — if the item is already fully fixed by an open, mergeable PR, say so and stop.
 5. **Land on CURRENT default-branch before you push.** Other concurrent minions branched from
