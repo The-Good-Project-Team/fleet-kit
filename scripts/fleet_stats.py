@@ -1,39 +1,16 @@
 #!/usr/bin/env python3
-"""fleet_stats — aggregation for the Stats page's three charts. Same "no DB, derive from what
-already exists" philosophy as the rest of this kit (see fleet_view_server.py's own header):
-runs_timeline and token_usage read fleet_db.py's sqlite mirror of runs.jsonl (already
-maintained by the live server, nothing new to persist); backlog_history reconstructs open-issue
-count over time from GitHub's own createdAt/closedAt fields on a single `gh issue list --state
-all` call (638 issues, one call, confirmed live 2026-08-25 -- no rate-limit concern, no need to
-have been recording a time series all along since the fleet started).
+"""fleet_stats — aggregation for the Stats page's charts. Same "no DB, derive from what already
+exists" philosophy as the rest of this kit (see fleet_view_server.py's own header): runs_summary
+and token_usage_by_hour read STATE.runs (already in memory, maintained by the live server,
+nothing new to persist); backlog_history reconstructs open-issue count over time from GitHub's
+own createdAt/closedAt fields on a single `gh issue list --state all` call (638 issues, one
+call, confirmed live 2026-08-25 -- no rate-limit concern, no need to have been recording a time
+series all along since the fleet started).
 """
 from __future__ import annotations
 
 import datetime as _dt
 import json
-
-
-def runs_timeline(runs: list[dict], hours: float = 24.0) -> list[dict]:
-    """Recent runs as timeline points: one per run, member/status/ts/cost -- the frontend plots
-    these as a scatter (member on one axis, time on the other) rather than this module owning
-    any chart-shape opinion. `runs` is STATE.runs (already in memory, ts as unix epoch seconds
-    per run_report.py's contract) -- no new query, just a time-windowed pass-through with only
-    the fields a chart needs (dropping outcome/evidence prose, which can be large).
-    """
-    cutoff = _now_epoch() - hours * 3600
-    out = []
-    for r in runs:
-        ts = r.get("ts")
-        if ts is None or ts < cutoff:
-            continue
-        out.append({
-            "ts": ts,
-            "member": r.get("member"),
-            "status": r.get("status"),
-            "cost_usd": (r.get("tokens") or {}).get("cost_usd"),
-        })
-    out.sort(key=lambda r: r["ts"])
-    return out
 
 
 def token_usage_by_hour(runs: list[dict], hours: float = 24.0) -> list[dict]:
@@ -62,6 +39,80 @@ def token_usage_by_hour(runs: list[dict], hours: float = 24.0) -> list[dict]:
 
 def _now_epoch() -> float:
     return _dt.datetime.now(_dt.timezone.utc).timestamp()
+
+
+# A run that never got to execute (blocked by budget/rate limits before doing any work) --
+# these dilute "is the fleet actually doing good work" if counted alongside real attempts, so
+# signal rate is computed over executed runs only. Every other status counts as executed,
+# including reported_nothing/quiet -- those DID run, they just found nothing worth reporting.
+_NOT_EXECUTED_STATUSES = {"budget_declined"}
+_OK_STATUSES = {"ok"}
+
+
+def runs_summary(runs: list[dict], hours: float = 24.0) -> dict:
+    """One payload for the whole Recent Runs card: headline KPIs (signal rate, budget-wall rate,
+    total runs, dormant-agent count), an hourly stacked-bar of run outcomes, and per-agent signal
+    rate over executed runs. Replaces the old per-run scatter (member x time), which answered
+    "when did each agent run" -- a question nobody was asking -- with "is the fleet's output any
+    good," which is the one that matters. One endpoint, one fetch, since all of it is the same
+    windowed pass over `runs` (STATE.runs, already in memory).
+    """
+    cutoff = _now_epoch() - hours * 3600
+    windowed = [r for r in runs if r.get("ts") is not None and r.get("ts") >= cutoff]
+
+    total = len(windowed)
+    executed = [r for r in windowed if (r.get("status") or "") not in _NOT_EXECUTED_STATUSES]
+    declined = total - len(executed)
+    ok = sum(1 for r in executed if (r.get("status") or "") in _OK_STATUSES)
+
+    signal_rate = round(100 * ok / len(executed)) if executed else 0
+    budget_wall = round(100 * declined / total) if total else 0
+
+    # dormant: members with runs in the window whose most recent run was budget_declined AND
+    # who logged nothing else -- i.e. every attempt in-window got walled off, not just the last one
+    by_member: dict[str, list[dict]] = {}
+    for r in windowed:
+        by_member.setdefault(r.get("member") or "unknown", []).append(r)
+    dormant = [m for m, rs in by_member.items()
+               if rs and all((r.get("status") or "") in _NOT_EXECUTED_STATUSES for r in rs)]
+
+    # hourly stacked-bar: count per (hour, status)
+    hour_buckets: dict[int, dict[str, int]] = {}
+    for r in windowed:
+        hour = int(r["ts"] // 3600) * 3600
+        status = r.get("status") or "unknown"
+        b = hour_buckets.setdefault(hour, {})
+        b[status] = b.get(status, 0) + 1
+    statuses = sorted({s for b in hour_buckets.values() for s in b})
+    hourly = [{"ts": hour, **{s: b.get(s, 0) for s in statuses}}
+              for hour, b in sorted(hour_buckets.items())]
+
+    # per-agent signal rate, executed runs only
+    agent_rates = []
+    for member, rs in sorted(by_member.items()):
+        member_executed = [r for r in rs if (r.get("status") or "") not in _NOT_EXECUTED_STATUSES]
+        if not member_executed:
+            continue
+        member_ok = sum(1 for r in member_executed if (r.get("status") or "") in _OK_STATUSES)
+        agent_rates.append({
+            "member": member,
+            "signal_rate": round(100 * member_ok / len(member_executed)),
+            "executed": len(member_executed),
+        })
+    agent_rates.sort(key=lambda a: -a["signal_rate"])
+
+    return {
+        "hours": hours,
+        "signal_rate": signal_rate,
+        "executed": len(executed),
+        "total": total,
+        "budget_wall": budget_wall,
+        "declined": declined,
+        "dormant": dormant,
+        "hourly": hourly,
+        "statuses": statuses,
+        "agent_rates": agent_rates,
+    }
 
 
 def backlog_history(issues_json: str, days: int = 30) -> list[dict]:
@@ -99,20 +150,18 @@ def backlog_history(issues_json: str, days: int = 30) -> list[dict]:
     return out
 
 
-def merged_prs_by_day(prs_json: str, days: int = 30) -> list[dict]:
-    """Merged PR count per day over the last `days` days -- a second series for the same Backlog
-    chart, so growth (backlog size) and throughput (PRs actually landing) sit on one timeline
-    instead of forcing a second card. `prs_json` is the raw stdout of `gh pr list --state merged
-    --json mergedAt --limit 500`, same "parse it here, own the error handling" pattern as
-    backlog_history above.
-
-    Same day-bucket granularity as backlog_history (not hour-by-hour) so the two series line up
-    on one shared x-axis without a second date-parsing pass in the frontend.
+def pr_activity_by_day(prs_json: str, days: int = 14) -> dict:
+    """New PRs opened + PRs merged (shipped), per day -- the throughput counterpart to
+    backlog_history's open-issue-count line, both day-keyed on the same x-axis so growth vs
+    throughput read on one chart. `prs_json` is the raw stdout of `gh pr list --state all --json
+    createdAt,mergedAt --limit 500` -- one call covers both series (open+merged+closed PRs all
+    have createdAt; only merged ones have mergedAt), same "parse it here" pattern as the rest of
+    this module.
     """
     try:
         prs = json.loads(prs_json) if prs_json else []
     except json.JSONDecodeError:
-        return []
+        return {"new_prs": [], "merged_prs": []}
     today = _dt.datetime.now(_dt.timezone.utc).date()
     start = today - _dt.timedelta(days=days - 1)
 
@@ -121,15 +170,23 @@ def merged_prs_by_day(prs_json: str, days: int = 30) -> list[dict]:
             return None
         return _dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).date()
 
-    counts: dict[_dt.date, int] = {}
+    opened: dict[_dt.date, int] = {}
+    merged: dict[_dt.date, int] = {}
     for pr in prs:
-        d = _parse(pr.get("mergedAt"))
+        d = _parse(pr.get("createdAt"))
         if d and start <= d <= today:
-            counts[d] = counts.get(d, 0) + 1
+            opened[d] = opened.get(d, 0) + 1
+        m = _parse(pr.get("mergedAt"))
+        if m and start <= m <= today:
+            merged[m] = merged.get(m, 0) + 1
 
-    out = []
+    days_list = []
     day = start
     while day <= today:
-        out.append({"date": day.isoformat(), "count": counts.get(day, 0)})
+        days_list.append(day)
         day += _dt.timedelta(days=1)
-    return out
+
+    return {
+        "new_prs": [{"date": d.isoformat(), "count": opened.get(d, 0)} for d in days_list],
+        "merged_prs": [{"date": d.isoformat(), "count": merged.get(d, 0)} for d in days_list],
+    }

@@ -145,6 +145,10 @@
   .rail-row { padding: 8px 16px; border-bottom: 1px solid var(--border); font-size: 12px; }
   .rail-row .rmeta { color: var(--dim); font-size: 10.5px; margin-top: 2px; }
   .rail-row .actions { margin-top: 5px; display: flex; gap: 5px; flex-wrap: wrap; }
+  .rail-row .tag-row { margin-top: 4px; display: flex; gap: 5px; flex-wrap: wrap; }
+  .rail-row .tag { font-size: 10px; padding: 1px 7px; border-radius: 10px;
+    background: color-mix(in srgb, var(--tag-color) 18%, var(--panel));
+    color: color-mix(in srgb, var(--tag-color) 70%, var(--text)); border: 1px solid var(--tag-color); }
   .checks-green { color: var(--ok); } .checks-pending { color: var(--warn); } .checks-failing { color: var(--bad); }
 
   /* ---------- sidebar nav items: PRs/Backlog + Settings, same list as agents, separated ---------- */
@@ -170,6 +174,10 @@
     letter-spacing: .05em; color: var(--dim); }
   .stats-card .stats-sub { color: var(--dimmer); font-size: 11px; margin-bottom: 10px; }
   .stats-card canvas { max-height: 260px; }
+  .runs-kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .kpi-cell .kpi-label { color: var(--dim); font-size: 11.5px; }
+  .kpi-cell .kpi-value { font-size: 24px; font-weight: 700; margin-top: 2px; }
+  .kpi-cell .kpi-sub { color: var(--dimmer); font-size: 11px; margin-top: 2px; }
 </style>
 <!-- Chart.js: Reif, 2026-08-25 -- "dont handroll, pick a nice graph element". This page already
      assumes internet access (calls GitHub's API, loads from a public domain), so a CDN script
@@ -249,11 +257,27 @@ function fmtIn(s) {
   return (s / 3600).toFixed(1) + 'h';
 }
 function copyText(text, el) {
-  navigator.clipboard?.writeText(text).then(() => {
-    const prev = el.textContent;
-    el.textContent = 'copied ✓';
-    setTimeout(() => { el.textContent = prev; }, 900);
-  });
+  const prev = el.textContent;
+  const flash = (label) => { el.textContent = label; setTimeout(() => { el.textContent = prev; }, 900); };
+  // Clipboard API can silently reject or hang (permission-gated, unfocused tab, non-secure
+  // context) with nothing surfaced to the user -- confirmed live 2026-08-25: button click did
+  // nothing, no console error, no visible failure. Fall back to the older execCommand path
+  // (still works in every browser this dashboard runs in) rather than leaving a dead button.
+  const legacyCopy = () => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      flash(ok ? 'copied ✓' : 'copy failed');
+    } catch { flash('copy failed'); }
+  };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(() => flash('copied ✓')).catch(legacyCopy);
+  } else {
+    legacyCopy();
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -696,16 +720,21 @@ function renderQueuePage() {
     </div>`;
   }).join('') || '<div class="run-empty">no open PRs</div>';
 
-  const issuesHtml = issues.map(i => `<div class="rail-row">
+  const issuesHtml = issues.map(i => {
+    const labels = (i.labels || []).map(l =>
+      `<span class="tag" style="--tag-color:#${esc(l.color || '888')}">${esc(l.name)}</span>`).join('');
+    return `<div class="rail-row">
       <a href="${REPO_URL ? REPO_URL + '/issues/' + i.number : '#'}" target="_blank">#${i.number}</a>
       <div>${esc(i.title)}</div>
+      ${labels ? `<div class="tag-row">${labels}</div>` : ''}
       <div class="rmeta">${i._claimed ? 'claimed' : 'open'} · ${ago(i.updatedAt)}</div>
       <div class="actions">
         ${i._claimed ? `<button class="btn small" data-act="prune" data-issue="${i.number}">release</button>` : ''}
         <button class="btn small" data-act="comment_issue" data-issue="${i.number}">comment</button>
         <button class="btn small" data-act="close_issue" data-issue="${i.number}">close</button>
       </div>
-    </div>`).join('') || '<div class="run-empty">backlog empty</div>';
+    </div>`;
+  }).join('') || '<div class="run-empty">backlog empty</div>';
 
   runListEl.innerHTML = `
     <div class="rail-section">
@@ -749,9 +778,19 @@ async function renderStatsPage() {
   runListEl.innerHTML = `
     <div class="stats-page">
       <div class="stats-card">
+        <h3>Self-Improving Score</h3>
+        <div class="stats-sub">an LLM reads the fleet's own week and scores it, daily -- 100 = Jarvis, 1 = a Windows update notification</div>
+        <div id="selfImproveCard"></div>
+        <canvas id="chartSelfImprove" style="margin-top:10px;"></canvas>
+      </div>
+      <div class="stats-card">
         <h3>Recent Runs</h3>
-        <div class="stats-sub">every run in the last 24h, by agent and time</div>
-        <canvas id="chartRuns"></canvas>
+        <div class="stats-sub">every run in the last 24h -- is the fleet's output any good</div>
+        <div id="runsKpiRow" class="runs-kpi-row"></div>
+        <div class="stats-sub" style="margin-top:14px;">Runs per hour by outcome</div>
+        <canvas id="chartRunsHourly"></canvas>
+        <div class="stats-sub" style="margin-top:14px;">Signal rate by agent, executed runs only</div>
+        <canvas id="chartAgentRate"></canvas>
       </div>
       <div class="stats-card">
         <h3>Token Usage</h3>
@@ -760,7 +799,7 @@ async function renderStatsPage() {
       </div>
       <div class="stats-card">
         <h3>Backlog Size</h3>
-        <div class="stats-sub">open fleet:backlog issue count + PRs merged, per day, last 30 days</div>
+        <div class="stats-sub">backlog total, new PRs, shipped PRs -- per day, last 14 days</div>
         <canvas id="chartBacklog"></canvas>
       </div>
     </div>`;
@@ -771,39 +810,121 @@ async function renderStatsPage() {
     return;
   }
 
-  const [runsData, tokensData, backlogData] = await Promise.all([
-    fetch('/api/stats/runs_timeline?hours=24').then(r => r.json()).catch(() => ({ points: [] })),
+  const [selfImprove, runsSummary, tokensData, backlogData] = await Promise.all([
+    fetch('/api/stats/self_improve_score?days=14').then(r => r.json()).catch(() => null),
+    fetch('/api/stats/runs_summary?hours=24').then(r => r.json()).catch(() => null),
     fetch('/api/stats/token_usage?hours=24').then(r => r.json()).catch(() => ({ buckets: [] })),
-    fetch('/api/stats/backlog_history?days=30').then(r => r.json()).catch(() => ({ days: [] })),
+    fetch('/api/stats/backlog_history?days=14').then(r => r.json()).catch(() => ({ days: [], new_prs: [], merged_prs: [] })),
   ]);
   if (PAGE !== 'stats') return; // navigated away while awaiting -- don't render into a gone canvas
 
-  destroyStatsChart('runs'); destroyStatsChart('tokens'); destroyStatsChart('backlog');
+  destroyStatsChart('selfImprove');
+  destroyStatsChart('runsHourly'); destroyStatsChart('agentRate');
+  destroyStatsChart('tokens'); destroyStatsChart('backlog');
 
-  // --- Recent Runs: scatter, one point per run, y-axis = member (categorical), color = status
-  const points = runsData.points || [];
-  const memberNames = [...new Set(points.map(p => p.member))].sort();
-  const STATUS_COLOR = { ok: '#1f8b4c', quiet: '#a6720f', budget_declined: '#9a9ea6' };
-  const runsByStatus = {};
-  points.forEach(p => {
-    const key = p.status || 'unknown';
-    (runsByStatus[key] ??= []).push({ x: p.ts * 1000, y: p.member });
-  });
-  STATS_CHARTS.runs = new Chart(document.getElementById('chartRuns'), {
-    type: 'scatter',
+  // --- Self-Improving Score: daily LLM judgment (self_improve_score.sh, cron on dino), this
+  // page only renders what's already scored -- no scoring logic here.
+  const siCard = document.getElementById('selfImproveCard');
+  const siHistory = selfImprove?.history || [];
+  const siLatest = selfImprove?.latest;
+  if (siCard) {
+    if (!siLatest) {
+      siCard.innerHTML = '<div class="run-empty">no score yet -- self_improve_score.sh runs once daily</div>';
+    } else {
+      const color = siLatest.score >= 66 ? '#1f8b4c' : siLatest.score >= 33 ? '#a6720f' : '#c13a2e';
+      siCard.innerHTML = `
+        <div class="kpi-cell">
+          <div class="kpi-label">${esc(siLatest.date)}</div>
+          <div class="kpi-value" style="color:${color};">${siLatest.score}<span style="font-size:14px;color:var(--dimmer);">/100</span></div>
+          <div class="kpi-sub">${esc(siLatest.reasoning || '')}</div>
+        </div>`;
+    }
+  }
+  if (siHistory.length) {
+    STATS_CHARTS.selfImprove = new Chart(document.getElementById('chartSelfImprove'), {
+      type: 'line',
+      data: {
+        labels: siHistory.map(d => d.date),
+        datasets: [{
+          label: 'self-improving score', data: siHistory.map(d => d.score),
+          borderColor: '#2166c4', backgroundColor: 'rgba(33,102,196,.08)',
+          fill: true, tension: 0.2, pointRadius: 2,
+        }],
+      },
+      options: {
+        responsive: true,
+        scales: { y: { min: 0, max: 100, grid: { color: '#eef0f3' } }, x: { grid: { display: false } } },
+        plugins: { legend: { display: false } },
+      },
+    });
+  }
+
+  // --- Recent Runs: KPI strip + hourly outcome bar + per-agent signal rate. Replaces the old
+  // per-run scatter (when did each agent run -- nobody asked) with "is the fleet's output any
+  // good" -- signal rate (ok / executed), budget-wall rate (declined before running / total),
+  // total runs, and which agents are fully walled off (dormant).
+  const STATUS_COLOR = { ok: '#1f8b4c', quiet: '#a6720f', reported_nothing: '#c13a2e', budget_declined: '#9a9ea6' };
+  const rs = runsSummary || { signal_rate: 0, executed: 0, total: 0, budget_wall: 0, declined: 0,
+                               dormant: [], hourly: [], statuses: [], agent_rates: [] };
+  const kpiRow = document.getElementById('runsKpiRow');
+  if (kpiRow) {
+    kpiRow.innerHTML = `
+      <div class="kpi-cell">
+        <div class="kpi-label">Signal rate</div>
+        <div class="kpi-value">${rs.signal_rate}%</div>
+        <div class="kpi-sub">${rs.executed} of ${rs.total} executed</div>
+      </div>
+      <div class="kpi-cell">
+        <div class="kpi-label">Budget wall</div>
+        <div class="kpi-value">${rs.budget_wall}%</div>
+        <div class="kpi-sub">${rs.declined} runs declined</div>
+      </div>
+      <div class="kpi-cell">
+        <div class="kpi-label">Total runs</div>
+        <div class="kpi-value">${rs.total}</div>
+        <div class="kpi-sub">${rs.agent_rates.length + rs.dormant.length} agents, 24h</div>
+      </div>
+      <div class="kpi-cell">
+        <div class="kpi-label">Dormant</div>
+        <div class="kpi-value">${rs.dormant.length}</div>
+        <div class="kpi-sub">${rs.dormant.join(', ') || 'none'}</div>
+      </div>`;
+  }
+
+  STATS_CHARTS.runsHourly = new Chart(document.getElementById('chartRunsHourly'), {
+    type: 'bar',
     data: {
-      datasets: Object.entries(runsByStatus).map(([status, data]) => ({
-        label: status, data,
-        backgroundColor: STATUS_COLOR[status] || '#c13a2e',
+      labels: rs.hourly.map(h => new Date(h.ts * 1000)),
+      datasets: rs.statuses.map(status => ({
+        label: status, data: rs.hourly.map(h => h[status] || 0),
+        backgroundColor: STATUS_COLOR[status] || '#8a8f98',
       })),
     },
     options: {
       responsive: true,
       scales: {
-        x: { type: 'time', time: { unit: 'hour' }, grid: { color: '#eef0f3' } },
-        y: { type: 'category', labels: memberNames, grid: { color: '#eef0f3' } },
+        x: { type: 'time', time: { unit: 'hour' }, stacked: true, grid: { display: false } },
+        y: { stacked: true, beginAtZero: true, grid: { color: '#eef0f3' } },
       },
       plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10.5 } } } },
+    },
+  });
+
+  STATS_CHARTS.agentRate = new Chart(document.getElementById('chartAgentRate'), {
+    type: 'bar',
+    data: {
+      labels: rs.agent_rates.map(a => a.member),
+      datasets: [{
+        label: 'signal rate', data: rs.agent_rates.map(a => a.signal_rate),
+        backgroundColor: rs.agent_rates.map(a =>
+          a.signal_rate >= 66 ? '#1f8b4c' : a.signal_rate >= 33 ? '#a6720f' : '#c13a2e'),
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      scales: { x: { beginAtZero: true, max: 100, grid: { color: '#eef0f3' } }, y: { grid: { display: false } } },
+      plugins: { legend: { display: false } },
     },
   });
 
@@ -828,29 +949,41 @@ async function renderStatsPage() {
     },
   });
 
-  // --- Backlog Size: line (open-issue count) + bar (PRs merged) per day, same day-keyed x-axis
-  // so growth and throughput read on one timeline -- merged_prs is a separate gh call
-  // (backlog_history) but both arrays are day-aligned by the server, so no join needed here.
+  // --- Backlog Size: all three as bars, per Reif's "more readable" -- backlog total gets its
+  // own right-hand y-axis (0-400ish) since it dwarfs new/shipped PR counts (0-100ish); on one
+  // shared axis the backlog bars swamp the PR bars to invisibility. Same day-keyed x-axis, all
+  // three arrays day-aligned by the server already (backlog_history / pr_activity_by_day).
   const days = backlogData.days || [];
-  const mergedDays = backlogData.merged_prs || [];
+  const newPrDays = backlogData.new_prs || [];
+  const mergedPrDays = backlogData.merged_prs || [];
   STATS_CHARTS.backlog = new Chart(document.getElementById('chartBacklog'), {
+    type: 'bar',
     data: {
       labels: days.map(d => d.date),
       datasets: [
         {
-          type: 'line', label: 'open backlog issues', data: days.map(d => d.count),
-          borderColor: '#2166c4', backgroundColor: 'rgba(33,102,196,.08)',
-          fill: true, tension: 0.15, pointRadius: 1.5, order: 1,
+          label: 'backlog total', data: days.map(d => d.count),
+          backgroundColor: 'rgba(33,102,196,.55)', yAxisID: 'yBacklog', order: 1,
         },
         {
-          type: 'bar', label: 'PRs merged', data: mergedDays.map(d => d.count),
-          backgroundColor: 'rgba(31,139,76,.55)', order: 2,
+          label: 'new PRs', data: newPrDays.map(d => d.count),
+          backgroundColor: 'rgba(166,114,15,.65)', yAxisID: 'yPrs', order: 2,
+        },
+        {
+          label: 'shipped PRs', data: mergedPrDays.map(d => d.count),
+          backgroundColor: 'rgba(31,139,76,.65)', yAxisID: 'yPrs', order: 3,
         },
       ],
     },
     options: {
       responsive: true,
-      scales: { y: { beginAtZero: true, grid: { color: '#eef0f3' } }, x: { grid: { display: false } } },
+      scales: {
+        x: { grid: { display: false } },
+        yBacklog: { beginAtZero: true, position: 'left', grid: { color: '#eef0f3' },
+          title: { display: true, text: 'backlog total', font: { size: 10.5 } } },
+        yPrs: { beginAtZero: true, position: 'right', grid: { display: false },
+          title: { display: true, text: 'PRs/day', font: { size: 10.5 } } },
+      },
       plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10.5 } } } },
     },
   });

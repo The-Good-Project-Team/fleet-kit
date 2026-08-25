@@ -493,11 +493,11 @@ class Handler(BaseHTTPRequestHandler):
             out = [fleet_kpi.sum_kpi_over_runs(name, windowed) for name in names]
             self._json({"kpi": out, "hours": hours})
             return
-        if path == "/api/stats/runs_timeline":
+        if path == "/api/stats/runs_summary":
             qs = parse_qs(urlparse(self.path).query)
             hours = float(qs.get("hours", ["24"])[0])
             snap = STATE.snapshot()
-            self._json({"points": fleet_stats.runs_timeline(snap["runs"], hours=hours), "hours": hours})
+            self._json(fleet_stats.runs_summary(snap["runs"], hours=hours))
             return
         if path == "/api/stats/token_usage":
             qs = parse_qs(urlparse(self.path).query)
@@ -514,17 +514,41 @@ class Handler(BaseHTTPRequestHandler):
             # Stats page load, not on every live tick, so a fresh call each time is cheap enough
             # (638 issues, one gh call, confirmed live 2026-08-25).
             qs = parse_qs(urlparse(self.path).query)
-            days = int(qs.get("days", ["30"])[0])
+            days = int(qs.get("days", ["14"])[0])
             issues_raw = _gh("issue", "list", "--state", "all", "--label", "fleet:backlog",
                               "--json", "number,createdAt,closedAt", "--limit", "1000")
-            # Same call-per-load tradeoff as the issues fetch above -- merged-PR count is the
-            # throughput counterpart to backlog size, plotted on the same chart/x-axis, so it's
-            # fetched alongside rather than as a separate endpoint the frontend has to join itself.
-            prs_raw = _gh("pr", "list", "--state", "merged", "--json", "mergedAt", "--limit", "500")
+            # New-PRs-opened + PRs-merged (shipped) per day -- the throughput counterpart to
+            # backlog size, plotted on the same chart/x-axis, so it's fetched alongside rather
+            # than as a separate endpoint the frontend has to join itself.
+            prs_raw = _gh("pr", "list", "--state", "all", "--json", "createdAt,mergedAt", "--limit", "500")
+            pr_activity = fleet_stats.pr_activity_by_day(prs_raw, days=days)
             self._json({
                 "days": fleet_stats.backlog_history(issues_raw, days=days),
-                "merged_prs": fleet_stats.merged_prs_by_day(prs_raw, days=days),
+                "new_prs": pr_activity["new_prs"],
+                "merged_prs": pr_activity["merged_prs"],
             })
+            return
+        if path == "/api/stats/self_improve_score":
+            # Read-only tail of self_improve_score.jsonl -- written once daily by
+            # self_improve_score.sh (cron, on dino), NOT computed here. This endpoint's only
+            # job is to hand the frontend the latest score + a short trend, same "server owns
+            # aggregation, this file is a plain jsonl the server tails" pattern as runs.jsonl.
+            qs = parse_qs(urlparse(self.path).query)
+            days = int(qs.get("days", ["14"])[0])
+            score_file = LOG_DIR / "self_improve_score.jsonl"
+            history = []
+            if score_file.exists():
+                for line in score_file.read_text().splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        history.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+            history = history[-days:]
+            latest = history[-1] if history else None
+            self._json({"latest": latest, "history": history})
             return
         if path == "/api/query":
             qs = parse_qs(urlparse(self.path).query)
