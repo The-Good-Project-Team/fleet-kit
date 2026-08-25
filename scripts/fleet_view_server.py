@@ -483,13 +483,71 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quiet the default stderr access log
         pass
 
+    def _access_log(self, path: str, status: int):
+        """Append one JSON line per API read to access.jsonl, for abuse forensics.
+
+        What this can and cannot establish, stated plainly so nobody over-trusts it later:
+        reads are anonymous by design (no key, Allow-Origin *), so NOTHING here is asserted
+        identity -- a client supplies its own User-Agent/Origin/Referer and can forge all three.
+        The one field a caller cannot forge is the source IP, and behind the Cloudflare tunnel
+        even that is only true via CF-Connecting-IP; self.client_address is the tunnel's own
+        loopback for every remote request and is useless for attribution. Recorded so a burst
+        can be characterised after the fact, not so anyone can be authenticated.
+        """
+        h = self.headers
+        entry = {
+            "ts": time.time(),
+            "path": path,
+            "status": status,
+            # Cloudflare's client IP first; the raw socket peer is the tunnel itself.
+            "ip": (h.get("CF-Connecting-IP") or h.get("X-Forwarded-For") or
+                   (self.client_address[0] if self.client_address else "")),
+            "peer": self.client_address[0] if self.client_address else "",
+            "cf_country": h.get("CF-IPCountry") or "",
+            "ua": (h.get("User-Agent") or "")[:300],
+            "origin": (h.get("Origin") or "")[:200],
+            "referer": (h.get("Referer") or "")[:200],
+        }
+        try:
+            with (LOG_DIR / "access.jsonl").open("a") as fh:
+                fh.write(json.dumps(entry) + "\n")
+        except OSError:
+            pass  # logging must never take the server down
+
     def _json(self, obj: dict, status: int = 200):
         body = json.dumps(obj).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        # CORS on API responses so a browser on another origin (philanthropy.org) can actually
+        # READ these. Without it every cross-origin fetch() fails at the origin check even
+        # though the request returns 200 -- the response arrives and the browser discards it.
+        #
+        # `*` is deliberate and safe HERE, and only because of what it does NOT cover:
+        #   - Allow-Origin `*` forbids credentials by spec, so no cookie or auth header rides
+        #     along on a cross-site request.
+        #   - Only GET is advertised. A cross-origin POST to a write route still preflights,
+        #     gets no Allow-Methods for POST, and never reaches do_POST's key gate.
+        #   - X-Fleet-Key is NOT in Allow-Headers, so a page cannot send the write key from a
+        #     browser at all, even if it somehow had one.
+        # Read routes were already world-readable through the tunnel before this line existed;
+        # this changes who can PARSE the bytes, not who can fetch them.
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
         self.end_headers()
         self.wfile.write(body)
+        if self.command == "GET":
+            self._access_log(urlparse(self.path).path, status)
+
+    def do_OPTIONS(self):
+        """CORS preflight. Answers for GET only -- a POST preflight gets no Allow-Methods for
+        POST and the browser refuses the real request before the write gate is ever consulted."""
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _authorized(self) -> bool:
         """True if this request may perform a write. See the gate in do_POST for the why.
