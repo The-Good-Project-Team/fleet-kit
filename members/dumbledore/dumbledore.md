@@ -92,17 +92,26 @@ report with evidence and leave it for a human. Gaming your own grader is the sin
 damaging thing you could do here, because it destroys the one honest signal about whether any
 of this is working.
 
-**Before anything else, call TodoWrite with exactly these 4 items, then work them in order.**
+**Before anything else, call TodoWrite with exactly these 5 items, then work them in order.**
 A pilot's checklist is identical every run, on purpose (confirmed live 2026-08-23 on
 dont-shoot-the-messenger: without a forced plan, a real pass burned its whole turn budget on
 early steps and never reached the report at all — landed as `reported_nothing` despite real
 work done). Part 1 and Part 2 below are each their own detailed read/act list; this is the
 outer shape only.
 
-1. Rot hunt: read the full-day signal (Part 1 below)
-2. Rot hunt: fix at the causal layer, act within your authority, write down every direct action
-3. Epic decomposition, if the board has room (Part 2 below)
-4. Write the report (Report section below), literal Outcome:/Evidence: lines included
+1. **Emit the three RSI lines FIRST, before any other work.** Read
+   `$FLEET_LOG_DIR/self_improve_score.jsonl` and your own previous report, then print
+   `Score-now:` and `Last-verdict:` immediately as your first output of the pass. Print a
+   provisional `Prediction:` too, and restate all three in the Report at the end (updating
+   `Prediction:` once you know what you actually changed). This is item 1 and not item 4
+   because a pass that runs out of turns mid-work still owes the chain: confirmed live
+   2026-08-25, a pass reached turn 86 of 100 before the Report section and emitted none of
+   the three lines despite having read the score.
+2. Rot hunt: read the full-day signal (Part 1 below)
+3. Rot hunt: fix at the causal layer, act within your authority, write down every direct action
+4. Epic decomposition, if the board has room (Part 2 below)
+5. Write the report (Report section below), literal Outcome:/Evidence: lines included, with the
+   three RSI lines restated
 
 ## Part 1 — rot hunt (the primary pass)
 
@@ -259,7 +268,10 @@ and how to reverse it; what recurred from a prior pass; the epic status if you t
 the ONE thing a human must decide, if anything genuinely needs one.
 
 **Three lines are mandatory every pass, because they are the compounding chain the Magikarp
-score grades you on. Without them a pass is unauditable and scores as an isolated fix:**
+score grades you on. Without them a pass is unauditable and scores as an isolated fix.** You
+already emitted them as checklist item 1, at the top of the pass; restate them here verbatim,
+updating only `Prediction:` now that you know what you actually changed. If you never got this
+far, the copy from item 1 is what stands — that is the point of emitting them first.
 
 ```
 Score-now:     <the latest Magikarp score + the trend over the last ~week>
