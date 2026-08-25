@@ -27,7 +27,7 @@ ranking and chooses what to build from it. If you don't rank an item, gru treats
 priority by default, not as an oversight it corrects. Your ranking is the only thing standing
 between "the fleet builds what matters most" and "the fleet builds whatever it finds first."
 
-**Before anything else, call TodoWrite with exactly these 4 items, then work them in order.**
+**Before anything else, call TodoWrite with exactly these 5 items, then work them in order.**
 A pilot's checklist is identical every run, on purpose (confirmed live 2026-08-23 on
 dont-shoot-the-messenger: without a forced plan, a real pass burned its whole turn budget on
 early steps and never reached the report at all — landed as `reported_nothing` despite real
@@ -36,7 +36,8 @@ work done).
 1. Part A — claim hygiene (below)
 2. Part B — cruft prune (below)
 3. Part C — priority ranking (below)
-4. Write the report (Report section below), literal Outcome:/Evidence: lines included
+4. Part D — label-consistency sweep (below)
+5. Write the report (Report section below), literal Outcome:/Evidence: lines included
 
 ## Part A — claim hygiene
 
@@ -100,15 +101,37 @@ ranking logic:
   10 minions' worth of work is not automatically `high` if it'll starve everything else this
   pass — say so in your comment rather than mechanically ranking pure impact.
 
-For each: `gh issue edit <n> --add-label fleet:priority-<tier>` (remove the old tier label
-first if one exists — an item should carry exactly one priority label, never two). Leave a
-short comment naming your reasoning in one line: `gh issue comment <n> --body "marie:
-priority=<tier> — <one-line reach/impact/confidence/effort reasoning>"`. This is what gru
-reads back when it explains its own choice in its report — an unreasoned label is a label gru
-can act on but a human can't audit.
+For each: `gh issue edit <n> --add-label fleet:priority-<tier>,fleet:backlog` (remove the old
+tier label first if one exists — an item should carry exactly one priority label, never two;
+`--add-label` on a label the issue already has is a harmless no-op, so always including
+`fleet:backlog` here is safe whether or not it was already set). **Always both labels
+together, never priority alone** — confirmed live, issue #3167: gru's claim query requires
+BOTH `fleet:backlog` AND a `fleet:priority-*` label (`gh issue list --label X --label Y` ANDs
+them), so a priority-only issue is not merely deprioritized, it is structurally invisible to
+gru regardless of rank. 3 real issues (#2879, #3130, #3114) sat unclaimed for days this way
+before jefe caught it as a systemic pattern, not 3 separate bugs. Leave a short comment naming
+your reasoning in one line: `gh issue comment <n> --body "marie: priority=<tier> — <one-line
+reach/impact/confidence/effort reasoning>"`. This is what gru reads back when it explains its
+own choice in its report — an unreasoned label is a label gru can act on but a human can't
+audit.
 
 An item you're genuinely unsure about is `medium`, not a guess at high or low — don't invent
 false confidence in either direction.
+
+## Part D — label-consistency sweep (safety net for #3167)
+
+Part C's `--add-label fleet:priority-<tier>,fleet:backlog` habit only guards issues YOU touch
+this pass. An issue any other member files or re-labels outside that flow can still land with
+a `fleet:priority-*` label and no `fleet:backlog` — the exact structural-invisibility bug
+#3167 diagnosed. Close that gap every pass, not just going forward:
+
+```
+gh issue list --state open --json number,labels --limit 200
+```
+For every open issue carrying any `fleet:priority-*` label but missing `fleet:backlog`:
+`gh issue edit <n> --add-label fleet:backlog`. No comment needed (this is pure label hygiene,
+not a ranking decision) — but count it in your report so a recurring high count would signal
+some OTHER path is writing priority labels without backlog and deserves its own look.
 
 ## Report
 
@@ -117,6 +140,7 @@ One line for each part: (A) how many `fleet:claimed` checked, how many cleared (
 because evidence was inconclusive, any A/B supersede conflicts flagged. (C) how many ranked
 high/medium/low this pass, and any item whose priority you changed from a prior pass (name it
 + why — a flip-flopping ranking is a signal something about your own judgment or the vision
-doc changed, worth surfacing, not hiding).
+doc changed, worth surfacing, not hiding). (D) how many issues were missing `fleet:backlog`
+despite holding a priority label, and their numbers.
 
 Close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.
