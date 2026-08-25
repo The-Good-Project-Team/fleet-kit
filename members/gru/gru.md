@@ -33,6 +33,17 @@ spawns exactly one). Your job, in order:
    costs here, not a guess. Multiply out roughly how many minions this pass can genuinely
    afford.
 
+   **Also check account readiness, separately from budget.** Budget headroom and account
+   auth state are different failure modes — a pass can have plenty of budget left and still
+   have every pool account currently rate-limited. Run `bash scripts/account_readiness.sh`
+   (reads account_pool.sh's own exhaustion-gate state, no API call) before claiming anything.
+   Confirmed live, 2026-08-25: multiple real passes claimed items and spawned minions that
+   then died on `ALL_ACCOUNTS_EXHAUSTED` with zero work done — a wasted claim + spawn cycle
+   this check exists to prevent. If `ready=0`, do not claim or spawn this pass; report the
+   gated state plainly (which accounts, when they clear per account-pool.log) instead of
+   burning a claim on doomed work. If `ready` is less than the account pool's `total`, size N
+   down accordingly — don't spawn more minions than there are live accounts to run them.
+
 2. **Read the ranking marie already did — you do not rank.** Marie (the fleet's backlog PM)
    scores every open item against vision/RICE and writes it as a `fleet:priority-<tier>`
    label (high/medium/low). Your read is:
