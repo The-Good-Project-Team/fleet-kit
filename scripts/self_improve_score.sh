@@ -42,11 +42,17 @@ KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FLEET_REPO="${FLEET_REPO:?FLEET_REPO required}"
 FLEET_LOG_DIR="${FLEET_LOG_DIR:?FLEET_LOG_DIR required}"
 OUT_FILE="$FLEET_LOG_DIR/self_improve_score.jsonl"
-TODAY="$(date -u +%Y-%m-%d)"
+# Scored every 3h (Reif, 2026-08-25), so the stamp is a timestamp, not a bare date -- a
+# date-only key would let the first run of the day satisfy the guard and silently no-op the
+# other seven. `date` stays a full UTC timestamp for the same reason: the chart plots one
+# point per SCORE, and seven points sharing "2026-08-25" would collapse on the x-axis.
+NOW_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# The 3h slot this run belongs to (00,03,...,21) -- the idempotency key. Re-running inside the
+# same slot is still a no-op, same "once per condition" shape as tunnel_health_check.sh; the
+# condition is just narrower now.
+SLOT="$(date -u +%Y-%m-%d)T$(printf '%02d' $(( 10#$(date -u +%H) / 3 * 3 )))"
 
-# Already-scored today -- once a day, not once per cron tick (matches tunnel_health_check.sh's
-# own "one page per outage" once-per-condition pattern, adapted to "once per day" here).
-if [ -f "$OUT_FILE" ] && grep -q "\"date\": \"$TODAY\"" "$OUT_FILE" 2>/dev/null; then
+if [ -f "$OUT_FILE" ] && grep -q "\"slot\": \"$SLOT\"" "$OUT_FILE" 2>/dev/null; then
   exit 0
 fi
 
@@ -154,8 +160,9 @@ fi
 python3 -c "
 import json
 d = json.loads('''$SCORE_JSON''')
-d['date'] = '$TODAY'
+d['date'] = '$NOW_TS'
+d['slot'] = '$SLOT'   # idempotency key: one score per 3h slot, re-runs inside it are no-ops
 print(json.dumps(d))
 " >> "$OUT_FILE"
 
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) scored $TODAY :: $SCORE_JSON" >> "$FLEET_LOG_DIR/self_improve_score.log"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) scored slot=$SLOT :: $SCORE_JSON" >> "$FLEET_LOG_DIR/self_improve_score.log"

@@ -25,6 +25,7 @@ top of commands you could already type.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import subprocess
@@ -586,10 +587,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json(_cached(f"backlog_history:{days}", 120.0, _build_backlog_history))
             return
         if path == "/api/stats/self_improve_score":
-            # Read-only tail of self_improve_score.jsonl -- written once daily by
+            # Read-only tail of self_improve_score.jsonl -- written every 3h by
             # self_improve_score.sh (cron, on dino), NOT computed here. This endpoint's only
             # job is to hand the frontend the latest score + a short trend, same "server owns
             # aggregation, this file is a plain jsonl the server tails" pattern as runs.jsonl.
+            #
+            # days= is a WINDOW IN DAYS, not a row count. It used to be `history[-days:]`, which
+            # was the same thing back when the score was daily -- at one row per 3h it would
+            # mean "the last 1.75 days" and quietly shrink the chart to a stub. Rows written
+            # before the 3h switch carry a bare "2026-08-25" date; newer ones carry a full
+            # timestamp. Both start with YYYY-MM-DD, so a string compare on the first 10 chars
+            # windows them correctly without having to parse either shape.
             qs = parse_qs(urlparse(self.path).query)
             days = int(qs.get("days", ["14"])[0])
             score_file = LOG_DIR / "self_improve_score.jsonl"
@@ -603,7 +611,9 @@ class Handler(BaseHTTPRequestHandler):
                         history.append(json.loads(line))
                     except json.JSONDecodeError:
                         continue
-            history = history[-days:]
+            cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                      - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+            history = [h for h in history if str(h.get("date", ""))[:10] >= cutoff]
             latest = history[-1] if history else None
             self._json({"latest": latest, "history": history})
             return
