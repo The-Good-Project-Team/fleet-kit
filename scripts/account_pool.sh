@@ -51,25 +51,38 @@ _account_pool_parse_reset() {
   [ -z "$hh" ] && return 1
   [ "$ampm" = "pm" ] && [ "$hh" -ne 12 ] && hh=$((hh + 12))
   [ "$ampm" = "am" ] && [ "$hh" -eq 12 ] && hh=0
-  epoch=$(TZ=UTC date -d "today $hh:00" +%s 2>/dev/null) \
-    || epoch=$(TZ=UTC date -j -f "%H:%M" "$(printf '%02d:00' "$hh")" +%s 2>/dev/null)
-  [ -z "$epoch" ] && return 1
+  # GNU first (the container this runs in), then BSD (a Mac host running the kit directly).
+  # The BSD form needs the DATE spelled out -- `date -j -f "%H:%M" "13:00"` does not mean
+  # "13:00 today" and quietly returns something else, which then fed the "+86400" branch below
+  # and produced a bogus gate (caught by selftest on macOS, 2026-08-25).
   now=$(date +%s)
+  local today
+  today=$(TZ=UTC date -u +%Y-%m-%d)
+  epoch=$(TZ=UTC date -u -d "$today $hh:00:00" +%s 2>/dev/null) \
+    || epoch=$(TZ=UTC date -j -u -f "%Y-%m-%d %H:%M:%S" "$today $(printf '%02d' "$hh"):00:00" +%s 2>/dev/null)
+  # A non-numeric or empty result means neither date(1) understood us -- say so instead of
+  # gating on garbage.
+  [[ "$epoch" =~ ^[0-9]+$ ]] || return 1
   # "resets 1pm" said about a time already past today means tomorrow, not an hour ago.
-  if [ "$epoch" -le "$now" ]; then
-    epoch=$(TZ=UTC date -d "tomorrow $hh:00" +%s 2>/dev/null) \
-      || epoch=$((epoch + 86400))
-  fi
+  [ "$epoch" -le "$now" ] && epoch=$(( epoch + 86400 ))
   echo "$epoch"
 }
 
 # _account_pool_mark_exhausted <account> <output> — record that $account is gated until the
 # reset time embedded in $output, so the NEXT tick's budget-verdict check skips it without
-# spending a call. Falls back to a flat 1h backoff if the output had no parseable reset time
-# (still better than re-spending a call every ~5min tick forever).
+# spending a call.
+#
+# The no-reset-time fallback is 5 MINUTES, not an hour (Reif, 2026-08-25). A real Anthropic
+# limit states its own reset ("resets 1pm (UTC)") and _account_pool_parse_reset picks it up;
+# output that claims exhaustion WITHOUT naming a reset is, empirically, not a real limit at
+# all -- every gate written on dino 2026-08-25 was this fallback firing on misclassified
+# output, and each one blinded both accounts for a full hour. One wrong 5-minute skip costs a
+# single tick; one wrong 1-hour skip costs twelve, and the fleet cannot fix anything (this bug
+# included) while it is gated. Bias the failure toward re-trying too eagerly, never toward
+# staying dark: a genuine limit re-reports itself on the next call and re-gates for free.
 _account_pool_mark_exhausted() {
   local account="$1" out="$2" epoch
-  epoch=$(_account_pool_parse_reset "$out") || epoch=$(( $(date +%s) + 3600 ))
+  epoch=$(_account_pool_parse_reset "$out") || epoch=$(( $(date +%s) + 300 ))
   mkdir -p "$(dirname "$ACCOUNT_POOL_STATE_FILE")" 2>/dev/null
   grep -v "^${account} " "$ACCOUNT_POOL_STATE_FILE" 2>/dev/null > "${ACCOUNT_POOL_STATE_FILE}.tmp" || true
   echo "$account $epoch" >> "${ACCOUNT_POOL_STATE_FILE}.tmp"
@@ -107,9 +120,19 @@ _account_pool_budget_verdict() {
 # limit"), and neither auth pattern matched "OAuth access token has been revoked" — both real
 # failures were silently misclassified as "other", which the caller then retries every account
 # for every single tick instead of logging the true, actionable reason once.
+#
+# `rate.?limit` REMOVED as a standalone pattern, Reif 2026-08-25, after it took the whole fleet
+# down for ~2h. It matched the bare words "rate limit" ANYWHERE in the captured output -- and
+# this pool `tee`s the command's full stdout, not just stderr, so an agent that merely RAN
+# `gh api rate_limit` (gru does exactly this, every pass, to check GitHub quota) printed the
+# phrase into its own transcript and got its account gated for an hour on the strength of it.
+# A real Anthropic limit always names itself ("you've hit your weekly limit"), so requiring
+# that wording costs nothing and stops the fleet from gating itself on its own log text. HTTP
+# 429 is kept, but anchored to the status code rather than prose. Sin #1 of a self-running
+# system is running itself out of tokens: everything else, it can fix.
 _account_pool_classify_failure() {
   local out="$1"
-  if grep -qiE "(reached|hit) your (weekly|usage) limit|rate.?limit|quota exceeded" <<<"$out"; then
+  if grep -qiE "(reached|hit) your (weekly|usage|5-hour|session) limit|quota exceeded|\b429\b|too many requests" <<<"$out"; then
     echo "exhausted"; return
   fi
   if grep -qiE "not logged in|please (log|sign) in|invalid api key|unauthorized|token (has been )?revoked|401" <<<"$out"; then
@@ -164,6 +187,10 @@ account_pool_run() {
     if [ "$rc" -eq 0 ]; then
       export ACCOUNT_POOL_SELECTED="$account"
       export ACCOUNT_POOL_LAST_REASON=""
+      # Log the success. account_health_check.sh measures outage length as "time since the last
+      # success" -- without this line the log holds only failures, so there is nothing to
+      # measure from and the pager cannot tell a 5-minute blip from a 5-hour outage.
+      _account_pool_log "account=$account call succeeded"
       # a stale gate for THIS account is now wrong (it just succeeded) -- clear it so a
       # manual credit top-up or an early reset isn't stuck honoring the old estimate.
       if [ -f "$ACCOUNT_POOL_STATE_FILE" ] && grep -q "^${account} " "$ACCOUNT_POOL_STATE_FILE" 2>/dev/null; then
