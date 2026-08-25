@@ -34,6 +34,19 @@ set -uo pipefail
 # whole time, just never reached the process that needed it).
 [ -f "${FLEET_ENV_FILE:-./fleet.env}" ] && { set -a; . "${FLEET_ENV_FILE:-./fleet.env}"; set +a; }
 
+# FLEET_API_KEY is the fleet-view write key -- it authorizes POST /api/run_now, which spawns
+# `claude -p --dangerously-skip-permissions` on this box. Sourcing fleet.env above exports it,
+# which would hand every member the ability to spawn unlimited runs (its own included) and put
+# the key inside nine agents' contexts, where a single prompt-injected page or issue body could
+# print it into a PR comment. No member needs it: nothing in members/ calls that endpoint, and
+# a member that wants work done files an issue or reports it, by design.
+#
+# So: drop it before `claude -p` inherits this environment. Least privilege, and it costs
+# nothing today. The key stays in fleet.env for the humans and out-of-band callers that
+# actually trigger runs. If a future member legitimately needs to wake another member, grant
+# it deliberately here by name -- do not re-export it for everyone.
+unset FLEET_API_KEY
+
 KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 REPO="${FLEET_REPO:?set FLEET_REPO in fleet.env}"
 LOG_DIR="${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}"
