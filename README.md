@@ -166,10 +166,15 @@ budget is a dial, "may this agent merge PRs" is not.
 python3 scripts/selftest.py
 ```
 
-Five checks, no network: specs validate, the report contract records silence as a status,
-overrides tune dials and refuse authority, `fleet.env` is yours and untracked, and schedulers
-exist for both platforms. This caught a real break during the port — `run_report.py` imported a
-scoring module that was never copied, so a fresh clone crashed on import and nothing noticed.
+No network. Specs validate, the report contract records silence as a status, overrides tune
+dials and refuse authority, `fleet.env` is yours and untracked, schedulers exist for both
+platforms, the account pool doesn't gate itself on its own log text, and the fleet-view write
+routes are authenticated and fail closed. This caught a real break during the port —
+`run_report.py` imported a scoring module that was never copied, so a fresh clone crashed on
+import and nothing noticed.
+
+Every check here is a bug that actually happened. Adding one when you fix something is the
+cheapest way to stop it coming back.
 
 ## Edited fleet.env but the container didn't notice?
 
@@ -190,6 +195,83 @@ ports, a plain restart can race its own port cleanup (`rootlessport listen tcp .
 already in use`) if the new instance binds before the kernel releases the old one's port. This
 script retries via `podman start` automatically when that happens, instead of leaving the
 container down.
+
+## Driving the fleet from outside the box
+
+`fleet_view_server.py` serves a live dashboard and a small control API. Read routes (`GET`) are
+open — it's a status page. **Every write route requires a shared secret**, sent as the
+`X-Fleet-Key` header:
+
+```bash
+curl -X POST https://<your-host>/api/run_now \
+  -H "X-Fleet-Key: $FLEET_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"member":"dumbledore"}'
+```
+
+Write routes: `run_now`, `fleet_toggle`, `steer`, `prune`, `close_pr`, `create_issue`,
+`comment_issue`, `close_issue`.
+
+### Where the key lives, and how to get it
+
+`FLEET_API_KEY` in `fleet.env` on the fleet box — **that file is the only source of truth.** It
+is gitignored and never committed, so it is not in this repo and cannot be recovered from git.
+There is no secret manager in this kit by design (see extension points below); `fleet.env` is
+where every other credential here lives too.
+
+**Read the existing key** (do this before generating a new one — a fleet that has been deployed
+already has one, and replacing it silently breaks every caller using the old value):
+
+```bash
+# on the box
+grep '^FLEET_API_KEY=' /path/to/fleet-kit/fleet.env
+
+# from your laptop, if the fleet runs in a container on a remote host
+ssh <host> "grep '^FLEET_API_KEY=' /path/to/fleet-kit/fleet.env"
+ssh <host> "podman exec <container> grep '^FLEET_API_KEY=' /fleet-kit/fleet.env"
+```
+
+**Set one for the first time** (or rotate — see below):
+
+```bash
+KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+printf '\nFLEET_API_KEY=%s\n' "$KEY" >> fleet.env
+```
+
+Write it to **both** the host `fleet.env` and the container's copy if those are separate files
+(a container built from an image has its own baked-in copy — editing only the host's leaves the
+running server on the old value until rebuild). Restart the server so it picks the key up:
+`fleet_view_server.py` reads it from its environment at request time, but only sees what it was
+launched with.
+
+**Rotating** is the same append, plus a server restart, plus updating every caller. Nothing
+caches it, so a rotation takes effect on the next request. Rotate if the key ever appears in a
+log, a PR comment, a CI transcript, or a chat window.
+
+**Don't paste it into a conversation with an agent.** An agent that needs to trigger a run
+should read it from `fleet.env` at call time and never echo it — the same rule this kit applies
+to every other secret (`account_pool.sh`'s tokens, `FLEET_MAXX_KEY`, the webhook secret). A key
+pasted into a transcript is a key in every context window that transcript touches.
+
+**A tunnel is not authentication.** This is the section's whole reason for existing. This
+server shipped with no auth and the advice "put it behind your own reverse proxy / tunnel if
+you want it reachable off the fleet box" — which is exactly what happened, and a tunnel
+*publishes* a service, it doesn't guard one. For a while anyone who knew the URL could POST a
+member name and spawn `claude -p --dangerously-skip-permissions` on the box: someone else's
+Anthropic budget, an agent with repo write access and a live `gh` token. Assume any host you
+expose is being probed, and put the check in the app.
+
+Two properties worth preserving if you touch this:
+
+- **It fails closed.** With `FLEET_API_KEY` unset, remote writes are *refused*, not allowed. An
+  unset key silently meaning "no authentication" is the exact state that caused the problem.
+  Requests from localhost skip the check so an operator on the box is never locked out.
+- **The key never reaches an LLM.** Every script that spawns `claude -p` sources `fleet.env`
+  with `set -a`, which exports the key — so each one `unset`s it before the exec. Otherwise
+  every member runs holding the ability to spawn unlimited runs, with the key sitting in nine
+  agents' contexts where one prompt-injected issue body could print it into a PR comment. The
+  thing the key protects must not be reachable by the things it protects against. `selftest.py`
+  fails if a new spawner is added without the unset.
 
 ## What's NOT in this kit (extension points)
 
