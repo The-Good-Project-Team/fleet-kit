@@ -26,6 +26,7 @@ top of commands you could already type.
 from __future__ import annotations
 
 import datetime
+import hmac
 import json
 import os
 import subprocess
@@ -490,6 +491,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _authorized(self) -> bool:
+        """True if this request may perform a write. See the gate in do_POST for the why.
+
+        FAILS CLOSED for anything off-box. With no FLEET_API_KEY set, a remote POST is refused
+        rather than allowed -- an unset key must never silently mean "no authentication", which
+        is precisely the state that left run_now world-callable in the first place. Localhost
+        stays allowed without a key so an operator on the box (and the container's own cron,
+        which POSTs nothing today but might) is never locked out of their own fleet by a
+        missing config value.
+        """
+        client = self.client_address[0] if self.client_address else ""
+        if client in ("127.0.0.1", "::1", "localhost"):
+            return True
+        key = (os.environ.get("FLEET_API_KEY") or "").strip()
+        if not key:
+            return False   # fail closed: no key configured => no remote writes, ever
+        sent = (self.headers.get("X-Fleet-Key") or "").strip()
+        return bool(sent) and hmac.compare_digest(sent, key)
+
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/":
@@ -694,6 +714,31 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(raw) if raw else {}
         except json.JSONDecodeError:
             body = {}
+
+        # --- AUTH GATE: every write route, one check ------------------------------------------
+        # Found live 2026-08-25: this server has always been unauthenticated, and it is published
+        # to the public internet through the Cloudflare tunnel. Anyone who knew the URL could POST
+        # a member name to /api/run_now and spawn `claude -p --dangerously-skip-permissions` on
+        # this box -- burning the account pool's budget and running an agent with repo write
+        # access and a gh token. Verified by POSTing an invalid member from off-box and getting
+        # this handler's own 400 back, which proves reachability and input processing.
+        #
+        # The gate lives HERE, at the top of do_POST, rather than per-route on purpose: every
+        # mutating endpoint (steer/prune/close_pr/create_issue/comment_issue/close_issue/
+        # fleet_toggle/run_now) is a POST, so one check covers all of them and a NEW write route
+        # added later is protected by default instead of being protected only if its author
+        # remembered. Read routes (GET) stay open -- the dashboard is a read-only view and
+        # requiring a header would break it in the browser for no security gain.
+        #
+        # Compared with hmac.compare_digest, not `==`: a plain string compare returns early on
+        # the first differing byte, which leaks key material to a patient attacker timing
+        # responses. Constant-time comparison is the standard fix and costs nothing here.
+        if not self._authorized():
+            client = self.client_address[0] if self.client_address else "?"
+            print(f"[fleet-view] DENIED {path} from {client} (bad or missing X-Fleet-Key)",
+                  flush=True)
+            self._json({"ok": False, "error": "unauthorized -- set X-Fleet-Key"}, 401)
+            return
 
         # --- steer: throttle/disable/re-tune a member, via overrides.py (dials only, by design
         # -- see that module's header: prompt/tools are PR-only even from this page). ----------

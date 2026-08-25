@@ -109,6 +109,34 @@ def _schedulers_for_both_platforms():
     assert list((ROOT / "schedulers" / "systemd").glob("*.timer")), "no systemd timers"
 
 
+def _write_routes_are_authenticated():
+    """Every POST route must sit behind the auth gate, and it must fail CLOSED.
+
+    Live incident 2026-08-25: this server was published through a Cloudflare tunnel with no
+    auth of any kind. A stranger who knew the URL could POST a member name to /api/run_now and
+    spawn `claude -p --dangerously-skip-permissions` on the fleet box -- burning the account
+    pool's budget, with repo write access and a gh token. Confirmed reachable from off-box.
+
+    The gate lives at the top of do_POST rather than per-route so a NEW write route added later
+    inherits it by default. This test pins both that placement and the fail-closed default.
+    """
+    src = (ROOT / "scripts" / "fleet_view_server.py").read_text()
+
+    # The gate must be inside do_POST, before any route dispatch.
+    post = src.split("def do_POST", 1)
+    assert len(post) == 2, "do_POST not found"
+    body = post[1]
+    gate = body.find("_authorized()")
+    first_route = body.find('if path == "/api/')
+    assert gate != -1, "do_POST has no _authorized() gate -- write routes are unauthenticated"
+    assert gate < first_route, "auth gate sits AFTER a route -- that route is unprotected"
+
+    # Fail closed: no key configured must mean no remote writes, never "auth disabled".
+    auth = src.split("def _authorized", 1)[1].split("\n    def ", 1)[0]
+    assert "return False" in auth, "_authorized never denies -- cannot be failing closed"
+    assert "compare_digest" in auth, "key compared without hmac.compare_digest (timing leak)"
+
+
 def _bash_eval(setup: str, expr: str) -> str:
     """Source account_pool.sh in a scratch HOME and echo one expression's result."""
     import subprocess
@@ -196,6 +224,7 @@ if __name__ == "__main__":
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)
+    check("fleet-view write routes are authenticated and fail closed", _write_routes_are_authenticated)
     check("incidental 'rate limit' text does not gate an account", _classifier_ignores_incidental_rate_limit_text)
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)
     check("exhaustion with no stated reset backs off minutes, not an hour", _unparseable_exhaustion_gates_briefly_not_for_an_hour)
