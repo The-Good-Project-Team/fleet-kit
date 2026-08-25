@@ -163,6 +163,47 @@ def _gh(*args: str, timeout: int = 15) -> str:
         return ""
 
 
+_TTL_CACHE: dict[str, tuple[float, object]] = {}
+_TTL_LOCK = threading.Lock()
+
+
+def _cached(key: str, ttl_s: float, produce):
+    """Memoize an expensive request-time computation for ttl_s seconds.
+
+    For endpoints that make their OWN blocking gh calls rather than reading STATE's polled
+    snapshot. backlog_history was measured at 8.4s per hit (two gh calls, 1000 issues + 500
+    PRs) and re-paid it on every single Stats page load, every reload, for every viewer --
+    while plotting DAY-granularity buckets that cannot meaningfully change between two loads
+    a minute apart.
+
+    produce() returns (value, cacheable). Returning cacheable=False serves the value for this
+    one request without storing it -- for when the underlying fetch failed in a way that still
+    produces a structurally valid but WRONG answer. _gh swallows every failure into "", which
+    the day-bucket aggregators happily turn into a full run of zeroes; caching that would pin a
+    false flatline over the real trend for the whole TTL. A stale-but-true chart is fine, a
+    confidently-wrong one is not.
+
+    The lock is held across produce() on purpose: this server is a ThreadingHTTPServer, so
+    two concurrent loads would otherwise both miss and fire duplicate 8s gh calls. Holding it
+    means the second waits on the first's result instead (a "thundering herd" / cache
+    stampede -- the standard fix is exactly this single-flight lock). Serializing distinct
+    keys is acceptable here: this cache fronts a handful of endpoints on a dashboard with a
+    handful of viewers, and correctness beats the parallelism we give up.
+
+    Stale entries are never evicted on a timer -- the key set is fixed and tiny (one per
+    endpoint+params combination), so the dict cannot grow without bound.
+    """
+    now = time.time()
+    with _TTL_LOCK:
+        hit = _TTL_CACHE.get(key)
+        if hit is not None and now - hit[0] < ttl_s:
+            return hit[1]
+        value, cacheable = produce()
+        if cacheable:
+            _TTL_CACHE[key] = (now, value)
+        return value
+
+
 def read_env_flags() -> dict:
     """FLEET_ENABLED from fleet.env text (not this process's environment, which was only a
     snapshot taken at start -- a toggle must be visible on the very next page load, not after
@@ -506,27 +547,43 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"buckets": fleet_stats.token_usage_by_hour(snap["runs"], hours=hours), "hours": hours})
             return
         if path == "/api/stats/backlog_history":
-            # Own gh call, not the cached STATE.gh snapshot -- that only carries currently-OPEN
+            # Own gh calls, not the cached STATE.gh snapshot -- that only carries currently-OPEN
             # issues (poll_gh_state's own --state open filter), but backlog_history needs every
             # issue ever labeled fleet:backlog, including closed ones, to reconstruct the
-            # historical open-count trend. Direct call, same 15-20s poll cadence class as
-            # everything else here, not cached across requests -- this endpoint is hit once per
-            # Stats page load, not on every live tick, so a fresh call each time is cheap enough
-            # (638 issues, one gh call, confirmed live 2026-08-25).
+            # historical open-count trend.
+            #
+            # CACHED, 120s (Reif, 2026-08-25). The original note here guessed "a fresh call each
+            # time is cheap enough"; measured, it was 8.4s per Stats page load -- two blocking gh
+            # calls (1000 issues + 500 PRs) re-run on every load and reload, by every viewer,
+            # to redraw buckets that are DAY-granular and cannot change between two loads a
+            # minute apart. 120s keeps the page honest against a fleet that ships several PRs an
+            # hour while making the second load instant.
             qs = parse_qs(urlparse(self.path).query)
             days = int(qs.get("days", ["14"])[0])
-            issues_raw = _gh("issue", "list", "--state", "all", "--label", "fleet:backlog",
-                              "--json", "number,createdAt,closedAt", "--limit", "1000")
-            # New-PRs-opened + PRs-merged (shipped) per day -- the throughput counterpart to
-            # backlog size, plotted on the same chart/x-axis, so it's fetched alongside rather
-            # than as a separate endpoint the frontend has to join itself.
-            prs_raw = _gh("pr", "list", "--state", "all", "--json", "createdAt,mergedAt", "--limit", "500")
-            pr_activity = fleet_stats.pr_activity_by_day(prs_raw, days=days)
-            self._json({
-                "days": fleet_stats.backlog_history(issues_raw, days=days),
-                "new_prs": pr_activity["new_prs"],
-                "merged_prs": pr_activity["merged_prs"],
-            })
+
+            def _build_backlog_history():
+                issues_raw = _gh("issue", "list", "--state", "all", "--label", "fleet:backlog",
+                                  "--json", "number,createdAt,closedAt", "--limit", "1000")
+                # New-PRs-opened + PRs-merged (shipped) per day -- the throughput counterpart to
+                # backlog size, plotted on the same chart/x-axis, so it's fetched alongside rather
+                # than as a separate endpoint the frontend has to join itself.
+                prs_raw = _gh("pr", "list", "--state", "all", "--json", "createdAt,mergedAt", "--limit", "500")
+                # _gh swallows failure into "" (timeout, rate limit, auth blip), and both
+                # aggregators turn "" into a full run of zero-count days -- which is
+                # indistinguishable, on the chart, from a genuinely empty backlog. Caching that
+                # would pin a false flatline over the real trend for the whole TTL, so refuse to
+                # cache it: raise, and let the caller serve this one request uncached. Slow beats
+                # confidently wrong on a page whose only job is to tell the truth about the fleet.
+                pr_activity = fleet_stats.pr_activity_by_day(prs_raw, days=days)
+                payload = {
+                    "days": fleet_stats.backlog_history(issues_raw, days=days),
+                    "new_prs": pr_activity["new_prs"],
+                    "merged_prs": pr_activity["merged_prs"],
+                }
+                return payload, bool(issues_raw.strip())
+
+            # Key on days: /api/stats/backlog_history?days=7 and ?days=30 are different answers.
+            self._json(_cached(f"backlog_history:{days}", 120.0, _build_backlog_history))
             return
         if path == "/api/stats/self_improve_score":
             # Read-only tail of self_improve_score.jsonl -- written once daily by
