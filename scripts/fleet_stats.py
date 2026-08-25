@@ -97,3 +97,39 @@ def backlog_history(issues_json: str, days: int = 30) -> list[dict]:
         out.append({"date": day.isoformat(), "count": count})
         day += _dt.timedelta(days=1)
     return out
+
+
+def merged_prs_by_day(prs_json: str, days: int = 30) -> list[dict]:
+    """Merged PR count per day over the last `days` days -- a second series for the same Backlog
+    chart, so growth (backlog size) and throughput (PRs actually landing) sit on one timeline
+    instead of forcing a second card. `prs_json` is the raw stdout of `gh pr list --state merged
+    --json mergedAt --limit 500`, same "parse it here, own the error handling" pattern as
+    backlog_history above.
+
+    Same day-bucket granularity as backlog_history (not hour-by-hour) so the two series line up
+    on one shared x-axis without a second date-parsing pass in the frontend.
+    """
+    try:
+        prs = json.loads(prs_json) if prs_json else []
+    except json.JSONDecodeError:
+        return []
+    today = _dt.datetime.now(_dt.timezone.utc).date()
+    start = today - _dt.timedelta(days=days - 1)
+
+    def _parse(ts: str | None) -> _dt.date | None:
+        if not ts:
+            return None
+        return _dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).date()
+
+    counts: dict[_dt.date, int] = {}
+    for pr in prs:
+        d = _parse(pr.get("mergedAt"))
+        if d and start <= d <= today:
+            counts[d] = counts.get(d, 0) + 1
+
+    out = []
+    day = start
+    while day <= today:
+        out.append({"date": day.isoformat(), "count": counts.get(day, 0)})
+        day += _dt.timedelta(days=1)
+    return out

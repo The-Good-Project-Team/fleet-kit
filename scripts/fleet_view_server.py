@@ -517,7 +517,14 @@ class Handler(BaseHTTPRequestHandler):
             days = int(qs.get("days", ["30"])[0])
             issues_raw = _gh("issue", "list", "--state", "all", "--label", "fleet:backlog",
                               "--json", "number,createdAt,closedAt", "--limit", "1000")
-            self._json({"days": fleet_stats.backlog_history(issues_raw, days=days)})
+            # Same call-per-load tradeoff as the issues fetch above -- merged-PR count is the
+            # throughput counterpart to backlog size, plotted on the same chart/x-axis, so it's
+            # fetched alongside rather than as a separate endpoint the frontend has to join itself.
+            prs_raw = _gh("pr", "list", "--state", "merged", "--json", "mergedAt", "--limit", "500")
+            self._json({
+                "days": fleet_stats.backlog_history(issues_raw, days=days),
+                "merged_prs": fleet_stats.merged_prs_by_day(prs_raw, days=days),
+            })
             return
         if path == "/api/query":
             qs = parse_qs(urlparse(self.path).query)

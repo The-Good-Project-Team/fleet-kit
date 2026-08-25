@@ -760,7 +760,7 @@ async function renderStatsPage() {
       </div>
       <div class="stats-card">
         <h3>Backlog Size</h3>
-        <div class="stats-sub">open fleet:backlog issue count per day, last 30 days</div>
+        <div class="stats-sub">open fleet:backlog issue count + PRs merged, per day, last 30 days</div>
         <canvas id="chartBacklog"></canvas>
       </div>
     </div>`;
@@ -828,22 +828,30 @@ async function renderStatsPage() {
     },
   });
 
-  // --- Backlog Size: line, open-issue count per day
+  // --- Backlog Size: line (open-issue count) + bar (PRs merged) per day, same day-keyed x-axis
+  // so growth and throughput read on one timeline -- merged_prs is a separate gh call
+  // (backlog_history) but both arrays are day-aligned by the server, so no join needed here.
   const days = backlogData.days || [];
+  const mergedDays = backlogData.merged_prs || [];
   STATS_CHARTS.backlog = new Chart(document.getElementById('chartBacklog'), {
-    type: 'line',
     data: {
       labels: days.map(d => d.date),
-      datasets: [{
-        label: 'open backlog issues', data: days.map(d => d.count),
-        borderColor: '#2166c4', backgroundColor: 'rgba(33,102,196,.08)',
-        fill: true, tension: 0.15, pointRadius: 1.5,
-      }],
+      datasets: [
+        {
+          type: 'line', label: 'open backlog issues', data: days.map(d => d.count),
+          borderColor: '#2166c4', backgroundColor: 'rgba(33,102,196,.08)',
+          fill: true, tension: 0.15, pointRadius: 1.5, order: 1,
+        },
+        {
+          type: 'bar', label: 'PRs merged', data: mergedDays.map(d => d.count),
+          backgroundColor: 'rgba(31,139,76,.55)', order: 2,
+        },
+      ],
     },
     options: {
       responsive: true,
       scales: { y: { beginAtZero: true, grid: { color: '#eef0f3' } }, x: { grid: { display: false } } },
-      plugins: { legend: { display: false } },
+      plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10.5 } } } },
     },
   });
 }
