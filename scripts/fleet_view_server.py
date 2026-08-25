@@ -38,6 +38,7 @@ from urllib.parse import parse_qs, urlparse
 KIT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(KIT_DIR / "scripts"))
 import fleet_db          # noqa: E402  (sqlite mirror -- search/spend queries over runs.jsonl)
+import fleet_kpi         # noqa: E402  (per-member headline-count extraction from outcome prose)
 import member_spec       # noqa: E402
 import overrides as ov   # noqa: E402  ('overrides' shadows nothing here; keep the module name clear)
 
@@ -231,11 +232,32 @@ def read_pass_block(member: str, n: int) -> list[str]:
     return lines[start_i:end_i]
 
 
+# Paths that count as the fleet editing its OWN rules/orchestration, not app code -- the
+# self-evolution panel's filter. Verified live 2026-08-25 against nonprofit-atlas's last 100
+# merged PRs: 21 of 100 touch one of these, a real and substantial signal, not noise.
+SELF_EVOLUTION_PATH_PREFIXES = (".claude/agents/", "scripts/lucky2/", "scripts/box/")
+
+
+def _touches_self_evolution_path(pr: dict) -> bool:
+    for f in pr.get("files") or []:
+        p = f.get("path", "")
+        if p.startswith(SELF_EVOLUTION_PATH_PREFIXES):
+            return True
+        if "/members/" in p and p.endswith(".md"):
+            return True
+    return False
+
+
 def poll_gh_state() -> dict:
     prs_raw = _gh("pr", "list", "--state", "open", "--json",
                    "number,title,isDraft,headRefName,url,statusCheckRollup,updatedAt")
     issues_raw = _gh("issue", "list", "--state", "open", "--label", "fleet:backlog", "--json",
                       "number,title,labels,updatedAt", "--limit", "100")
+    # Recently merged (plain feed, any file) + self-evolution (same underlying call, filtered
+    # to agent-definition paths) -- one gh call serves both rather than two separate queries,
+    # since self-evolution is just a filtered view of the same merged-PR list.
+    merged_raw = _gh("pr", "list", "--state", "merged", "--json",
+                      "number,title,mergedAt,url,author,files", "--limit", "30")
     try:
         prs = json.loads(prs_raw) if prs_raw else []
     except json.JSONDecodeError:
@@ -244,6 +266,10 @@ def poll_gh_state() -> dict:
         issues = json.loads(issues_raw) if issues_raw else []
     except json.JSONDecodeError:
         issues = []
+    try:
+        merged = json.loads(merged_raw) if merged_raw else []
+    except json.JSONDecodeError:
+        merged = []
     for pr in prs:
         checks = pr.get("statusCheckRollup") or []
         states = {c.get("state") or c.get("conclusion") for c in checks}
@@ -253,7 +279,10 @@ def poll_gh_state() -> dict:
     for issue in issues:
         names = {lb.get("name") for lb in issue.get("labels") or []}
         issue["_claimed"] = any(n and n.endswith(":claimed") for n in names)
-    return {"prs": prs, "issues": issues, "polled_at": time.time()}
+    merged.sort(key=lambda pr: pr.get("mergedAt") or "", reverse=True)
+    self_evolution = [pr for pr in merged if _touches_self_evolution_path(pr)]
+    return {"prs": prs, "issues": issues, "merged": merged,
+            "self_evolution": self_evolution, "polled_at": time.time()}
 
 
 class State:
@@ -428,6 +457,24 @@ class Handler(BaseHTTPRequestHandler):
             db = fleet_db.connect()
             fleet_db.sync(db)
             self._json({"spend": fleet_db.spend(db, member=member, hours=hours), "hours": hours})
+            return
+        if path == "/api/kpi":
+            # Per-member headline count (fleet_kpi.py), summed over a time window -- reuses
+            # STATE.runs (already in memory, already the live source for the run feed) rather
+            # than a fresh gh/db query, since this only needs member+outcome+ts, all present
+            # on every in-memory run record.
+            qs = parse_qs(urlparse(self.path).query)
+            hours = float(qs.get("hours", ["24"])[0])
+            cutoff = time.time() - hours * 3600
+            snap = STATE.snapshot()
+            windowed = [r for r in snap["runs"] if (r.get("ts") or 0) >= cutoff]
+            try:
+                members = member_spec.load_all()
+                names = [m["name"] for m in members]
+            except Exception:
+                names = sorted({r.get("member") for r in windowed if r.get("member")})
+            out = [fleet_kpi.sum_kpi_over_runs(name, windowed) for name in names]
+            self._json({"kpi": out, "hours": hours})
             return
         if path == "/api/query":
             qs = parse_qs(urlparse(self.path).query)

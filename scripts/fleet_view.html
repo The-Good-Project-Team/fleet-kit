@@ -57,6 +57,7 @@
   .agent-item .aname { overflow-wrap: break-word; }
   .agent-item.disabled-agent .aname { color: var(--dimmer); text-decoration: line-through; }
   .agent-item .aago { color: var(--dimmer); font-size: 10.5px; margin-top: 1px; }
+  .agent-item .akpi { color: var(--dim); font-size: 10.5px; margin-top: 1px; font-weight: 600; }
 
   /* ---------- center: selected agent's detail -- header/actions fixed, run list scrolls ---------- */
   .detail { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -108,8 +109,30 @@
     border: 1px solid var(--border); border-radius: 4px; max-height: 320px; overflow-y: auto;
     white-space: pre-wrap; word-break: break-all; font-size: 11px; color: var(--dim); }
   .transcript.open { display: block; }
-  .transcript .tline { padding: 1px 0; }
+  .transcript .tline { padding: 2px 0; border-left: 2px solid transparent; padding-left: 6px; }
   .transcript .tline.live { color: var(--accent); }
+  .transcript .tts { color: var(--dimmer); margin-right: 6px; font-size: 10px; }
+  .transcript .ttext { white-space: pre-wrap; }
+  /* thinking: italic + dim -- the model's own reasoning, lowest visual weight */
+  .transcript .tk-thinking .ttext { font-style: italic; color: var(--dimmer); }
+  /* tool call: accent-colored, bold-ish -- what the agent DID */
+  .transcript .tk-call { border-left-color: var(--accent); }
+  .transcript .tk-call .ttext { color: var(--text); }
+  /* tool result ok: quiet dim green -- succeeded, not worth dwelling on */
+  .transcript .tk-result-ok { border-left-color: var(--ok); }
+  .transcript .tk-result-ok .ttext { color: var(--dim); }
+  /* tool result ERROR: stays loud -- exactly what a human scans a transcript for, never muted */
+  .transcript .tk-result-err { border-left-color: var(--bad); background: rgba(224,100,90,.08); }
+  .transcript .tk-result-err .ttext { color: var(--bad); }
+  /* pass start/end/result markers: a subtle divider, not a normal content row */
+  .transcript .tk-marker { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 5px; }
+  .transcript .tk-marker .ttext { color: var(--dimmer); font-size: 10.5px; text-transform: uppercase; letter-spacing: .03em; }
+  /* long tool result: short/full text coexist in the DOM, CSS swaps which shows */
+  .transcript .tfull { display: none; }
+  .transcript .tline-expanded .tshort { display: none; }
+  .transcript .tline-expanded .tfull { display: inline; }
+  .transcript .tmore { display: block; color: var(--accent); cursor: pointer; font-size: 10.5px; margin-top: 2px; }
+  .transcript .tline-expanded .tmore { display: none; }
   .row.upcoming, .run-row.upcoming { opacity: .5; cursor: default; }
 
   /* ---------- pages: PRs+backlog and settings, now sidebar-selected views inside .detail ---------- */
@@ -157,6 +180,9 @@
       <div class="side-nav-item" data-page="queue">
         PRs &amp; Backlog <span class="count-badge" id="navQueueCount">0</span>
       </div>
+      <div class="side-nav-item" data-page="evolution">
+        Self-Evolution <span class="count-badge" id="navEvolutionCount">0</span>
+      </div>
       <div class="side-nav-item" data-page="settings">Settings</div>
     </div>
     <div class="detail" id="detailPane">
@@ -175,9 +201,10 @@ let SPECS = [];          // from /api/members -- spec + effective + overrides, p
 let ALL_RUNS = [];        // oldest-first, matches runs.jsonl append order
 let SELECTED = null;      // currently open agent name, or null (only meaningful when PAGE==='agent')
 let PAGE = 'agent';       // 'agent' | 'queue' | 'settings' -- which sidebar item is active
-let GH = { prs: [], issues: [] };
+let GH = { prs: [], issues: [], merged: [], self_evolution: [] };
 let FLEET_STATE = {};
 let NEXT_FIRES = [];
+let KPI_BY_MEMBER = {}; // member name -> /api/kpi row ({total, unit, runs_with_kpi, runs_total})
 const dot = document.getElementById('dot');
 const agentListEl = document.getElementById('agentList');
 const detailHeadEl = document.getElementById('detailHead');
@@ -257,12 +284,16 @@ function renderSidebar() {
     const last = lastRunFor(name);
     const cls = !enabled ? 'off' : statusClass(last?.status);
     const active = PAGE === 'agent' && name === SELECTED;
+    const k = KPI_BY_MEMBER[name];
+    const kpiLine = (k && k.total !== null && k.total !== undefined && k.unit)
+      ? `<div class="akpi">${k.total} ${esc(k.unit)}</div>` : '';
     return `<div class="agent-item ${active ? 'active' : ''} ${!enabled ? 'disabled-agent' : ''}"
         data-agent="${esc(name)}">
       <span class="astatus ${cls}"></span>
       <div class="atext">
         <div class="aname">${esc(name)}</div>
         <div class="aago">${last ? ago(last.ts) : 'never run'}</div>
+        ${kpiLine}
       </div>
     </div>`;
   }).join('');
@@ -270,6 +301,7 @@ function renderSidebar() {
     el.classList.toggle('active', PAGE === el.dataset.page);
   });
   document.getElementById('navQueueCount').textContent = (GH.prs?.length || 0) + (GH.issues?.length || 0);
+  document.getElementById('navEvolutionCount').textContent = GH.self_evolution?.length || 0;
 }
 
 agentListEl.addEventListener('click', e => {
@@ -293,6 +325,17 @@ function dialValue(eff, key) {
   return (eff.llm || {})[key];
 }
 
+// KPI-in-title text: "roomba · 47 worktrees evaluated today" when this member has a defined
+// KPI shape and at least one counted run in the window; falls back to nothing (just the plain
+// name) for a member with no KPI shape (fleet_kpi.py returns total:null for those) or zero
+// counted runs yet -- never show a fabricated "0 <unit>" for a member that has no unit to begin
+// with.
+function kpiTitleSuffix(name) {
+  const k = KPI_BY_MEMBER[name];
+  if (!k || k.total === null || k.total === undefined || !k.unit) return '';
+  return ` · ${k.total} ${k.unit} today`;
+}
+
 function renderDetailHead() {
   const m = SPECS.find(s => s.spec.name === SELECTED);
   if (!m) { detailHeadEl.innerHTML = ''; return; }
@@ -314,7 +357,7 @@ function renderDetailHead() {
 
   detailHeadEl.innerHTML = `
     <div class="title-row">
-      <h2>${esc(name)}</h2>
+      <h2>${esc(name)}${esc(kpiTitleSuffix(name))}</h2>
       <span class="lane">${esc(m.spec.kind)}${m.spec.lane ? ' · ' + esc(m.spec.lane) : ''}</span>
     </div>
     <div class="spend-line">${esc(spendLine)}${nextLine ? ' · ' + esc(nextLine) : ''}</div>
@@ -346,6 +389,48 @@ function reindexSeq(name) {
 let OPEN_TRANSCRIPT_RUN_ID = null; // survives renderRunList() rebuilds -- see restoreOpenTranscript()
 let RUN_VIEW = 'history'; // 'history' (past runs) | 'upcoming' (this member's single next scheduled fire)
 
+// ---------------------------------------------------------------------------------------------
+// Transcript line rendering: run_member.sh's stream_log.py writes every log line with a fixed
+// prefix shape ("[ts] pass start ...", "[ts] thinking: ...", "[ts] tool call: X -- args",
+// "[ts] tool result (ok|ERROR): ..."). Parse that prefix once per line so thinking/tool-call/
+// tool-result/error render as visually distinct rows instead of one flat grey dump (Reif,
+// 2026-08-25: "more readable transcript"). No backend change needed -- read_pass_block already
+// returns these exact lines, this is purely a frontend render.
+// ---------------------------------------------------------------------------------------------
+const TLINE_RE = /^\[([^\]]+)\]\s(.*)$/s;
+function classifyTline(raw) {
+  const m = TLINE_RE.exec(raw);
+  const ts = m ? m[1] : '';
+  const rest = m ? m[2] : raw;
+  let kind = 'plain';
+  if (/^(pass start|pass end|pass result|session init)\b/.test(rest)) kind = 'marker';
+  else if (rest.startsWith('thinking:')) kind = 'thinking';
+  else if (rest.startsWith('tool call:')) kind = 'call';
+  else if (rest.startsWith('tool result (ok')) kind = 'result-ok';
+  else if (rest.startsWith('tool result (ERROR')) kind = 'result-err';
+  return { ts, rest, kind };
+}
+function renderTline(raw, extraClass) {
+  const { ts, rest, kind } = classifyTline(raw);
+  // A long tool result (several samples run multi-KB) pushes everything else out of the
+  // 320px-tall scrollable box -- collapse anything past 4 lines behind a toggle, always shown
+  // in full for an ERROR (errors are exactly what a human scans for, never collapse those).
+  // Full text is always in the DOM (never re-fetched on expand); CSS just switches which of
+  // .tshort/.tfull is visible once '.tline-expanded' is added by the click handler.
+  const lines = rest.split('\n');
+  const long = kind !== 'result-err' && lines.length > 4;
+  if (!long) {
+    return `<div class="tline tk-${kind} ${extraClass || ''}">
+      ${ts ? `<span class="tts">${esc(ts)}</span>` : ''}<span class="ttext">${esc(rest)}</span>
+    </div>`;
+  }
+  const shortText = lines.slice(0, 4).join('\n');
+  return `<div class="tline tk-${kind} ${extraClass || ''}">
+    ${ts ? `<span class="tts">${esc(ts)}</span>` : ''}<span class="ttext tshort">${esc(shortText)}</span><span class="ttext tfull">${esc(rest)}</span>
+    <span class="tmore" data-act="expand-tline">… ${lines.length - 4} more lines</span>
+  </div>`;
+}
+
 async function loadTranscriptInto(box, rec) {
   box.dataset.loaded = '1';
   box.innerHTML = '<div class="tline">loading transcript…</div>';
@@ -353,7 +438,7 @@ async function loadTranscriptInto(box, rec) {
     const r = await fetch(`/api/pass_log?member=${encodeURIComponent(rec.member)}&n=${rec._seqFromEnd}`);
     const { lines } = await r.json();
     box.innerHTML = (lines && lines.length)
-      ? lines.map(l => `<div class="tline">${esc(l)}</div>`).join('')
+      ? lines.map(l => renderTline(l)).join('')
       : '<div class="tline">no transcript recorded for this pass</div>';
   } catch {
     box.innerHTML = '<div class="tline">failed to load transcript</div>';
@@ -479,6 +564,8 @@ function renderRunList() {
 }
 
 runListEl.addEventListener('click', e => {
+  const moreEl = e.target.closest('.tmore');
+  if (moreEl) { moreEl.closest('.tline')?.classList.add('tline-expanded'); return; }
   const ridEl = e.target.closest('.rid');
   if (ridEl) { copyText(ridEl.textContent, ridEl); return; }
   if (e.target.closest('a') || e.target.closest('button')) return;
@@ -510,7 +597,33 @@ function selectPage(page) {
   PAGE = page;
   renderSidebar();
   if (page === 'queue') renderQueuePage();
+  else if (page === 'evolution') renderEvolutionPage();
   else if (page === 'settings') renderSettingsPage();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Self-Evolution page: merged PRs that touch the fleet's OWN rules (.claude/agents/,
+// orchestration scripts) rather than app code -- a timeline of the fleet rewriting itself
+// (Reif, 2026-08-25: "evidence of system self-evolution"). Distinct from the plain Recently
+// Merged list on the queue page, which is unfiltered.
+// ---------------------------------------------------------------------------------------------
+function renderEvolutionPage() {
+  if (PAGE !== 'evolution') return;
+  const prs = GH.self_evolution || [];
+  detailHeadEl.innerHTML = `<div class="title-row"><h2>Self-Evolution</h2></div>
+    <div class="spend-line">merged PRs that changed the fleet's own agent charters or orchestration scripts</div>`;
+  const rowsHtml = prs.map(pr => {
+    const fileList = (pr.files || []).map(f =>
+      `<code>${esc(f.path)}</code> <span class="rmeta">+${f.additions}/-${f.deletions}</span>`
+    ).join('<br>');
+    return `<div class="rail-row">
+      <a href="${esc(pr.url)}" target="_blank">#${pr.number}</a>
+      <div>${esc(pr.title)}</div>
+      <div class="rmeta">${esc(pr.author?.login || '')} · merged ${ago(pr.mergedAt)}</div>
+      <div class="rmeta" style="margin-top:4px">${fileList}</div>
+    </div>`;
+  }).join('') || '<div class="run-empty">no self-evolution PRs found yet</div>';
+  runListEl.innerHTML = `<div class="rail-section">${rowsHtml}</div>`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -544,6 +657,15 @@ function renderQueuePage() {
       </div>
     </div>`).join('') || '<div class="run-empty">backlog empty</div>';
 
+  // Recently Merged: the natural third state of a PR (open -> merged/closed) alongside what
+  // this page already tracks -- what actually shipped, not just what's still in flight.
+  const merged = GH.merged || [];
+  const mergedHtml = merged.map(pr => `<div class="rail-row">
+      <a href="${esc(pr.url)}" target="_blank">#${pr.number}</a>
+      <div>${esc(pr.title)}</div>
+      <div class="rmeta">${esc(pr.author?.login || '')} · merged ${ago(pr.mergedAt)} · ${(pr.files || []).length} file${(pr.files || []).length === 1 ? '' : 's'}</div>
+    </div>`).join('') || '<div class="run-empty">nothing merged recently</div>';
+
   runListEl.innerHTML = `
     <div class="rail-section">
       <div class="rail-head">Open PRs <span class="count-badge">${prs.length}</span></div>
@@ -553,6 +675,10 @@ function renderQueuePage() {
       <div class="rail-head">Backlog <span class="count-badge">${issues.length}</span>
         <button class="btn small" id="newIssue" style="margin-left:auto">+ new</button></div>
       ${issuesHtml}
+    </div>
+    <div class="rail-section">
+      <div class="rail-head">Recently Merged <span class="count-badge">${merged.length}</span></div>
+      ${mergedHtml}
     </div>`;
   document.getElementById('newIssue')?.addEventListener('click', async () => {
     const title = prompt('issue title:');
@@ -654,13 +780,15 @@ async function renderFleetState() {
 }
 
 async function loadMembers() {
-  const [{ members }, { spend }] = await Promise.all([
+  const [{ members }, { spend }, { kpi }] = await Promise.all([
     fetch('/api/members').then(r => r.json()),
     fetch('/api/spend?hours=24').then(r => r.json()),
+    fetch('/api/kpi?hours=24').then(r => r.json()),
   ]);
   const spendByMember = Object.fromEntries((spend || []).map(s => [s.member, s]));
   members.forEach(m => { m._spend = spendByMember[m.spec.name]; });
   SPECS = members;
+  KPI_BY_MEMBER = Object.fromEntries((kpi || []).map(k => [k.member, k]));
   const totalCost = (spend || []).reduce((sum, s) => sum + (s.total_cost || 0), 0);
   document.getElementById('globalSpend').innerHTML = `$${totalCost.toFixed(2)} <b>today</b>`;
   if (!SELECTED && SPECS.length) SELECTED = SPECS[0].spec.name;
@@ -688,10 +816,7 @@ function appendLiveLine(rec) {
   const row = runListEl.querySelector('.run-row.open');
   const box = row && row.querySelector('.transcript.open');
   if (!box) return;
-  const div = document.createElement('div');
-  div.className = 'tline live';
-  div.textContent = rec.line;
-  box.appendChild(div);
+  box.insertAdjacentHTML('beforeend', renderTline(rec.line, 'live'));
 }
 
 async function boot() {
@@ -701,7 +826,7 @@ async function boot() {
     loadMembers(),
   ]);
   ALL_RUNS = snap.runs || [];
-  GH = snap.gh || { prs: [], issues: [] };
+  GH = snap.gh || { prs: [], issues: [], merged: [], self_evolution: [] };
   resortSidebar();
   renderSidebar();
   await renderQueue();
@@ -713,7 +838,7 @@ async function boot() {
   es.onopen = () => dot.classList.add('live');
   es.onerror = () => dot.classList.remove('live');
   es.addEventListener('run', e => { onRunEvent(JSON.parse(e.data)); renderQueue(); });
-  es.addEventListener('gh', e => { GH = JSON.parse(e.data); renderSidebar(); renderQueuePage(); });
+  es.addEventListener('gh', e => { GH = JSON.parse(e.data); renderSidebar(); renderQueuePage(); renderEvolutionPage(); });
   es.addEventListener('logline', e => appendLiveLine(JSON.parse(e.data)));
 }
 boot();
