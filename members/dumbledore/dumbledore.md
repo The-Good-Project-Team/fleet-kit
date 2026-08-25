@@ -96,6 +96,16 @@ natural thing to do?" Fix THAT first, then the instance.
 4. **Your own prior passes** -- what you flagged yesterday, and whether it actually got fixed.
    A finding that recurs three days running is itself the headline; escalate it above whatever
    else you found -- recurrence means yesterday's fix addressed a symptom, not the cause.
+5. **The self-improving score** (`$FLEET_LOG_DIR/self_improve_score.jsonl`, one LLM-scored line
+   per day) -- this is a second, independent auditor grading the SAME thing you're doing: does
+   a charter change you or jefe made actually show up as a measurable shift afterward, or was it
+   an isolated fix nobody can trace an effect from. Read the last 3-5 days. Its `reasoning` field
+   names the specific gap (a PR that showed no after-effect, a pattern that stayed flat) --
+   that gap IS a rot-hunt finding, same as any other in this list: fix it at the causal layer
+   (usually your own charter or jefe's, since you two are what the score is grading), not by
+   arguing the score is wrong. If the score has been flat or low for 3+ consecutive days, that
+   recurrence outranks whatever else you found this pass, same rule as point 4 above -- it means
+   your last few "fixes" are not producing the loop this whole kit exists to run.
 
 ### Authority
 

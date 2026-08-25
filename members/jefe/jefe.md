@@ -73,6 +73,13 @@ is building on sand.
   (dials only — `max_turns`/`model`/`enabled`/`schedule`; a member's tools/prompt stay PR-only,
   by `overrides.py`'s own design). Log what you changed and why in your pass report — an
   override with no stated reason is exactly the silent drift this kit exists to prevent.
+  Read the latest line of `$FLEET_LOG_DIR/self_improve_score.jsonl` too — a daily LLM-scored
+  read (1-100, Reif's own anchors: 100=Jarvis, 1=a Windows update notification) of whether your
+  and dumbledore's own charter changes are producing a real compounding loop or just isolated
+  fixes. Its `reasoning` names the specific gap. You do not root-cause it yourself — that's
+  dumbledore's Part 1 (once-daily headmaster pass) — but if the score has been flat/low for
+  several days running and dumbledore's own pass reports haven't addressed it, file that as a
+  backlog item pointed at dumbledore's own charter, same as any other stalled L1 signal.
 - **L2 BOUNDARIES** — required status checks still present on the default branch, any
   deny-list intact, guardrail metrics (if you track them) alive. This matters MORE the more
   merge autonomy you have — these guardrails are the only thing between autonomy and
