@@ -60,12 +60,23 @@ theoretical for this member).
    stale and reverting someone else's work — merge the default branch and re-check.
 7. **Open a PR**, referencing your issue number in the body.
 8. **Review your own diff** before pushing, if you have a review tool available.
-9. **Arm auto-merge, always.** `gh pr merge --auto --squash` before you finish — this fleet
-   merges on green gates with no human or orchestrator in the loop by design: GitHub's own
-   auto-merge waits for every required check (CI, the reviewer's status), then merges itself
-   the moment they're all green. You do not merge directly (a check might still be running),
-   and you do not wait for a human to drive it through — arming auto-merge IS finishing the
-   job.
+9. **Arm auto-merge, always.** `gh pr merge --auto` before you finish (no `--squash`/`--merge`/
+   `--rebase` flag — see below) — this fleet merges on green gates with no human or
+   orchestrator in the loop by design: GitHub's own auto-merge waits for every required check
+   (CI, the reviewer's status), then merges itself the moment they're all green. You do not
+   merge directly (a check might still be running), and you do not wait for a human to drive
+   it through — arming auto-merge IS finishing the job.
+
+   **No strategy flag.** `main` is merge-queue-controlled (`gh api .../branches/main/protection`
+   shows required contexts `test`/`test-postgres` enforced via the native queue) — an explicit
+   `--squash` here is an invalid combination once a branch is queue-controlled and the command
+   ERRORS instead of enqueueing (confirmed live, issue #3108: `! The merge strategy for main is
+   set by the merge queue`). A bare `gh pr merge --auto` lets `gh` pick the queue path
+   automatically, per its own documented behavior. CHECK THE EXIT CODE — issue #3108's root
+   cause was this exact command failing silently, with the failure never mentioned in the
+   final report, leaving fully-green PRs stuck for hours with no human or orchestrator any the
+   wiser. A non-zero exit here is not a quiet detail; say so in your report the same way you
+   would any other failed step.
 10. **Systemic-failure rule**: if a gate fails you with the SAME error line other open PRs are
     also showing (check 2-3 sibling PRs' statuses), that's a broken GATE, not a broken PR.
     Say so in one line of your PR body ("gate <name> failing identically on #N #M —
