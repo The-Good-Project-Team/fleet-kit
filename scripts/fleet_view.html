@@ -419,7 +419,22 @@ function runRowHtml(rec, dupCount) {
     </div>
     <div class="routcome">${rec.outcome ? formatOutcome(rec.outcome) : noOutcomeHint(rec)}</div>
     ${rec.evidence ? `<div class="rmeta">${formatOutcome(rec.evidence)}</div>` : ''}
-    ${rec.tokens && rec.tokens.cost_usd ? `<div class="rmeta">$${Number(rec.tokens.cost_usd).toFixed(3)} · ${esc(rec.tokens.num_turns)} turns</div>` : ''}
+    ${(() => {
+      // Every run should show its cost, even a zero-spend one -- a run card with a status
+      // badge and no token line reads as "we don't know what this cost," when the real
+      // answer for a budget_declined/exhausted run is "nothing, it never got to spend."
+      // (Reif, 2026-08-25: "every fleet session should show its token usage" -- the truthy
+      // `rec.tokens.cost_usd` check below silently dropped the whole line for cost_usd=0 or
+      // =null, which is exactly every account-pool-exhausted run.)
+      const t = rec.tokens;
+      if (t && typeof t.cost_usd === 'number') {
+        return `<div class="rmeta">$${t.cost_usd.toFixed(3)} · ${esc(t.num_turns ?? 0)} turns</div>`;
+      }
+      if (rec.status === 'budget_declined') {
+        return `<div class="rmeta">$0.000 · declined before spending</div>`;
+      }
+      return '';
+    })()}
     ${rec.run_id ? `<div class="rid" title="click to copy run_id">${esc(rec.run_id)}</div>` : ''}
     <div class="transcript"></div>`;
 }
