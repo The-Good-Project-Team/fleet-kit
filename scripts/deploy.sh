@@ -48,8 +48,23 @@ log() { echo "[deploy $(date '+%Y-%m-%d %H:%M:%S %Z')] $*"; }
 # One place both the green candidate and the real cutover build their `podman run` args from --
 # duplicating this list between call sites is exactly how a mount silently drifts between "what
 # we tested" and "what we shipped" (the same defect class as the-fixer's own opus/sonnet drift).
+#
+# CLAUDE ACCOUNT MOUNTS: looped over FLEET_ACCOUNTS (from fleet.env, same list account_pool.sh
+# reads) rather than hardcoded to just "primary" -- confirmed live, 2026-08-25: this function
+# only ever mounted .claude-primary, so claude-reif's credentials lived in the CONTAINER's
+# writable layer only, not a host bind mount. Every deploy (a real podman run under a NEW
+# container object, per this file's own header) silently dropped claude-reif back to logged-out,
+# while primary survived untouched -- account_pool.sh then correctly saw only one usable
+# account and nobody could tell why the pool "lost" claude-reif after every deploy. A host dir
+# per account, created here if missing, closes that -- any account in FLEET_ACCOUNTS now
+# persists across every future deploy the same way primary always did.
 run_args() {
     local name="$1" view_port="$2" webhook_port="$3"
+    local account_mounts=()
+    for acct in ${FLEET_ACCOUNTS:-primary}; do
+        mkdir -p "/home/ubuntu/.claude-$acct"
+        account_mounts+=(-v "/home/ubuntu/.claude-$acct:/root/.claude-$acct")
+    done
     echo -d --name "$name" \
         -e FLEET_REPO_URL=https://github.com/The-Good-Project-Team/nonprofit-atlas.git \
         -e FLEET_VIEW_PORT="$view_port" \
@@ -61,7 +76,7 @@ run_args() {
         -v "$INSTANCE_DIR/logs:/var/log/fleet-kit" \
         -v "$INSTANCE_DIR/fleet.env:/fleet-kit/fleet.env" \
         -v "$INSTANCE_DIR/webhook_secret:/fleet-kit/.webhook_secret" \
-        -v /home/ubuntu/.claude-primary:/root/.claude-primary \
+        "${account_mounts[@]}" \
         -p "$view_port:$view_port" -p "$webhook_port:$webhook_port" \
         "$IMAGE" cron-foreground
 }
