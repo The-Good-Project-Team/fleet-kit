@@ -232,20 +232,25 @@ def read_pass_block(member: str, n: int) -> list[str]:
     return lines[start_i:end_i]
 
 
-# Paths that count as the fleet editing its OWN rules/orchestration, not app code -- the
-# self-evolution panel's filter. Verified live 2026-08-25 against nonprofit-atlas's last 100
-# merged PRs: 21 of 100 touch one of these, a real and substantial signal, not noise.
-SELF_EVOLUTION_PATH_PREFIXES = (".claude/agents/", "scripts/lucky2/", "scripts/box/")
-
-
-def _touches_self_evolution_path(pr: dict) -> bool:
-    for f in pr.get("files") or []:
-        p = f.get("path", "")
-        if p.startswith(SELF_EVOLUTION_PATH_PREFIXES):
-            return True
-        if "/members/" in p and p.endswith(".md"):
-            return True
-    return False
+# Self-evolution means jefe or dumbledore -- the fleet's own two self-correcting personas --
+# decided to change the fleet's rules, not just any worker (minion/roomba/etc) touching an
+# agent-definition path as incidental work. GitHub's PR `author` is USELESS for this: every
+# merged PR shows the human account (goodindustries) because that account's `gh` credentials
+# do the actual merge for every persona -- confirmed live 2026-08-25 (PR #3176, a plain
+# human/session PR on branch docs/hack-solo-mode, author reads identically to a real jefe PR).
+# The real signal is the BRANCH NAME: jefe's own worktree/PR flow names its branch `jefe/...`
+# (confirmed live: PR #3150, branch `jefe/fix-3108-msh-squash`) and dumbledore's the same way
+# (confirmed live: PR #3032, branch `dumbledore/memory-20260820h`) -- vs. a human-authored
+# branch (generic docs/, devops/, feat/ prefixes) or a WORKER's own branch (`member/<name>-...`
+# for roomba, minion, etc -- NOT jefe/dumbledore, and not what this panel is about per Reif's
+# correction, 2026-08-25: "jefe was the source of the PR", not "any of the 9 members touched an
+# agent file"). jefe is reactive (priority ladder, backlog); dumbledore's whole charter IS
+# "fix the instruction/charter/gate that caused the symptom, not the instance" -- the only two
+# personas whose job is deciding the fleet's OWN rules should change, not doing the work itself.
+# Filtered server-side via gh's `head:` search qualifier (see poll_gh_state below) rather than
+# pulling N generic merged PRs and filtering client-side -- jefe/dumbledore PRs are sparse (2
+# and 5 of the last 100 merged, measured live) so a client-filtered recent-N window would often
+# show this panel empty even when real self-evolution happened.
 
 
 def poll_gh_state() -> dict:
@@ -253,11 +258,17 @@ def poll_gh_state() -> dict:
                    "number,title,isDraft,headRefName,url,statusCheckRollup,updatedAt")
     issues_raw = _gh("issue", "list", "--state", "open", "--label", "fleet:backlog", "--json",
                       "number,title,labels,updatedAt", "--limit", "100")
-    # Recently merged (plain feed, any file) + self-evolution (same underlying call, filtered
-    # to agent-definition paths) -- one gh call serves both rather than two separate queries,
-    # since self-evolution is just a filtered view of the same merged-PR list.
+    # Recently merged: plain feed, whatever's most recent -- what just shipped, any branch.
     merged_raw = _gh("pr", "list", "--state", "merged", "--json",
-                      "number,title,mergedAt,url,author,files", "--limit", "30")
+                      "number,title,mergedAt,url,author,files,headRefName", "--limit", "30")
+    # Self-evolution: server-side head: search per persona (see the "Self-evolution means
+    # jefe or dumbledore" comment above for why) rather than filtering a recent-N window
+    # client-side.
+    jefe_raw = _gh("pr", "list", "--state", "merged", "--search", "head:jefe/", "--json",
+                    "number,title,mergedAt,url,author,files,headRefName", "--limit", "20")
+    dumbledore_raw = _gh("pr", "list", "--state", "merged", "--search", "head:dumbledore/",
+                          "--json", "number,title,mergedAt,url,author,files,headRefName",
+                          "--limit", "20")
     try:
         prs = json.loads(prs_raw) if prs_raw else []
     except json.JSONDecodeError:
@@ -270,6 +281,11 @@ def poll_gh_state() -> dict:
         merged = json.loads(merged_raw) if merged_raw else []
     except json.JSONDecodeError:
         merged = []
+    try:
+        self_evolution = (json.loads(jefe_raw) if jefe_raw else []) + \
+                          (json.loads(dumbledore_raw) if dumbledore_raw else [])
+    except json.JSONDecodeError:
+        self_evolution = []
     for pr in prs:
         checks = pr.get("statusCheckRollup") or []
         states = {c.get("state") or c.get("conclusion") for c in checks}
@@ -280,7 +296,7 @@ def poll_gh_state() -> dict:
         names = {lb.get("name") for lb in issue.get("labels") or []}
         issue["_claimed"] = any(n and n.endswith(":claimed") for n in names)
     merged.sort(key=lambda pr: pr.get("mergedAt") or "", reverse=True)
-    self_evolution = [pr for pr in merged if _touches_self_evolution_path(pr)]
+    self_evolution.sort(key=lambda pr: pr.get("mergedAt") or "", reverse=True)
     return {"prs": prs, "issues": issues, "merged": merged,
             "self_evolution": self_evolution, "polled_at": time.time()}
 

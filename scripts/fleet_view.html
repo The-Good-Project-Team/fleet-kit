@@ -109,6 +109,7 @@
     border: 1px solid var(--border); border-radius: 4px; max-height: 320px; overflow-y: auto;
     white-space: pre-wrap; word-break: break-all; font-size: 11px; color: var(--dim); }
   .transcript.open { display: block; }
+  .tcopy-row { display: flex; justify-content: flex-end; margin-bottom: 6px; }
   .transcript .tline { padding: 2px 0; border-left: 2px solid transparent; padding-left: 6px; }
   .transcript .tline.live { color: var(--accent); }
   .transcript .tts { color: var(--dimmer); margin-right: 6px; font-size: 10px; }
@@ -179,6 +180,9 @@
       <div class="side-sep"></div>
       <div class="side-nav-item" data-page="queue">
         PRs &amp; Backlog <span class="count-badge" id="navQueueCount">0</span>
+      </div>
+      <div class="side-nav-item" data-page="merged">
+        Recently Merged <span class="count-badge" id="navMergedCount">0</span>
       </div>
       <div class="side-nav-item" data-page="evolution">
         Self-Evolution <span class="count-badge" id="navEvolutionCount">0</span>
@@ -301,6 +305,7 @@ function renderSidebar() {
     el.classList.toggle('active', PAGE === el.dataset.page);
   });
   document.getElementById('navQueueCount').textContent = (GH.prs?.length || 0) + (GH.issues?.length || 0);
+  document.getElementById('navMergedCount').textContent = GH.merged?.length || 0;
   document.getElementById('navEvolutionCount').textContent = GH.self_evolution?.length || 0;
 }
 
@@ -437,8 +442,12 @@ async function loadTranscriptInto(box, rec) {
   try {
     const r = await fetch(`/api/pass_log?member=${encodeURIComponent(rec.member)}&n=${rec._seqFromEnd}`);
     const { lines } = await r.json();
+    // Raw lines kept on the box itself (not re-derived from rendered HTML, which has been
+    // reformatted/collapsed) so the copy button always copies the real, complete transcript.
+    box.dataset.rawLines = JSON.stringify(lines || []);
+    const header = '<div class="tcopy-row"><button class="btn small" data-act="copy-transcript">copy transcript</button></div>';
     box.innerHTML = (lines && lines.length)
-      ? lines.map(l => renderTline(l)).join('')
+      ? header + lines.map(l => renderTline(l)).join('')
       : '<div class="tline">no transcript recorded for this pass</div>';
   } catch {
     box.innerHTML = '<div class="tline">failed to load transcript</div>';
@@ -568,6 +577,13 @@ runListEl.addEventListener('click', e => {
   if (moreEl) { moreEl.closest('.tline')?.classList.add('tline-expanded'); return; }
   const ridEl = e.target.closest('.rid');
   if (ridEl) { copyText(ridEl.textContent, ridEl); return; }
+  const copyBtn = e.target.closest('[data-act="copy-transcript"]');
+  if (copyBtn) {
+    const box = copyBtn.closest('.transcript');
+    const lines = JSON.parse(box?.dataset.rawLines || '[]');
+    copyText(lines.join('\n'), copyBtn);
+    return;
+  }
   if (e.target.closest('a') || e.target.closest('button')) return;
   const row = e.target.closest('.run-row');
   if (!row) return;
@@ -597,21 +613,40 @@ function selectPage(page) {
   PAGE = page;
   renderSidebar();
   if (page === 'queue') renderQueuePage();
+  else if (page === 'merged') renderMergedPage();
   else if (page === 'evolution') renderEvolutionPage();
   else if (page === 'settings') renderSettingsPage();
 }
 
 // ---------------------------------------------------------------------------------------------
-// Self-Evolution page: merged PRs that touch the fleet's OWN rules (.claude/agents/,
-// orchestration scripts) rather than app code -- a timeline of the fleet rewriting itself
-// (Reif, 2026-08-25: "evidence of system self-evolution"). Distinct from the plain Recently
-// Merged list on the queue page, which is unfiltered.
+// Recently Merged page: plain unfiltered merged-PR feed -- what actually shipped, any branch,
+// any author. Own sidebar item (moved off the PRs & Backlog page, Reif 2026-08-25: buried at
+// the bottom of a 68-item backlog, "where is that" -- needed a click of its own, not a scroll).
+// ---------------------------------------------------------------------------------------------
+function renderMergedPage() {
+  if (PAGE !== 'merged') return;
+  const merged = GH.merged || [];
+  detailHeadEl.innerHTML = `<div class="title-row"><h2>Recently Merged</h2></div>`;
+  const rowsHtml = merged.map(pr => `<div class="rail-row">
+      <a href="${esc(pr.url)}" target="_blank">#${pr.number}</a>
+      <div>${esc(pr.title)}</div>
+      <div class="rmeta">${esc(pr.author?.login || '')} · merged ${ago(pr.mergedAt)} · ${(pr.files || []).length} file${(pr.files || []).length === 1 ? '' : 's'}</div>
+    </div>`).join('') || '<div class="run-empty">nothing merged recently</div>';
+  runListEl.innerHTML = `<div class="rail-section">${rowsHtml}</div>`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Self-Evolution page: merged PRs SOURCED BY jefe or dumbledore -- the fleet's own two
+// self-correcting personas deciding the fleet's rules should change, not any worker touching
+// an agent-definition path as incidental work (see fleet_view_server.py's poll_gh_state for the
+// branch-name filter and why PR author can't be used). Distinct from the plain Recently Merged
+// page, which is unfiltered.
 // ---------------------------------------------------------------------------------------------
 function renderEvolutionPage() {
   if (PAGE !== 'evolution') return;
   const prs = GH.self_evolution || [];
   detailHeadEl.innerHTML = `<div class="title-row"><h2>Self-Evolution</h2></div>
-    <div class="spend-line">merged PRs that changed the fleet's own agent charters or orchestration scripts</div>`;
+    <div class="spend-line">merged PRs sourced by jefe or dumbledore -- the fleet deciding its own rules should change</div>`;
   const rowsHtml = prs.map(pr => {
     const fileList = (pr.files || []).map(f =>
       `<code>${esc(f.path)}</code> <span class="rmeta">+${f.additions}/-${f.deletions}</span>`
@@ -619,10 +654,10 @@ function renderEvolutionPage() {
     return `<div class="rail-row">
       <a href="${esc(pr.url)}" target="_blank">#${pr.number}</a>
       <div>${esc(pr.title)}</div>
-      <div class="rmeta">${esc(pr.author?.login || '')} · merged ${ago(pr.mergedAt)}</div>
+      <div class="rmeta">${esc(pr.headRefName || '')} · merged ${ago(pr.mergedAt)}</div>
       <div class="rmeta" style="margin-top:4px">${fileList}</div>
     </div>`;
-  }).join('') || '<div class="run-empty">no self-evolution PRs found yet</div>';
+  }).join('') || '<div class="run-empty">no jefe/dumbledore self-evolution PRs found yet</div>';
   runListEl.innerHTML = `<div class="rail-section">${rowsHtml}</div>`;
 }
 
@@ -657,15 +692,6 @@ function renderQueuePage() {
       </div>
     </div>`).join('') || '<div class="run-empty">backlog empty</div>';
 
-  // Recently Merged: the natural third state of a PR (open -> merged/closed) alongside what
-  // this page already tracks -- what actually shipped, not just what's still in flight.
-  const merged = GH.merged || [];
-  const mergedHtml = merged.map(pr => `<div class="rail-row">
-      <a href="${esc(pr.url)}" target="_blank">#${pr.number}</a>
-      <div>${esc(pr.title)}</div>
-      <div class="rmeta">${esc(pr.author?.login || '')} · merged ${ago(pr.mergedAt)} · ${(pr.files || []).length} file${(pr.files || []).length === 1 ? '' : 's'}</div>
-    </div>`).join('') || '<div class="run-empty">nothing merged recently</div>';
-
   runListEl.innerHTML = `
     <div class="rail-section">
       <div class="rail-head">Open PRs <span class="count-badge">${prs.length}</span></div>
@@ -675,10 +701,6 @@ function renderQueuePage() {
       <div class="rail-head">Backlog <span class="count-badge">${issues.length}</span>
         <button class="btn small" id="newIssue" style="margin-left:auto">+ new</button></div>
       ${issuesHtml}
-    </div>
-    <div class="rail-section">
-      <div class="rail-head">Recently Merged <span class="count-badge">${merged.length}</span></div>
-      ${mergedHtml}
     </div>`;
   document.getElementById('newIssue')?.addEventListener('click', async () => {
     const title = prompt('issue title:');
@@ -797,7 +819,12 @@ async function loadMembers() {
 async function renderQueue() {
   const { next_fires } = await (await fetch('/api/next_fires')).json();
   NEXT_FIRES = next_fires || [];
-  renderDetailHead();
+  // Bug (Reif, 2026-08-25 screenshot): this 15s-interval call rendered the agent detail head
+  // over whatever page the user had actually navigated to (Self-Evolution's PR rows showing
+  // under the last-selected agent's name/header) -- renderDetailHead() unconditionally
+  // overwrites detailHeadEl with agent info regardless of PAGE. Guard it the same way
+  // renderQueuePage/renderEvolutionPage/renderSettingsPage already guard themselves.
+  if (PAGE === 'agent') renderDetailHead();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -831,14 +858,16 @@ async function boot() {
   renderSidebar();
   await renderQueue();
   selectAgent(SELECTED);
-  setInterval(async () => { await loadMembers(); renderSidebar(); renderDetailHead(); }, 30000);
+  // Same PAGE guard as renderQueue() above -- loadMembers() itself is page-agnostic (spend/KPI
+  // data every page's sidebar KPI line needs), but renderDetailHead() is agent-page-only.
+  setInterval(async () => { await loadMembers(); renderSidebar(); if (PAGE === 'agent') renderDetailHead(); }, 30000);
   setInterval(renderQueue, 15000);
 
   const es = new EventSource('/api/stream');
   es.onopen = () => dot.classList.add('live');
   es.onerror = () => dot.classList.remove('live');
   es.addEventListener('run', e => { onRunEvent(JSON.parse(e.data)); renderQueue(); });
-  es.addEventListener('gh', e => { GH = JSON.parse(e.data); renderSidebar(); renderQueuePage(); renderEvolutionPage(); });
+  es.addEventListener('gh', e => { GH = JSON.parse(e.data); renderSidebar(); renderQueuePage(); renderMergedPage(); renderEvolutionPage(); });
   es.addEventListener('logline', e => appendLiveLine(JSON.parse(e.data)));
 }
 boot();
