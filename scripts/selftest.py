@@ -109,6 +109,41 @@ def _schedulers_for_both_platforms():
     assert list((ROOT / "schedulers" / "systemd").glob("*.timer")), "no systemd timers"
 
 
+def _api_key_never_reaches_an_llm():
+    """No script that execs `claude -p` may leave FLEET_API_KEY in its environment.
+
+    That key authorizes POST /api/run_now, which spawns
+    `claude -p --dangerously-skip-permissions` on the fleet box. Every one of these scripts
+    sources fleet.env with `set -a`, which exports it -- so without an explicit unset, all nine
+    members run holding the ability to spawn unlimited runs, and the key sits in nine agents'
+    contexts where one prompt-injected issue body could print it into a PR comment.
+
+    No member needs it (nothing under members/ calls that endpoint), so it is dropped before
+    the exec. This test fails if a NEW spawner is added without the same unset.
+    """
+    import re
+    spawners = []
+    for path in (ROOT / "scripts").glob("*.sh"):
+        text = path.read_text()
+        if "claude -p" not in text:
+            continue
+        # A script that only delegates (exec's another runner) is covered by that runner.
+        if re.search(r"exec bash .*run_member\.sh", text):
+            continue
+        spawners.append((path.name, text))
+
+    assert spawners, "no claude -p spawners found -- test is looking in the wrong place"
+    # Only scripts that actually SOURCE fleet.env export the key. A mere mention of the
+    # filename in a comment does not (account_pool.sh does exactly that, and is always sourced
+    # BY a caller that has already unset it).
+    sources_env = re.compile(r"^\s*\[ -f .*fleet\.env.*\].*set -a", re.M)
+    missing = [name for name, text in spawners
+               if sources_env.search(text) and "unset FLEET_API_KEY" not in text]
+    assert not missing, (
+        f"these scripts exec `claude -p` with FLEET_API_KEY still exported: {missing} -- "
+        "add `unset FLEET_API_KEY` after the fleet.env source")
+
+
 def _write_routes_are_authenticated():
     """Every POST route must sit behind the auth gate, and it must fail CLOSED.
 
@@ -225,6 +260,7 @@ if __name__ == "__main__":
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)
     check("fleet-view write routes are authenticated and fail closed", _write_routes_are_authenticated)
+    check("FLEET_API_KEY never reaches an LLM pass", _api_key_never_reaches_an_llm)
     check("incidental 'rate limit' text does not gate an account", _classifier_ignores_incidental_rate_limit_text)
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)
     check("exhaustion with no stated reset backs off minutes, not an hour", _unparseable_exhaustion_gates_briefly_not_for_an_hour)

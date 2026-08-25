@@ -38,6 +38,10 @@ KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # token live in fleet.env, not the calling environment, so without this every account_pool_run
 # call here fails "unauthenticated" for every account and this script silently no-ops.
 [ -f "${FLEET_ENV_FILE:-$KIT_DIR/fleet.env}" ] && { set -a; . "${FLEET_ENV_FILE:-$KIT_DIR/fleet.env}"; set +a; }
+# Never hand the fleet-view write key to an LLM pass -- it authorizes POST /api/run_now,
+# which spawns agent runs on this box. See run_member.sh's fuller note. Least privilege.
+unset FLEET_API_KEY
+
 
 FLEET_REPO="${FLEET_REPO:?FLEET_REPO required}"
 FLEET_LOG_DIR="${FLEET_LOG_DIR:?FLEET_LOG_DIR required}"
