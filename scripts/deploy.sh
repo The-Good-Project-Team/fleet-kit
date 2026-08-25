@@ -31,6 +31,17 @@ set -euo pipefail
 
 KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INSTANCE_DIR="${FLEET_INSTANCE_DIR:?set FLEET_INSTANCE_DIR -- e.g. /home/ubuntu/fleet-kit/instances/nonprofit-atlas}"
+
+# Source the instance's fleet.env for FLEET_ACCOUNTS (run_args() below needs it to mount every
+# pool account, not just primary -- see run_args()'s own header). auto_deploy.sh, the usual
+# caller, never sources fleet.env itself -- confirmed live 2026-08-25: PR #54's mount-every-
+# account fix landed in run_args() but the very next real auto_deploy tick still only mounted
+# claude-primary, because FLEET_ACCOUNTS was unset at deploy time and the loop fell back to
+# its "primary" default. Sourcing it HERE makes deploy.sh self-contained regardless of caller,
+# same discipline run_agent_pass.sh/run_member.sh already apply (set -a/+a -- a plain `.` only
+# sets local shell vars, invisible to anything this script itself execs).
+[ -f "$INSTANCE_DIR/fleet.env" ] && { set -a; . "$INSTANCE_DIR/fleet.env"; set +a; }
+
 CONTAINER="${FLEET_CONTAINER_NAME:-philanthropy}"
 RETIRED_MARKER="${CONTAINER}-retired"  # fixed name: the most recent stopped-but-known-good build
 IMAGE="${FLEET_IMAGE_NAME:-fleet-kit:latest}"
