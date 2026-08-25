@@ -81,6 +81,14 @@
 
   .run-list { flex: 1; overflow-y: auto; min-height: 0; }
   .run-empty { padding: 30px; color: var(--dimmer); text-align: center; }
+  /* A low Magikarp score only knows Splash. Honors reduced-motion. */
+  @keyframes karpFlop {
+    0%, 100% { transform: rotate(-7deg) translateY(0); }
+    50%      { transform: rotate(7deg) translateY(-4px); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    [style*="karpFlop"] { animation: none !important; }
+  }
   .upcoming-card { margin: 16px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 6px; }
   .upcoming-card .u-in { font-size: 20px; font-weight: 700; }
   .upcoming-card .rmeta { color: var(--dim); font-size: 11.5px; margin-top: 6px; }
@@ -778,8 +786,8 @@ async function renderStatsPage() {
   runListEl.innerHTML = `
     <div class="stats-page">
       <div class="stats-card">
-        <h3>Self-Improving Score</h3>
-        <div class="stats-sub">an LLM reads the fleet's own week and scores it, daily -- 100 = Jarvis, 1 = a Windows update notification</div>
+        <h3>Magikarp Score</h3>
+        <div class="stats-sub">an LLM reads the fleet's own week and scores it, every 3h -- 100 = Jarvis, 1 = a Windows update notification. Splash does nothing... yet.</div>
         <div id="selfImproveCard"></div>
         <canvas id="chartSelfImprove" style="margin-top:10px;"></canvas>
       </div>
@@ -822,31 +830,72 @@ async function renderStatsPage() {
   destroyStatsChart('runsHourly'); destroyStatsChart('agentRate');
   destroyStatsChart('tokens'); destroyStatsChart('backlog');
 
-  // --- Self-Improving Score: daily LLM judgment (self_improve_score.sh, cron on dino), this
+  // --- Magikarp Score: LLM judgment every 3h (self_improve_score.sh, cron on dino), this
   // page only renders what's already scored -- no scoring logic here.
+  //
+  // The fish is drawn inline rather than fetched: an ORIGINAL stylized carp, not Nintendo's
+  // sprite -- same joke, no copyrighted artwork shipped in the repo, and no external asset to
+  // 404 later. It reacts to the score, which is the whole point of the name: a low score is a
+  // fish that only knows Splash, and the thing about Magikarp is it does eventually evolve.
   const siCard = document.getElementById('selfImproveCard');
   const siHistory = selfImprove?.history || [];
   const siLatest = selfImprove?.latest;
+
+  function magikarpArt(score) {
+    // Below 33 it flops (Splash). 33-65 it's stirring. 66+ it has earned the glow.
+    const flop = score < 33, evolving = score >= 66;
+    const body = flop ? '#d94f3d' : evolving ? '#e8643f' : '#e05a3c';
+    const fin  = flop ? '#f2c14e' : '#ffd75e';
+    return `
+      <svg viewBox="0 0 120 72" width="112" height="68" role="img"
+           aria-label="Magikarp score mascot, a carp at ${score} out of 100"
+           style="flex:none;${flop ? 'animation:karpFlop 1.6s ease-in-out infinite;' : ''}">
+        ${evolving ? `<ellipse cx="58" cy="38" rx="46" ry="26" fill="#ffd75e" opacity=".18"/>` : ''}
+        <path d="M96 38 L116 24 L116 52 Z" fill="${fin}"/>
+        <path d="M52 14 Q60 2 70 14 Q62 10 52 14 Z" fill="${fin}"/>
+        <ellipse cx="56" cy="38" rx="40" ry="21" fill="${body}"/>
+        <path d="M30 52 Q44 62 58 52 Q44 58 30 52 Z" fill="${fin}"/>
+        <path d="M56 17 Q66 26 56 59" stroke="#b03c2c" stroke-width="2.5" fill="none" opacity=".55"/>
+        <circle cx="28" cy="33" r="7" fill="#fff"/>
+        <circle cx="${flop ? 26 : 27}" cy="33" r="3.4" fill="#26303a"/>
+        <path d="M18 42 Q24 46 30 43" stroke="#b03c2c" stroke-width="2" fill="none" stroke-linecap="round"/>
+        ${evolving ? `<path d="M104 10 l3 7 7 3 -7 3 -3 7 -3 -7 -7 -3 7 -3 z" fill="#ffd75e"/>` : ''}
+      </svg>`;
+  }
+
   if (siCard) {
     if (!siLatest) {
-      siCard.innerHTML = '<div class="run-empty">no score yet -- self_improve_score.sh runs once daily</div>';
+      siCard.innerHTML = '<div class="run-empty">no score yet -- self_improve_score.sh runs every 3h</div>';
     } else {
       const color = siLatest.score >= 66 ? '#1f8b4c' : siLatest.score >= 33 ? '#a6720f' : '#c13a2e';
+      const quip = siLatest.score < 33 ? 'still just Splash'
+                 : siLatest.score < 66 ? 'gaining XP'
+                 : 'evolution imminent';
       siCard.innerHTML = `
-        <div class="kpi-cell">
-          <div class="kpi-label">${esc(siLatest.date)}</div>
-          <div class="kpi-value" style="color:${color};">${siLatest.score}<span style="font-size:14px;color:var(--dimmer);">/100</span></div>
-          <div class="kpi-sub">${esc(siLatest.reasoning || '')}</div>
+        <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;">
+          ${magikarpArt(siLatest.score)}
+          <div class="kpi-cell" style="flex:1;min-width:240px;">
+            <div class="kpi-label">${esc(siLatest.date)} &middot; ${quip}</div>
+            <div class="kpi-value" style="color:${color};">${siLatest.score}<span style="font-size:14px;color:var(--dimmer);">/100</span></div>
+            <div class="kpi-sub">${esc(siLatest.reasoning || '')}</div>
+          </div>
         </div>`;
     }
   }
   if (siHistory.length) {
+    // Rows written before the 3h switch carry a bare "2026-08-25"; newer ones a full ISO
+    // timestamp. Render the timestamps as "08-25 18h" -- a raw 20-char ISO string per point
+    // is unreadable on the x-axis once there are eight of them a day.
+    const karpLabel = s => {
+      const v = String(s || '');
+      return v.length > 10 ? `${v.slice(5, 10)} ${v.slice(11, 13)}h` : v.slice(5);
+    };
     STATS_CHARTS.selfImprove = new Chart(document.getElementById('chartSelfImprove'), {
       type: 'line',
       data: {
-        labels: siHistory.map(d => d.date),
+        labels: siHistory.map(d => karpLabel(d.date)),
         datasets: [{
-          label: 'self-improving score', data: siHistory.map(d => d.score),
+          label: 'magikarp score', data: siHistory.map(d => d.score),
           borderColor: '#2166c4', backgroundColor: 'rgba(33,102,196,.08)',
           fill: true, tension: 0.2, pointRadius: 2,
         }],
