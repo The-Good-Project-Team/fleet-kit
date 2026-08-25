@@ -32,18 +32,69 @@ set -uo pipefail
 
 ACCOUNT_POOL_ORDER="${FLEET_ACCOUNTS:-primary}"
 ACCOUNT_POOL_LOG_FILE="${ACCOUNT_POOL_LOG_FILE:-${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}/account-pool.log}"
+ACCOUNT_POOL_STATE_FILE="${ACCOUNT_POOL_STATE_FILE:-${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}/account-pool-exhausted.state}"
 
 _account_pool_log() {
   mkdir -p "$(dirname "$ACCOUNT_POOL_LOG_FILE")" 2>/dev/null
   echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] account_pool: $*" >> "$ACCOUNT_POOL_LOG_FILE"
 }
 
+# _account_pool_parse_reset <output> — pull a reset time out of the CLI's own wording
+# ("resets 1pm (UTC)", confirmed live wording as of 2026-08-24) and print its next epoch
+# occurrence, or nothing if the output didn't carry one. `date -d`/`date -j` differ (GNU vs
+# BSD) -- try GNU first, fall back to BSD (this kit runs in a Linux container, but keep the
+# fallback so account_pool.sh stays portable to a Mac host running it directly).
+_account_pool_parse_reset() {
+  local out="$1" hh ampm epoch now
+  read -r hh ampm < <(grep -ioE "resets [0-9]{1,2}(am|pm) \(UTC\)" <<<"$out" \
+    | head -1 | grep -ioE "[0-9]{1,2}(am|pm)" | sed -E 's/^([0-9]{1,2})(am|pm)$/\1 \2/')
+  [ -z "$hh" ] && return 1
+  [ "$ampm" = "pm" ] && [ "$hh" -ne 12 ] && hh=$((hh + 12))
+  [ "$ampm" = "am" ] && [ "$hh" -eq 12 ] && hh=0
+  epoch=$(TZ=UTC date -d "today $hh:00" +%s 2>/dev/null) \
+    || epoch=$(TZ=UTC date -j -f "%H:%M" "$(printf '%02d:00' "$hh")" +%s 2>/dev/null)
+  [ -z "$epoch" ] && return 1
+  now=$(date +%s)
+  # "resets 1pm" said about a time already past today means tomorrow, not an hour ago.
+  if [ "$epoch" -le "$now" ]; then
+    epoch=$(TZ=UTC date -d "tomorrow $hh:00" +%s 2>/dev/null) \
+      || epoch=$((epoch + 86400))
+  fi
+  echo "$epoch"
+}
+
+# _account_pool_mark_exhausted <account> <output> — record that $account is gated until the
+# reset time embedded in $output, so the NEXT tick's budget-verdict check skips it without
+# spending a call. Falls back to a flat 1h backoff if the output had no parseable reset time
+# (still better than re-spending a call every ~5min tick forever).
+_account_pool_mark_exhausted() {
+  local account="$1" out="$2" epoch
+  epoch=$(_account_pool_parse_reset "$out") || epoch=$(( $(date +%s) + 3600 ))
+  mkdir -p "$(dirname "$ACCOUNT_POOL_STATE_FILE")" 2>/dev/null
+  grep -v "^${account} " "$ACCOUNT_POOL_STATE_FILE" 2>/dev/null > "${ACCOUNT_POOL_STATE_FILE}.tmp" || true
+  echo "$account $epoch" >> "${ACCOUNT_POOL_STATE_FILE}.tmp"
+  mv "${ACCOUNT_POOL_STATE_FILE}.tmp" "$ACCOUNT_POOL_STATE_FILE"
+  _account_pool_log "account=$account marked gated until epoch=$epoch ($(date -d "@$epoch" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || date -r "$epoch" '+%Y-%m-%d %H:%M UTC' 2>/dev/null))"
+}
+
 # Extension point: define this yourself (before sourcing this file, or export the function)
 # to consult your own budget-tracking API. Must print one of: ok | gated:<reason> | unknown.
-# Absent by default — account_pool_run() then always tries the account and classifies from
-# the command's actual output instead of pre-empting the call.
+# Default here reads the exhaustion state file this module writes on its own (see
+# _account_pool_mark_exhausted) -- an account we already know is exhausted, with a reset time
+# still in the future, is skipped without spending another call. Override still works: define
+# your own function (e.g. to consult a real budget API) and it takes precedence via normal
+# shell function redefinition semantics -- source this file first, then redefine.
 _account_pool_budget_verdict() {
-  echo "unknown"
+  local account="$1" epoch now
+  [ -f "$ACCOUNT_POOL_STATE_FILE" ] || { echo "unknown"; return; }
+  epoch=$(awk -v a="$account" '$1==a{print $2}' "$ACCOUNT_POOL_STATE_FILE" | tail -1)
+  [ -z "$epoch" ] && { echo "unknown"; return; }
+  now=$(date +%s)
+  if [ "$epoch" -gt "$now" ]; then
+    echo "gated:exhausted_until_$epoch"
+  else
+    echo "unknown"
+  fi
 }
 
 # _account_pool_classify_failure <combined_output> — best-effort text match. Real accounts
@@ -113,13 +164,19 @@ account_pool_run() {
     if [ "$rc" -eq 0 ]; then
       export ACCOUNT_POOL_SELECTED="$account"
       export ACCOUNT_POOL_LAST_REASON=""
+      # a stale gate for THIS account is now wrong (it just succeeded) -- clear it so a
+      # manual credit top-up or an early reset isn't stuck honoring the old estimate.
+      if [ -f "$ACCOUNT_POOL_STATE_FILE" ] && grep -q "^${account} " "$ACCOUNT_POOL_STATE_FILE" 2>/dev/null; then
+        grep -v "^${account} " "$ACCOUNT_POOL_STATE_FILE" > "${ACCOUNT_POOL_STATE_FILE}.tmp" || true
+        mv "${ACCOUNT_POOL_STATE_FILE}.tmp" "$ACCOUNT_POOL_STATE_FILE"
+      fi
       return 0
     fi
     reason=$(_account_pool_classify_failure "$(cat "$capture")")
     _account_pool_log "account=$account command failed rc=$rc reason=$reason"
     export ACCOUNT_POOL_LAST_REASON="$reason"
     case "$reason" in
-      exhausted) continue ;;
+      exhausted) _account_pool_mark_exhausted "$account" "$(cat "$capture")"; continue ;;
       unauthenticated) continue ;;
       *) continue ;;   # a transient/other failure still tries the next account rather than
                         # giving up on the whole pool over one bad tick
