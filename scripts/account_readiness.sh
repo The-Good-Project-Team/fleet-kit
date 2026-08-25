@@ -21,7 +21,13 @@
 set -uo pipefail
 
 ACCOUNTS="${FLEET_ACCOUNTS:-primary}"
-STATE_FILE="${ACCOUNT_POOL_STATE_FILE:-${FLEET_LOG_DIR:-/var/log/fleet-kit}/account-pool-exhausted.state}"
+# Default MUST match account_pool.sh's own default exactly (same env var, same fallback) --
+# confirmed live, 2026-08-25: this used $FLEET_LOG_DIR:-/var/log/fleet-kit while
+# account_pool.sh uses $FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit. Without FLEET_LOG_DIR
+# explicitly exported, the two scripts silently read/write DIFFERENT files -- this one reported
+# a false ready=2 while the real gate file (account_pool.sh's) showed both accounts gated. gru
+# itself caught this via cross-check and filed nonprofit-atlas#3163 rather than trust it blind.
+STATE_FILE="${ACCOUNT_POOL_STATE_FILE:-${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}/account-pool-exhausted.state}"
 
 now=$(date +%s)
 ready=0
