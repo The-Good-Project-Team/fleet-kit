@@ -162,7 +162,20 @@
   ::-webkit-scrollbar { width: 9px; height: 9px; }
   ::-webkit-scrollbar-thumb { background: var(--panel-2); border-radius: 5px; border: 2px solid var(--panel); }
   ::-webkit-scrollbar-thumb:hover { background: var(--dimmer); }
+
+  .stats-page { padding: 16px; overflow-y: auto; }
+  .stats-card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 14px 16px; margin-bottom: 16px; }
+  .stats-card h3 { margin: 0 0 4px; font-size: 12.5px; text-transform: uppercase;
+    letter-spacing: .05em; color: var(--dim); }
+  .stats-card .stats-sub { color: var(--dimmer); font-size: 11px; margin-bottom: 10px; }
+  .stats-card canvas { max-height: 260px; }
 </style>
+<!-- Chart.js: Reif, 2026-08-25 -- "dont handroll, pick a nice graph element". This page already
+     assumes internet access (calls GitHub's API, loads from a public domain), so a CDN script
+     is consistent with what it already does, not a new dependency class. -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
 <body>
 <div class="shell">
@@ -187,6 +200,7 @@
       <div class="side-nav-item" data-page="evolution">
         Self-Evolution <span class="count-badge" id="navEvolutionCount">0</span>
       </div>
+      <div class="side-nav-item" data-page="stats">Stats</div>
       <div class="side-nav-item" data-page="settings">Settings</div>
     </div>
     <div class="detail" id="detailPane">
@@ -615,6 +629,7 @@ function selectPage(page) {
   if (page === 'queue') renderQueuePage();
   else if (page === 'merged') renderMergedPage();
   else if (page === 'evolution') renderEvolutionPage();
+  else if (page === 'stats') renderStatsPage();
   else if (page === 'settings') renderSettingsPage();
 }
 
@@ -709,6 +724,127 @@ function renderQueuePage() {
     const body = prompt('body — optional:', '');
     const r = await fetch('/api/create_issue', { method: 'POST', body: JSON.stringify({ title, lane, body }) });
     alert((await r.json()).ok ? 'filed' : 'failed — see server log');
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stats page: recent runs as a timeline, token usage over time, backlog size over time. Three
+// Chart.js charts (Reif, 2026-08-25: "dont handroll, pick a nice graph element") reading the
+// three /api/stats/* endpoints fleet_stats.py aggregates server-side -- this function only
+// shapes the already-aggregated JSON into Chart.js's dataset format, no math of its own.
+// Chart instances are destroyed and recreated on every render (not updated in place) -- this
+// page is visited rarely compared to the live agent view, so the simplicity of "always start
+// clean" outweighs the small cost of a full chart teardown/rebuild.
+// ---------------------------------------------------------------------------------------------
+let STATS_CHARTS = {}; // chart-id -> Chart instance, so re-renders can destroy before recreate
+
+function destroyStatsChart(id) {
+  STATS_CHARTS[id]?.destroy();
+  delete STATS_CHARTS[id];
+}
+
+async function renderStatsPage() {
+  if (PAGE !== 'stats') return;
+  detailHeadEl.innerHTML = `<div class="title-row"><h2>Stats</h2></div>`;
+  runListEl.innerHTML = `
+    <div class="stats-page">
+      <div class="stats-card">
+        <h3>Recent Runs</h3>
+        <div class="stats-sub">every run in the last 24h, by agent and time</div>
+        <canvas id="chartRuns"></canvas>
+      </div>
+      <div class="stats-card">
+        <h3>Token Usage</h3>
+        <div class="stats-sub">input + output tokens per hour, last 24h</div>
+        <canvas id="chartTokens"></canvas>
+      </div>
+      <div class="stats-card">
+        <h3>Backlog Size</h3>
+        <div class="stats-sub">open fleet:backlog issue count per day, last 30 days</div>
+        <canvas id="chartBacklog"></canvas>
+      </div>
+    </div>`;
+
+  if (typeof Chart === 'undefined') {
+    runListEl.querySelector('.stats-page').innerHTML =
+      '<div class="run-empty">Chart.js failed to load (CDN unreachable?) -- stats unavailable</div>';
+    return;
+  }
+
+  const [runsData, tokensData, backlogData] = await Promise.all([
+    fetch('/api/stats/runs_timeline?hours=24').then(r => r.json()).catch(() => ({ points: [] })),
+    fetch('/api/stats/token_usage?hours=24').then(r => r.json()).catch(() => ({ buckets: [] })),
+    fetch('/api/stats/backlog_history?days=30').then(r => r.json()).catch(() => ({ days: [] })),
+  ]);
+  if (PAGE !== 'stats') return; // navigated away while awaiting -- don't render into a gone canvas
+
+  destroyStatsChart('runs'); destroyStatsChart('tokens'); destroyStatsChart('backlog');
+
+  // --- Recent Runs: scatter, one point per run, y-axis = member (categorical), color = status
+  const points = runsData.points || [];
+  const memberNames = [...new Set(points.map(p => p.member))].sort();
+  const STATUS_COLOR = { ok: '#1f8b4c', quiet: '#a6720f', budget_declined: '#9a9ea6' };
+  const runsByStatus = {};
+  points.forEach(p => {
+    const key = p.status || 'unknown';
+    (runsByStatus[key] ??= []).push({ x: p.ts * 1000, y: p.member });
+  });
+  STATS_CHARTS.runs = new Chart(document.getElementById('chartRuns'), {
+    type: 'scatter',
+    data: {
+      datasets: Object.entries(runsByStatus).map(([status, data]) => ({
+        label: status, data,
+        backgroundColor: STATUS_COLOR[status] || '#c13a2e',
+      })),
+    },
+    options: {
+      responsive: true,
+      scales: {
+        x: { type: 'time', time: { unit: 'hour' }, grid: { color: '#eef0f3' } },
+        y: { type: 'category', labels: memberNames, grid: { color: '#eef0f3' } },
+      },
+      plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10.5 } } } },
+    },
+  });
+
+  // --- Token Usage: stacked bar, input vs output, per hour
+  const buckets = tokensData.buckets || [];
+  STATS_CHARTS.tokens = new Chart(document.getElementById('chartTokens'), {
+    type: 'bar',
+    data: {
+      labels: buckets.map(b => new Date(b.ts * 1000)),
+      datasets: [
+        { label: 'input', data: buckets.map(b => b.input_tokens), backgroundColor: '#9a9ea6' },
+        { label: 'output', data: buckets.map(b => b.output_tokens), backgroundColor: '#2166c4' },
+      ],
+    },
+    options: {
+      responsive: true,
+      scales: {
+        x: { type: 'time', time: { unit: 'hour' }, stacked: true, grid: { display: false } },
+        y: { stacked: true, grid: { color: '#eef0f3' } },
+      },
+      plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10.5 } } } },
+    },
+  });
+
+  // --- Backlog Size: line, open-issue count per day
+  const days = backlogData.days || [];
+  STATS_CHARTS.backlog = new Chart(document.getElementById('chartBacklog'), {
+    type: 'line',
+    data: {
+      labels: days.map(d => d.date),
+      datasets: [{
+        label: 'open backlog issues', data: days.map(d => d.count),
+        borderColor: '#2166c4', backgroundColor: 'rgba(33,102,196,.08)',
+        fill: true, tension: 0.15, pointRadius: 1.5,
+      }],
+    },
+    options: {
+      responsive: true,
+      scales: { y: { beginAtZero: true, grid: { color: '#eef0f3' } }, x: { grid: { display: false } } },
+      plugins: { legend: { display: false } },
+    },
   });
 }
 

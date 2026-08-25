@@ -39,6 +39,7 @@ KIT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(KIT_DIR / "scripts"))
 import fleet_db          # noqa: E402  (sqlite mirror -- search/spend queries over runs.jsonl)
 import fleet_kpi         # noqa: E402  (per-member headline-count extraction from outcome prose)
+import fleet_stats       # noqa: E402  (Stats page aggregation: run timeline, tokens, backlog history)
 import member_spec       # noqa: E402
 import overrides as ov   # noqa: E402  ('overrides' shadows nothing here; keep the module name clear)
 
@@ -491,6 +492,32 @@ class Handler(BaseHTTPRequestHandler):
                 names = sorted({r.get("member") for r in windowed if r.get("member")})
             out = [fleet_kpi.sum_kpi_over_runs(name, windowed) for name in names]
             self._json({"kpi": out, "hours": hours})
+            return
+        if path == "/api/stats/runs_timeline":
+            qs = parse_qs(urlparse(self.path).query)
+            hours = float(qs.get("hours", ["24"])[0])
+            snap = STATE.snapshot()
+            self._json({"points": fleet_stats.runs_timeline(snap["runs"], hours=hours), "hours": hours})
+            return
+        if path == "/api/stats/token_usage":
+            qs = parse_qs(urlparse(self.path).query)
+            hours = float(qs.get("hours", ["24"])[0])
+            snap = STATE.snapshot()
+            self._json({"buckets": fleet_stats.token_usage_by_hour(snap["runs"], hours=hours), "hours": hours})
+            return
+        if path == "/api/stats/backlog_history":
+            # Own gh call, not the cached STATE.gh snapshot -- that only carries currently-OPEN
+            # issues (poll_gh_state's own --state open filter), but backlog_history needs every
+            # issue ever labeled fleet:backlog, including closed ones, to reconstruct the
+            # historical open-count trend. Direct call, same 15-20s poll cadence class as
+            # everything else here, not cached across requests -- this endpoint is hit once per
+            # Stats page load, not on every live tick, so a fresh call each time is cheap enough
+            # (638 issues, one gh call, confirmed live 2026-08-25).
+            qs = parse_qs(urlparse(self.path).query)
+            days = int(qs.get("days", ["30"])[0])
+            issues_raw = _gh("issue", "list", "--state", "all", "--label", "fleet:backlog",
+                              "--json", "number,createdAt,closedAt", "--limit", "1000")
+            self._json({"days": fleet_stats.backlog_history(issues_raw, days=days)})
             return
         if path == "/api/query":
             qs = parse_qs(urlparse(self.path).query)
