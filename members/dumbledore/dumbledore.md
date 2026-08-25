@@ -273,6 +273,17 @@ already emitted them as checklist item 1, at the top of the pass; restate them h
 updating only `Prediction:` now that you know what you actually changed. If you never got this
 far, the copy from item 1 is what stands — that is the point of emitting them first.
 
+**Verifying these lines landed — do NOT anchor the grep to `^`.** `run_member.sh` writes every
+line of a pass into the log prefixed with `[<timestamp>] thinking:` (or `tool call:` etc.), so
+`grep -E "^Score-now"` matches NOTHING even on a pass that emitted all three correctly. This
+produced a false "the fix failed" reading live on 2026-08-25. Use a substring match:
+
+```
+grep -oiE "Score-now:.{0,60}|Prediction:.{0,60}|Last-verdict:.{0,60}" "$FLEET_LOG_DIR/dumbledore.log"
+```
+
+and discard hits that are a `tool call: Bash -- grep ...` echoing the pattern back.
+
 ```
 Score-now:     <the latest Magikarp score + the trend over the last ~week>
 Prediction:    <the change you made this pass, and the specific number you expect it to
