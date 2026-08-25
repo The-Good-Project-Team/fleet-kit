@@ -122,7 +122,16 @@ case "${1:-cron-foreground}" in
       echo "21 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh jefe >> $LOG_DIR/jefe.log 2>&1"
       echo "41 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh roomba >> $LOG_DIR/roomba.log 2>&1"
       echo "33 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh marie >> $LOG_DIR/marie.log 2>&1"
-      echo "13 15 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dumbledore >> $LOG_DIR/dumbledore.log 2>&1"
+      # dumbledore: daily -> every 7h (2026-08-25, Reif), now that it OWNS the Magikarp score
+      # rather than treating it as one rot-hunt item among five. A once-daily owner gets 1
+      # feedback tick per day against a score sampled every 3h; at 7h it gets 3-4, which is
+      # what makes its Prediction/Last-verdict loop mean anything.
+      #
+      # Explicit hours, NOT `13 */7 * * *`: cron's step operator restarts the pattern each day,
+      # so */7 fires at 00,07,14,21 and then again at 00 -- a 3h gap across midnight, not 7h.
+      # 01/08/15/22 keeps 15:13-ish (its long-standing slot) in the rotation and stays off the
+      # :03/:21/:33/:41/:47/:51 minutes the other members already own.
+      echo "13 1,8,15,22 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dumbledore >> $LOG_DIR/dumbledore.log 2>&1"
     } > "$CRONTAB"
     chmod 0644 "$CRONTAB"
     echo "[entrypoint] installed crontab (token redacted, stored separately at $TOKEN_FILE, mode 600):"
