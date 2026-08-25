@@ -275,6 +275,24 @@ log "pass start (kind=llm charter=$BEHAVIOR model=$MODEL max_turns=$MAX_TURNS bu
 # into the member's own log AS THEY HAPPEN, piped straight to `log` so a human tailing the log
 # (or dumbledore reading it back) sees the pass unfold, not just its outcome.
 RESULT_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_result.XXXXXX")
+# the-fixer's own check.sh dedups fires against ONE global state file
+# (~/.cache/fleet-kit/the-fixer.state) so the same red SHA never re-fires every 2 minutes. But
+# a sub-pass the-fixer spawns for a SPECIFIC stale PR (`run_member.sh the-fixer --item N`,
+# charter Step 2) calls that same check.sh, sees the PARENT pass's fire already recorded as
+# "already-fighting", and silently no-ops without ever touching the PR it was sent to fix.
+# Confirmed live 2026-08-24/25 (PR #3118, #3127, #3149) -- self-diagnosed by the-fixer itself,
+# logged as project memory the_fixer_stale_pr_subpass_check_sh_collision, and worked around by
+# the-fixer's own passes ever since by refusing to use the fan-out mechanism at all and fixing
+# PRs one at a time, in-process, per pass -- meaning two simultaneous fires cost two full paid
+# passes in sequence instead of one pass fanning out in parallel, exactly the "take every fire
+# around" behavior this override restores. check.sh already supports FIXER_STATE_FILE (built
+# for manual dry-run verification, see that script's own header) -- reuse it here: a sub-pass
+# scoped to one PR gets its OWN dedup file, keyed by item number, so it can never collide with
+# the parent's or another sub-pass's state.
+if [ "$MEMBER" = "the-fixer" ] && [ -n "$ITEM" ]; then
+  export FIXER_STATE_FILE="$LOG_DIR/.the-fixer-item-${ITEM}.state"
+fi
+
 # IS_SANDBOX=1: claude CLI refuses --dangerously-skip-permissions when running as root/sudo
 # (a laptop-safety guard -- root there means "someone escalated"). Inside this container root
 # IS the only user, by design (see Dockerfile header) -- there's no separate human account the
