@@ -38,6 +38,8 @@ from urllib.parse import parse_qs, urlparse
 KIT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(KIT_DIR / "scripts"))
 import fleet_db          # noqa: E402  (sqlite mirror -- search/spend queries over runs.jsonl)
+import fleet_kpi         # noqa: E402  (per-member headline-count extraction from outcome prose)
+import fleet_stats       # noqa: E402  (Stats page aggregation: run timeline, tokens, backlog history)
 import member_spec       # noqa: E402
 import overrides as ov   # noqa: E402  ('overrides' shadows nothing here; keep the module name clear)
 
@@ -231,11 +233,43 @@ def read_pass_block(member: str, n: int) -> list[str]:
     return lines[start_i:end_i]
 
 
+# Self-evolution means jefe or dumbledore -- the fleet's own two self-correcting personas --
+# decided to change the fleet's rules, not just any worker (minion/roomba/etc) touching an
+# agent-definition path as incidental work. GitHub's PR `author` is USELESS for this: every
+# merged PR shows the human account (goodindustries) because that account's `gh` credentials
+# do the actual merge for every persona -- confirmed live 2026-08-25 (PR #3176, a plain
+# human/session PR on branch docs/hack-solo-mode, author reads identically to a real jefe PR).
+# The real signal is the BRANCH NAME: jefe's own worktree/PR flow names its branch `jefe/...`
+# (confirmed live: PR #3150, branch `jefe/fix-3108-msh-squash`) and dumbledore's the same way
+# (confirmed live: PR #3032, branch `dumbledore/memory-20260820h`) -- vs. a human-authored
+# branch (generic docs/, devops/, feat/ prefixes) or a WORKER's own branch (`member/<name>-...`
+# for roomba, minion, etc -- NOT jefe/dumbledore, and not what this panel is about per Reif's
+# correction, 2026-08-25: "jefe was the source of the PR", not "any of the 9 members touched an
+# agent file"). jefe is reactive (priority ladder, backlog); dumbledore's whole charter IS
+# "fix the instruction/charter/gate that caused the symptom, not the instance" -- the only two
+# personas whose job is deciding the fleet's OWN rules should change, not doing the work itself.
+# Filtered server-side via gh's `head:` search qualifier (see poll_gh_state below) rather than
+# pulling N generic merged PRs and filtering client-side -- jefe/dumbledore PRs are sparse (2
+# and 5 of the last 100 merged, measured live) so a client-filtered recent-N window would often
+# show this panel empty even when real self-evolution happened.
+
+
 def poll_gh_state() -> dict:
     prs_raw = _gh("pr", "list", "--state", "open", "--json",
                    "number,title,isDraft,headRefName,url,statusCheckRollup,updatedAt")
     issues_raw = _gh("issue", "list", "--state", "open", "--label", "fleet:backlog", "--json",
                       "number,title,labels,updatedAt", "--limit", "100")
+    # Recently merged: plain feed, whatever's most recent -- what just shipped, any branch.
+    merged_raw = _gh("pr", "list", "--state", "merged", "--json",
+                      "number,title,mergedAt,url,author,files,headRefName", "--limit", "30")
+    # Self-evolution: server-side head: search per persona (see the "Self-evolution means
+    # jefe or dumbledore" comment above for why) rather than filtering a recent-N window
+    # client-side.
+    jefe_raw = _gh("pr", "list", "--state", "merged", "--search", "head:jefe/", "--json",
+                    "number,title,mergedAt,url,author,files,headRefName", "--limit", "20")
+    dumbledore_raw = _gh("pr", "list", "--state", "merged", "--search", "head:dumbledore/",
+                          "--json", "number,title,mergedAt,url,author,files,headRefName",
+                          "--limit", "20")
     try:
         prs = json.loads(prs_raw) if prs_raw else []
     except json.JSONDecodeError:
@@ -244,6 +278,15 @@ def poll_gh_state() -> dict:
         issues = json.loads(issues_raw) if issues_raw else []
     except json.JSONDecodeError:
         issues = []
+    try:
+        merged = json.loads(merged_raw) if merged_raw else []
+    except json.JSONDecodeError:
+        merged = []
+    try:
+        self_evolution = (json.loads(jefe_raw) if jefe_raw else []) + \
+                          (json.loads(dumbledore_raw) if dumbledore_raw else [])
+    except json.JSONDecodeError:
+        self_evolution = []
     for pr in prs:
         checks = pr.get("statusCheckRollup") or []
         states = {c.get("state") or c.get("conclusion") for c in checks}
@@ -253,7 +296,10 @@ def poll_gh_state() -> dict:
     for issue in issues:
         names = {lb.get("name") for lb in issue.get("labels") or []}
         issue["_claimed"] = any(n and n.endswith(":claimed") for n in names)
-    return {"prs": prs, "issues": issues, "polled_at": time.time()}
+    merged.sort(key=lambda pr: pr.get("mergedAt") or "", reverse=True)
+    self_evolution.sort(key=lambda pr: pr.get("mergedAt") or "", reverse=True)
+    return {"prs": prs, "issues": issues, "merged": merged,
+            "self_evolution": self_evolution, "polled_at": time.time()}
 
 
 class State:
@@ -428,6 +474,50 @@ class Handler(BaseHTTPRequestHandler):
             db = fleet_db.connect()
             fleet_db.sync(db)
             self._json({"spend": fleet_db.spend(db, member=member, hours=hours), "hours": hours})
+            return
+        if path == "/api/kpi":
+            # Per-member headline count (fleet_kpi.py), summed over a time window -- reuses
+            # STATE.runs (already in memory, already the live source for the run feed) rather
+            # than a fresh gh/db query, since this only needs member+outcome+ts, all present
+            # on every in-memory run record.
+            qs = parse_qs(urlparse(self.path).query)
+            hours = float(qs.get("hours", ["24"])[0])
+            cutoff = time.time() - hours * 3600
+            snap = STATE.snapshot()
+            windowed = [r for r in snap["runs"] if (r.get("ts") or 0) >= cutoff]
+            try:
+                members = member_spec.load_all()
+                names = [m["name"] for m in members]
+            except Exception:
+                names = sorted({r.get("member") for r in windowed if r.get("member")})
+            out = [fleet_kpi.sum_kpi_over_runs(name, windowed) for name in names]
+            self._json({"kpi": out, "hours": hours})
+            return
+        if path == "/api/stats/runs_timeline":
+            qs = parse_qs(urlparse(self.path).query)
+            hours = float(qs.get("hours", ["24"])[0])
+            snap = STATE.snapshot()
+            self._json({"points": fleet_stats.runs_timeline(snap["runs"], hours=hours), "hours": hours})
+            return
+        if path == "/api/stats/token_usage":
+            qs = parse_qs(urlparse(self.path).query)
+            hours = float(qs.get("hours", ["24"])[0])
+            snap = STATE.snapshot()
+            self._json({"buckets": fleet_stats.token_usage_by_hour(snap["runs"], hours=hours), "hours": hours})
+            return
+        if path == "/api/stats/backlog_history":
+            # Own gh call, not the cached STATE.gh snapshot -- that only carries currently-OPEN
+            # issues (poll_gh_state's own --state open filter), but backlog_history needs every
+            # issue ever labeled fleet:backlog, including closed ones, to reconstruct the
+            # historical open-count trend. Direct call, same 15-20s poll cadence class as
+            # everything else here, not cached across requests -- this endpoint is hit once per
+            # Stats page load, not on every live tick, so a fresh call each time is cheap enough
+            # (638 issues, one gh call, confirmed live 2026-08-25).
+            qs = parse_qs(urlparse(self.path).query)
+            days = int(qs.get("days", ["30"])[0])
+            issues_raw = _gh("issue", "list", "--state", "all", "--label", "fleet:backlog",
+                              "--json", "number,createdAt,closedAt", "--limit", "1000")
+            self._json({"days": fleet_stats.backlog_history(issues_raw, days=days)})
             return
         if path == "/api/query":
             qs = parse_qs(urlparse(self.path).query)

@@ -57,6 +57,7 @@
   .agent-item .aname { overflow-wrap: break-word; }
   .agent-item.disabled-agent .aname { color: var(--dimmer); text-decoration: line-through; }
   .agent-item .aago { color: var(--dimmer); font-size: 10.5px; margin-top: 1px; }
+  .agent-item .akpi { color: var(--dim); font-size: 10.5px; margin-top: 1px; font-weight: 600; }
 
   /* ---------- center: selected agent's detail -- header/actions fixed, run list scrolls ---------- */
   .detail { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -108,8 +109,31 @@
     border: 1px solid var(--border); border-radius: 4px; max-height: 320px; overflow-y: auto;
     white-space: pre-wrap; word-break: break-all; font-size: 11px; color: var(--dim); }
   .transcript.open { display: block; }
-  .transcript .tline { padding: 1px 0; }
+  .tcopy-row { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+  .transcript .tline { padding: 2px 0; border-left: 2px solid transparent; padding-left: 6px; }
   .transcript .tline.live { color: var(--accent); }
+  .transcript .tts { color: var(--dimmer); margin-right: 6px; font-size: 10px; }
+  .transcript .ttext { white-space: pre-wrap; }
+  /* thinking: italic + dim -- the model's own reasoning, lowest visual weight */
+  .transcript .tk-thinking .ttext { font-style: italic; color: var(--dimmer); }
+  /* tool call: accent-colored, bold-ish -- what the agent DID */
+  .transcript .tk-call { border-left-color: var(--accent); }
+  .transcript .tk-call .ttext { color: var(--text); }
+  /* tool result ok: quiet dim green -- succeeded, not worth dwelling on */
+  .transcript .tk-result-ok { border-left-color: var(--ok); }
+  .transcript .tk-result-ok .ttext { color: var(--dim); }
+  /* tool result ERROR: stays loud -- exactly what a human scans a transcript for, never muted */
+  .transcript .tk-result-err { border-left-color: var(--bad); background: rgba(224,100,90,.08); }
+  .transcript .tk-result-err .ttext { color: var(--bad); }
+  /* pass start/end/result markers: a subtle divider, not a normal content row */
+  .transcript .tk-marker { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 5px; }
+  .transcript .tk-marker .ttext { color: var(--dimmer); font-size: 10.5px; text-transform: uppercase; letter-spacing: .03em; }
+  /* long tool result: short/full text coexist in the DOM, CSS swaps which shows */
+  .transcript .tfull { display: none; }
+  .transcript .tline-expanded .tshort { display: none; }
+  .transcript .tline-expanded .tfull { display: inline; }
+  .transcript .tmore { display: block; color: var(--accent); cursor: pointer; font-size: 10.5px; margin-top: 2px; }
+  .transcript .tline-expanded .tmore { display: none; }
   .row.upcoming, .run-row.upcoming { opacity: .5; cursor: default; }
 
   /* ---------- pages: PRs+backlog and settings, now sidebar-selected views inside .detail ---------- */
@@ -138,7 +162,20 @@
   ::-webkit-scrollbar { width: 9px; height: 9px; }
   ::-webkit-scrollbar-thumb { background: var(--panel-2); border-radius: 5px; border: 2px solid var(--panel); }
   ::-webkit-scrollbar-thumb:hover { background: var(--dimmer); }
+
+  .stats-page { padding: 16px; overflow-y: auto; }
+  .stats-card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 14px 16px; margin-bottom: 16px; }
+  .stats-card h3 { margin: 0 0 4px; font-size: 12.5px; text-transform: uppercase;
+    letter-spacing: .05em; color: var(--dim); }
+  .stats-card .stats-sub { color: var(--dimmer); font-size: 11px; margin-bottom: 10px; }
+  .stats-card canvas { max-height: 260px; }
 </style>
+<!-- Chart.js: Reif, 2026-08-25 -- "dont handroll, pick a nice graph element". This page already
+     assumes internet access (calls GitHub's API, loads from a public domain), so a CDN script
+     is consistent with what it already does, not a new dependency class. -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
 <body>
 <div class="shell">
@@ -157,6 +194,13 @@
       <div class="side-nav-item" data-page="queue">
         PRs &amp; Backlog <span class="count-badge" id="navQueueCount">0</span>
       </div>
+      <div class="side-nav-item" data-page="merged">
+        Recently Merged <span class="count-badge" id="navMergedCount">0</span>
+      </div>
+      <div class="side-nav-item" data-page="evolution">
+        Self-Evolution <span class="count-badge" id="navEvolutionCount">0</span>
+      </div>
+      <div class="side-nav-item" data-page="stats">Stats</div>
       <div class="side-nav-item" data-page="settings">Settings</div>
     </div>
     <div class="detail" id="detailPane">
@@ -175,9 +219,10 @@ let SPECS = [];          // from /api/members -- spec + effective + overrides, p
 let ALL_RUNS = [];        // oldest-first, matches runs.jsonl append order
 let SELECTED = null;      // currently open agent name, or null (only meaningful when PAGE==='agent')
 let PAGE = 'agent';       // 'agent' | 'queue' | 'settings' -- which sidebar item is active
-let GH = { prs: [], issues: [] };
+let GH = { prs: [], issues: [], merged: [], self_evolution: [] };
 let FLEET_STATE = {};
 let NEXT_FIRES = [];
+let KPI_BY_MEMBER = {}; // member name -> /api/kpi row ({total, unit, runs_with_kpi, runs_total})
 const dot = document.getElementById('dot');
 const agentListEl = document.getElementById('agentList');
 const detailHeadEl = document.getElementById('detailHead');
@@ -257,12 +302,16 @@ function renderSidebar() {
     const last = lastRunFor(name);
     const cls = !enabled ? 'off' : statusClass(last?.status);
     const active = PAGE === 'agent' && name === SELECTED;
+    const k = KPI_BY_MEMBER[name];
+    const kpiLine = (k && k.total !== null && k.total !== undefined && k.unit)
+      ? `<div class="akpi">${k.total} ${esc(k.unit)}</div>` : '';
     return `<div class="agent-item ${active ? 'active' : ''} ${!enabled ? 'disabled-agent' : ''}"
         data-agent="${esc(name)}">
       <span class="astatus ${cls}"></span>
       <div class="atext">
         <div class="aname">${esc(name)}</div>
         <div class="aago">${last ? ago(last.ts) : 'never run'}</div>
+        ${kpiLine}
       </div>
     </div>`;
   }).join('');
@@ -270,6 +319,8 @@ function renderSidebar() {
     el.classList.toggle('active', PAGE === el.dataset.page);
   });
   document.getElementById('navQueueCount').textContent = (GH.prs?.length || 0) + (GH.issues?.length || 0);
+  document.getElementById('navMergedCount').textContent = GH.merged?.length || 0;
+  document.getElementById('navEvolutionCount').textContent = GH.self_evolution?.length || 0;
 }
 
 agentListEl.addEventListener('click', e => {
@@ -293,6 +344,17 @@ function dialValue(eff, key) {
   return (eff.llm || {})[key];
 }
 
+// KPI-in-title text: "roomba · 47 worktrees evaluated today" when this member has a defined
+// KPI shape and at least one counted run in the window; falls back to nothing (just the plain
+// name) for a member with no KPI shape (fleet_kpi.py returns total:null for those) or zero
+// counted runs yet -- never show a fabricated "0 <unit>" for a member that has no unit to begin
+// with.
+function kpiTitleSuffix(name) {
+  const k = KPI_BY_MEMBER[name];
+  if (!k || k.total === null || k.total === undefined || !k.unit) return '';
+  return ` · ${k.total} ${k.unit} today`;
+}
+
 function renderDetailHead() {
   const m = SPECS.find(s => s.spec.name === SELECTED);
   if (!m) { detailHeadEl.innerHTML = ''; return; }
@@ -314,7 +376,7 @@ function renderDetailHead() {
 
   detailHeadEl.innerHTML = `
     <div class="title-row">
-      <h2>${esc(name)}</h2>
+      <h2>${esc(name)}${esc(kpiTitleSuffix(name))}</h2>
       <span class="lane">${esc(m.spec.kind)}${m.spec.lane ? ' · ' + esc(m.spec.lane) : ''}</span>
     </div>
     <div class="spend-line">${esc(spendLine)}${nextLine ? ' · ' + esc(nextLine) : ''}</div>
@@ -346,14 +408,60 @@ function reindexSeq(name) {
 let OPEN_TRANSCRIPT_RUN_ID = null; // survives renderRunList() rebuilds -- see restoreOpenTranscript()
 let RUN_VIEW = 'history'; // 'history' (past runs) | 'upcoming' (this member's single next scheduled fire)
 
+// ---------------------------------------------------------------------------------------------
+// Transcript line rendering: run_member.sh's stream_log.py writes every log line with a fixed
+// prefix shape ("[ts] pass start ...", "[ts] thinking: ...", "[ts] tool call: X -- args",
+// "[ts] tool result (ok|ERROR): ..."). Parse that prefix once per line so thinking/tool-call/
+// tool-result/error render as visually distinct rows instead of one flat grey dump (Reif,
+// 2026-08-25: "more readable transcript"). No backend change needed -- read_pass_block already
+// returns these exact lines, this is purely a frontend render.
+// ---------------------------------------------------------------------------------------------
+const TLINE_RE = /^\[([^\]]+)\]\s(.*)$/s;
+function classifyTline(raw) {
+  const m = TLINE_RE.exec(raw);
+  const ts = m ? m[1] : '';
+  const rest = m ? m[2] : raw;
+  let kind = 'plain';
+  if (/^(pass start|pass end|pass result|session init)\b/.test(rest)) kind = 'marker';
+  else if (rest.startsWith('thinking:')) kind = 'thinking';
+  else if (rest.startsWith('tool call:')) kind = 'call';
+  else if (rest.startsWith('tool result (ok')) kind = 'result-ok';
+  else if (rest.startsWith('tool result (ERROR')) kind = 'result-err';
+  return { ts, rest, kind };
+}
+function renderTline(raw, extraClass) {
+  const { ts, rest, kind } = classifyTline(raw);
+  // A long tool result (several samples run multi-KB) pushes everything else out of the
+  // 320px-tall scrollable box -- collapse anything past 4 lines behind a toggle, always shown
+  // in full for an ERROR (errors are exactly what a human scans for, never collapse those).
+  // Full text is always in the DOM (never re-fetched on expand); CSS just switches which of
+  // .tshort/.tfull is visible once '.tline-expanded' is added by the click handler.
+  const lines = rest.split('\n');
+  const long = kind !== 'result-err' && lines.length > 4;
+  if (!long) {
+    return `<div class="tline tk-${kind} ${extraClass || ''}">
+      ${ts ? `<span class="tts">${esc(ts)}</span>` : ''}<span class="ttext">${esc(rest)}</span>
+    </div>`;
+  }
+  const shortText = lines.slice(0, 4).join('\n');
+  return `<div class="tline tk-${kind} ${extraClass || ''}">
+    ${ts ? `<span class="tts">${esc(ts)}</span>` : ''}<span class="ttext tshort">${esc(shortText)}</span><span class="ttext tfull">${esc(rest)}</span>
+    <span class="tmore" data-act="expand-tline">… ${lines.length - 4} more lines</span>
+  </div>`;
+}
+
 async function loadTranscriptInto(box, rec) {
   box.dataset.loaded = '1';
   box.innerHTML = '<div class="tline">loading transcript…</div>';
   try {
     const r = await fetch(`/api/pass_log?member=${encodeURIComponent(rec.member)}&n=${rec._seqFromEnd}`);
     const { lines } = await r.json();
+    // Raw lines kept on the box itself (not re-derived from rendered HTML, which has been
+    // reformatted/collapsed) so the copy button always copies the real, complete transcript.
+    box.dataset.rawLines = JSON.stringify(lines || []);
+    const header = '<div class="tcopy-row"><button class="btn small" data-act="copy-transcript">copy transcript</button></div>';
     box.innerHTML = (lines && lines.length)
-      ? lines.map(l => `<div class="tline">${esc(l)}</div>`).join('')
+      ? header + lines.map(l => renderTline(l)).join('')
       : '<div class="tline">no transcript recorded for this pass</div>';
   } catch {
     box.innerHTML = '<div class="tline">failed to load transcript</div>';
@@ -479,8 +587,17 @@ function renderRunList() {
 }
 
 runListEl.addEventListener('click', e => {
+  const moreEl = e.target.closest('.tmore');
+  if (moreEl) { moreEl.closest('.tline')?.classList.add('tline-expanded'); return; }
   const ridEl = e.target.closest('.rid');
   if (ridEl) { copyText(ridEl.textContent, ridEl); return; }
+  const copyBtn = e.target.closest('[data-act="copy-transcript"]');
+  if (copyBtn) {
+    const box = copyBtn.closest('.transcript');
+    const lines = JSON.parse(box?.dataset.rawLines || '[]');
+    copyText(lines.join('\n'), copyBtn);
+    return;
+  }
   if (e.target.closest('a') || e.target.closest('button')) return;
   const row = e.target.closest('.run-row');
   if (!row) return;
@@ -510,7 +627,53 @@ function selectPage(page) {
   PAGE = page;
   renderSidebar();
   if (page === 'queue') renderQueuePage();
+  else if (page === 'merged') renderMergedPage();
+  else if (page === 'evolution') renderEvolutionPage();
+  else if (page === 'stats') renderStatsPage();
   else if (page === 'settings') renderSettingsPage();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Recently Merged page: plain unfiltered merged-PR feed -- what actually shipped, any branch,
+// any author. Own sidebar item (moved off the PRs & Backlog page, Reif 2026-08-25: buried at
+// the bottom of a 68-item backlog, "where is that" -- needed a click of its own, not a scroll).
+// ---------------------------------------------------------------------------------------------
+function renderMergedPage() {
+  if (PAGE !== 'merged') return;
+  const merged = GH.merged || [];
+  detailHeadEl.innerHTML = `<div class="title-row"><h2>Recently Merged</h2></div>`;
+  const rowsHtml = merged.map(pr => `<div class="rail-row">
+      <a href="${esc(pr.url)}" target="_blank">#${pr.number}</a>
+      <div>${esc(pr.title)}</div>
+      <div class="rmeta">${esc(pr.author?.login || '')} · merged ${ago(pr.mergedAt)} · ${(pr.files || []).length} file${(pr.files || []).length === 1 ? '' : 's'}</div>
+    </div>`).join('') || '<div class="run-empty">nothing merged recently</div>';
+  runListEl.innerHTML = `<div class="rail-section">${rowsHtml}</div>`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Self-Evolution page: merged PRs SOURCED BY jefe or dumbledore -- the fleet's own two
+// self-correcting personas deciding the fleet's rules should change, not any worker touching
+// an agent-definition path as incidental work (see fleet_view_server.py's poll_gh_state for the
+// branch-name filter and why PR author can't be used). Distinct from the plain Recently Merged
+// page, which is unfiltered.
+// ---------------------------------------------------------------------------------------------
+function renderEvolutionPage() {
+  if (PAGE !== 'evolution') return;
+  const prs = GH.self_evolution || [];
+  detailHeadEl.innerHTML = `<div class="title-row"><h2>Self-Evolution</h2></div>
+    <div class="spend-line">merged PRs sourced by jefe or dumbledore -- the fleet deciding its own rules should change</div>`;
+  const rowsHtml = prs.map(pr => {
+    const fileList = (pr.files || []).map(f =>
+      `<code>${esc(f.path)}</code> <span class="rmeta">+${f.additions}/-${f.deletions}</span>`
+    ).join('<br>');
+    return `<div class="rail-row">
+      <a href="${esc(pr.url)}" target="_blank">#${pr.number}</a>
+      <div>${esc(pr.title)}</div>
+      <div class="rmeta">${esc(pr.headRefName || '')} · merged ${ago(pr.mergedAt)}</div>
+      <div class="rmeta" style="margin-top:4px">${fileList}</div>
+    </div>`;
+  }).join('') || '<div class="run-empty">no jefe/dumbledore self-evolution PRs found yet</div>';
+  runListEl.innerHTML = `<div class="rail-section">${rowsHtml}</div>`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -561,6 +724,127 @@ function renderQueuePage() {
     const body = prompt('body — optional:', '');
     const r = await fetch('/api/create_issue', { method: 'POST', body: JSON.stringify({ title, lane, body }) });
     alert((await r.json()).ok ? 'filed' : 'failed — see server log');
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stats page: recent runs as a timeline, token usage over time, backlog size over time. Three
+// Chart.js charts (Reif, 2026-08-25: "dont handroll, pick a nice graph element") reading the
+// three /api/stats/* endpoints fleet_stats.py aggregates server-side -- this function only
+// shapes the already-aggregated JSON into Chart.js's dataset format, no math of its own.
+// Chart instances are destroyed and recreated on every render (not updated in place) -- this
+// page is visited rarely compared to the live agent view, so the simplicity of "always start
+// clean" outweighs the small cost of a full chart teardown/rebuild.
+// ---------------------------------------------------------------------------------------------
+let STATS_CHARTS = {}; // chart-id -> Chart instance, so re-renders can destroy before recreate
+
+function destroyStatsChart(id) {
+  STATS_CHARTS[id]?.destroy();
+  delete STATS_CHARTS[id];
+}
+
+async function renderStatsPage() {
+  if (PAGE !== 'stats') return;
+  detailHeadEl.innerHTML = `<div class="title-row"><h2>Stats</h2></div>`;
+  runListEl.innerHTML = `
+    <div class="stats-page">
+      <div class="stats-card">
+        <h3>Recent Runs</h3>
+        <div class="stats-sub">every run in the last 24h, by agent and time</div>
+        <canvas id="chartRuns"></canvas>
+      </div>
+      <div class="stats-card">
+        <h3>Token Usage</h3>
+        <div class="stats-sub">input + output tokens per hour, last 24h</div>
+        <canvas id="chartTokens"></canvas>
+      </div>
+      <div class="stats-card">
+        <h3>Backlog Size</h3>
+        <div class="stats-sub">open fleet:backlog issue count per day, last 30 days</div>
+        <canvas id="chartBacklog"></canvas>
+      </div>
+    </div>`;
+
+  if (typeof Chart === 'undefined') {
+    runListEl.querySelector('.stats-page').innerHTML =
+      '<div class="run-empty">Chart.js failed to load (CDN unreachable?) -- stats unavailable</div>';
+    return;
+  }
+
+  const [runsData, tokensData, backlogData] = await Promise.all([
+    fetch('/api/stats/runs_timeline?hours=24').then(r => r.json()).catch(() => ({ points: [] })),
+    fetch('/api/stats/token_usage?hours=24').then(r => r.json()).catch(() => ({ buckets: [] })),
+    fetch('/api/stats/backlog_history?days=30').then(r => r.json()).catch(() => ({ days: [] })),
+  ]);
+  if (PAGE !== 'stats') return; // navigated away while awaiting -- don't render into a gone canvas
+
+  destroyStatsChart('runs'); destroyStatsChart('tokens'); destroyStatsChart('backlog');
+
+  // --- Recent Runs: scatter, one point per run, y-axis = member (categorical), color = status
+  const points = runsData.points || [];
+  const memberNames = [...new Set(points.map(p => p.member))].sort();
+  const STATUS_COLOR = { ok: '#1f8b4c', quiet: '#a6720f', budget_declined: '#9a9ea6' };
+  const runsByStatus = {};
+  points.forEach(p => {
+    const key = p.status || 'unknown';
+    (runsByStatus[key] ??= []).push({ x: p.ts * 1000, y: p.member });
+  });
+  STATS_CHARTS.runs = new Chart(document.getElementById('chartRuns'), {
+    type: 'scatter',
+    data: {
+      datasets: Object.entries(runsByStatus).map(([status, data]) => ({
+        label: status, data,
+        backgroundColor: STATUS_COLOR[status] || '#c13a2e',
+      })),
+    },
+    options: {
+      responsive: true,
+      scales: {
+        x: { type: 'time', time: { unit: 'hour' }, grid: { color: '#eef0f3' } },
+        y: { type: 'category', labels: memberNames, grid: { color: '#eef0f3' } },
+      },
+      plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10.5 } } } },
+    },
+  });
+
+  // --- Token Usage: stacked bar, input vs output, per hour
+  const buckets = tokensData.buckets || [];
+  STATS_CHARTS.tokens = new Chart(document.getElementById('chartTokens'), {
+    type: 'bar',
+    data: {
+      labels: buckets.map(b => new Date(b.ts * 1000)),
+      datasets: [
+        { label: 'input', data: buckets.map(b => b.input_tokens), backgroundColor: '#9a9ea6' },
+        { label: 'output', data: buckets.map(b => b.output_tokens), backgroundColor: '#2166c4' },
+      ],
+    },
+    options: {
+      responsive: true,
+      scales: {
+        x: { type: 'time', time: { unit: 'hour' }, stacked: true, grid: { display: false } },
+        y: { stacked: true, grid: { color: '#eef0f3' } },
+      },
+      plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10.5 } } } },
+    },
+  });
+
+  // --- Backlog Size: line, open-issue count per day
+  const days = backlogData.days || [];
+  STATS_CHARTS.backlog = new Chart(document.getElementById('chartBacklog'), {
+    type: 'line',
+    data: {
+      labels: days.map(d => d.date),
+      datasets: [{
+        label: 'open backlog issues', data: days.map(d => d.count),
+        borderColor: '#2166c4', backgroundColor: 'rgba(33,102,196,.08)',
+        fill: true, tension: 0.15, pointRadius: 1.5,
+      }],
+    },
+    options: {
+      responsive: true,
+      scales: { y: { beginAtZero: true, grid: { color: '#eef0f3' } }, x: { grid: { display: false } } },
+      plugins: { legend: { display: false } },
+    },
   });
 }
 
@@ -654,13 +938,15 @@ async function renderFleetState() {
 }
 
 async function loadMembers() {
-  const [{ members }, { spend }] = await Promise.all([
+  const [{ members }, { spend }, { kpi }] = await Promise.all([
     fetch('/api/members').then(r => r.json()),
     fetch('/api/spend?hours=24').then(r => r.json()),
+    fetch('/api/kpi?hours=24').then(r => r.json()),
   ]);
   const spendByMember = Object.fromEntries((spend || []).map(s => [s.member, s]));
   members.forEach(m => { m._spend = spendByMember[m.spec.name]; });
   SPECS = members;
+  KPI_BY_MEMBER = Object.fromEntries((kpi || []).map(k => [k.member, k]));
   const totalCost = (spend || []).reduce((sum, s) => sum + (s.total_cost || 0), 0);
   document.getElementById('globalSpend').innerHTML = `$${totalCost.toFixed(2)} <b>today</b>`;
   if (!SELECTED && SPECS.length) SELECTED = SPECS[0].spec.name;
@@ -669,7 +955,12 @@ async function loadMembers() {
 async function renderQueue() {
   const { next_fires } = await (await fetch('/api/next_fires')).json();
   NEXT_FIRES = next_fires || [];
-  renderDetailHead();
+  // Bug (Reif, 2026-08-25 screenshot): this 15s-interval call rendered the agent detail head
+  // over whatever page the user had actually navigated to (Self-Evolution's PR rows showing
+  // under the last-selected agent's name/header) -- renderDetailHead() unconditionally
+  // overwrites detailHeadEl with agent info regardless of PAGE. Guard it the same way
+  // renderQueuePage/renderEvolutionPage/renderSettingsPage already guard themselves.
+  if (PAGE === 'agent') renderDetailHead();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -688,10 +979,7 @@ function appendLiveLine(rec) {
   const row = runListEl.querySelector('.run-row.open');
   const box = row && row.querySelector('.transcript.open');
   if (!box) return;
-  const div = document.createElement('div');
-  div.className = 'tline live';
-  div.textContent = rec.line;
-  box.appendChild(div);
+  box.insertAdjacentHTML('beforeend', renderTline(rec.line, 'live'));
 }
 
 async function boot() {
@@ -701,19 +989,21 @@ async function boot() {
     loadMembers(),
   ]);
   ALL_RUNS = snap.runs || [];
-  GH = snap.gh || { prs: [], issues: [] };
+  GH = snap.gh || { prs: [], issues: [], merged: [], self_evolution: [] };
   resortSidebar();
   renderSidebar();
   await renderQueue();
   selectAgent(SELECTED);
-  setInterval(async () => { await loadMembers(); renderSidebar(); renderDetailHead(); }, 30000);
+  // Same PAGE guard as renderQueue() above -- loadMembers() itself is page-agnostic (spend/KPI
+  // data every page's sidebar KPI line needs), but renderDetailHead() is agent-page-only.
+  setInterval(async () => { await loadMembers(); renderSidebar(); if (PAGE === 'agent') renderDetailHead(); }, 30000);
   setInterval(renderQueue, 15000);
 
   const es = new EventSource('/api/stream');
   es.onopen = () => dot.classList.add('live');
   es.onerror = () => dot.classList.remove('live');
   es.addEventListener('run', e => { onRunEvent(JSON.parse(e.data)); renderQueue(); });
-  es.addEventListener('gh', e => { GH = JSON.parse(e.data); renderSidebar(); renderQueuePage(); });
+  es.addEventListener('gh', e => { GH = JSON.parse(e.data); renderSidebar(); renderQueuePage(); renderMergedPage(); renderEvolutionPage(); });
   es.addEventListener('logline', e => appendLiveLine(JSON.parse(e.data)));
 }
 boot();
