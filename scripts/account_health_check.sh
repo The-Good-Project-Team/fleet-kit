@@ -9,11 +9,20 @@
 # IT is a host poll and not a webhook.
 #
 # WHAT IT WATCHES: account-pool.log's "ALL accounts in '...' failed this call" line (written
-# by account_pool.sh once per tick where every account failed). Logic: look at the most recent
-# line in the log, period. If it's a failure line AND it's older than THRESHOLD_MINUTES, the
-# pool has been down continuously since at least then with nothing succeeding since (a success
-# would be the newest line instead -- account_pool_run's caller always logs pass end rc=0
-# right after a successful call returns, and log lines are append-only in time order).
+# by account_pool.sh once per tick where every account failed), measured against the newest
+# SUCCESS line in the same log.
+#
+# The obvious version of this check is broken, and was, live, until 2026-08-25: taking the age
+# of the newest FAILURE line can never page. account_pool.sh appends a fresh failure line every
+# tick (~5min) for as long as an outage lasts, so that line is always seconds old, `age_minutes`
+# is permanently ~0, and `age >= THRESHOLD_MINUTES` is unreachable by construction. The fleet
+# sat down for ~2h emitting "failing but only 4m old" every tick and never paged; a human found
+# it in a bar chart instead. The age that actually answers "how long has the pool been down"
+# is the age of the last SUCCESS, which is what this reads now.
+#
+# That fix requires account_pool.sh to log successes at all -- it previously returned 0 silently,
+# so no success line ever existed to measure from (the original comment here assumed the caller
+# logged one; it did not). account_pool_run now writes "account=<a> call succeeded".
 #
 # CONFIRMED LIVE 2026-08-24/25: both fleet accounts died silently, ticking every ~5min for
 # hours, nobody paged until a human noticed a screenshot didn't match the log's story. This
@@ -59,14 +68,34 @@ if [[ "$last_line" != *"ALL accounts in"*"failed this call"* ]]; then
   exit 0
 fi
 
-# Newest line IS a failure. How old is it? If it's older than the threshold, nothing has
-# succeeded in at least that long -- a sustained outage, not a blip.
-line_ts=$(grep -oE '^\[[0-9-]+ [0-9:]+' <<<"$last_line" | tr -d '[')
-line_epoch=$(date -u -d "$line_ts" +%s 2>/dev/null)
+# Newest line IS a failure. How long since anything SUCCEEDED? Measuring the newest failure
+# line is useless -- it is re-appended every tick during an outage and so is always ~0 minutes
+# old (see header). Find the newest success line and measure from that instead.
+# GNU `date -d` first (the Linux host this cron runs on), BSD `date -j -f` second (a Mac
+# running the kit directly). Without the BSD arm this returns nothing on macOS and the check
+# exits quietly having measured nothing -- a dead pager that reports itself as fine, which is
+# the same class of silent failure this whole script exists to catch.
+_line_epoch() {
+  local ts
+  ts=$(grep -oE '^\[[0-9-]+ [0-9:]+' <<<"$1" | tr -d '[')
+  [ -z "$ts" ] && return 1
+  date -u -d "$ts" +%s 2>/dev/null \
+    || TZ=UTC date -j -f "%Y-%m-%d %H:%M:%S" "$ts" +%s 2>/dev/null
+}
+
 now_epoch=$(date +%s)
+last_ok_line=$(grep "call succeeded" "$POOL_LOG" | tail -1)
+
+if [ -n "$last_ok_line" ]; then
+  line_epoch=$(_line_epoch "$last_ok_line")
+else
+  # No success has EVER been logged (a pool that has never worked, or a log predating success
+  # logging). Fall back to the OLDEST failure line -- the outage is at least that old.
+  line_epoch=$(_line_epoch "$(grep "failed this call" "$POOL_LOG" | head -1)")
+fi
 
 if [ -z "$line_epoch" ]; then
-  echo "[account_health_check] WARNING: could not parse timestamp from last line: $last_line"
+  echo "[account_health_check] WARNING: could not parse a timestamp to measure from"
   exit 0
 fi
 
