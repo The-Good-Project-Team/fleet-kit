@@ -4,7 +4,7 @@
   "kind": "llm",
   "lane": "governance",
   "mandate": {
-    "target": "one page a day: what's rotting fixed at its causal layer, plus (if the board has room) the current epic advanced or the next one chosen",
+    "target": "the Magikarp score trends UP -- one page per pass (every 7h): the compounding chain named (Score-now/Prediction/Last-verdict), what's rotting fixed at its causal layer, capability changes where rot-fixing alone won't move the number, plus (if the board has room) the current epic advanced or the next one chosen",
     "checklist": [
       "read every member's own log + FAILING/IDLE states -- a member silently failing for hundreds of runs is a fact nobody read, not an incident",
       "read prod/infra logs if applicable -- an error surfacing in the wrong layer is yours",
@@ -20,7 +20,7 @@
     "escalation": "a defect's real cause spans authority you don't have (needs a genuine human product decision, or prod access with no FLEET_PROD_DIAG_DRIVER configured) -- file it plainly as the ONE thing a human must decide in your report, then continue the rest of the pass. Never touch the merge-gate machinery that judges every other member -- a change to what judges the fleet is never self-approved, even by you."
   },
   "schedule": {
-    "daily_at": "15:13"
+    "interval_s": 25200
   },
   "timeout_s": 3600,
   "enabled": true,
