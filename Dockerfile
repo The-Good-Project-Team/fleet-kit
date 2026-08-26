@@ -21,9 +21,27 @@ ENV DEBIAN_FRONTEND=noninteractive
 # git: worktree builder. python3: board_github.py/run_report.py/maxx_reader.py. curl+ca-certs: gh
 # CLI install + claude CLI install. cron: schedule cadences inside the container without a
 # host-level launchd/systemd dependency (schedulers/ templates remain for host-native installs).
+# sqlite3: the CLI, so a charter can query fleet.db the obvious way. Added 2026-08-26 after
+# BOTH gru's and nerd's charters shipped `sqlite3 "$FLEET_LOG_DIR/fleet.db" ...` commands that
+# died on `sh: sqlite3: not found` -- gru's cost-calibration step was reading NO data and
+# nothing said so, because a shell command that fails still lets the pass continue.
 RUN apt-get update -qq && apt-get install -y -qq \
-      git python3 python3-pip curl ca-certificates cron gnupg jq \
+      git python3 python3-pip curl ca-certificates cron gnupg jq sqlite3 \
     && rm -rf /var/lib/apt/lists/*
+
+# Python libs the ANALYSIS lanes need (datta/nerd). The container shipped with NO third-party
+# python at all -- not even requests -- so a nerd told to read GSC or GA4 could not, and would
+# have filed "no credential" forever even once the credentials landed.
+#   requests      : ordinary HTTP with a real timeout story; urllib works but every caller
+#                   re-implements retries/headers badly.
+#   google-auth   : service-account signing for GSC + GA4. Deliberately NOT
+#                   google-api-python-client: the target repo's own gsc_pages.py proves the
+#                   Search Console REST API needs only google-auth + urllib, and the heavier
+#                   client pulls a large dependency tree for no gain here.
+# No --break-system-packages: this base ships pip 22.0.2, which predates that flag and exits
+# "no such option", failing the build. Verified against the real image 2026-08-26 rather than
+# assumed -- the flag is correct on newer bases and would have looked right in review.
+RUN pip3 install --no-cache-dir requests google-auth
 
 # GitHub CLI — official apt repo, not a hand-rolled binary fetch (fewer moving parts to break
 # on an arch/OS change).

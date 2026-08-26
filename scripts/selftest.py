@@ -534,6 +534,28 @@ def _datta_dispatches_and_nerds_analyse():
     # A deliberate noindex re-filed every pass trains the reader to ignore the lane.
     assert "deliberate" in nerd, "no rule separating legitimate noindex from accidental"
 
+    # A checklist alone only finds failures someone already suffered. The discovery half is
+    # where a lane's real work comes from -- and it needs MEMORY, because a one-shot pass that
+    # cannot read its own history re-derives the same finding forever and files it again.
+    assert "What did I do last time" in nerd, "no pass memory -- nerd re-derives every pass"
+    assert "self_critique" in nerd, "past-you already named the next pass's work; unused"
+    assert "fleet.db" in nerd, "no mechanism given for reading prior passes"
+    assert "outcome IS NOT NULL" in nerd, \
+        "killed/declined passes have no outcome; reading them as 'I did nothing' is wrong"
+    assert "already shipped" in nerd, "nerd never checks merged PRs -- refiles fixed things"
+    assert "Where is the opportunity" in nerd, "discovery is framed as breakage-hunting only"
+    assert "buildable" in nerd, "no judgment step; unbuildable opportunities file as findings"
+
+    # The tools those steps need must actually exist in the image, or the steps silently no-op.
+    dockerfile = (root / "Dockerfile").read_text()
+    assert "sqlite3" in dockerfile, "sqlite3 CLI missing -- pass memory queries return nothing"
+    assert "google-auth" in dockerfile, "no GSC/GA4 auth lib -- growth/datadog cannot measure"
+    # pip 22.0.2 on this base predates --break-system-packages and exits 'no such option',
+    # failing the whole build. Verified against the real image, not assumed.
+    df_code = "\n".join(l for l in dockerfile.splitlines() if not l.lstrip().startswith("#"))
+    assert "--break-system-packages" not in df_code, \
+        "flag unsupported by this base image's pip (22.0.2) -- breaks the build"
+
     # nerd must never self-fire: datta decides coverage, so a cron-fired nerd would run a lane
     # nobody chose. Same contract minion has.
     spec = json.loads((root / "members" / "nerd" / "nerd.fleet.json").read_text())

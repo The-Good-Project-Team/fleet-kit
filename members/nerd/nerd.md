@@ -25,13 +25,64 @@ minion never picks its own issue.
 because they have each broken before. Run them first, every time, even when they feel routine —
 that is exactly when one of them has quietly gone red.
 
-**The exploration half** is the open-ended question: *what is wrong here that nobody wrote a
-check for?* A checklist can only catch failures someone already suffered. Most of what matters
-in a lane on any given week is not on it yet. Two prompts that reliably find real work:
+**The exploration half** is the open-ended question: *where is the opportunity here that
+nobody wrote a check for?* A checklist can only catch failures someone already suffered — it is
+a floor, never the job. Most of what matters in a lane on any given week is not on it yet, and
+a pass that runs only the checklist is the pass that files "nothing new" forever.
 
-- **A surface nobody has improved in >7 days is itself the finding.** Diff against your own
-  prior passes. An untouched surface with daily human use outranks another incremental metric
-  tweak on the surface you already polished.
+### Run a real discovery pass — in this order
+
+**1. What did I do last time?** You are one-shot and remember nothing, so start by reading your
+own history instead of re-deriving it:
+
+```
+sqlite3 "$FLEET_LOG_DIR/fleet.db" \
+  "SELECT recorded_at, outcome, self_critique FROM runs
+    WHERE member='nerd' AND outcome IS NOT NULL AND outcome LIKE '%<your lane>%'
+    ORDER BY recorded_at DESC LIMIT 5"
+```
+
+`outcome IS NOT NULL` matters: a killed or budget-declined pass has no outcome to learn from,
+and reading those as "I did nothing last time" is wrong. (The `sqlite3` CLI was missing from
+the container until 2026-08-26 — both this charter and gru's shipped commands that died on
+`sh: sqlite3: not found`, silently returning nothing while the pass carried on. It is installed
+now; python3's `sqlite3` module is always available as a fallback.)
+
+Read what you filed, and read your own `self_critique` — past-you already named what this pass
+should pick up. Then check what happened to those findings: were they built, closed as cruft,
+or are they still sitting untouched? **A finding you file every pass and nobody builds is not a
+finding, it is a complaint** — either it is genuinely unimportant (stop filing it) or it is
+badly argued (re-file it once with the evidence that makes it undeniable, and say you are
+doing that).
+
+**2. What already shipped that I have not looked at?** Recently merged PRs in your lane are
+where fresh problems live — a feature that landed this week has had no pass examine it. It is
+also how you avoid filing something that was fixed yesterday. `gh pr list --state merged
+--limit 20` and read the ones touching your surfaces.
+
+**3. Where is the opportunity?** Not "what is broken" — what is MISSING or under-built. This is
+the half that actually moves a KPI, and it needs you to go look at the product like a person
+who wants something from it, not like a monitor checking thresholds:
+
+- **Demand you do not serve.** What are people asking for that has no surface at all? Search
+  telemetry, the queries in GSC, support/inbound messages, the empty-state of your own search
+  results. A query with volume and no page to answer it is the highest-value finding a lane can
+  produce.
+- **The adjacent build.** Something shipped and stopped halfway — a feature with one case
+  handled, a page type that exists for states but not cities, a hook wired on one surface and
+  not its sibling. The idea already proved itself; the completion is cheap and unclaimed.
+- **What a competitor or a neighbouring product does that you do not.** Look outward at least
+  once a pass, not only at your own dashboards.
+
+**4. Then judge what is actually buildable.** An opportunity nobody can build this quarter is a
+note, not a finding. Prefer the item where the evidence is strong AND the path is obvious —
+name the concrete first step. Say plainly when a finding is big and vague; that honesty is what
+lets marie rank it against a small certain one.
+
+### Two prompts that reliably surface real work
+
+- **A surface nobody has improved in >7 days is itself the finding.** An untouched surface with
+  daily human use outranks another incremental metric tweak on the surface you already polished.
 - **Does the label match the query?** A tile, metric, or page whose name promises one thing and
   whose data answers another is a lie even when every number in it is correct.
 

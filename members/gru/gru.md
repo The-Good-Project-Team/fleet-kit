@@ -121,6 +121,10 @@ spawns exactly one). Your job, in order:
    the estimate trustworthy, and it is not optional:
 
    ```
+   # NOTE: the sqlite3 CLI was MISSING from the container until 2026-08-26 -- this command
+   # died on `sh: sqlite3: not found` and returned nothing, so the calibration below was
+   # running on NO data while looking like it worked. It ships in the image now (Dockerfile).
+   # If it ever goes missing again, python3's sqlite3 module is always available.
    sqlite3 "$FLEET_LOG_DIR/fleet.db" \
      "SELECT run_id, cost_usd, num_turns, status FROM runs
       WHERE member='minion' AND recorded_at > strftime('%s','now','-2 hours')
