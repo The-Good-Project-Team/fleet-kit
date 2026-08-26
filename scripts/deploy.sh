@@ -291,7 +291,14 @@ if exists "${CONTAINER}-green"; then
     podman rm -f "${CONTAINER}-green" >/dev/null 2>&1 || true
 fi
 # shellcheck disable=SC2046
-podman run $(run_args "${CONTAINER}-green" "$GREEN_VIEW_PORT" "$GREEN_WEBHOOK_PORT") >/dev/null
+# `9>&-` closes auto_deploy.sh's flock fd for THIS call only. podman's helper processes
+# (conmon, slirp4netns) live as long as the CONTAINER, so anything they inherit is held for
+# hours -- and on 2026-08-26 that was the deploy lock itself: `lsof` showed conmon holding
+# fd 9 with an elapsed time exactly matching the container's StartedAt, every subsequent
+# auto_deploy tick found the lock taken, exited 0 through its quiet-no-op path, and the
+# pipeline was dead for ~2 hours with NOTHING in the log. Harmless when the fd does not
+# exist (a hand-run deploy), which is why it is unconditional.
+podman run $(run_args "${CONTAINER}-green" "$GREEN_VIEW_PORT" "$GREEN_WEBHOOK_PORT") >/dev/null 9>&-
 
 log "health-checking green (up to ${HEALTH_TIMEOUT_S}s)"
 if ! health_check "$GREEN_VIEW_PORT"; then
@@ -342,7 +349,9 @@ podman rename "${CONTAINER}-green" "$CONTAINER"
 # recreate in the whole flow; it happens only after health already passed on the alt ports.
 podman rm -f "$CONTAINER" >/dev/null 2>&1
 # shellcheck disable=SC2046
-podman run $(run_args "$CONTAINER" "$VIEW_PORT" "$WEBHOOK_PORT") >/dev/null
+# Same fd-close as the green candidate above -- this is the container that LIVES, so a leaked
+# fd here is the one that wedges every future deploy.
+podman run $(run_args "$CONTAINER" "$VIEW_PORT" "$WEBHOOK_PORT") >/dev/null 9>&-
 
 log "health-checking the real cutover (up to ${HEALTH_TIMEOUT_S}s)"
 # Past the rename window: the explicit rollback below handles a health failure with more care
