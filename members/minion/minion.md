@@ -25,9 +25,23 @@ early steps and never reached the report at all — landed as `reported_nothing`
 work done; minion's own real-world record is 0 of 27 recent runs landing `ok` — this is not
 theoretical for this member).
 
-1. **Read your item.** Your prompt names the exact issue number. `gh issue view <n>` for its
-   title + body — that is your spec. Do not touch any other issue, claimed or not; picking a
+1. **Read your item.** Your prompt names the exact issue number. `gh issue view <n> --comments`
+   for its title, body AND comments. Do not touch any other issue, claimed or not; picking a
    different one defeats the whole reason gru claimed items itself.
+
+   **If the issue carries `fleet:prd`, marie wrote a spec for it in a comment — that is your
+   spec, not the body.** She is the fleet's PM and wrote it against the repo's current vision,
+   after the body was filed. Its **Acceptance criteria** are what you build to and what a
+   reviewer will check; its **Non-goals** are what keeps this item from growing mid-build
+   (they are there because that growth is what turns a small item into a stalled one). The
+   body stays useful as the original reporter's account of the problem.
+
+   A PRD line reading `UNKNOWN — <question>` is marie flagging something she could not resolve
+   from the repo. Do NOT invent an answer: build the parts that are specified, leave the
+   unknown alone, and name it in your report so a human can close it. Guessing there is how a
+   pass ships something confidently wrong.
+
+   No `fleet:prd` label? The body is your spec, as before.
 2. **Build.** Tests first when practical. Follow the codebase's existing style. Reuse before
    you build — check for an existing utility or pattern before writing a new one.
 3. **Test locally** before you push — run whatever this repo's test command is. **You are a
