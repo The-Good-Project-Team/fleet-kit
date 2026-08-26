@@ -643,6 +643,58 @@ def _datta_dispatches_and_nerds_analyse():
     assert spec.get("schedule"), "empty schedule fails member_spec validation (found live)"
 
 
+def _every_pass_files_a_written_report():
+    """A pass costs real money; it owes a memo, not three one-line fields.
+
+    Reif, 2026-08-26: "I want a report after each run, I paid for it after all." A gru pass
+    runs 78 turns and $1.53; what came back was Outcome/Evidence/Self-critique -- one line
+    each -- and the only alternative was the 170-line raw transcript. Neither is a report.
+
+    `Report:` is the ONE multi-line field in the contract. Every other field is `(.+?)$` by
+    construction because `status` keys off them, so a parser that swallowed paragraphs would
+    make `Outcome:` unbounded. This one captures everything up to the next contract line, so
+    prose survives into runs.jsonl whole.
+
+    Captured, NEVER enforced: a missing report must not change `status`. A pass that did real
+    work and skipped the prose is still successful -- making the memo load-bearing would turn
+    a formatting slip into a false failure, the exact bug persona_law §10b exists to prevent.
+    """
+    import run_report
+    text = ("Report:\nBOTTOM LINE: nothing shipped.\n\n1. one\n2. two\n\n"
+            "WHAT TO IMPROVE: check the meter.\n\n"
+            "Outcome: QUIET -- see #3321\nEvidence: maxx_reader.py -> 0.0\n"
+            "Self-critique: no observed data\n")
+    r = run_report.parse_report(text)
+    assert r.get("report"), "the written report is not captured"
+    assert "BOTTOM LINE" in r["report"] and "WHAT TO IMPROVE" in r["report"], \
+        "report body truncated -- it must survive whole, it is already a distillation"
+    # It must STOP at the next contract line, or the parseable fields get swallowed into prose.
+    assert "Outcome:" not in r["report"], "report bleeds into the fields status is derived from"
+    assert r["outcome"] and r["self_critique"], "capturing the report broke the §10b fields"
+
+    # Absent report must be harmless -- status comes from Outcome:, never from the memo.
+    plain = run_report.parse_report("Outcome: did a thing #12\nEvidence: ran it\n")
+    assert plain.get("report") is None, "a pass with no report should carry None, not junk"
+    assert run_report.classify(plain, vision_required=False, exit_code=0) == "ok", \
+        "a missing report changed status -- a formatting slip must never fail a real pass"
+
+    # Every member must be TOLD to write one, or the field stays empty forever.
+    import glob
+    charters = glob.glob(str(Path(__file__).parent.parent / "members" / "*" / "*.md"))
+    missing = [Path(c).name for c in charters
+               if "Outcome:" in Path(c).read_text() and "10c" not in Path(c).read_text()]
+    assert not missing, f"charters know the fields but not the report: {missing}"
+
+    law = (Path(__file__).parent.parent / "agents" / "persona_law.md").read_text()
+    assert "## 10c" in law, "the report contract is not in the law every member inherits"
+
+    # And it must reach the DB, or dumbledore/lens can only read reports by grepping raw logs.
+    import fleet_db
+    assert "report" in fleet_db.SCHEMA, "fleet.db has no report column"
+    assert any(c[0] == "report" for c in fleet_db._ADD_COLUMNS), \
+        "existing fleet.db files would never gain the column -- history lost"
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -859,6 +911,7 @@ if __name__ == "__main__":
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
     check("datta dispatches by coverage, nerds analyse one lane", _datta_dispatches_and_nerds_analyse)
+    check("every pass files a written report", _every_pass_files_a_written_report)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)

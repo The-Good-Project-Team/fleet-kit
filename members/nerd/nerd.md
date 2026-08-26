@@ -403,6 +403,6 @@ ten of these skims — put the thing that would matter most to a real person fir
 pass found nothing that would matter to anyone, say THAT plainly rather than burying it under
 three small correct observations.
 
-Close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus
+**Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus
 `Self-critique:` per §11) — the prose above is what a human reads, these lines are what
 `run_report.py` actually parses into `status`.

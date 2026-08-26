@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS runs (
   evidence                    TEXT,
   vision_link                  TEXT,
   self_critique                 TEXT,
+  report                         TEXT,
   prediction                     TEXT,
   score_now                       TEXT,
   last_verdict                     TEXT,
@@ -76,6 +77,9 @@ _ADD_COLUMNS = (
     ("prediction", "TEXT"),
     ("score_now", "TEXT"),
     ("last_verdict", "TEXT"),
+    # The written report (persona_law §10c). Added via _ADD_COLUMNS rather than SCHEMA so an
+    # existing fleet.db gains it on the next connect() -- no rebuild, no lost history.
+    ("report", "TEXT"),
 )
 
 
@@ -108,6 +112,7 @@ def _row_from_record(rec: dict) -> tuple:
         rec.get("run_id"), rec.get("member"), rec.get("kind"),
         rec.get("item_id"), rec.get("pr"), rec.get("status"), rec.get("exit_code"),
         rec.get("outcome"), rec.get("evidence"), rec.get("vision_link"), rec.get("self_critique"),
+        rec.get("report"),
         rec.get("prediction"), rec.get("score_now"), rec.get("last_verdict"),
         tokens.get("cost_usd"), tokens.get("num_turns"),
         tokens.get("input_tokens"), tokens.get("output_tokens"),
@@ -142,10 +147,10 @@ def sync(conn: sqlite3.Connection, runs_file: Path | None = None) -> int:
             conn.execute(
                 """INSERT OR REPLACE INTO runs
                    (run_id, member, kind, item_id, pr, status, exit_code, outcome, evidence,
-                    vision_link, self_critique, prediction, score_now, last_verdict,
+                    vision_link, self_critique, report, prediction, score_now, last_verdict,
                     cost_usd, num_turns, input_tokens, output_tokens,
                     cache_read_tokens, cache_creation_tokens, duration_ms, stop_reason, recorded_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 _row_from_record(rec),
             )
             n += 1
