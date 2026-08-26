@@ -376,6 +376,17 @@ def _deploy_cordons_then_drains_and_always_uncordons():
     assert "uncordon_fleet" in src, "no uncordon -- a failed deploy would leave the fleet off"
     assert "trap uncordon_fleet EXIT INT TERM" in src, "uncordon is not on an exit trap"
 
+    # fleet.env is BIND-MOUNTED into the container, and a bind mount follows the INODE. Any
+    # edit that writes a new file and renames it over the old one (sed -i, most editors) leaves
+    # the container reading the ORIGINAL inode forever. Found live 2026-08-26: the cordon used
+    # `sed -i.deploybak`, so the host read FLEET_ENABLED=false while the container still read
+    # true -- members kept starting mid-drain (in-flight 3 -> 7 WHILE cordoned) and the deploy
+    # log announced a cordon that was never in effect. refresh_container.sh's header documents
+    # this same trap for this same file.
+    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+    assert "sed -i" not in code, "cordon uses sed -i -- replaces the inode, so the container never sees it"
+    assert "cordon_write" in src, "no inode-preserving writer for fleet.env"
+
     body = src[src.find("drain_inflight_passes()"):src.find("\ndrain_inflight_passes\n")]
     assert body.count("uncordon_fleet\n            return 0") == 2, \
         "not every drain return path uncordons"
