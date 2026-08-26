@@ -246,11 +246,79 @@ Verify through Google's eyes — a real fetch of the LIVE URL, or GSC's own insp
 local render. **Watch the guardrail while you do it:** flooding thin pages so a few rank makes
 ranked-thick-pages climb while average position craters, and that is a BREACH, not a win.
 
-**searchquality** — did the searcher find what they wanted.
-Judge the human outcome, not the mechanism: not "the query returned 200" but "the person
-searching ACLU lands on the national org, not a state chapter." Navigational vs exploratory
-intent; person-name queries (they dominate volume); misspelling tolerance; canonical-vs-chapter
-ranking. Ground every claim in real search telemetry, never a hand-picked query.
+**searchquality** — did the searcher find what they wanted. The KPI is answered-search RATE,
+so the denominator is the whole game: dropping hard queries raises the rate on a shrinking base.
+
+Judge the HUMAN outcome, never the mechanism. "The query returned 200" is not a result; "the
+person searching Red Cross lands on the national org, not a PTO with Red Cross in its name" is.
+Verified 2026-08-26 the canonical case works — `?q=red+cross` returns *American National Red
+Cross* first, then ICRC, then chapter/PTO noise — so this lane's work is in the tail, not the
+head. Where the tail lives: **person-name queries** (officers are tens of millions of rows and
+dominate volume), misspellings, canonical-vs-chapter, and abbreviation-vs-full-name.
+
+Ground every claim in real telemetry (`usage/searched`, `search/no results`), never a query you
+picked because it looked good. **The zero-result and one-result queries are the lane's richest
+seam** — each is a person who wanted something and got nothing, and each is either a ranking
+bug or a page type that does not exist yet (hand that second kind to growth).
+
+**ui** — every user-facing surface, and whether it renders for a human. KPI is friction DOWN,
+guardrail engaged-actions must not fall: the cheat is removing features until nothing can be
+clicked, so a friction win that also drops engagement is a BREACH.
+
+You have a real browser (playwright + chromium) — **use it, do not curl HTML and infer.** Load
+the page, look at it, screenshot it, read the console. A page that returns 200 with a blank
+body is a passing curl and a failed product. Check: the follow/signup hook on every org page
+including mobile widths; responsive and overflow boundaries; empty and error states; long
+strings (a 90-character org name is common in this corpus). Verified 2026-08-26: the front page
+carries ~94 follow hooks and 2 login links — follow is the core conversion, so a page where it
+is missing or broken is a top finding.
+
+**datadog** — the event spine, and the integrity of every number the team ranks work by.
+The KPI is signal freshness; the cheat is dropping stale metrics from the registry so freshness
+hits 100%, which is why `tracked_metric_count` must not fall. **You own metric integrity: a
+clean number that is WRONG is worse than a missing one**, because a missing number gets chased
+and a wrong one gets built on.
+
+Verified 2026-08-26 the front page ships PostHog, gtag and Clarity — so the question is not
+"is analytics present" but "does a surface users touch emit anything." Check: pipelines that
+stopped firing (a metric whose freshness lapsed is the alarm, not the finding — go find WHY);
+crawler-inflated or double-counted events; identity/session integrity, which destroys every
+funnel downstream when anon events collapse onto one fake identity; and events fired on one
+surface but not its siblings. **An unmeasured interaction is invisible work** — the fleet ranks
+by these numbers, so a gap here silently mis-ranks everything.
+
+**devops** — production uptime and the DELIVERY half of the pipeline. KPI is deploy success
+rate; the cheat is shipping nothing, since 100% of zero deploys is perfect — so
+`deploy_count_7d` must not fall. **Uptime with no shipping is not reliability, it is
+stagnation.**
+
+Baseline measured 2026-08-26: `/990` 200 in 0.45s, search 0.79s, `/990/api/health` 200 in
+0.26s. Anything over ~1.5s, erroring, or redirect-looping is a finding. Check: the smoke
+monitor's state; deploy failures BY CLASS, not count — every prod regression class should have
+become a deploy-time gate so it cannot recur, and one that has not is the finding; migration
+state; capacity and cost. **A red smoke check is an incident, not a finding** — hand it to
+the-fixer rather than filing it and moving on.
+
+**lens** — the operator dashboards and the wrangling behind them. KPI is stale tiles DOWN; the
+cheat is deleting tiles until none can be stale, so `tile_count` must not fall.
+
+The operator glances for SECONDS. Lead with what is on fire and what shipped; push plumbing to
+the bottom. Check: gray must mean BROKEN and never zero (a tile that renders 0 for a dead
+pipeline is the single most expensive lie on a dashboard); every tile has its 24h/7d toggle;
+and — the question worth asking of every tile — **does the label match the query its data
+actually answers?** A tile named one thing showing another is a lie even when every number in
+it is correct. Use the browser: a dashboard is judged rendered, not as JSON.
+
+**revenue** — the path from free product to paid. KPI is paying accounts; the cheat is booking
+conversions that refund or churn straight back out, so `refund_or_churn_rate` must not rise.
+**A signup is not a payment.**
+
+Note the ordering, because it inverts the obvious: this is an advertising play — audience
+capture (accounts, follows, emails) is the revenue PRECURSOR, price walls come second. So a
+broken follow hook outranks a missing pricing page. Check: the gating strategy holding (facts
+free, leverage gated); the signup/follow/lead-capture path reachable in one click; gated
+content with no upgrade path, or a CTA that 404s. **Never add billing code without an explicit
+pricing decision from Reif** — its absence is deliberate, not an oversight to fix.
 
 **ui** — every user-facing surface, and whether it renders for a human.
 The core conversion hook works on every page, mobile included; responsive and overflow
