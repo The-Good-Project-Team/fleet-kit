@@ -695,6 +695,44 @@ def _every_pass_files_a_written_report():
         "existing fleet.db files would never gain the column -- history lost"
 
 
+def _every_scheduled_member_is_actually_on_cron():
+    """A member's own spec does NOT put it on cron -- entrypoint.sh's hand-written list does.
+
+    Found live 2026-08-26 by roomba, filed as nonprofit-atlas#3321: datta shipped
+    enabled:true with schedule.hourly_at_minute=12 and had run ZERO times since 11:39 that
+    morning, because adding a member's spec and charter does not add it to
+    /etc/cron.d/fleet-kit. The dashboard read "never run"; nothing else complained. The same
+    class already bit this kit once -- the crontab predated run_member.sh and silently ran 2 of
+    7 members forever (see entrypoint.sh's own comment).
+
+    So the two lists must agree, and this is the check that makes disagreement loud:
+      enabled + scheduled in its spec  =>  a run_member.sh line in entrypoint.sh
+    Two documented exceptions, both spawned BY another member rather than by cron:
+      minion  -- spawned by gru with --item
+      nerd    -- spawned by datta with --task lane=<name>
+    Both ship enabled:false precisely so a cron tick can never run one nobody chose.
+    """
+    import json, glob
+    root = Path(__file__).parent.parent
+    entry = (root / "entrypoint.sh").read_text()
+    spawned_by_a_member = {"minion", "nerd"}
+    missing = []
+    for f in sorted(glob.glob(str(root / "members" / "*" / "*.fleet.json"))):
+        spec = json.loads(Path(f).read_text())
+        name = spec["name"]
+        if name in spawned_by_a_member or not spec.get("enabled"):
+            continue
+        if not (spec.get("schedule") or {}):
+            continue
+        # gru fires through its own fanout wrapper, not a bare run_member.sh line.
+        if f"run_member.sh {name}" in entry or f"run_{name}_fanout.sh" in entry:
+            continue
+        missing.append(name)
+    assert not missing, (
+        f"enabled+scheduled but never wired into cron, so they will NEVER run: {missing}. "
+        "A spec does not schedule a member; entrypoint.sh's crontab does.")
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -912,6 +950,7 @@ if __name__ == "__main__":
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
     check("datta dispatches by coverage, nerds analyse one lane", _datta_dispatches_and_nerds_analyse)
     check("every pass files a written report", _every_pass_files_a_written_report)
+    check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)

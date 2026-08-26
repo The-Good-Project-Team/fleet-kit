@@ -122,6 +122,13 @@ case "${1:-cron-foreground}" in
       echo "21 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh jefe >> $LOG_DIR/jefe.log 2>&1"
       echo "41 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh roomba >> $LOG_DIR/roomba.log 2>&1"
       echo "33 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh marie >> $LOG_DIR/marie.log 2>&1"
+      # datta (:12, analysis) -- the coverage dispatcher. It spawns nerds itself, so ONLY datta
+      # gets a cron line; nerd ships enabled:false and never self-fires, exactly like minion
+      # under gru. Added 2026-08-26 after roomba filed nonprofit-atlas#3321: datta had been
+      # enabled+scheduled in its own spec since 11:39 that day and had run ZERO times, because
+      # a member's spec does not put it on cron -- THIS hand-maintained list does, and nobody
+      # remembered. The dashboard read "never run" and nothing else complained.
+      echo "12 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh datta >> $LOG_DIR/datta.log 2>&1"
       # dumbledore: daily -> every 7h (2026-08-25, Reif), now that it OWNS the Magikarp score
       # rather than treating it as one rot-hunt item among five. A once-daily owner gets 1
       # feedback tick per day against a score sampled every 3h; at 7h it gets 3-4, which is
