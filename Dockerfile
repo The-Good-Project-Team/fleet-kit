@@ -41,7 +41,22 @@ RUN apt-get update -qq && apt-get install -y -qq \
 # No --break-system-packages: this base ships pip 22.0.2, which predates that flag and exits
 # "no such option", failing the build. Verified against the real image 2026-08-26 rather than
 # assumed -- the flag is correct on newer bases and would have looked right in review.
-RUN pip3 install --no-cache-dir requests google-auth
+RUN pip3 install --no-cache-dir requests google-auth playwright
+
+# A real browser, because some numbers exist ONLY in a rendered page. Google's Page Indexing
+# report -- the one holding "3.7M discovered, currently not indexed" and "1.68M excluded by
+# noindex" -- has NO API at all (its sitemaps.list `indexed` field has reported ~0% since it
+# was deprecated in 2019), so the ONLY way to read those buckets and their example URLs is to
+# open the page. Same for judging a UI surface as a human sees it rather than as a template.
+#
+# playwright's OWN chromium, not apt's: Ubuntu 22.04 ships `chromium-browser` as a snap stub
+# that cannot run in a container, and `chromium` has no candidate at all (verified on the real
+# image). --with-deps pulls the shared libraries headless chromium needs; without it the
+# binary installs fine and then fails at launch, which is the worst shape to debug.
+#
+# Costs ~115MB for the headless shell plus its system libs. Deliberate: the alternative is a
+# lane that files "cannot read, no browser" every pass forever.
+RUN playwright install --with-deps chromium
 
 # GitHub CLI — official apt repo, not a hand-rolled binary fetch (fewer moving parts to break
 # on an arch/OS change).

@@ -550,6 +550,24 @@ def _datta_dispatches_and_nerds_analyse():
     dockerfile = (root / "Dockerfile").read_text()
     assert "sqlite3" in dockerfile, "sqlite3 CLI missing -- pass memory queries return nothing"
     assert "google-auth" in dockerfile, "no GSC/GA4 auth lib -- growth/datadog cannot measure"
+    # Some numbers exist ONLY in a rendered page -- GSC's Page Indexing report (3.7M
+    # discovered-not-indexed, 1.68M noindex) has no API at all. Without a browser that lane
+    # files "cannot read, no browser" every pass forever.
+    assert "playwright install" in dockerfile, "no browser -- the API-less reports stay unread"
+    # apt's chromium on Ubuntu 22.04 is a snap stub that cannot run in a container, and plain
+    # `chromium` has no candidate; playwright's own build is the one that actually launches.
+    assert "playwright install --with-deps" in dockerfile, \
+        "chromium installs but fails at launch without its shared libs"
+
+    # The credential a nerd needs must be MOUNTED, or the browser is useless: the service
+    # account lives on the app's box, not the fleet box. Optional by design -- an instance that
+    # does not analyse these lanes must be unaffected.
+    dep = (root / "scripts" / "deploy.sh").read_text()
+    assert "FLEET_ANALYTICS_CREDS_DIR" in dep, "analytics credentials are never mounted"
+    assert ":/fleet-kit/.analytics:ro" in dep, "credential mount is not read-only"
+    i = dep.find("FLEET_ANALYTICS_CREDS_DIR")
+    guard = dep[i:i + 200]
+    assert "-d " in guard, "mount is not guarded on the directory existing -- breaks a deploy"
     # pip 22.0.2 on this base predates --break-system-packages and exits 'no such option',
     # failing the whole build. Verified against the real image, not assumed.
     df_code = "\n".join(l for l in dockerfile.splitlines() if not l.lstrip().startswith("#"))

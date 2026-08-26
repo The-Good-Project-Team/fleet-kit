@@ -189,16 +189,28 @@ delta under ~10% of the base is noise unless shards-fetched moved with it.
 report has NO API: the bucket totals and their example URLs exist only in the Search Console
 UI. Reading them means driving a browser.
 
-> **BLOCKED TODAY, and this is itself a standing finding.** Verified 2026-08-26: the fleet
-> container has no browser at all — no Chromium, no Playwright, and no `claude-in-chrome` MCP
-> server — so no pass can currently open Search Console. Until that lands, do the parts you CAN
-> do (the API-backed numbers in step 1's table, and steps 2-3), and file the gap ONCE naming
-> exactly what it blocks: "cannot read GSC Page Indexing exclusion buckets — no browser in the
-> container; the noindex/discovered-not-indexed reasons and their example URLs exist only in
-> the UI." Do not re-file it every pass, and do not substitute a number you derived another
-> way — the URL-Inspection sample answers a different question and is n=15.
+A browser ships in the image (playwright + headless chromium, 2026-08-26) — verified loading
+philanthropy.org and reading its real `<h1>`, so this step RUNS. Drive it from python:
 
-When a browser IS available, the loop is: open Search Console for the property, click INTO the
+```
+python3 -c "
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    b = p.chromium.launch(args=['--no-sandbox','--disable-dev-shm-usage'])
+    pg = b.new_page(); pg.goto('<url>', timeout=45000)
+    print(pg.title()); pg.screenshot(path='/tmp/shot.png'); b.close()
+"
+```
+
+`--no-sandbox` is required inside the container; without it chromium exits at launch.
+
+**Search Console needs a login the fleet box may not hold.** The service-account key lives on
+the app's own prod box, not necessarily here — check `GSC_SA_KEY` names a file that EXISTS
+before planning around it, and if it does not, that is the finding: file it once naming the
+variable and the exact question it blocks, then do the parts you can. Never substitute a number
+derived another way; the URL-Inspection sample answers a different question at n=15.
+
+The loop, once you can reach it: open Search Console for the property, click INTO the
 big exclusion reasons, and read the example URLs Google lists. The two that dominate:
 
 - **`noindex` (1.68M)** — click through and determine WHY. Much of this is probably correct and
