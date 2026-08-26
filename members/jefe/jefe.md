@@ -44,6 +44,31 @@ this covers BOTH shapes of that failure, not just one:
     ```
     Then let the checks re-run and the queue take it — do NOT merge directly, because this
     shape's checks have not yet run against the base it would land on.
+
+    **Then CONFIRM the required checks actually attached — `update-branch` alone may not be
+    enough.** A PR can be BLOCKED not because a check FAILED but because it is ABSENT: the
+    required contexts never attached to the head at all, which reads identically to "still
+    pending" on every surface (that is gh#3315's whole class). Check by name, not by colour:
+    ```
+    gh api repos/<owner>/<repo>/commits/<headRefOid>/check-runs --jq '[.check_runs[].name]'
+    ```
+    If the required contexts (`test`, `test-postgres`) are missing from that list, updating the
+    base again will not summon them. Push an empty commit to the PR branch instead — a real
+    push fires the `synchronize` event that attaches a PR-linked check suite:
+    ```
+    git clone --depth 1 --branch <headRefName> <repo-url> /tmp/rec && cd /tmp/rec
+    git commit --allow-empty -m "ci: retrigger absent checks (PR #<n>)"
+    git push origin HEAD:<headRefName>
+    ```
+    Measured live on #3307, 2026-08-26: after `update-branch` the head carried only
+    `sync-lock=skipped` and its CI run was cancelled; the empty-commit push attached `test`,
+    `test-postgres`, and `enforcement-preflight` and CI ran. `gh run rerun` and
+    `workflow_dispatch` are both ruled out for this — see watch-stuck-merges.yml's header.
+
+    **This is a manual fallback for a mechanism that should not need you.** nonprofit-atlas
+    already ships automated recovery for exactly this (`watch-stuck-merges.yml` +
+    `scripts/ci/stuck_pr_watch.py`, gh#3315). If you are doing this by hand, that mechanism is
+    down — check gh#3332 before repeating the fix on a second PR.
 Either shape is a broken MECHANISM, not a content decision — judge-judy already said yes. This
 never substitutes for judge-judy's review and never overrides a red/pending check; it only
 covers "everything said yes and nothing happened." Log it loudly in your pass report either way

@@ -354,6 +354,17 @@ def _jefe_can_unstick_a_pr_that_is_merely_behind():
     assert "do NOT merge directly" in window or "not merge directly" in window, \
         "jefe's stale-base remedy must forbid a direct merge -- checks have not run on that base"
 
+    # BLOCKED can also mean the required checks never ATTACHED, not that one failed -- absent
+    # reads identically to pending on every surface (gh#3315). Measured on #3307: after
+    # update-branch the head carried only `sync-lock=skipped`; an empty-commit push attached
+    # test/test-postgres/enforcement-preflight. jefe must know to check by NAME and to push.
+    assert "check-runs" in md, "jefe cannot tell an ABSENT required check from a pending one"
+    assert "--allow-empty" in md, \
+        "jefe has no remedy for absent checks -- only a real push fires synchronize"
+    # And must not present the manual fix as the system's answer: automated recovery exists.
+    assert "stuck_pr_watch" in md or "3332" in md, \
+        "jefe's manual retrigger must point at the automated mechanism it stands in for"
+
 
 def _adhoc_task_adds_to_the_charter_never_replaces_it():
     """`--task` runs a member ad-hoc with one extra instruction, charter still governing.
