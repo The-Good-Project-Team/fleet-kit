@@ -196,7 +196,10 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    port = 8562
+    # FLEET_WEBHOOK_PORT is what fleet.env/deploy.sh already use to place this port; reading it
+    # here means the receiver lands where the rest of the kit expects without every caller
+    # having to remember --port. Explicit --port still wins, for a one-off on a busy box.
+    port = int(os.environ.get("FLEET_WEBHOOK_PORT") or 8562)
     if "--port" in sys.argv:
         port = int(sys.argv[sys.argv.index("--port") + 1])
     log(f"listening on :{port}, watching {WATCHED_WORKFLOWS}")

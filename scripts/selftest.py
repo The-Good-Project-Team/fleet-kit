@@ -291,6 +291,33 @@ def _deploy_drains_inflight_passes():
     assert "FLEET_DRAIN_MAX_S" in src, "drain has no bound -- a stuck pass blocks deploys forever"
 
 
+def _one_deploy_at_a_time_and_a_countable_drain():
+    """The drain gate must not let deploys stack, and must be able to count to zero.
+
+    Both found live 2026-08-26, minutes after the drain shipped:
+
+    1. auto_deploy polls every 5 min, but a drained deploy can hold for FLEET_DRAIN_MAX_S
+       (1800s default). Its state file is written only on SUCCESS, so while one deploy drains,
+       LAST_DEPLOYED stays stale and every tick starts ANOTHER deploy -- observed as two
+       concurrent deploy.sh, the second heading for a cutover while the first still held. Two
+       deploys renaming the same containers is the exact mid-cutover race #92 added rollback for.
+    2. `pgrep -c` PRINTS "0" and THEN exits 1 on no match, so `|| echo 0` appended a second
+       line and $inflight became "0\\n0" -- non-empty, fails -eq, and the gate logged a defer
+       with nothing running. A drain that cannot recognise zero never proceeds on its own.
+    """
+    auto = (Path(__file__).parent / "auto_deploy.sh").read_text()
+    assert "flock" in auto, "auto_deploy has no lock -- 5-min ticks stack during a long drain"
+    assert "exec 9>" in auto, "flock needs a held fd or the lock is released immediately"
+    assert "flock -n 9" in auto, "lock must be non-blocking -- a queued deploy is a slow duplicate"
+
+    dep = (Path(__file__).parent / "deploy.sh").read_text()
+    i = dep.find("inflight=\"$(podman exec")
+    assert i != -1, "drain no longer counts in-flight passes"
+    line = dep[i:dep.find("\n", i)]
+    assert "|| echo 0" not in line, "`|| echo 0` on pgrep -c yields '0\\n0', which never equals 0"
+    assert "tr -cd '0-9'" in line, "in-flight count is not sanitised to digits"
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -502,6 +529,7 @@ if __name__ == "__main__":
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
     check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
+    check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)
