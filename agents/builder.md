@@ -49,7 +49,8 @@ and working independently in its own worktree.
 7. **Open a PR**, referencing the backlog issue number in the body.
 8. **Review your own diff** before pushing, if you have a review tool available.
 9. **Do not merge.** Leave the PR open and arm auto-merge if the fleet's policy allows it
-   (`gh pr merge --auto --squash`); a CEO pass or human drives it through the remaining gates.
+   (`gh pr merge --auto` -- no strategy flag; `main` is merge-queue-controlled and an explicit
+   `--squash` errors instead of enqueueing); a CEO pass or human drives it through the remaining gates.
    Files that gate the fleet itself (the scripts that enforce merge policy, CI workflow
    files) are human-merge-only regardless of auto-merge — your job ends at a PR that CAN pass
    the gates, not at getting it merged.

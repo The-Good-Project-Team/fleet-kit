@@ -13,7 +13,7 @@
       "merge origin/<default-branch> into your worktree and re-test if it moved under you",
       "stage explicit changed paths only -- never a blanket add",
       "open the PR referencing your issue number",
-      "arm auto-merge (`gh pr merge --auto --squash`) unconditionally before finishing",
+      "arm auto-merge (`gh pr merge --auto`, no strategy flag -- main is merge-queue-controlled and an explicit --squash errors instead of enqueueing) unconditionally before finishing, and CHECK THE EXIT CODE",
       "report honestly if you cannot complete the item -- gru is reading this back"
     ],
     "limits": {
