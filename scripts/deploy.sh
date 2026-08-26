@@ -42,6 +42,21 @@ INSTANCE_DIR="${FLEET_INSTANCE_DIR:?set FLEET_INSTANCE_DIR -- e.g. /home/ubuntu/
 # sets local shell vars, invisible to anything this script itself execs).
 [ -f "$INSTANCE_DIR/fleet.env" ] && { set -a; . "$INSTANCE_DIR/fleet.env"; set +a; }
 
+# The target repo this instance's agents work. Baked in as a literal until 2026-08-26, which
+# made deploy.sh the one file that could not serve a second instance: up.sh correctly passes
+# the operator's own FLEET_REPO_URL on first launch, but EVERY subsequent deploy re-created the
+# container with `-e FLEET_REPO_URL=...nonprofit-atlas.git` regardless. A second fleet would
+# have come up pointed at the right repo, worked fine, and then silently switched to
+# nonprofit-atlas on its first redeploy -- agents filing issues and PRs against someone else's
+# repo, with nothing in the logs saying the target had changed. Required, not defaulted: a
+# wrong repo is not something to guess at.
+FLEET_REPO_URL="${FLEET_REPO_URL:?set FLEET_REPO_URL (the repo this fleet works) in fleet.env}"
+# Host dir holding the per-account .claude-<acct> credential mounts. Was /home/ubuntu, which is
+# only correct on this one box; a Mac or any non-ubuntu host silently created the dirs under a
+# path nobody looks at and every account came up logged out (the same class of failure the
+# account-mount comment below describes). $HOME is the right default for the user running the
+# deploy, and stays overridable for an operator who keeps credentials elsewhere.
+FLEET_CREDS_DIR="${FLEET_CREDS_DIR:-$HOME}"
 CONTAINER="${FLEET_CONTAINER_NAME:-philanthropy}"
 RETIRED_MARKER="${CONTAINER}-retired"  # fixed name: the most recent stopped-but-known-good build
 IMAGE="${FLEET_IMAGE_NAME:-fleet-kit:latest}"
@@ -73,11 +88,11 @@ run_args() {
     local name="$1" view_port="$2" webhook_port="$3"
     local account_mounts=()
     for acct in ${FLEET_ACCOUNTS:-primary}; do
-        mkdir -p "/home/ubuntu/.claude-$acct"
-        account_mounts+=(-v "/home/ubuntu/.claude-$acct:/root/.claude-$acct")
+        mkdir -p "$FLEET_CREDS_DIR/.claude-$acct"
+        account_mounts+=(-v "$FLEET_CREDS_DIR/.claude-$acct:/root/.claude-$acct")
     done
     echo -d --name "$name" \
-        -e FLEET_REPO_URL=https://github.com/The-Good-Project-Team/nonprofit-atlas.git \
+        -e FLEET_REPO_URL="$FLEET_REPO_URL" \
         -e FLEET_VIEW_PORT="$view_port" \
         -e GH_TOKEN="$GH_TOKEN" \
         -e FLEET_ENV_FILE=/fleet-kit/fleet.env \
@@ -173,7 +188,12 @@ drain_inflight_passes() {
 
     local waited=0 inflight
     while :; do
-        inflight="$(podman exec "$CONTAINER" pgrep -c -f 'bash .*run_member[.]sh' 2>/dev/null || echo 0)"
+        # `|| echo 0` on its own is NOT enough: pgrep -c PRINTS "0" and THEN exits 1 when it
+        # matches nothing, so the fallback appends a second line and $inflight becomes "0\n0" --
+        # which is non-empty, fails -eq, and made the gate report a defer with nothing running.
+        # Seen live 2026-08-26 ("drain: 0 / 0 agent pass(es) in flight"). Take the first line
+        # and keep only digits, so any pgrep quirk still yields a number.
+        inflight="$(podman exec "$CONTAINER" pgrep -c -f 'bash .*run_member[.]sh' 2>/dev/null | head -1 | tr -cd '0-9')"
         [ -z "$inflight" ] && inflight=0
         if [ "$inflight" -eq 0 ] 2>/dev/null; then
             [ "$waited" -gt 0 ] && log "drain: clear after ${waited}s -- proceeding with deploy"

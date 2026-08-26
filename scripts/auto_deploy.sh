@@ -33,6 +33,31 @@ log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" >> "$LOG"; }
 
 cd "$KIT_DIR"
 
+# ONE deploy at a time. This poll fires every 5 minutes, and since the drain gate landed
+# (deploy.sh, 2026-08-26) a single deploy can legitimately hold for up to FLEET_DRAIN_MAX_S
+# (default 1800s) waiting for in-flight agent passes to finish. The early-exit below cannot
+# stop the pile-up on its own: the state file is written only on SUCCESS, so while a deploy is
+# still draining, LAST_DEPLOYED is stale and every subsequent tick sees "main moved" and starts
+# ANOTHER deploy. Observed live within minutes of the drain shipping -- two concurrent
+# deploy.sh processes, the second reporting a clear drain and heading for a cutover while the
+# first still held. Two deploys renaming the same containers is precisely the mid-cutover race
+# #92 had to add automatic rollback for.
+#
+# flock over a pidfile/mkdir: the kernel releases it when the process dies, so a killed or
+# crashed deploy cannot wedge every future tick behind a stale lock. -n = fail immediately
+# rather than queueing, because a queued deploy is just a slower duplicate of the one already
+# running -- the next 5-minute tick is the retry.
+LOCKFILE="$HOME/.cache/fleet-kit/auto_deploy.lock"
+mkdir -p "$(dirname "$LOCKFILE")"
+exec 9>"$LOCKFILE"
+if command -v flock >/dev/null 2>&1; then
+    if ! flock -n 9; then
+        # Quiet by default: with a 30-minute drain this is the EXPECTED state for five ticks
+        # out of six, and logging each one would bury the real deploy lines in noise.
+        exit 0
+    fi
+fi
+
 # Never deploy over a dirty checkout -- a local uncommitted edit (a live-patch hotfix, say)
 # silently getting stashed/blown away by a pull is exactly the kind of "healed silently" this
 # kit's own persona_law.md warns against. Loud stop, not a guess.

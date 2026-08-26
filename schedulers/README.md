@@ -2,7 +2,9 @@
 
 Templates for both macOS (launchd) and Linux (systemd timer). Fill the `{{...}}` placeholders
 — `{{REPO_PATH}}` (your `FLEET_REPO`), `{{KIT_PATH}}` (where this kit lives, e.g. `{{REPO_PATH}}/.fleet`),
-`{{USER}}` (the account running the fleet) — then install per your platform's normal mechanism.
+`{{USER}}` (the account running the fleet), `{{LOG_DIR}}` (your `FLEET_LOG_DIR`), and
+`{{WEBHOOK_PORT}}` (your `FLEET_WEBHOOK_PORT`, e.g. `8562`) — then install per your platform's
+normal mechanism.
 
 | Job | Cadence | Script | Required? |
 |---|---|---|---|

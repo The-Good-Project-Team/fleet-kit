@@ -44,6 +44,12 @@ unset FLEET_API_KEY
 
 
 FLEET_REPO="${FLEET_REPO:?FLEET_REPO required}"
+# The repo this fleet works, by name, for the scoring prompt below. Was the literal string
+# "nonprofit-atlas" inside the prompt: a second instance would have asked the model to score a
+# repo it was not looking at, and the model would have answered confidently about the wrong
+# thing -- the failure would read as a bad score, not as a misconfiguration. Derived from
+# FLEET_REPO (already required above) so there is one source of truth and nothing new to set.
+FLEET_REPO_NAME="${FLEET_REPO_NAME:-$(basename "$FLEET_REPO")}"
 FLEET_LOG_DIR="${FLEET_LOG_DIR:?FLEET_LOG_DIR required}"
 OUT_FILE="$FLEET_LOG_DIR/self_improve_score.jsonl"
 # Scored every 3h (Reif, 2026-08-25), so the stamp is a timestamp, not a bare date -- a
@@ -97,7 +103,7 @@ print(json.dumps(by_day, indent=None, sort_keys=True))
 " 2>/dev/null || echo "unavailable")
 fi
 
-PROMPT="You are scoring whether an autonomous agent fleet (fleet-kit, running on nonprofit-atlas) is genuinely SELF-IMPROVING, not just running.
+PROMPT="You are scoring whether an autonomous agent fleet (fleet-kit, running on $FLEET_REPO_NAME) is genuinely SELF-IMPROVING, not just running.
 
 THE ACTUAL TEST (Reif's own definition, use this exactly -- not general 'did it self-correct sometimes'):
 Self-improvement is a COMPOUNDING LOOP: jefe or dumbledore makes a charter/rule change -> that

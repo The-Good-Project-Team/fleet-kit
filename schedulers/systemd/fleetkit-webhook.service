@@ -12,7 +12,7 @@ Environment="FLEET_WEBHOOK_SECRET_FILE={{KIT_PATH}}/.webhook_secret"
 # root-readable by convention/backup tooling in a way a gitignored file at a known path isn't
 # automatically swept into. ExecStartPre resolves the file into the env var the script expects.
 ExecStartPre=/bin/bash -c 'test -s "${FLEET_WEBHOOK_SECRET_FILE}" || { echo "FATAL: ${FLEET_WEBHOOK_SECRET_FILE} missing or empty -- generate one: openssl rand -hex 32 > ${FLEET_WEBHOOK_SECRET_FILE}"; exit 1; }'
-ExecStart=/bin/bash -c 'FLEET_WEBHOOK_SECRET="$(cat "${FLEET_WEBHOOK_SECRET_FILE}")" FLEET_REPO={{REPO_PATH}} FLEET_LOG_DIR={{LOG_DIR}} exec python3 {{KIT_PATH}}/scripts/webhook_receiver.py --port 8562'
+ExecStart=/bin/bash -c 'FLEET_WEBHOOK_SECRET="$(cat "${FLEET_WEBHOOK_SECRET_FILE}")" FLEET_REPO={{REPO_PATH}} FLEET_LOG_DIR={{LOG_DIR}} exec python3 {{KIT_PATH}}/scripts/webhook_receiver.py --port {{WEBHOOK_PORT}}'
 Restart=on-failure
 RestartSec=5
 
