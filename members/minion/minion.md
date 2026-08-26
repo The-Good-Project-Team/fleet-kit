@@ -52,6 +52,31 @@ theoretical for this member).
    sees the result; there is no later turn that resumes you. If you can't afford to wait for a
    full suite in this pass's budget, run a narrower, faster command you CAN wait for (targeted
    tests for what you touched) rather than backgrounding a slow one you won't see finish.**
+3b. **A browser ships in this image — USE IT when the item touches rendered UI.** Between
+   2026-08-25 and 26, fifteen of your own self-critiques named "no browser tooling in this
+   sandbox" / "no live screenshot" as the reason you could not satisfy an issue's OWN
+   acceptance criteria. Two of those landed AFTER the browser shipped (#107). PRs went out
+   with a CSS-token-consistency *argument* where the PRD had asked for a screenshot. The
+   tooling was there; this charter just never told you.
+
+   Playwright + headless chromium are installed and verified live (loaded philanthropy.org
+   and read its real `<h1>`). Same incantation nerd.md uses:
+
+   ```
+   python3 -c "
+   from playwright.sync_api import sync_playwright
+   with sync_playwright() as p:
+       b = p.chromium.launch(args=['--no-sandbox','--disable-dev-shm-usage'])
+       pg = b.new_page(); pg.goto('<url>', timeout=45000)
+       print(pg.title()); pg.screenshot(path='/tmp/shot.png'); b.close()
+   "
+   ```
+
+   `--no-sandbox` is required (this runs as root in a container). If the item's acceptance
+   criteria ask for a rendered page, a screenshot, or "looks right" — render it and SAY what
+   you saw. **"I could not verify visually" is now a false statement**, so if you write
+   something like it in a self-critique, you have skipped a step you could have run.
+
 4. **Check for duplicates.** `gh pr diff <n>` on any suspicious open PR before writing new
    code — if the item is already fully fixed by an open, mergeable PR, say so and stop.
 5. **Land on CURRENT default-branch before you push.** Other concurrent minions branched from
