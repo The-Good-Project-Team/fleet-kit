@@ -139,6 +139,58 @@ if [ "${1:-}" = "--rollback" ]; then
     do_rollback
 fi
 
+# --- drain gate -------------------------------------------------------------------------
+# Blue-green protects SERVING (no request hits a half-started container). It does nothing for
+# WORK: agent passes run as children of the blue container's cron, so the `podman stop -t 10`
+# in the cutover below SIGTERMs then SIGKILLs whatever is mid-pass. Found live 2026-08-26:
+# auto_deploy landed #92 while an ad-hoc marie pass was scoring issue complexity; the pass died
+# at 17 of 79 issues, ~$3 spent, and (before the companion fix in run_member.sh) left no
+# runs.jsonl row at all. A pass can run for an hour (timeout_s: 3600) and auto_deploy ticks
+# every few minutes, so on an active merge day this is not an edge case -- it is a coin flip.
+#
+# This is connection draining, the same thing a load balancer does before pulling a backend:
+# stop sending work, let in-flight work finish, THEN replace. The difference is we cannot
+# gracefully finish an agent pass in seconds, so we DEFER the whole deploy instead. auto_deploy
+# is a cron poll -- a deferred deploy simply happens on the next tick, and its state file is
+# only written on success, so nothing is lost by waiting.
+#
+# Bounded on purpose: a genuinely stuck pass must not block deploys forever. Past the max, we
+# deploy anyway and say so loudly -- run_member.sh's SIGTERM trap then records the interrupted
+# pass as status=killed instead of losing it silently. Belt and braces: drain avoids the kill,
+# the trap makes an unavoidable kill visible.
+#
+# Skipped entirely when there is no live blue (first deploy, or recovering from a dark prod):
+# there is no work to drain, and blocking recovery on a missing container would be backwards.
+DRAIN_MAX_S="${FLEET_DRAIN_MAX_S:-1800}"
+# `bash .*run_member[.]sh` and not a plain `run_member.sh`: pgrep matches against full command
+# lines, so a bare pattern also matches the very shell podman spawns to RUN the check, and the
+# gate would report a pass running forever (verified live -- `pgrep -af run_member.sh` returns
+# its own wrapper). The [.] keeps the pattern from matching itself in any context.
+drain_inflight_passes() {
+    exists "$CONTAINER" || { log "drain: no live $CONTAINER -- nothing to drain"; return 0; }
+    podman inspect "$CONTAINER" --format '{{.State.Running}}' 2>/dev/null | grep -q true \
+        || { log "drain: $CONTAINER is not running -- nothing to drain"; return 0; }
+
+    local waited=0 inflight
+    while :; do
+        inflight="$(podman exec "$CONTAINER" pgrep -c -f 'bash .*run_member[.]sh' 2>/dev/null || echo 0)"
+        [ -z "$inflight" ] && inflight=0
+        if [ "$inflight" -eq 0 ] 2>/dev/null; then
+            [ "$waited" -gt 0 ] && log "drain: clear after ${waited}s -- proceeding with deploy"
+            return 0
+        fi
+        if [ "$waited" -ge "$DRAIN_MAX_S" ]; then
+            log "drain: STILL $inflight pass(es) in flight after ${DRAIN_MAX_S}s -- deploying ANYWAY."
+            log "drain: those passes will be killed; run_member.sh records them as status=killed (safe to re-run)."
+            return 0
+        fi
+        [ "$waited" -eq 0 ] && log "drain: $inflight agent pass(es) in flight -- deferring cutover (max ${DRAIN_MAX_S}s)"
+        sleep 15
+        waited=$((waited + 15))
+    done
+}
+drain_inflight_passes
+
 log "building $IMAGE from $KIT_DIR"
 podman build -t "$IMAGE" "$KIT_DIR"
 

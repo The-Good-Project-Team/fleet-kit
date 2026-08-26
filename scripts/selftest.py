@@ -232,6 +232,65 @@ def _adhoc_task_adds_to_the_charter_never_replaces_it():
     assert "${TASK:+-adhoc}" in src, "ad-hoc runs are not distinguishable in run_id"
 
 
+def _a_killed_pass_is_recorded_not_lost():
+    """A pass killed from outside must leave a runs.jsonl row, and the trap must be ABLE to run.
+
+    2026-08-26: a deploy cutover (`podman stop -t 10`) SIGKILLed an in-flight marie pass mid-
+    work. runs.jsonl got no row at all -- not an error row, NO row -- because the record is
+    written only after `claude -p` returns. ~$3 of spend and 17 completed issue-scores looked,
+    from every dashboard, like a pass that never ran. Silent loss is worse than a failure row.
+
+    Two independent properties, because the first is useless without the second:
+
+    1. run_report classifies 143/137 (SIGTERM/SIGKILL) as `killed` -- distinct from timed_out
+       (had time left) and budget_declined (was spending fine). It means interrupted, re-runnable.
+    2. The pass pipeline is BACKGROUNDED and waited on. Bash defers a trap handler while a
+       FOREGROUND child runs, so with the pipeline in the foreground the handler would not fire
+       until claude exited on its own -- measured at t+60s against a 60s sleep, while podman
+       SIGKILLs at t+10s. A trap that cannot run in the grace window is decoration; this asserts
+       the structure that makes it real, which review alone did not catch.
+    """
+    import run_report
+    for code in (143, 137):
+        rec = run_report.build_record(member="t", run_id="r", kind="llm", exit_code=code,
+                                      pass_text="", usage=None, vision_required=False)
+        assert rec["status"] == "killed", f"exit {code} -> {rec['status']}, want killed"
+    # An interrupted pass must stay distinguishable from the two statuses it superficially
+    # resembles; collapsing them is exactly the #3015 class of bug.
+    for code, want in ((3, "budget_declined"), (124, "timed_out")):
+        rec = run_report.build_record(member="t", run_id="r", kind="llm", exit_code=code,
+                                      pass_text="", usage=None, vision_required=False)
+        assert rec["status"] == want, f"exit {code} -> {rec['status']}, want {want}"
+
+    src = (Path(__file__).parent / "run_member.sh").read_text()
+    assert "trap record_killed_pass TERM INT" in src, "no SIGTERM trap on the pass"
+    assert "PASS_PID=$!" in src and 'wait "$PASS_PID"' in src, \
+        "pass pipeline is not backgrounded+waited -- the trap cannot fire during claude -p"
+    # `wait` reports the job's LAST command (the log loop, always 0), so the subshell must
+    # re-raise claude's own status or budget_declined/timed_out silently break.
+    assert 'exit "${PIPESTATUS[0]}" ) &' in src, \
+        "backgrounded pipeline does not re-raise PIPESTATUS -- claude's exit code is lost"
+
+
+def _deploy_drains_inflight_passes():
+    """deploy.sh must not kill agent work to ship code.
+
+    Blue-green protects serving, not work: passes run as children of the blue container's cron,
+    so the cutover's `podman stop` kills whatever is mid-pass. The gate defers the deploy while
+    a pass is in flight (auto_deploy is a cron poll -- it simply retries next tick), bounded so
+    a stuck pass cannot block deploys forever.
+    """
+    src = (Path(__file__).parent / "deploy.sh").read_text()
+    assert "drain_inflight_passes" in src, "no drain gate in deploy.sh"
+    i = src.find("drain_inflight_passes()")
+    j = src.find("log \"building $IMAGE")
+    assert i != -1 and j != -1 and i < j, "drain gate must run BEFORE the build/cutover"
+    # pgrep matches full command lines, so a bare `run_member.sh` pattern also matches the shell
+    # podman spawns to run the check -- the gate would then see a pass forever and never deploy.
+    assert "bash .*run_member[.]sh" in src, "drain pattern would self-match its own wrapper"
+    assert "FLEET_DRAIN_MAX_S" in src, "drain has no bound -- a stuck pass blocks deploys forever"
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -441,6 +500,8 @@ if __name__ == "__main__":
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
+    check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)
+    check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)
