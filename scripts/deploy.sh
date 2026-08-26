@@ -178,13 +178,37 @@ fi
 # there is no work to drain, and blocking recovery on a missing container would be backwards.
 DRAIN_MAX_S="${FLEET_DRAIN_MAX_S:-1800}"
 CORDONED=0
+# TRUNCATE-AND-REWRITE, never `sed -i` / replace-then-rename. fleet.env is BIND-MOUNTED into
+# the container ($INSTANCE_DIR/fleet.env -> /fleet-kit/fleet.env), and a bind mount follows the
+# INODE, not the path: any edit that writes a new file and renames it over the old one leaves
+# the container reading the ORIGINAL inode forever. refresh_container.sh's header documents
+# this exact trap for this exact file; the cordon walked straight into it.
+#
+# Caught live 2026-08-26, and it made the cordon a silent NO-OP in production: the host file
+# read FLEET_ENABLED=false while `podman exec ... grep FLEET_ENABLED /fleet-kit/fleet.env`
+# still read true, so members kept starting mid-drain -- in-flight went 3 -> 7 WHILE cordoned,
+# and a marie pass began 1m41s into it. The worst possible shape: the deploy log honestly
+# announced a cordon that was never in effect.
+#
+# `cat tmp > file` truncates the EXISTING inode in place, so the container sees the change on
+# its very next read -- the property fleet_enabled_or_exit depends on.
+cordon_write() {
+    local want="$1" tmp
+    tmp="$(mktemp)"
+    awk -v v="$want" '
+        /^[[:space:]]*FLEET_ENABLED[[:space:]]*=/ { print "FLEET_ENABLED=" v; found=1; next }
+        { print }
+        END { if (!found) print "FLEET_ENABLED=" v }
+    ' "$INSTANCE_DIR/fleet.env" > "$tmp"
+    cat "$tmp" > "$INSTANCE_DIR/fleet.env"
+    rm -f "$tmp"
+}
 # Idempotent on purpose: the EXIT trap and an explicit call after the drain can both reach it,
 # and a second run must not re-enable a fleet a human turned off in the meantime.
 uncordon_fleet() {
     [ "$CORDONED" = "1" ] || return 0
     CORDONED=0
-    sed -i -E 's/^[[:space:]]*FLEET_ENABLED[[:space:]]*=.*/FLEET_ENABLED=true/' "$INSTANCE_DIR/fleet.env"
-    rm -f "$INSTANCE_DIR/fleet.env.deploybak"
+    cordon_write true
     log "uncordon: FLEET_ENABLED=true -- members resume on the next tick"
 }
 
@@ -217,7 +241,7 @@ drain_inflight_passes() {
         if grep -qE '^[[:space:]]*FLEET_ENABLED[[:space:]]*=[[:space:]]*true' "$INSTANCE_DIR/fleet.env"; then
             CORDONED=1
             trap uncordon_fleet EXIT INT TERM
-            sed -i.deploybak -E 's/^[[:space:]]*FLEET_ENABLED[[:space:]]*=.*/FLEET_ENABLED=false/' "$INSTANCE_DIR/fleet.env"
+            cordon_write false
             log "cordon: FLEET_ENABLED=false -- no NEW passes will start while this deploy drains"
         fi
     fi
