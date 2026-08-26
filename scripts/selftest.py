@@ -438,6 +438,40 @@ def _marie_writes_a_prd_and_minion_reads_it():
     assert stated == listed, f"checklist says {stated} items but lists {listed}"
 
 
+def _fixer_catches_the_no_answer_class():
+    """A required check that never reports is invisible to a green-or-red sweep.
+
+    The merge gate is binary: it arms on GREEN, alarms on RED. There is a third outcome it was
+    never built for -- NEITHER. A workflow that dies before its jobs launch (`startup_failure`)
+    posts no check, and one that never triggers posts nothing at all. The PR then sits BLOCKED
+    forever: it cannot merge (a required check is missing) and cannot alarm (nothing went red).
+
+    the-fixer's three original shapes each miss it for their own reason: $failed wants
+    conclusion == FAILURE (a startup failure says STARTUP_FAILURE); $conflict wants DIRTY (the
+    branch merges fine); $wedged wants status != COMPLETED (a startup failure IS completed --
+    it completed by dying, and a run that never started is not in the rollup to filter at all).
+
+    Measured live 2026-08-26: 3 of 10 open PRs were non-draft, BLOCKED, with ZERO checks, while
+    other PRs the same hour had 3 checks each -- so checks do fire on that repo; those shas
+    simply never got a run. Separately 2 of the last 25 workflow runs concluded startup_failure.
+    Old jq surfaced 1 PR; new jq surfaced 2 on the same data, the extra one being a real stuck PR.
+
+    Drafts are excluded on purpose -- a draft with no checks is normal (workflows commonly skip
+    drafts), so alarming there would fire on every WIP branch.
+    """
+    src = (Path(__file__).parent.parent / "members" / "the-fixer" / "check.sh").read_text()
+    assert "STARTUP_FAILURE" in src, "a run that died before launching is still invisible"
+    assert "no-checks-at-all" in src, "a PR with zero checks is still invisible"
+    assert "check-never-ran" in src, "no reason string distinguishes a never-run check"
+    assert "$noanswer" in src and "$noran" in src, "no-answer shapes are not in the select"
+    # The zero-check shape MUST exclude drafts and MUST be age-gated, or it fires on every
+    # freshly-opened PR before CI has had a chance to post anything.
+    i = src.find("$noanswer")
+    clause = src[max(0, i - 260):i]
+    assert "isDraft" in clause, "zero-check shape does not exclude drafts -- fires on every WIP"
+    assert "createdAt" in clause, "zero-check shape is not age-gated -- fires on brand-new PRs"
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -652,6 +686,7 @@ if __name__ == "__main__":
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
     check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
+    check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
