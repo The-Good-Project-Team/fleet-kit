@@ -321,6 +321,26 @@ def _one_deploy_at_a_time_and_a_countable_drain():
         if line.strip().startswith("podman run "):
             assert "9>&-" in line, \
                 "podman run inherits the deploy lock fd -- the container will hold it forever"
+    # `[ cond ] && cmd` returns NON-ZERO when cond is false. Under `set -e`, that status
+    # propagates -- as a function's last statement it becomes the function's exit status, and
+    # at top level it aborts the script outright. Measured 2026-08-26: the drain's
+    # `[ "$waited" -gt 0 ] && log ...` killed three consecutive deploys on its HEALTHIEST path
+    # (waited=0, nothing in flight, drain clears instantly) while the same build ran fine by
+    # hand -- the failure looked like a clean cordon/uncordon with no error at all.
+    for path in ("deploy.sh", "auto_deploy.sh"):
+        src2 = (Path(__file__).parent / path).read_text().splitlines()
+        for n, line in enumerate(src2, 1):
+            st = line.strip()
+            if not st.startswith("[ ") or "&&" not in st or st.endswith("|| true"):
+                continue
+            nxt = next((l.strip() for l in src2[n:] if l.strip() and not l.strip().startswith("#")), "")
+            # Safe only when another statement follows in the same block; if the next thing is
+            # a block end, this guard's false status becomes the enclosing exit status.
+            if nxt in ("}", "fi", "done", "esac", ""):
+                raise AssertionError(
+                    f"{path}:{n} `[ ... ] && ...` is the last statement in its block -- "
+                    f"a false condition returns non-zero and set -e will abort: {st[:60]}")
+
     assert "STALE LOCK" in auto, \
         "a wedged lock exits 0 through the quiet path; without an alarm it is invisible"
 
