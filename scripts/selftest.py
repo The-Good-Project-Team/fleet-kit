@@ -501,6 +501,8 @@ def _datta_dispatches_and_nerds_analyse():
     datta = (root / "members" / "datta" / "datta.md").read_text()
     nerd = (root / "members" / "nerd" / "nerd.md").read_text()
 
+    assert "massive user value" in datta, \
+        "datta dispatches by staleness alone -- coverage becomes the goal instead of the means"
     assert "never analyse" in datta.lower() or "never analyse a lane yourself" in datta, \
         "datta does not hold the dispatcher/worker split"
     assert "FLEET_RUN_NOW=1" in datta, "datta cannot spawn a nerd (nerd ships enabled:false)"
@@ -561,7 +563,15 @@ def _datta_dispatches_and_nerds_analyse():
     assert "outcome IS NOT NULL" in nerd, \
         "killed/declined passes have no outcome; reading them as 'I did nothing' is wrong"
     assert "already shipped" in nerd, "nerd never checks merged PRs -- refiles fixed things"
-    assert "Where is the opportunity" in nerd, "discovery is framed as breakage-hunting only"
+    assert "massive user value" in nerd, "discovery is framed as breakage-hunting only"
+    # The reason the nerds exist, stated where every pass reads it first. Without this a
+    # metrics-driven pass optimises the proxy and never asks whether anyone is better off --
+    # and every KPI here CAN be moved without creating any user value, which is why each
+    # lane's cheat is named. When the KPI and the user disagree, the user is right, and that
+    # disagreement is the most valuable thing a pass can report: the instrument has drifted.
+    assert "PROXY, never the goal" in nerd, "KPI presented as the goal rather than a proxy"
+    assert "who is better off" in nerd, \
+        "findings need not state their user value, so 'moves the metric' passes for a reason"
     assert "buildable" in nerd, "no judgment step; unbuildable opportunities file as findings"
 
     # The tools those steps need must actually exist in the image, or the steps silently no-op.
