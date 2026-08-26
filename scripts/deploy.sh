@@ -177,6 +177,17 @@ fi
 # Skipped entirely when there is no live blue (first deploy, or recovering from a dark prod):
 # there is no work to drain, and blocking recovery on a missing container would be backwards.
 DRAIN_MAX_S="${FLEET_DRAIN_MAX_S:-1800}"
+CORDONED=0
+# Idempotent on purpose: the EXIT trap and an explicit call after the drain can both reach it,
+# and a second run must not re-enable a fleet a human turned off in the meantime.
+uncordon_fleet() {
+    [ "$CORDONED" = "1" ] || return 0
+    CORDONED=0
+    sed -i -E 's/^[[:space:]]*FLEET_ENABLED[[:space:]]*=.*/FLEET_ENABLED=true/' "$INSTANCE_DIR/fleet.env"
+    rm -f "$INSTANCE_DIR/fleet.env.deploybak"
+    log "uncordon: FLEET_ENABLED=true -- members resume on the next tick"
+}
+
 # `bash .*run_member[.]sh` and not a plain `run_member.sh`: pgrep matches against full command
 # lines, so a bare pattern also matches the very shell podman spawns to RUN the check, and the
 # gate would report a pass running forever (verified live -- `pgrep -af run_member.sh` returns
@@ -185,6 +196,31 @@ drain_inflight_passes() {
     exists "$CONTAINER" || { log "drain: no live $CONTAINER -- nothing to drain"; return 0; }
     podman inspect "$CONTAINER" --format '{{.State.Running}}' 2>/dev/null | grep -q true \
         || { log "drain: $CONTAINER is not running -- nothing to drain"; return 0; }
+
+    # CORDON before draining. Without this the drain waits for a fleet that never idles:
+    # gru fires hourly and BLOCKS until every minion it spawned finishes, marie/jefe/roomba
+    # each hold their own slot, and gru keeps SPAWNING new minions the whole time -- measured
+    # live 2026-08-26, in-flight went 2 -> 5 DURING a drain, so the count was rising, not
+    # falling, and the deploy was heading for its 1800s bound to force-kill exactly the work
+    # the gate exists to protect. Waiting for zero only terminates if nothing new starts.
+    #
+    # This is cordon-then-drain, the standard node-rollout shape: stop scheduling NEW work,
+    # let existing work finish, then replace. FLEET_ENABLED=false is the kit's own kill switch
+    # and is read fresh by fleet_enabled_or_exit at the top of EVERY pass, so it takes effect
+    # on the very next cron tick with nothing to restart -- and it gates only the automatic
+    # loop, so a human's "run now" still works while a deploy is quiescing.
+    #
+    # Restored by trap on EVERY exit path, including the failure paths that `exit 1` out of
+    # this script: leaving the fleet cordoned after a failed deploy would silently stop every
+    # member indefinitely, which is a far worse outcome than the deploy we were trying to do.
+    if [ "${FLEET_QUIESCE:-1}" = "1" ] && [ -f "$INSTANCE_DIR/fleet.env" ]; then
+        if grep -qE '^[[:space:]]*FLEET_ENABLED[[:space:]]*=[[:space:]]*true' "$INSTANCE_DIR/fleet.env"; then
+            CORDONED=1
+            trap uncordon_fleet EXIT INT TERM
+            sed -i.deploybak -E 's/^[[:space:]]*FLEET_ENABLED[[:space:]]*=.*/FLEET_ENABLED=false/' "$INSTANCE_DIR/fleet.env"
+            log "cordon: FLEET_ENABLED=false -- no NEW passes will start while this deploy drains"
+        fi
+    fi
 
     local waited=0 inflight
     while :; do
@@ -197,11 +233,13 @@ drain_inflight_passes() {
         [ -z "$inflight" ] && inflight=0
         if [ "$inflight" -eq 0 ] 2>/dev/null; then
             [ "$waited" -gt 0 ] && log "drain: clear after ${waited}s -- proceeding with deploy"
+            uncordon_fleet
             return 0
         fi
         if [ "$waited" -ge "$DRAIN_MAX_S" ]; then
             log "drain: STILL $inflight pass(es) in flight after ${DRAIN_MAX_S}s -- deploying ANYWAY."
             log "drain: those passes will be killed; run_member.sh records them as status=killed (safe to re-run)."
+            uncordon_fleet
             return 0
         fi
         [ "$waited" -eq 0 ] && log "drain: $inflight agent pass(es) in flight -- deferring cutover (max ${DRAIN_MAX_S}s)"
@@ -244,6 +282,11 @@ fi
 # and `--rollback` could not fix it either because do_rollback's first branches look for a
 # $CONTAINER that no longer existed. do_rollback ITSELF was always correct (it renames
 # $RETIRED_MARKER back); nothing ever called it on a mid-cutover failure. This trap does.
+#
+# NOTE: this REPLACES the drain's uncordon EXIT trap (bash keeps one handler per signal). That
+# is safe only because the drain always calls uncordon_fleet explicitly on both of its return
+# paths, so the fleet is already uncordoned by the time execution reaches here -- verified by
+# selftest. If you ever add a third way out of the drain, uncordon on it too.
 cutover_failed() {
     local rc=$?
     [ "$rc" -eq 0 ] && return 0
