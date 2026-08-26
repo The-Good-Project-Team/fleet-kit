@@ -472,6 +472,57 @@ def _fixer_catches_the_no_answer_class():
     assert "createdAt" in clause, "zero-check shape is not age-gated -- fires on brand-new PRs"
 
 
+def _datta_dispatches_and_nerds_analyse():
+    """The analysis pair mirrors gru/minion: one measures coverage, the other does the work.
+
+    Ported from the source fleet's 7 lane charters (growth, searchquality, ui, datadog, devops,
+    lens, revenue), which ran as ad-hoc cloud routines with no shared runner, no run records,
+    and no spawn discipline. Under the gru/minion shape they get all three for free.
+
+    The properties that make it work rather than just exist:
+
+    - datta must NOT analyse. The split is the point -- a dispatcher that also does the work
+      stops measuring coverage honestly, because the lane it just examined always looks fresh.
+    - nerd needs BOTH halves. A checklist alone only catches failures someone already suffered;
+      open-ended exploration is where the unowned problems live.
+    - Every lane's KPI ships with its guardrail AND its named cheat. A bare KPI is numerator
+      theater -- each of the seven has an obvious gamification (delete the stale metrics and
+      freshness hits 100%; ship nothing and deploy success is 100%), so the charter names each
+      one explicitly rather than hoping the model does not find it.
+    - UNCAPPED, with evidence. "Nothing new" with no evidence line is the exact pass that
+      rotted the source fleet: 108 of 211 recorded passes filed ZERO.
+    - Access is declared. Two lanes need third-party logins (GSC, GA4, Clarity) that may be
+      absent; a nerd must file the gap naming the variable, never invent the number. A
+      fabricated metric is worse than a missing one -- the gap gets fixed, the fabrication gets
+      ranked and built on.
+    """
+    import json
+    root = Path(__file__).parent.parent
+    datta = (root / "members" / "datta" / "datta.md").read_text()
+    nerd = (root / "members" / "nerd" / "nerd.md").read_text()
+
+    assert "never analyse" in datta.lower() or "never analyse a lane yourself" in datta, \
+        "datta does not hold the dispatcher/worker split"
+    assert "FLEET_RUN_NOW=1" in datta, "datta cannot spawn a nerd (nerd ships enabled:false)"
+    assert "lane=" in datta and "lane=<name>" in nerd, "no lane is handed to the nerd"
+
+    for lane in ("growth", "searchquality", "ui", "datadog", "devops", "lens", "revenue"):
+        assert lane in nerd, f"lane {lane} lost in the port"
+    assert nerd.count("must not") >= 6, "guardrails missing -- a bare KPI is numerator theater"
+    assert "cheat" in nerd.lower(), "the obvious gamification of each KPI is not named"
+    assert "UNCAPPED" in nerd, "the file-or-say-why law did not come across"
+    assert "unverified" in nerd, "no honest-gap escape; invites fabricated metrics"
+    for var in ("GSC_SA_KEY", "GSC_PROPERTY", "GA4_PROPERTY_ID", "CLARITY_API_TOKEN"):
+        assert var in nerd, f"{var} not declared, so a nerd cannot tell if it can measure"
+    assert "never build the fix" in nerd.lower(), "nerd may wander into minion's lane"
+
+    # nerd must never self-fire: datta decides coverage, so a cron-fired nerd would run a lane
+    # nobody chose. Same contract minion has.
+    spec = json.loads((root / "members" / "nerd" / "nerd.fleet.json").read_text())
+    assert spec["enabled"] is False, "nerd self-fires -- it would run lanes datta never chose"
+    assert spec.get("schedule"), "empty schedule fails member_spec validation (found live)"
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -687,6 +738,7 @@ if __name__ == "__main__":
     check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
+    check("datta dispatches by coverage, nerds analyse one lane", _datta_dispatches_and_nerds_analyse)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
