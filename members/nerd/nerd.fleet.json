@@ -35,7 +35,8 @@
         "Grep",
         "Glob",
         "TodoWrite",
-        "WebFetch"
+        "WebFetch",
+        "WebSearch"
       ],
       "deny": [
         "Bash(gh pr merge:*)",
