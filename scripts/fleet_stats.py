@@ -87,6 +87,22 @@ def runs_summary(runs: list[dict], hours: float = 24.0) -> dict:
     hourly = [{"ts": hour, **{s: b.get(s, 0) for s in statuses}}
               for hour, b in sorted(hour_buckets.items())]
 
+    # minions spawned per hour. gru decides how many minions an hour can afford (fanout.py packs
+    # by complexity), so this series is the fleet's actual BUILD throughput -- the run-outcome
+    # chart above counts all nine members together and buries it. Every hour in the window is
+    # emitted, zeros included: a gap in a sparse series reads as "no data", while an explicit 0
+    # reads as "gru ran and chose to spawn nothing", which is a real and different signal.
+    minion_buckets: dict[int, int] = {}
+    for r in windowed:
+        if (r.get("member") or "") != "minion":
+            continue
+        hour = int(r["ts"] // 3600) * 3600
+        minion_buckets[hour] = minion_buckets.get(hour, 0) + 1
+    first_hour = int(cutoff // 3600) * 3600
+    last_hour = int(_now_epoch() // 3600) * 3600
+    minions_hourly = [{"ts": h, "count": minion_buckets.get(h, 0)}
+                      for h in range(first_hour, last_hour + 3600, 3600)]
+
     # per-agent signal rate, executed runs only
     agent_rates = []
     for member, rs in sorted(by_member.items()):
@@ -111,6 +127,7 @@ def runs_summary(runs: list[dict], hours: float = 24.0) -> dict:
         "dormant": dormant,
         "hourly": hourly,
         "statuses": statuses,
+        "minions_hourly": minions_hourly,
         "agent_rates": agent_rates,
     }
 
