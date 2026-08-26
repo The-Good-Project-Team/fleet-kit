@@ -516,6 +516,24 @@ def _datta_dispatches_and_nerds_analyse():
         assert var in nerd, f"{var} not declared, so a nerd cannot tell if it can measure"
     assert "never build the fix" in nerd.lower(), "nerd may wander into minion's lane"
 
+    # growth's checklist was hand-tuned 2026-08-26 against live numbers. The properties that
+    # make it act rather than just observe:
+    assert "MAXIMIZE INDEXED PAGES" in nerd, "growth lost its stated target"
+    # Four different 'indexation' numbers exist and are NOT interchangeable -- comparing across
+    # them is the classic wrong finding (98,171 surfaced vs ~27% sampled measure different
+    # things), so the charter tabulates all four and their nature.
+    for n in ("pages surfaced", "shards fetched", "Page Indexing buckets"):
+        assert n in nerd, f"growth does not distinguish '{n}' from the other indexation numbers"
+    assert "n=15" in nerd, "sample size not stated -- invites filing a regression on noise"
+    # 3.7M discovered-not-indexed is a crawl-budget judgment, NOT a discovery gap (shards are
+    # 339/339). A nerd that reads it as discovery files sitemap work that changes nothing.
+    assert "NOT a discovery problem" in nerd, "the discovered-not-indexed bucket is misframed"
+    # The corpus-growth half needs concrete verified gaps, or it degenerates into 'make more
+    # pages' -- which makes discovered-not-indexed worse, not better.
+    assert "CONFIRMED MISSING" in nerd and "category" in nerd, "no verified page-type gap named"
+    # A deliberate noindex re-filed every pass trains the reader to ignore the lane.
+    assert "deliberate" in nerd, "no rule separating legitimate noindex from accidental"
+
     # nerd must never self-fire: datta decides coverage, so a cron-fired nerd would run a lane
     # nobody chose. Same contract minion has.
     spec = json.loads((root / "members" / "nerd" / "nerd.fleet.json").read_text())

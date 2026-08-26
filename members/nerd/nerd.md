@@ -117,12 +117,71 @@ substitute number you derived some other way.
 
 ## Per-lane checklists — run yours, every pass
 
-**growth** — organic discovery and the path to a paid action.
-Sitemap actually serves and enumerates (a sitemap that 504s silently tanks discovery); new page
-types have both sitemap enumeration AND inbound internal links, or they stay undiscovered;
-canonical/JSON-LD not regressed; indexation coverage vs the corpus. Verify through Google's
-eyes — a real fetch of the LIVE url — not a local render. A page that renders but is in no
-sitemap and has no inbound links is not shipped.
+**growth** — MAXIMIZE INDEXED PAGES. That is the target, stated plainly: more useful pages
+that Google actually indexes. Everything below serves it.
+
+*Know which number you are quoting.* Four different "indexation" numbers exist here and they
+are NOT interchangeable — comparing across them is the classic wrong finding:
+
+| number | source | reading 2026-08-26 | nature |
+|---|---|---|---|
+| pages surfaced | GSC search analytics, 28d | 98,171 (−6,315) | LAGGING — needs impressions to accrue |
+| shards fetched | GSC `sitemaps.list` | 339/339, 83/83 | LEADING — moves within days of a fix |
+| ~% indexed | URL Inspection, rotating sample | ~27% (n=15) | real per-URL truth, but tiny n |
+| Page Indexing buckets | GSC UI **only** | 3.7M discovered-not-indexed, 1.68M noindex | NO API exists |
+
+State which one you used, every time. `n=15` is directional only — **never file a regression on
+sample movement alone**; confirm against shards-fetched or a fresh sample first. A surfaced
+delta under ~10% of the base is noise unless shards-fetched moved with it.
+
+**1. Diagnose the exclusion buckets — by reading Google's own report.** The Page Indexing
+report has NO API: the bucket totals and their example URLs exist only in the Search Console
+UI. Reading them means driving a browser.
+
+> **BLOCKED TODAY, and this is itself a standing finding.** Verified 2026-08-26: the fleet
+> container has no browser at all — no Chromium, no Playwright, and no `claude-in-chrome` MCP
+> server — so no pass can currently open Search Console. Until that lands, do the parts you CAN
+> do (the API-backed numbers in step 1's table, and steps 2-3), and file the gap ONCE naming
+> exactly what it blocks: "cannot read GSC Page Indexing exclusion buckets — no browser in the
+> container; the noindex/discovered-not-indexed reasons and their example URLs exist only in
+> the UI." Do not re-file it every pass, and do not substitute a number you derived another
+> way — the URL-Inspection sample answers a different question and is n=15.
+
+When a browser IS available, the loop is: open Search Console for the property, click INTO the
+big exclusion reasons, and read the example URLs Google lists. The two that dominate:
+
+- **`noindex` (1.68M)** — click through and determine WHY. Much of this is probably correct and
+  deliberate (thin stubs, dupes, paginated tails, user/admin surfaces). Your job is to sort
+  legitimate-noindex from accidental-noindex, name which is which with the example URLs you
+  actually saw, and file only the accidental half. **A deliberate noindex you re-file every
+  pass is noise that trains the reader to ignore you** — when you confirm one is intentional,
+  say so in the finding so the next pass does not re-litigate it.
+- **`Discovered – currently not indexed` (3.7M)** — Google KNOWS these URLs and declined them.
+  This is NOT a discovery problem: shards are 339/339 fetched, so the sitemap is doing its job.
+  It is a crawl-budget/quality judgment. More thin pages make this WORSE, not better.
+
+**2. Grow the corpus with pages that will actually index.** The lever is genuinely useful page
+types with real demand behind them — build to what GSC says people search, not to what is easy
+to enumerate. Verified live 2026-08-26, so build on what exists rather than rediscovering it:
+
+- ALREADY SHIPPED: `/990/nonprofits/in/<state>` and `/in/<state>/<city>` (both 200, ~119
+  internal links each), `/990/who-funds/`, `/990/funders-for/`, `/990/grants-by/`,
+  `/990/foundations-funding/`, `/990/salaries/`, `/990/report/`, `/990/people/`.
+- CONFIRMED MISSING (404 today): **category × geo** — `/in/<state>/<category>` and
+  `/in/<state>/<city>/<category>` ("top animal-welfare nonprofits in Houston"); and
+  **similar-orgs** — a "charities like X" page. Both are high-demand query shapes with no page
+  to rank.
+
+A new page type only counts if it is **enumerated in the sitemap AND reachable by internal
+links**. A page that renders but is in neither is not shipped — Google will never see it.
+
+**3. Guard what already ranks.** A sitemap that 504s, a canonical/JSON-LD regression, or a
+robots change silently tanks discovery for pages that were fine yesterday. Losing indexed pages
+costs more than adding new ones gains.
+
+Verify through Google's eyes — a real fetch of the LIVE URL, or GSC's own inspection — never a
+local render. **Watch the guardrail while you do it:** flooding thin pages so a few rank makes
+ranked-thick-pages climb while average position craters, and that is a BREACH, not a win.
 
 **searchquality** — did the searcher find what they wanted.
 Judge the human outcome, not the mechanism: not "the query returned 200" but "the person
