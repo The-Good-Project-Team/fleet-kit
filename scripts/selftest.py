@@ -357,6 +357,34 @@ def _marie_sweeps_the_whole_backlog_not_just_the_new():
     assert stated == numbered, f"checklist says {stated} items but lists {numbered}"
 
 
+def _deploy_cordons_then_drains_and_always_uncordons():
+    """The drain must stop NEW work, not just wait, and must never leave the fleet off.
+
+    Waiting for zero only terminates if nothing new starts -- and this fleet never idles: gru
+    fires hourly and BLOCKS until every minion it spawned finishes, while continuing to spawn
+    more. Measured live 2026-08-26: in-flight went 2 -> 5 DURING a drain. The count was rising,
+    so the deploy was heading for its 1800s bound to force-kill exactly the work the gate
+    exists to protect. Cordon-then-drain (the standard node-rollout shape) is what terminates.
+
+    The dangerous half is the restore: a deploy that dies while cordoned would leave
+    FLEET_ENABLED=false and silently stop EVERY member indefinitely -- worse than the killed
+    pass this all started with. So uncordon must be on a trap covering every exit path, and
+    must also run explicitly before the cutover replaces that trap with its own.
+    """
+    src = (Path(__file__).parent / "deploy.sh").read_text()
+    assert "FLEET_ENABLED=false" in src, "drain does not cordon -- it will wait for a fleet that never idles"
+    assert "uncordon_fleet" in src, "no uncordon -- a failed deploy would leave the fleet off"
+    assert "trap uncordon_fleet EXIT INT TERM" in src, "uncordon is not on an exit trap"
+
+    body = src[src.find("drain_inflight_passes()"):src.find("\ndrain_inflight_passes\n")]
+    assert body.count("uncordon_fleet\n            return 0") == 2, \
+        "not every drain return path uncordons"
+    # bash keeps ONE handler per signal, so the cutover's own trap REPLACES the drain's. That is
+    # only safe because the drain uncordons explicitly before execution ever reaches it.
+    assert src.find("\ndrain_inflight_passes\n") < src.find("trap cutover_failed"), \
+        "cutover trap is set before the drain runs -- it would clobber the uncordon trap"
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -570,6 +598,7 @@ if __name__ == "__main__":
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
     check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)
+    check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)
