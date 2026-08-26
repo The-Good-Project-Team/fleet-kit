@@ -366,6 +366,36 @@ def _jefe_can_unstick_a_pr_that_is_merely_behind():
         "jefe's manual retrigger must point at the automated mechanism it stands in for"
 
 
+def _score_reasoning_is_not_guillotined_mid_word():
+    """The Magikarp score's reasoning must survive to the dashboard whole.
+
+    Reif, 2026-08-26, reading the live panel: "getting truncated". Every score ever written
+    was cut at exactly 600 characters, mid-word -- 'recurring) shows th',
+    'noisy/multi-caused, n'. Measured on the deployed box: all stored rows len==600.
+
+    The cause is a mismatch between two lines of the SAME file. The prompt asks for "one or
+    two sentences" but also demands a PR number, its merge date, the specific before/after
+    shift in the daily numbers, and a clause justifying the score -- which reliably runs
+    700-900 chars. The model complied with the content requirement; the cap then destroyed the
+    conclusion. And it happened at WRITE time, so the lost half was never recoverable by any
+    UI change.
+
+    This is "never distill an already-distilled field" (a standing decision on this fleet)
+    enforced by a hardcoded slice instead of honoured.
+    """
+    src = (ROOT / "scripts/self_improve_score.sh").read_text()
+    assert "[:600]" not in src, \
+        "score reasoning is still capped at 600 chars -- shorter than the prompt's own demands"
+    # Whatever the cap is, it must clear what the prompt can actually produce.
+    import re as _re
+    caps = [int(m) for m in _re.findall(r"len\(reasoning\) > (\d+)", src)]
+    assert caps, "no explicit length guard on reasoning -- an unbounded field is its own hazard"
+    assert min(caps) >= 1200, f"cap {min(caps)} still truncates a compliant answer (700-900 typical)"
+    # And a cut must land on a word boundary and admit itself, never stop mid-token.
+    assert "rsplit(' ', 1)" in src, "a truncated reasoning still cuts mid-word"
+    assert "[truncated]" in src, "a truncated reasoning does not say it was truncated"
+
+
 def _adhoc_task_adds_to_the_charter_never_replaces_it():
     """`--task` runs a member ad-hoc with one extra instruction, charter still governing.
 
@@ -1103,6 +1133,7 @@ if __name__ == "__main__":
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
     check("minion knows the browser in its own image exists", _minion_knows_the_browser_exists)
+    check("score reasoning is not guillotined mid-word", _score_reasoning_is_not_guillotined_mid_word)
     check("jefe can unstick a PR that is merely behind its base", _jefe_can_unstick_a_pr_that_is_merely_behind)
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
