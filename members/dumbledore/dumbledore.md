@@ -107,6 +107,21 @@ outer shape only.
    because a pass that runs out of turns mid-work still owes the chain: confirmed live
    2026-08-25, a pass reached turn 86 of 100 before the Report section and emitted none of
    the three lines despite having read the score.
+
+   **Read your previous report out of the db, never out of your log** (fleet-kit#83). Your
+   own three lines are persisted columns now, so `Last-verdict:` has something literal to
+   check instead of a truncated `thinking:` stream:
+   ```
+   sqlite3 "$FLEET_LOG_DIR/fleet.db" "SELECT recorded_at, score_now, prediction, last_verdict
+     FROM runs WHERE member='dumbledore' AND prediction IS NOT NULL
+     ORDER BY recorded_at DESC LIMIT 3"
+   ```
+   Rows before that fix read NULL -- that is "wasn't captured," not "the pass skipped it," and
+   it is not a finding. If the LAST row is NULL but newer rows are populated, the chain broke
+   for a real reason and THAT is a finding.
+   Grepping your own log for these lines does not work and never did: `run_member.sh` prefixes
+   every line with `[<ts>] thinking:` / `tool call:`, so an anchored `^Score-now` can never
+   match. If you must grep, use a substring and discard the hit that is your own grep echoing.
 2. Rot hunt: read the full-day signal (Part 1 below)
 3. Rot hunt: fix at the causal layer, act within your authority, write down every direct action
 4. Epic decomposition, if the board has room (Part 2 below)

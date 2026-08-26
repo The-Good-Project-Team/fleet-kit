@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS runs (
   evidence                    TEXT,
   vision_link                  TEXT,
   self_critique                 TEXT,
+  prediction                     TEXT,
+  score_now                       TEXT,
+  last_verdict                     TEXT,
   cost_usd                      REAL,
   num_turns                      INTEGER,
   input_tokens                    INTEGER,
@@ -63,11 +66,32 @@ CREATE TABLE IF NOT EXISTS sync_state (id INTEGER PRIMARY KEY CHECK (id = 0), of
 """
 
 
+# Columns added to `runs` after the table shipped. CREATE TABLE IF NOT EXISTS is a no-op
+# against a db that already exists, so a new column in SCHEMA alone reaches a fresh box and
+# NOBODY else -- the live fleet.db keeps the old shape and every INSERT then fails on column
+# count. Expand-contract: ADD COLUMN is backward-compatible (old rows read NULL = "wasn't
+# captured", same convention _row_from_record already uses for absent token fields), so a
+# rolled-back deploy still reads and writes this table fine.
+_ADD_COLUMNS = (
+    ("prediction", "TEXT"),
+    ("score_now", "TEXT"),
+    ("last_verdict", "TEXT"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    have = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    for name, decl in _ADD_COLUMNS:
+        if name not in have:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {decl}")
+
+
 def connect(db_path: Path | None = None) -> sqlite3.Connection:
     p = db_path or DB_FILE
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(p))
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.execute("INSERT OR IGNORE INTO sync_state (id, offset) VALUES (0, 0)")
     conn.commit()
     return conn
@@ -84,6 +108,7 @@ def _row_from_record(rec: dict) -> tuple:
         rec.get("run_id"), rec.get("member"), rec.get("kind"),
         rec.get("item_id"), rec.get("pr"), rec.get("status"), rec.get("exit_code"),
         rec.get("outcome"), rec.get("evidence"), rec.get("vision_link"), rec.get("self_critique"),
+        rec.get("prediction"), rec.get("score_now"), rec.get("last_verdict"),
         tokens.get("cost_usd"), tokens.get("num_turns"),
         tokens.get("input_tokens"), tokens.get("output_tokens"),
         tokens.get("cache_read_input_tokens"), tokens.get("cache_creation_input_tokens"),
@@ -117,9 +142,10 @@ def sync(conn: sqlite3.Connection, runs_file: Path | None = None) -> int:
             conn.execute(
                 """INSERT OR REPLACE INTO runs
                    (run_id, member, kind, item_id, pr, status, exit_code, outcome, evidence,
-                    vision_link, self_critique, cost_usd, num_turns, input_tokens, output_tokens,
+                    vision_link, self_critique, prediction, score_now, last_verdict,
+                    cost_usd, num_turns, input_tokens, output_tokens,
                     cache_read_tokens, cache_creation_tokens, duration_ms, stop_reason, recorded_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 _row_from_record(rec),
             )
             n += 1
