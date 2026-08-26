@@ -534,6 +534,24 @@ def _datta_dispatches_and_nerds_analyse():
     # A deliberate noindex re-filed every pass trains the reader to ignore the lane.
     assert "deliberate" in nerd, "no rule separating legitimate noindex from accidental"
 
+    # Every lane was hand-tuned 2026-08-26 against numbers measured on the live product. The
+    # guard is that each stays SUBSTANTIVE: the thin one-liners they replaced described a
+    # topic without telling a pass what to actually do, which is how a lane ends up filing
+    # "nothing new" forever.
+    import re as _re
+    for lane in ("growth", "searchquality", "ui", "datadog", "devops", "lens", "revenue"):
+        i = nerd.find(f"**{lane}** \u2014")
+        assert i != -1, f"{lane} lost its checklist heading"
+        j = nerd.find("\n\n**", i + 5)
+        body = nerd[i:j if j > 0 else i + 1200]
+        assert len(body.split()) >= 90, f"{lane} checklist thinned back to a topic label"
+    # The two failure modes every lane shares, stated where the pass will read them.
+    assert "clean number that is WRONG is worse" in nerd, "datadog lost the integrity rule"
+    assert "signup is not a payment" in nerd, "revenue lost the KPI/guardrail distinction"
+    assert "incident, not a finding" in nerd, "devops would file a live incident and move on"
+    # A browser now ships; a lane that curls HTML and infers is not doing the job.
+    assert "playwright" in nerd, "ui/lens never told to use the browser that ships in the image"
+
     # A checklist alone only finds failures someone already suffered. The discovery half is
     # where a lane's real work comes from -- and it needs MEMORY, because a one-shot pass that
     # cannot read its own history re-derives the same finding forever and files it again.
