@@ -67,6 +67,17 @@ _FIELD = {
     # runs.jsonl every other leg of the report already lands in, so dumbledore's rot-hunt can
     # read every member's self-critique in aggregate instead of grepping N raw logs by hand.
     "self_critique": re.compile(r"^[ \t]*Self-critique[ \t]*:[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
+    # The recursive-self-improvement leg (#83). Same treatment as self_critique -- captured,
+    # never enforced, absence never changes `status`. These three lines are the only ones in
+    # the report contract whose READER is the NEXT pass rather than a human: dumbledore's
+    # charter requires each pass to predict, and the pass after it to return a verdict on
+    # whether that prediction came true. Before this, the fields were parsed nowhere and the
+    # only trace of them on disk was stream_log.py's truncated `thinking:` lines -- which are
+    # intermediate reasoning, not the final answer, so the verdict had nothing to check
+    # against and dumbledore's own score reasoning has cited the broken chain since 08-25.
+    "prediction": re.compile(r"^[ \t]*Prediction[ \t]*:[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
+    "score_now": re.compile(r"^[ \t]*Score-now[ \t]*:[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
+    "last_verdict": re.compile(r"^[ \t]*Last-verdict[ \t]*:[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
 }
 
 # An outcome must name something a human can open. "I looked at the dashboard" is not an
@@ -142,6 +153,11 @@ def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
         "evidence": report["evidence"],
         "vision_link": report["vision_link"],
         "self_critique": report["self_critique"],
+        # #83: the compounding chain's data plane. A pass writes `prediction`; the NEXT pass
+        # reads it back out of fleet.db and writes `last_verdict` about it.
+        "prediction": report["prediction"],
+        "score_now": report["score_now"],
+        "last_verdict": report["last_verdict"],
         # Deterministic, not regex-parsed from prose -- the caller already knows these when it
         # writes the record (worktree_builder.sh resolves PR_NUM itself before calling this).
         # Optional: a mechanical member or an early-exit ("no unclaimed items") has neither.

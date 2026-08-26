@@ -247,7 +247,9 @@ Two things to know before pointing a page at these:
   slice, and cache if you must poll.
 - **They are open to anyone who knows the host.** A login in front of *your* page does not
   protect *this* data — the routes have no key. Treat the payload as public: it carries commit
-  author names, agent `self_critique` text, and internal issue titles. If that is not acceptable,
+  author names, agent `self_critique` / `prediction` / `last_verdict` text, and internal issue
+  titles — the RSI fields are a member's unfiltered self-assessment, so read them as candid
+  internal notes, not as copy anyone outside should see. If that is not acceptable,
   gate `do_GET` behind a read key and proxy the calls server-side (never from browser JS, where
   any key is public).
 

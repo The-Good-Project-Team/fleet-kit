@@ -80,6 +80,74 @@ def _report_contract():
     assert timed_out["status"] == "timed_out", timed_out["status"]
 
 
+def _rsi_lines_survive_to_the_next_pass():
+    """#83: the compounding chain needs a data plane, not a log grep.
+
+    The job this proves is dumbledore's, not a function's: pass N writes `Prediction:`, and
+    pass N+1 must be able to READ THAT LITERAL LINE BACK to say whether it came true. Before
+    this, the three RSI lines were parsed nowhere and survived only in stream_log.py's
+    truncated `thinking:` output -- intermediate reasoning, not the final answer -- so
+    `Last-verdict:` had nothing to check and the score's own reasoning cited the broken chain.
+    Exercised through runs.jsonl -> fleet.db, the same path run_member.sh uses, because a
+    build_record() assertion alone would still pass with no column to land in.
+    """
+    import run_report, fleet_db, sqlite3
+    text = ("FLEET-REPORT\nScore-now: 18 (down from 22)\n"
+            "Prediction: capturing these lines closes the loop\n"
+            "Last-verdict: my last prediction did not come true -- #83 still open\n"
+            "Outcome: filed #83\nEvidence: scripts/run_report.py:60\n")
+    rec = run_report.build_record(member="dumbledore", run_id="rsi-1", kind="llm", exit_code=0,
+                                  pass_text=text, usage=None, vision_required=False)
+    assert rec["prediction"] == "capturing these lines closes the loop", rec.get("prediction")
+    assert rec["score_now"] == "18 (down from 22)", rec.get("score_now")
+    assert rec["last_verdict"].startswith("my last prediction did not come true")
+    # Absence stays NULL and never changes status -- same contract as self_critique.
+    bare = run_report.build_record(member="t", run_id="rsi-2", kind="llm", exit_code=0,
+                                   pass_text="Outcome: did a thing\nEvidence: app.py:1\n",
+                                   usage=None, vision_required=False)
+    assert bare["prediction"] is None and bare["status"] == "ok", bare["status"]
+
+    with tempfile.TemporaryDirectory() as d:
+        runs = Path(d) / "runs.jsonl"
+        runs.write_text(json.dumps(rec) + "\n")
+        conn = fleet_db.connect(Path(d) / "fleet.db")
+        fleet_db.sync(conn, runs_file=runs)
+        got = conn.execute("SELECT prediction, score_now, last_verdict FROM runs "
+                           "WHERE member='dumbledore' ORDER BY recorded_at DESC LIMIT 1").fetchone()
+        assert got and got[0] == "capturing these lines closes the loop", got
+        assert got[1] == "18 (down from 22)" and got[2], got
+
+        # An ALREADY-EXISTING fleet.db is the case that actually ships: CREATE TABLE IF NOT
+        # EXISTS is a no-op there, so without the ADD COLUMN migration prod keeps the old
+        # shape and every insert fails on column count while a fresh box looks fine.
+        # The legacy table is today's SCHEMA minus the three new columns -- built by stripping
+        # them out of the real thing, so this fixture can't drift into a shape prod never had.
+        old = Path(d) / "old.db"
+        legacy_schema = "\n".join(
+            ln for ln in fleet_db.SCHEMA.splitlines()
+            if not any(c in ln.split()[:1] for c in ("prediction", "score_now", "last_verdict"))
+        )
+        legacy = sqlite3.connect(str(old))
+        legacy.executescript(legacy_schema)
+        legacy.execute("INSERT INTO runs (run_id, member, outcome, recorded_at) "
+                       "VALUES ('legacy-1','marie','a row written before the migration', 1.0)")
+        legacy.commit(); legacy.close()
+
+        conn2 = fleet_db.connect(old)
+        cols = {r[1] for r in conn2.execute("PRAGMA table_info(runs)")}
+        assert {"prediction", "score_now", "last_verdict"} <= cols, cols
+        # The pre-existing row must survive untouched, reading NULL for what wasn't captured.
+        row = conn2.execute("SELECT member, outcome, prediction FROM runs "
+                            "WHERE run_id='legacy-1'").fetchone()
+        assert row == ("marie", "a row written before the migration", None), row
+        # ...and a NEW record must insert into the migrated table without a column-count error.
+        newruns = Path(d) / "more.jsonl"
+        newruns.write_text(json.dumps(rec) + "\n")
+        fleet_db.sync(conn2, runs_file=newruns)
+        assert conn2.execute("SELECT prediction FROM runs WHERE run_id='rsi-1'").fetchone()[0] \
+            == "capturing these lines closes the loop"
+
+
 def _overrides_are_narrow():
     import overrides
     with tempfile.TemporaryDirectory() as d:
@@ -256,6 +324,7 @@ if __name__ == "__main__":
     check("member specs load and validate", _member_specs_validate)
     check("member_spec's OWN default MEMBERS_DIR resolves (not just an explicit path)", _members_dir_default_is_right)
     check("report contract: ok + silence is recorded", _report_contract)
+    check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)
