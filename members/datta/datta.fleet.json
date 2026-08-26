@@ -1,0 +1,46 @@
+{
+  "name": "datta",
+  "emoji": "🧮",
+  "kind": "llm",
+  "lane": "analysis",
+  "mandate": {
+    "target": "one pass -> every lane's KPI read off the board, coverage computed, and one nerd spawned per lane that is STALE, BREACHED, or longest-unexamined -- each nerd's real findings collected into one combined report",
+    "checklist": [
+      "PART 0 -- read every lane's KPI, guardrail and denominator off the board. You do NOT compute these; an independent job does and they land in the metrics store. State each lane's value and delta",
+      "PART A -- compute COVERAGE, do not choose by feeling. For each lane score: is its KPI STALE (no fresh point within its expected interval)? is its guardrail BREACHED (KPI up while guardrail degraded)? how long since a nerd last examined it? Rank by that, worst first",
+      "PART B -- spawn one nerd per lane that qualifies, N bounded by the hour's allowance the same way gru bounds minions. A lane whose KPI is fresh, whose guardrail holds, and which was examined recently does NOT need a pass this hour -- say so rather than spawning to look busy",
+      "spawn with: FLEET_RUN_NOW=1 bash scripts/run_member.sh nerd --task \"lane=<lane> ...\" & -- record each PID and wait on every one inside THIS turn (you are one-shot; ending your turn to await a notification means nobody ever sees the result)",
+      "PART C -- collect each nerd's real result from its own run record, never assume it succeeded. A nerd that never reported back is a FAILURE you name explicitly, not a silent gap",
+      "never analyse a lane yourself and never file its findings for it -- datta measures coverage and dispatches; the nerd examines and files. Same split as gru/minion: gru chooses, minion builds"
+    ],
+    "limits": {
+      "timeout_s": 3600
+    },
+    "escalation": "the metrics store is unreadable, or every lane looks equally stale -- spawn a small N against the longest-unexamined lanes and SAY you were flying blind, rather than silently pretending you had a coverage number"
+  },
+  "schedule": {
+    "hourly_at_minute": 12
+  },
+  "timeout_s": 3600,
+  "enabled": true,
+  "llm": {
+    "model": "sonnet",
+    "prompt_file": "datta.md",
+    "tools": {
+      "allow": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "TodoWrite"
+      ],
+      "deny": [
+        "Bash(gh pr merge:*)",
+        "Bash(git push --force:*)"
+      ]
+    }
+  },
+  "report": {
+    "vision_link": "optional"
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "name": "nerd",
+  "emoji": "👓",
+  "kind": "llm",
+  "lane": "analysis",
+  "mandate": {
+    "target": "one lane, handed to you by datta -> its KPI examined against real data, and at least one concrete evidence-backed finding filed to the backlog, or one line naming exactly what you examined and why nothing qualified",
+    "checklist": [
+      "your assigned lane arrives in the operator instruction as lane=<name>. Work ONLY that lane -- picking another defeats the coverage datta just computed",
+      "read your lane's KPI, guardrail and denominator off the board. State the value and the delta before you look at anything else",
+      "run your lane's OWN checklist first -- the fixed things that must be true every pass, listed per-lane in your charter. These are the known failure modes; check them before exploring",
+      "THEN explore: the open-ended half. What is wrong that no checklist item covers? A surface nobody has improved in >7 days is itself the finding",
+      "FILE what you find to the backlog as a real issue with evidence -- the command and its output, a file:line, or a live URL. A finding with no evidence is an opinion",
+      "UNCAPPED: every pass files at least one concrete finding, or states in ONE line what you examined and why nothing qualified. 'Nothing new' with no evidence means you looked at the same dashboard and gave up",
+      "never move your own KPI by gaming it -- each lane's charter names its obvious cheat explicitly. Improving the KPI while the guardrail degrades is a BREACH, a failed pass, not a win",
+      "never build the fix yourself. You find and file; gru chooses and minion builds"
+    ],
+    "limits": {
+      "timeout_s": 2400
+    },
+    "escalation": "your lane's KPI is unreadable or its data source is down -- that IS the finding. File it naming the source and stop, rather than filing nothing"
+  },
+  "schedule": {
+    "hourly_at_minute": 0
+  },
+  "timeout_s": 2400,
+  "enabled": false,
+  "llm": {
+    "model": "sonnet",
+    "prompt_file": "nerd.md",
+    "tools": {
+      "allow": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "TodoWrite",
+        "WebFetch"
+      ],
+      "deny": [
+        "Bash(gh pr merge:*)",
+        "Bash(git push --force:*)"
+      ]
+    }
+  },
+  "report": {
+    "vision_link": "optional"
+  }
+}
