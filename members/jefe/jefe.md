@@ -31,6 +31,19 @@ this covers BOTH shapes of that failure, not just one:
     root cause: minion's arm command used to hardcode `--squash`, which errors under a
     merge-queue-controlled branch, and the failure went unreported). Same remedy, same command:
     `gh pr merge`.
+  - **green, armed, and simply BEHIND** (`mergeStateStatus: BLOCKED` while every check is
+    success and `mergeable: MERGEABLE`). A merge queue re-tests each entry against the CURRENT
+    base, so a branch that has fallen behind cannot enter no matter how green it looks — its
+    checks passed against a base that no longer exists. Nothing in this fleet updates a stale
+    branch, so such a PR strands itself indefinitely and every surface reports it as healthy.
+    Confirmed live 2026-08-26: nonprofit-atlas#3307 sat green, armed, and BLOCKED for hours at
+    `behind_by=17`. Diagnose and fix without merging anything by hand:
+    ```
+    gh api repos/<owner>/<repo>/compare/main...<headRefName> --jq '.behind_by'
+    gh api -X PUT repos/<owner>/<repo>/pulls/<n>/update-branch
+    ```
+    Then let the checks re-run and the queue take it — do NOT merge directly, because this
+    shape's checks have not yet run against the base it would land on.
 Either shape is a broken MECHANISM, not a content decision — judge-judy already said yes. This
 never substitutes for judge-judy's review and never overrides a red/pending check; it only
 covers "everything said yes and nothing happened." Log it loudly in your pass report either way
