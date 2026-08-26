@@ -206,6 +206,32 @@ def _fanout_packs_the_hour_by_complexity():
         raise AssertionError("unit_pct=0 silently accepted")
 
 
+def _adhoc_task_adds_to_the_charter_never_replaces_it():
+    """`--task` runs a member ad-hoc with one extra instruction, charter still governing.
+
+    Reif, 2026-08-26: "you can run marie with a custom thing to do ... makes sense that we can
+    run something ad-hoc with some prompt addition." The mechanism already existed as --item
+    (how gru hands a minion its issue); this generalises it.
+
+    The property that matters is CONTAINMENT: an operator instruction must not become a way to
+    talk a member out of its own mandate, checklist, limits or escalation rules. So the runner
+    must state that the charter still governs and that a conflict is reported, not obeyed --
+    and the charter text must still be present in the prompt, not swapped out.
+    """
+    src = (Path(__file__).parent / "run_member.sh").read_text()
+    assert '--task) TASK=' in src, "--task is not parsed"
+    assert 'TASK=""' in src, "TASK unset would abort under set -u"
+    # It ADDS: the charter ($PROMPT) is still interpolated after the instruction.
+    i = src.find("THIS RUN HAS AN ADDITIONAL INSTRUCTION")
+    assert i != -1, "no ad-hoc preamble"
+    block = src[i:i + 700]
+    assert "$TASK" in block and "$PROMPT" in block, "instruction or charter missing from prompt"
+    assert "still governs" in block, "preamble does not assert the charter still governs"
+    assert "follow the charter" in block, "preamble does not resolve conflicts toward the charter"
+    # An ad-hoc pass is marked so it can be excluded from cost calibration.
+    assert "${TASK:+-adhoc}" in src, "ad-hoc runs are not distinguishable in run_id"
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -414,6 +440,7 @@ if __name__ == "__main__":
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
+    check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)
