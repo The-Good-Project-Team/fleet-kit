@@ -80,6 +80,27 @@ _FIELD = {
     "last_verdict": re.compile(r"^[ \t]*Last-verdict[ \t]*:[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
 }
 
+# THE WRITTEN REPORT, and the only multi-LINE field in the contract. Reif, 2026-08-26: "I want
+# a report after each run... I paid for it after all." A pass costs real money and 20-80 turns;
+# what came back was three one-line fields, and the only alternative was a 170-line raw
+# transcript. Neither is a report.
+#
+# Every other field above is `(.+?)$` -- single line by construction, because `status` keys off
+# them and a parser that swallowed paragraphs would make `Outcome:` unbounded. This one is
+# deliberately different: it captures everything from `Report:` to the first line that starts
+# a DIFFERENT contract field (Outcome/Evidence/Self-critique/Prediction/Score-now/
+# Last-verdict/Vision-link) or the end of the output. So a member writes prose -- paragraphs,
+# bullets, numbers -- and it survives intact into runs.jsonl.
+#
+# Captured, NEVER enforced: like self_critique, a missing report must not change `status`. A
+# pass that did real work and skipped the prose is still a successful pass; making the report
+# load-bearing would turn a formatting slip into a false failure, which is the exact bug §10b
+# exists to prevent.
+_REPORT_RE = re.compile(
+    r"^[ \t]*Report[ \t]*:[ \t]*\n?(.*?)(?=^[ \t]*(?:Outcome|Evidence|Self-critique|Prediction|"
+    r"Score-now|Last-verdict|Vision-link)[ \t]*:|\Z)",
+    re.MULTILINE | re.IGNORECASE | re.DOTALL)
+
 # An outcome must name something a human can open. "I looked at the dashboard" is not an
 # outcome; "#2771" is. This is the same bar the board already applies to a Vision score.
 _ARTIFACT = re.compile(r"(#\d+|https?://\S+|[\w./-]+\.\w+:\d+)")
@@ -115,6 +136,16 @@ def parse_report(text: str) -> dict:
     """Pull the FLEET-REPORT block out of a pass's output. Never raises."""
     text = text or ""
     out = {}
+    m = _REPORT_RE.search(text)
+    # Cap at ~8k: a report is prose a human reads, not a place to paste the transcript back in.
+    # Truncation is visible (the marker) rather than silent -- an invisible cut would let a
+    # member think it filed something it did not.
+    if m and m.group(1).strip():
+        body = m.group(1).strip()
+        out["report"] = body if len(body) <= 8000 else body[:8000] + "\n[... report truncated at 8000 chars]"
+    else:
+        out["report"] = None
+
     for key, rx in _FIELD.items():
         m = rx.search(text)
         out[key] = m.group(1).strip() if m else None
@@ -164,6 +195,9 @@ def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
         "evidence": report["evidence"],
         "vision_link": report["vision_link"],
         "self_critique": report["self_critique"],
+        # The written report -- prose, multi-line, what a human actually reads after paying for
+        # the pass. See _REPORT_RE for why it is the one field that spans lines.
+        "report": report.get("report"),
         # #83: the compounding chain's data plane. A pass writes `prediction`; the NEXT pass
         # reads it back out of fleet.db and writes `last_verdict` about it.
         "prediction": report["prediction"],

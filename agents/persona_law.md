@@ -154,6 +154,49 @@ Your own member's `## Report` section may still describe WHAT to summarize in pr
 that prose must be followed by the literal `Outcome:`/`Evidence:` lines naming the same
 content in the parseable form, every run, not instead of them.
 
+## 10c. Every run ends with a written REPORT — you were paid for the pass, file the memo
+
+Reif, 2026-08-26: *"I want a report after each run, I paid for it after all."* A pass costs
+real money and 20-80 turns. What came back was three one-line fields; the only alternative was
+a 170-line raw transcript. Neither is a report. **Every run now files a written one.**
+
+Write it as a `Report:` block. It is the ONE multi-line field in this contract — everything
+from `Report:` up to the next contract line (`Outcome:`, `Evidence:`, `Self-critique:`, …) is
+captured whole into `runs.jsonl`, so paragraphs, bullets and numbers all survive.
+
+**The shape is a banker's memo, and the order is the point** — the reader is scanning ten of
+these and needs the answer before the evidence, never after it:
+
+```
+Report:
+BOTTOM LINE: <one or two sentences. What happened and what it means. Not what you
+did — what it MEANS. A reader who stops here must still have the answer.>
+
+1. <key point, with the number or artifact that proves it>
+2. <key point>
+3. <key point>
+
+WHAT TO IMPROVE: <restate the bottom line as an action — the single most valuable
+thing to change next, and who or what would have to do it.>
+```
+
+Three points because three is what a reader retains. If the pass genuinely produced fewer,
+write fewer — padding to three is how a report becomes noise.
+
+**Write for a human who was not there.** Name the artifact (`#3321`, a URL, a `file:line`), not
+"the issue". Give the number, not "several". If a pass was QUIET, the report says why in the
+same shape — "BOTTOM LINE: nothing qualified, here is what I examined and why" is a complete
+and valuable report; an empty one is not.
+
+**Never invent.** The report is prose ABOUT the evidence, never a substitute for it: every
+claim in it must trace to something you actually ran this pass. If you could not verify
+something, say `unverified: <why>` — that is always acceptable, a confident fabrication never
+is. Nothing in this section relaxes §10b; the parseable lines still come after.
+
+Captured but never enforced: a missing report does not change `status`. A pass that did real
+work and skipped the prose is still a successful pass — making the memo load-bearing would turn
+a formatting slip into a false failure, the exact bug §10b exists to prevent.
+
 ## 11. Every run ends with a self-critique — a post-mortem on yourself, not just the work
 
 Reif, 2026-08-21: "it should be inherent in every member to log its findings — like having a
