@@ -166,6 +166,22 @@ if exists "$RETIRED_MARKER"; then
     # being the rollback target the moment THIS deploy's blue took over successfully last time.
     podman rm -f "$RETIRED_MARKER" >/dev/null 2>&1 || true
 fi
+# FROM HERE UNTIL THE HEALTH CHECK, A FAILURE LEAVES NO LIVE CONTAINER. Confirmed live
+# 2026-08-26: `podman rename green -> $CONTAINER` failed after blue had already been renamed
+# to $RETIRED_MARKER, and the script simply exited -- prod served nothing on 8420 for ~2min,
+# and `--rollback` could not fix it either because do_rollback's first branches look for a
+# $CONTAINER that no longer existed. do_rollback ITSELF was always correct (it renames
+# $RETIRED_MARKER back); nothing ever called it on a mid-cutover failure. This trap does.
+cutover_failed() {
+    local rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    log "FAILED mid-cutover (rc=$rc) -- restoring the previous build rather than leaving prod dark"
+    trap - ERR EXIT
+    do_rollback
+}
+trap cutover_failed ERR EXIT
+set -e
+
 if exists "$CONTAINER"; then
     podman stop -t 10 "$CONTAINER" >/dev/null 2>&1 || true
     podman rename "$CONTAINER" "$RETIRED_MARKER"
@@ -180,6 +196,10 @@ podman rm -f "$CONTAINER" >/dev/null 2>&1
 podman run $(run_args "$CONTAINER" "$VIEW_PORT" "$WEBHOOK_PORT") >/dev/null
 
 log "health-checking the real cutover (up to ${HEALTH_TIMEOUT_S}s)"
+# Past the rename window: the explicit rollback below handles a health failure with more care
+# than the generic trap (it preserves the broken build for inspection), so hand off to it.
+trap - ERR EXIT
+set +e
 if ! health_check "$VIEW_PORT"; then
     log "FAILED after cutover -- rolling back to $RETIRED_MARKER"
     podman stop -t 5 "$CONTAINER" >/dev/null 2>&1 || true
