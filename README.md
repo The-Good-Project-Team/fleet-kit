@@ -212,6 +212,56 @@ curl -X POST https://<your-host>/api/run_now \
 Write routes: `run_now`, `fleet_toggle`, `steer`, `prune`, `close_pr`, `create_issue`,
 `comment_issue`, `close_issue`.
 
+### Read routes (GET, no key)
+
+The server listens on `FLEET_VIEW_PORT`, **default 8420** — not the port you may have guessed
+from the dashboard URL. All of these return JSON and send
+`Access-Control-Allow-Origin: *`, so a browser on another origin can read them directly.
+
+| route | size | what it carries |
+|---|---|---|
+| `/api/snapshot` | ~570KB | everything: `runs[]` (last 500) + `gh.{prs,issues,merged,self_evolution}` |
+| `/api/query?member=&status=&item_id=&limit=100` | varies | filtered runs out of the sqlite mirror — prefer this over `snapshot` |
+| `/api/stats/runs_summary?hours=24` | ~3KB | `signal_rate`, `executed`, `total`, `budget_wall`, `declined`, `dormant[]`, `statuses`, `agent_rates`, `hourly[]` |
+| `/api/stats/token_usage?hours=24` | ~2KB | hourly buckets: input/output tokens, `cost_usd` |
+| `/api/stats/backlog_history` | ~1.6KB | open-backlog trend (does its own `gh` calls; cached 120s) |
+| `/api/spend` | ~1.3KB | per member: `runs`, `total_cost`, `avg_cost`, `total_turns`, `ok_runs` |
+| `/api/kpi?hours=24` | ~1KB | per-member KPI rollup out of outcome prose |
+| `/api/members` | ~37KB | full member specs (mandate, lane, schedule) |
+| `/api/next_fires` | ~1.2KB | when each member fires next |
+| `/api/fleet_state` | small | env flags: `FLEET_ENABLED`, `REPO_URL`, per-member on/off |
+| `/api/pass_log?member=` | varies | tail of one member's log |
+| `/api/stream` | SSE | live event stream |
+
+**Shipped work** is `gh.merged[]` — each entry has `number`, `title`, `url`, `mergedAt`,
+`headRefName`, `author`, and `files[]` with per-file `additions`/`deletions`.
+
+```bash
+curl -s https://<your-host>/api/stats/runs_summary?hours=24 | jq
+```
+
+Two things to know before pointing a page at these:
+
+- **`/api/snapshot` is recomputed per request** and is by far the largest response. A page that
+  polls it is a cheap way to load the box. Use `/api/query` or a `stats/*` route if you want a
+  slice, and cache if you must poll.
+- **They are open to anyone who knows the host.** A login in front of *your* page does not
+  protect *this* data — the routes have no key. Treat the payload as public: it carries commit
+  author names, agent `self_critique` text, and internal issue titles. If that is not acceptable,
+  gate `do_GET` behind a read key and proxy the calls server-side (never from browser JS, where
+  any key is public).
+
+### Access log
+
+Every API read appends one JSON line to `$FLEET_LOG_DIR/access.jsonl`: `ts`, `path`, `status`,
+`ip`, `peer`, `cf_country`, `ua`, `origin`, `referer`.
+
+Reads are anonymous by design, so **nothing here is asserted identity** — `ua`, `origin`, and
+`referer` are supplied by the caller and are trivially forged. Behind a Cloudflare tunnel the
+only field a caller cannot forge is `ip`, taken from `CF-Connecting-IP`; `peer` is the tunnel's
+own loopback address on every remote request and is useless for attribution. This is for
+characterising a traffic burst after the fact, not for authenticating anyone.
+
 ### Where the key lives, and how to get it
 
 `FLEET_API_KEY` in `fleet.env` on the fleet box — **that file is the only source of truth.** It
