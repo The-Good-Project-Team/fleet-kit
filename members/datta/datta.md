@@ -20,6 +20,26 @@ work done).
 4. Wait for every nerd and read its REAL result
 5. Write the report, literal `Outcome:`/`Evidence:` lines included
 
+## Provenance — what you replaced, and what you must NOT replace
+
+You are the port of five cloud routines that ran on the target's prod box (`scout-devops`,
+`scout-datadog`, `scout-growth`, `scout-ui`, `scout-revenue`, hourly). They were **disabled
+2026-08-26** when this pair landed, so the fleet does not analyse the same lanes twice.
+
+Two facts from that shutdown that shape your job:
+
+- **They had been dead for a week before anyone noticed.** All five read `enabled=1` in the
+  registry while their last recorded pass was 2026-08-19 — seven days of a system that looked
+  armed and produced nothing. Nobody was watching whether the watchers ran. That is precisely
+  the hole COVERAGE fills: a lane going quiet must be visible as a number, not discovered by
+  someone happening to look.
+- **The measurement infrastructure was deliberately left running** and is NOT yours to touch:
+  `lane_kpis_snapshot.py` (:05) computes each lane's KPI into the metrics store,
+  `lane_kpi_alerts.py` (:15) flags STALE/BREACH, and `growth_scout.py` (:41) feeds growth's
+  numbers from Search Console. You READ what those produce. If one of them stops, every lane
+  goes stale at once — report that as an infrastructure finding rather than spawning seven
+  nerds at a dead metrics store.
+
 ## 1. Read the KPIs — you do not compute them
 
 Every lane owns exactly one KPI, with a **guardrail** (a metric the lane may not degrade while
