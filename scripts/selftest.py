@@ -206,6 +206,65 @@ def _fanout_packs_the_hour_by_complexity():
         raise AssertionError("unit_pct=0 silently accepted")
 
 
+def _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing():
+    """The meter gru spends against is the FLEET's per-diem hour, never a session's pacing.
+
+    Real outage, 2026-08-26: the build half of the fleet sat idle for hours reporting
+    `headroom_fraction=0.0, label=ok` -- a real signal, read live, and completely wrong.
+    0.0 came from `1 - session_used_pct/session_advised_pct` where those two fields described
+    an interactive LAPTOP session (22% used against a 7.4% advised share) that had nothing to
+    do with the fleet. The fleet's own allowance at that exact moment was healthy:
+    per_diem_hourly_pct=0.356, reserved_pct=0, week_bank_pct=1.9, verdict=ok.
+
+    A human's hot session must never read as a fleet-wide wall. This is the same
+    silence-reads-as-health failure the deploy pipeline kept producing: gru dutifully reported
+    QUIET every pass, so the outage looked like an honest empty backlog.
+
+    Second half: gru.md and fanout.py both document spending against `per_diem_hourly_pct`
+    minus `reserved_pct`. The reader never emitted either field, so gru had no source for the
+    only number its charter tells it to use.
+    """
+    import maxx_reader
+
+    live = {
+        "verdict": "ok",
+        "session_advised_pct": 7.4, "session_used_pct": 22,   # a laptop mid-burn
+        "per_diem_hourly_pct": 0.356, "reserved_pct": 0,      # the fleet's real slice
+        "week_bank_pct": 1.9,
+    }
+    fraction, label, budget = maxx_reader.get_headroom("https://example.invalid", "h", "k",
+                                                    fetcher=lambda *a, **k: live)
+    assert label == "ok", label
+    # The fields gru's charter actually spends against must reach it.
+    assert budget["per_diem_hourly_pct"] == 0.356, budget
+    assert budget["reserved_pct"] == 0, budget
+    # A laptop over its advised share must NOT zero the fleet.
+    assert fraction > 0, f"a laptop's overburn zeroed the fleet: {fraction}"
+
+    # A genuinely empty week bank still reads as no headroom -- fail open must not mean
+    # fail blind.
+    dry, _, _ = maxx_reader.get_headroom(
+        "https://example.invalid", "h", "k", fetcher=lambda *a, **k: {**live, "week_bank_pct": 0})
+    assert dry == 0.0, dry
+
+    # Unreadable meter -> None, never a budget-shaped stand-in for a failure.
+    for bad in ("maxx_unreachable", "maxx_auth_rejected"):
+        f, lbl, b = maxx_reader.get_headroom(
+            "https://example.invalid", "h", "k", fetcher=lambda *a, **k: bad)
+        assert f is None and lbl == bad and b == {}, (f, lbl, b)
+    # A verdict this module does not vouch for is not spendable.
+    f, lbl, _ = maxx_reader.get_headroom(
+        "https://example.invalid", "h", "k", fetcher=lambda *a, **k: {**live, "verdict": "over"})
+    assert f is None and lbl == "maxx_verdict_over", (f, lbl)
+
+    # The CLI prints the allowance fields, so a human (and gru) can see the real slice.
+    import json as _json, subprocess
+    out = subprocess.run([sys.executable, str(HERE / "maxx_reader.py"), "--selftest"],
+                         capture_output=True, text=True)
+    payload = _json.loads(out.stdout)
+    assert "per_diem_hourly_pct" in payload and "headroom_fraction" in payload, payload
+
+
 def _adhoc_task_adds_to_the_charter_never_replaces_it():
     """`--task` runs a member ad-hoc with one extra instruction, charter still governing.
 
@@ -940,6 +999,7 @@ if __name__ == "__main__":
     check("report contract: ok + silence is recorded", _report_contract)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
+    check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
     check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)

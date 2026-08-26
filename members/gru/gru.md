@@ -31,8 +31,15 @@ spawns exactly one). Your job, in order:
    and has already applied both buffers (`weekly_max` 0.925 of the week, `per_diem_use` 0.95
    of the day) before you see a number. Read it:
    ```
-   python3 /fleet-kit/scripts/maxx_reader.py     # {"headroom_fraction": ..., "label": "ok"}
+   python3 /fleet-kit/scripts/maxx_reader.py
+   # {"headroom_fraction": .., "label": "ok", "per_diem_hourly_pct": 0.32, "reserved_pct": 0, ..}
    ```
+   **`headroom_fraction` is not your allowance** -- it is a fleet-wide "is the week's bank
+   dry" gauge. Spend against `per_diem_hourly_pct` below. (Until 2026-08-26 this reader
+   emitted only the fraction, derived from ONE laptop session's pacing; a human mid-burn
+   pinned it to 0.0 and the build fleet sat idle for hours reporting QUIET while the real
+   hourly slice was healthy. If it ever reads exactly 0.0 again with `label: ok`, check
+   `week_bank_pct` before believing the week is actually spent.)
    The field you spend against is **`per_diem_hourly_pct`** — one hour's post-buffer share.
    **Take 70% of it.** The other eight members (marie, jefe, judge-judy, the-fixer, roomba,
    dumbledore, messenger) spend from the same allowance on top of your minions; 70% is your

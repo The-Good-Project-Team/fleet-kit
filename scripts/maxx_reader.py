@@ -24,9 +24,14 @@ Env:
   FLEET_MAXX_HANDLE   the maxx handle to read
   FLEET_MAXX_KEY      the bearer/query-string secret (never logged, never printed)
 
-If any of the three is unset, get_headroom_fraction() returns None -- "no real signal
+If any of the three is unset, get_headroom() returns None -- "no real signal
 configured," the caller's documented cue to fall back to its own fixed-ceiling default. This
 is not an error state; most fleet-kit consumers will never set these.
+
+WHAT THE FRACTION MEASURES. The per-diem/week bank, which is fleet-wide. It is deliberately
+NOT session_advised_pct/session_used_pct: those describe one interactive session, and reading
+them as a fleet signal idled the build fleet for hours on 2026-08-26 (a laptop at 22% of a
+7.4% advised share pinned this to 0.0 while per_diem_hourly_pct=0.356 and verdict=ok).
 """
 from __future__ import annotations
 
@@ -86,53 +91,74 @@ def fetch_budget(base_url: str, handle: str, key: str, timeout: float = TIMEOUT_
         return "maxx_unexpected_shape"
 
 
-def get_headroom_fraction(
+def get_headroom(
     base_url: str | None = None, handle: str | None = None, key: str | None = None,
     fetcher=fetch_budget,
-) -> tuple[float | None, str]:
-    """(fraction, label). fraction is 0.0-1.0 -- how much of the current pacing window is
-    still safe to spend -- or None when no real signal is available/trustworthy. label is
-    always a short diagnostic string, never sensitive (no secret, no raw payload).
+) -> tuple[float | None, str, dict]:
+    """(fraction, label, budget). `budget` carries the fleet's real allowance fields through
+    to the caller -- `per_diem_hourly_pct` and `reserved_pct` are what gru.md and fanout.py
+    both document spending against, and returning only a scalar left gru with no source for
+    the one number its charter tells it to use. Empty dict whenever there is no trustworthy
+    reading.
 
-    fraction is derived from session_advised_pct/session_used_pct when maxx marks them live
-    (the same "pace against your own advised share, not raw 5h%" lesson m_budget_maxx.py's
-    _tier_from_real_usage learned the hard way) -- NOT usage_week_pct/usage_five_pct directly,
-    which read fine at 100% right up until the wall.
+    `fraction` is 0.0-1.0 -- how much of the PER-DIEM bank is still safe to spend -- or None
+    when no real signal is available.
+
+    NOT derived from session_advised_pct/session_used_pct. Those describe ONE interactive
+    session's pacing, and on 2026-08-26 they idled the whole build fleet for hours: a laptop
+    at 22% of a 7.4% advised share drove this to exactly 0.0 while the fleet's own slice
+    (per_diem_hourly_pct=0.356, reserved_pct=0, verdict=ok) was entirely healthy. A human's
+    hot session is not a fleet-wide wall. The week bank is the fleet-wide quantity, so it is
+    what gates the fleet.
     """
     base_url = base_url or os.environ.get("FLEET_MAXX_URL")
     handle = handle or os.environ.get("FLEET_MAXX_HANDLE")
     key = key or os.environ.get("FLEET_MAXX_KEY")
     if not (base_url and handle and key):
-        return None, "not_configured"
+        return None, "not_configured", {}
 
     budget = fetcher(base_url, handle, key)
     if isinstance(budget, str):
-        return None, budget
+        return None, budget, {}
     if not isinstance(budget, dict):
-        return None, "maxx_unexpected_shape"
+        return None, "maxx_unexpected_shape", {}
 
     verdict = str(budget.get("verdict", "")).lower()
     if verdict not in SAFE_VERDICTS:
-        return None, f"maxx_verdict_{verdict or 'missing'}"
+        return None, f"maxx_verdict_{verdict or 'missing'}", {}
 
-    advised = budget.get("session_advised_pct")
-    used = budget.get("session_used_pct")
-    if advised is not None and used is not None and advised > 0:
-        fraction = max(0.0, 1.0 - (float(used) / float(advised)))
-        return fraction, "ok"
+    allowance = {
+        k: budget[k] for k in ("per_diem_hourly_pct", "reserved_pct", "week_bank_pct",
+                               "per_diem_usable_pct", "sustainable_pct_per_hour", "verdict")
+        if budget.get(k) is not None
+    }
 
-    # No session pacing fields -- fall back to the coarser week-bank reading rather than
-    # refusing outright (still a real, if less precise, signal).
     bank = budget.get("week_bank_pct")
-    if bank is not None:
-        return max(0.0, min(1.0, float(bank) / 100.0)), "ok_bank_only"
+    if bank is None:
+        return None, "maxx_missing_pacing_fields", allowance
+    return max(0.0, min(1.0, float(bank) / 100.0)), "ok", allowance
 
-    return None, "maxx_missing_pacing_fields"
+
+def get_headroom_fraction(
+    base_url: str | None = None, handle: str | None = None, key: str | None = None,
+    fetcher=fetch_budget,
+) -> tuple[float | None, str]:
+    """Back-compat two-tuple for callers that only want the scalar."""
+    fraction, label, _ = get_headroom(base_url, handle, key, fetcher)
+    return fraction, label
 
 
 def main() -> int:
-    fraction, label = get_headroom_fraction()
-    print(json.dumps({"headroom_fraction": fraction, "label": label}))
+    # --selftest exercises the CLI's shape without a network call.
+    if "--selftest" in sys.argv:
+        fraction, label, budget = get_headroom(
+            "https://example.invalid", "h", "k",
+            fetcher=lambda *a, **k: {"verdict": "ok", "week_bank_pct": 1.9,
+                                     "per_diem_hourly_pct": 0.356, "reserved_pct": 0},
+        )
+    else:
+        fraction, label, budget = get_headroom()
+    print(json.dumps({"headroom_fraction": fraction, "label": label, **budget}))
     return 0 if fraction is not None else 1
 
 
