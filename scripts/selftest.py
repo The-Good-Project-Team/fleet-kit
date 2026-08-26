@@ -396,6 +396,48 @@ def _deploy_cordons_then_drains_and_always_uncordons():
         "cutover trap is set before the drain runs -- it would clobber the uncordon trap"
 
 
+def _marie_writes_a_prd_and_minion_reads_it():
+    """marie is m-PM: she must make an item BUILDABLE, and minion must consume that.
+
+    Part C's Confidence criterion already diagnoses the failure -- a vague issue "wastes a
+    minion's whole pass on clarifying-question paralysis" -- and its only response was to rank
+    the item lower. Ranking a bad spec lower does not make it buildable; nobody else writes
+    one (gru chooses, minion builds), so the spec never got written and minion built from
+    whatever prose the original reporter happened to file.
+
+    Two halves, and the first is useless without the second: marie must WRITE the PRD, and
+    minion must READ it. A PRD posted where nobody looks is worse than none -- it costs a pass
+    and changes nothing.
+
+    Bounded to gru's next-build queue (unclaimed priority-high, cap 5/pass) on purpose: a PRD
+    for every open item would eat the pass that keeps the board true, and most of the backlog
+    is never built. Honest UNKNOWNs over invention, because a plausible invented requirement
+    is a bug that ships, while a named gap is a 30-second fix for a human.
+    """
+    marie = (Path(__file__).parent.parent / "members" / "marie" / "marie.md").read_text()
+    assert "## Part C4" in marie, "marie writes no PRD -- ranking a vague issue lower never fixes it"
+    for section in ("## Problem", "## Goal / Non-goals", "## Acceptance criteria"):
+        assert section in marie, f"PRD format missing {section}"
+    assert "UNKNOWN" in marie, "PRD has no honest-gap escape -- invites invented requirements"
+    assert "fleet:prd" in marie, "no label marking an item as spec'd; passes would rewrite PRDs"
+    assert "5 per pass" in marie or "Cap: 5" in marie, "PRD writing is unbounded"
+    assert "never edit the body" in marie.lower() or "never edit the body" in marie, \
+        "PRD must be a comment -- the body is the reporter's record"
+
+    minion = (Path(__file__).parent.parent / "members" / "minion" / "minion.md").read_text()
+    assert "fleet:prd" in minion, "minion never checks for a PRD -- marie would write into a void"
+    assert "--comments" in minion, "minion reads only the body, so a PRD comment is invisible to it"
+    assert "UNKNOWN" in minion, "minion is not told to leave UNKNOWNs alone rather than guess"
+
+    # The forced checklist is what a pass executes; a part missing from it is a part skipped.
+    todo = marie[marie.find("call TodoWrite"):marie.find("## Part A")]
+    assert "Part C4" in todo, "Part C4 missing from the forced checklist"
+    import re
+    m = re.search(r"exactly these (\d+) items", marie)
+    stated, listed = int(m.group(1)), len(re.findall(r"^\d+\. ", todo, re.M))
+    assert stated == listed, f"checklist says {stated} items but lists {listed}"
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -609,6 +651,7 @@ if __name__ == "__main__":
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
     check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)
+    check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
