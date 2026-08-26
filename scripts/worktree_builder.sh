@@ -202,8 +202,19 @@ if [ -n "$PR_NUM" ]; then
   if ! grep -qE 'Backlog:[[:space:]]*#[0-9]+' <<<"$BODY"; then
     printf '%s\n\nBacklog: #%s\n' "$BODY" "$ITEM_ID" | gh pr edit "$PR_NUM" --body-file - >/dev/null 2>&1
   fi
-  gh pr merge "$PR_NUM" --auto --squash >/dev/null 2>&1
-  log "item #$ITEM_ID: opened PR #$PR_NUM, auto-merge armed"
+  # NO STRATEGY FLAG. `main` is merge-queue-controlled, and an explicit --squash is an invalid
+  # combination on a queued branch: gh ERRORS ("The merge strategy for main is set by the merge
+  # queue") instead of enqueueing. Confirmed live twice -- issue #3108, and again 2026-08-26 on
+  # nonprofit-atlas#3307, which sat green and unmerged for hours with autoMergeRequest=null.
+  #
+  # And CHECK THE EXIT CODE. This call used to end in `>/dev/null 2>&1` with the "auto-merge
+  # armed" line unconditionally after it -- so a failed arm logged as a successful one and the
+  # PR simply never merged, with nothing anywhere saying why.
+  if arm_err="$(gh pr merge "$PR_NUM" --auto 2>&1 >/dev/null)"; then
+    log "item #$ITEM_ID: opened PR #$PR_NUM, auto-merge armed"
+  else
+    log "item #$ITEM_ID: opened PR #$PR_NUM, but ARMING AUTO-MERGE FAILED -- it will not merge on green: ${arm_err:-unknown error}"
+  fi
 else
   log "item #$ITEM_ID: build session ended with no PR URL found in output -- releasing claim"
 fi

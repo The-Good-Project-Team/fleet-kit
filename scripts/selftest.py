@@ -265,6 +265,50 @@ def _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing():
     assert "per_diem_hourly_pct" in payload and "headroom_fraction" in payload, payload
 
 
+def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
+    """Arming auto-merge must not pass --squash/--merge/--rebase, and must not eat the error.
+
+    `main` on nonprofit-atlas is merge-queue-controlled (a `merge_queue` ruleset, SQUASH,
+    grouping ALLGREEN). Passing an explicit strategy to `gh pr merge` on a queue-controlled
+    branch is an invalid combination: gh ERRORS instead of enqueueing --
+
+        ! The merge strategy for main is set by the merge queue
+
+    Confirmed live twice: issue #3108, and again 2026-08-26 on nonprofit-atlas#3307, which sat
+    MERGEABLE with statusCheckRollup=SUCCESS and autoMergeRequest=null for hours. minion.md
+    step 9 already documents the bare form and says CHECK THE EXIT CODE; these two callers
+    shipped the broken one anyway.
+
+    The second half is why nobody noticed: worktree_builder.sh redirected the failure to
+    /dev/null and logged "auto-merge armed" on the very next line, so the log asserted success
+    for a command that had just failed. Silence reads as health.
+    """
+    import re as _re
+    # Only a flag attached to the command itself -- prose explaining WHY --squash is wrong
+    # ("an explicit --squash errors") must not trip this. Stop at the closing backtick/quote
+    # so an explanation trailing the command is not read as part of it.
+    bad = _re.compile(r"gh pr merge(?:\s+(?:--auto|\"?\$?[A-Za-z_{}\"]*PR_NUM[\"}]*|\d+))*"
+                      r"\s+--(squash|merge|rebase)\b")
+    for rel in ("scripts/worktree_builder.sh", "members/minion/minion.fleet.json",
+                "members/minion/minion.md", "members/jefe/jefe.md", "agents/builder.md",
+                "README.md"):
+        f = ROOT / rel
+        if not f.exists():
+            continue
+        for i, line in enumerate(f.read_text().splitlines(), 1):
+            if "--auto" in line and bad.search(line):
+                raise AssertionError(
+                    f"{rel}:{i} arms auto-merge with a strategy flag -- errors under the "
+                    f"merge queue instead of enqueueing: {line.strip()[:90]}")
+
+    # The builder must not claim it armed auto-merge without checking the exit code.
+    src = (ROOT / "scripts/worktree_builder.sh").read_text()
+    arm = [l for l in src.splitlines() if "gh pr merge" in l and "--auto" in l]
+    assert arm, "worktree_builder.sh no longer arms auto-merge at all"
+    assert not any(_re.search(r">/dev/null 2>&1\s*$", l) for l in arm), \
+        "the arming call still discards its error; a failed arm would log as armed"
+
+
 def _adhoc_task_adds_to_the_charter_never_replaces_it():
     """`--task` runs a member ad-hoc with one extra instruction, charter still governing.
 
@@ -1001,6 +1045,7 @@ if __name__ == "__main__":
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
+    check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
     check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
