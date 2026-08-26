@@ -330,6 +330,31 @@ def _minion_knows_the_browser_exists():
     assert "sync_playwright" in md, "minion.md gestures at a browser without the working call"
 
 
+def _jefe_can_unstick_a_pr_that_is_merely_behind():
+    """Green + armed + BLOCKED is a THIRD stuck shape, and the only fix is updating the base.
+
+    A merge queue re-tests every entry against the CURRENT base, so a PR whose checks passed
+    against a stale base cannot enter the queue however green it looks. Nothing in this fleet
+    updated a stale branch, so such a PR stranded itself while every surface called it healthy.
+
+    Confirmed live 2026-08-26: nonprofit-atlas#3307, all checks success, autoMergeRequest
+    armed, mergeStateStatus BLOCKED, behind_by=17. jefe's charter covered "armed but stuck"
+    and "never armed at all" -- neither of which describes it, and neither remedy (a direct
+    `gh pr merge`) is even safe here, since the checks have not run against the base it would
+    land on.
+    """
+    md = (ROOT / "members/jefe/jefe.md").read_text()
+    assert "update-branch" in md, \
+        "jefe cannot unstick a PR that is merely behind its base -- no update-branch remedy"
+    assert "behind_by" in md, "jefe has no way to DIAGNOSE a behind-the-base PR"
+    # The remedy must not be "merge it by hand": this shape's checks have not run against the
+    # base it would land on, so a direct merge lands untested code.
+    idx = md.index("update-branch")
+    window = md[idx:idx + 400]
+    assert "do NOT merge directly" in window or "not merge directly" in window, \
+        "jefe's stale-base remedy must forbid a direct merge -- checks have not run on that base"
+
+
 def _adhoc_task_adds_to_the_charter_never_replaces_it():
     """`--task` runs a member ad-hoc with one extra instruction, charter still governing.
 
@@ -1067,6 +1092,7 @@ if __name__ == "__main__":
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
     check("minion knows the browser in its own image exists", _minion_knows_the_browser_exists)
+    check("jefe can unstick a PR that is merely behind its base", _jefe_can_unstick_a_pr_that_is_merely_behind)
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
     check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)
