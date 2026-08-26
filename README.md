@@ -196,6 +196,79 @@ already in use`) if the new instance binds before the kernel releases the old on
 script retries via `podman start` automatically when that happens, instead of leaving the
 container down.
 
+## Deploying: where the box is, and why it silently stops updating
+
+**The box is `dino`.** `ssh dino` — the SSH config lives in `~/Classified/dino/ssh/config` and
+goes through the cloudflared tunnel (`ProxyCommand cloudflared access ssh --hostname
+dino.luckymachines.co/ssh`), same hostname that serves the API on 8420. `lucky`, `lucky-vm` and
+`lucky-host` are *different machines* and have no fleet-kit checkout — probing them is a dead
+end, they are not this.
+
+| thing | where |
+|---|---|
+| host checkout | `/home/ubuntu/fleet-kit` (**not** `/opt/fleet-kit`) |
+| instance dir | `/home/ubuntu/fleet-kit/instances/nonprofit-atlas` |
+| container | `philanthropy` (rootless podman, `podman ps`) |
+| paths *inside* the container | `/fleet-kit/scripts/`, `/var/log/fleet-kit/` |
+| public endpoint | `https://dino.luckymachines.co` → 8420 |
+
+Deploy is **blue-green** and is the only supported path — it builds a green candidate on alt
+ports 8571/8572, health-checks it, cuts over, and keeps the previous build stopped as
+`philanthropy-retired`:
+
+```bash
+ssh dino
+cd ~/fleet-kit
+FLEET_INSTANCE_DIR=/home/ubuntu/fleet-kit/instances/nonprofit-atlas bash scripts/deploy.sh
+# roll back at any time:
+bash scripts/deploy.sh --rollback
+```
+
+### Why the box silently falls behind (confirmed live, 2026-08-26 — 19 commits behind)
+
+`auto_deploy.sh` polls `main` and deploys when it moves, so nobody watches it. It **refuses to
+act** in two states, by design, and both are silent unless you read `auto_deploy.log`:
+
+1. **Dirty working tree.** It will not pull over uncommitted local changes (a hand-patched
+   hotfix would be destroyed). Found live with two hand-patched scripts that had *already been
+   merged upstream* — so the box blocked itself on edits it no longer needed.
+2. **Checked out on a branch that isn't `main`.** Found live on a stale
+   `feat/fleet-view-transcripts-kpi-evolution`. `git pull --ff-only origin main` then fails with
+   `fatal: Not possible to fast-forward` — because the feature branch's commits were squash-merged
+   upstream, so the content matches but the SHAs never will.
+
+**Check both before assuming a merge shipped.** A merged, mutation-tested, "verified" PR is
+still not running until this says `0`:
+
+```bash
+ssh dino 'cd ~/fleet-kit && git fetch -q origin && git branch --show-current && \
+  git rev-list --count HEAD..origin/main && git status --porcelain'
+# want: main / 0 / (no output at all)
+```
+
+`auto_deploy.sh` tests bare `git status --porcelain`, which **includes untracked files** — so a
+stray `fleet.env.bak.*` left behind by an editor is enough to block every deploy tick
+indefinitely, with the only trace a line in `auto_deploy.log`. Clean those up; don't leave them
+sitting in the checkout.
+
+Recovering a stuck box: confirm the local edits are already upstream
+(`git diff --quiet origin/main -- <file>` → identical, safe to discard), back the diff up
+anyway (`git diff > ~/fleet-kit-dirty-backup-$(date -u +%Y%m%d-%H%M%S).patch`), `git checkout --`
+the files, `git checkout main`, pull, then run `deploy.sh`.
+
+### Two gotchas that will waste your time
+
+- **`selftest.py`'s `fleet.env.example present, fleet.env untracked` check FAILS on any real
+  box, and that failure is expected.** It asserts `fleet.env` does not *exist*, but a live box
+  must have one to run at all — the check conflates "untracked" with "absent". `12/13` with only
+  that red is a healthy box. Verify the file is genuinely untracked
+  (`git ls-files --error-unmatch fleet.env` → error = good) rather than "fixing" the tree.
+- **Schema changes need a migration, not just a new column in `SCHEMA`.** `CREATE TABLE IF NOT
+  EXISTS` is a no-op against the existing `fleet.db`, so a column added to `SCHEMA` alone reaches
+  a fresh clone and *nowhere else*, while every insert on the live box fails on column count. Add
+  it to `_ADD_COLUMNS` in `fleet_db.py` (expand-contract `ADD COLUMN`) so old rows read NULL and a
+  rollback still works.
+
 ## Driving the fleet from outside the box
 
 `fleet_view_server.py` serves a live dashboard and a small control API. Read routes (`GET`) are
