@@ -309,6 +309,27 @@ def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
         "the arming call still discards its error; a failed arm would log as armed"
 
 
+def _minion_knows_the_browser_exists():
+    """A capability the image ships must appear in the charter of whoever needs it.
+
+    fleet-kit#115, filed BY the fleet against itself: #107 put playwright + headless chromium
+    in the image, but members/minion/minion.md never mentioned it. Fifteen minion
+    self-critiques in 24h named "no browser tooling in this sandbox" as the reason an item's
+    OWN acceptance criteria went unmet -- two of them AFTER the browser had shipped. Real PRs
+    (e.g. nonprofit-atlas#3231) argued CSS-token consistency where the PRD asked for a
+    screenshot.
+
+    A tool nobody is told about is indistinguishable from a tool that was never built.
+    """
+    md = (ROOT / "members/minion/minion.md").read_text()
+    assert "playwright" in md.lower(), \
+        "minion.md never mentions the browser #107 shipped -- see fleet-kit#115"
+    # The incantation must be runnable, not merely alluded to: headless chromium needs
+    # --no-sandbox as root in a container, and nerd.md's proven snippet carries it.
+    assert "--no-sandbox" in md, "minion.md's browser snippet omits --no-sandbox; it runs as root"
+    assert "sync_playwright" in md, "minion.md gestures at a browser without the working call"
+
+
 def _adhoc_task_adds_to_the_charter_never_replaces_it():
     """`--task` runs a member ad-hoc with one extra instruction, charter still governing.
 
@@ -1045,6 +1066,7 @@ if __name__ == "__main__":
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
+    check("minion knows the browser in its own image exists", _minion_knows_the_browser_exists)
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
     check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)
