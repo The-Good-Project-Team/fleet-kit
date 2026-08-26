@@ -148,50 +148,88 @@ def _rsi_lines_survive_to_the_next_pass():
             == "capturing these lines closes the loop"
 
 
-def _fanout_n_is_arithmetic_not_judgment():
-    """N scales with real budget, and the ladder is not secretly capped.
+def _fanout_packs_the_hour_by_complexity():
+    """gru fills an hour's allowance with WORK; N is an output of that, never an input.
 
-    The job: give the fleet more build throughput when there is budget for it. 69 real fanouts
-    of a model deciding N in prose produced N wandering 1-4 with no relationship to headroom,
-    so the failure this guards is a REGRESSION TO A CLAMP -- someone reintroducing a quiet
-    ceiling and starving throughput again, which is exactly what the deleted
-    "don't spawn more minions than there are live accounts" rule did.
+    Reif, 2026-08-26: "its more about choosing jobs to run (that max out the availability)
+    than it is about choosing minions to spawn." The failure this guards is a regression to
+    counting minions as if every item were the same size -- two complexity-3s may fit an hour
+    that one complexity-9 would blow.
+
+    Everything here is PERCENT OF WEEK. The fleet runs on a subscription, so dollars are not
+    the constraint; maxx already applies both buffers (weekly_max, per_diem_use) before a
+    caller sees per_diem_hourly_pct.
     """
     import fanout
-    # More budget must mean more minions, monotonically, well past any old cap.
-    ns = [fanout.n_from_headroom(b, 1.36, headroom_fraction=0.5)
-          for b in (2, 10, 20, 40, 80, 200)]
-    assert ns == sorted(ns), ns
-    assert ns[0] == 1, ns
-    assert ns[-1] > 20, f"ladder is capped somewhere: {ns}"
-    # Fibonacci rungs only -- N moves in decisions, not noise.
-    rungs = {1, 2, 3, 5, 8, 13, 21, 34, 55, 89}
-    assert set(ns) <= rungs, ns
+    # The ladder is exponential and anchored at 5 -- must match marie.md's Part C2 table.
+    assert fanout.complexity_multiplier(5) == 1.0
+    assert fanout.complexity_multiplier(1) < fanout.complexity_multiplier(5) < fanout.complexity_multiplier(10)
+    span = fanout.complexity_multiplier(10) / fanout.complexity_multiplier(1)
+    assert 10 < span < 25, f"ladder span {span:.1f}x is not the calibrated ~15x"
+    # An unlabelled item is median, never free -- otherwise it packs infinitely many.
+    assert fanout.complexity_multiplier(None) == fanout.complexity_multiplier(5)
 
-    # The backlog binds when it is smaller than what budget affords, and never pads past it.
-    rich = fanout.explain(200.0, 1.36, claimable=2)
-    assert rich["n"] == 2 and rich["binding"] == "claimable_items", rich
-    assert fanout.explain(200.0, 1.36, claimable=0)["n"] == 0, "spawned with nothing to build"
+    items = [{"number": 1, "complexity": 9}, {"number": 2, "complexity": 1},
+             {"number": 3, "complexity": 2}]
+    # Priority order is marie's and is never reordered by size: a too-big item is SKIPPED and
+    # the cheaper items behind it still land.
+    r = fanout.pack(items, allowance_pct=0.10, unit_pct=0.05)
+    assert [c["number"] for c in r["chosen"]] == [2, 3], r["chosen"]
+    assert [c["number"] for c in r["skipped"]] == [1], r["skipped"]
+    assert not r["over_allowance"] and r["binding"] == "allowance"
+    assert r["est_spend_pct"] <= r["allowance_pct"]
 
-    # Broke, but still tries one item -- a low meter must never stop the fleet dead.
-    assert fanout.n_from_headroom(0.0, 1.36) == 1
-    # An operator ceiling is honored only when explicitly asked for; absent by default.
-    assert fanout.n_from_headroom(200.0, 1.36, ceiling=8) == 8
-    assert fanout.n_from_headroom(200.0, 1.36) > 8, "a default cap crept back in"
+    # Size drives packing: a bigger allowance takes the expensive item too.
+    assert fanout.pack(items, 1.0, 0.05)["n"] == 3
 
-    # Caller misconfiguration is loud, never a silent 0 or 1 that looks like a budget state.
-    for bad in (0, -1):
-        try:
-            fanout.n_from_headroom(20.0, bad)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f"spend_per_build={bad} silently accepted")
+    # Nothing claimable is not an error, and never spawns.
+    assert fanout.pack([], 0.4, 0.05)["binding"] == "nothing_claimable"
 
-    # The derivation is exposed -- this is what makes N inspectable rather than opaque, and
-    # is the whole answer to why the original fanout.py was deleted.
-    for k in ("n", "binding", "planned_usd", "spend_per_build", "budget_affords"):
-        assert k in rich, k
+    # A floor may exceed the allowance, but must SAY so -- silent overspend is the one
+    # outcome this must never produce.
+    tight = fanout.pack(items, 0.001, 0.05, min_items=1)
+    assert tight["n"] == 1 and tight["over_allowance"] and tight["forced_over_floor"] == 1
+
+    # The unit cost is DERIVED from real passes, normalised by each pass's own complexity so
+    # a week of easy items doesn't make everything look cheap.
+    unit = fanout.calibrate([{"pct": 0.05, "complexity": 5},
+                             {"pct": 0.05 * fanout.complexity_multiplier(8), "complexity": 8}])
+    assert abs(unit - 0.05) < 1e-6, unit
+    # Refuses to invent one when there is nothing usable.
+    assert fanout.calibrate([]) is None
+    assert fanout.calibrate([{"pct": 0, "complexity": 5}]) is None
+    try:
+        fanout.pack(items, 0.4, 0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unit_pct=0 silently accepted")
+
+
+def _no_member_ships_a_cap():
+    """Caps are off fleet-wide: control by selection and charter quality, not truncation.
+
+    Reif, 2026-08-26: "all caps come off -- we must control via intelligence vs by force."
+    Measured on 142 real minion runs, 43 hit the 60-turn wall vs 8 near the budget cap, and
+    every `stop_reason: tool_use` row sat at ~61 turns -- the CLI cutting a pass mid-tool-call
+    with budget to spare, converting expensive-but-finishable work into paid-for nothing.
+
+    The regression this guards is a DEFAULT creeping back: `run_member.sh` used to default to
+    60 turns / $5 when a spec omitted them, so deleting the keys alone would have changed
+    nothing. An absent cap must reach the CLI as NO FLAG.
+    """
+    import member_spec
+    for s in member_spec.load_all():
+        assert "max_turns" not in s["llm"], f"{s['name']} ships a turn cap"
+        assert "max_budget_usd" not in s["mandate"]["limits"], f"{s['name']} ships a budget cap"
+        # timeout_s stays -- wall-clock is the one backstop a runaway pass still needs.
+        assert s["mandate"]["limits"].get("timeout_s"), f"{s['name']} lost its timeout backstop"
+
+    # An omitted cap must not be resurrected as a default by the runner.
+    src = (Path(__file__).parent / "run_member.sh").read_text()
+    assert "get('max_turns') or ''" in src, "run_member.sh reintroduced a max_turns default"
+    assert "get('max_budget_usd') or ''" in src, "run_member.sh reintroduced a budget default"
+    assert '[ -n "$MAX_TURNS" ] && CAP_ARGS+=' in src, "empty cap no longer omits the flag"
 
 
 def _overrides_are_narrow():
@@ -203,7 +241,10 @@ def _overrides_are_narrow():
                                why="proving the dial works", store=store)
         eff, applied = overrides.apply(spec, store=store)
         assert eff["llm"]["max_turns"] == 7 and applied
-        assert spec["llm"]["max_turns"] != 7, "the git spec must not be mutated"
+        # The git spec must not be mutated. Specs ship UNCAPPED as of 2026-08-26 (no max_turns
+        # key at all), so the property to assert is "the source is untouched" -- absent stays
+        # absent -- not "it holds some other number."
+        assert spec["llm"].get("max_turns") != 7, "the git spec must not be mutated"
         # Authority is never live-tunable.
         try:
             overrides.set_override(spec["name"], "tools", ["x"], by="selftest",
@@ -371,7 +412,8 @@ if __name__ == "__main__":
     check("member_spec's OWN default MEMBERS_DIR resolves (not just an explicit path)", _members_dir_default_is_right)
     check("report contract: ok + silence is recorded", _report_contract)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
-    check("minion count N scales with budget and is never secretly capped", _fanout_n_is_arithmetic_not_judgment)
+    check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
+    check("no member ships a turn or budget cap", _no_member_ships_a_cap)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)

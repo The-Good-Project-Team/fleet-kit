@@ -1,6 +1,6 @@
 {
   "name": "jefe",
-  "emoji": "👑",
+  "emoji": "\ud83d\udc51",
   "kind": "llm",
   "lane": "orchestrate",
   "mandate": {
@@ -15,7 +15,9 @@
       "file any broken layer as a backlog issue + report it -- never stall the whole pass on one broken layer",
       "report which layer was acted at and the one thing (if any) a human must decide"
     ],
-    "limits": {"max_turns": 60, "timeout_s": 1800, "max_budget_usd": 8},
+    "limits": {
+      "timeout_s": 1800
+    },
     "escalation": "the priority ladder itself doesn't resolve a real ambiguity (which of two broken layers to act on, whether a metric drop is signal or noise) -- file it as a backlog issue with your reasoning, then continue down the ladder for the rest of the pass. Never stall the whole pass on one undecidable call; never touch the merge-gate machinery that judges you, that decision is never self-approved."
   },
   "schedule": {
@@ -25,12 +27,22 @@
   "enabled": true,
   "llm": {
     "model": "sonnet",
-    "max_turns": 60,
     "prompt_file": "jefe.md",
     "worktree": false,
     "tools": {
-      "allow": ["Read", "Grep", "Glob", "Edit", "Write", "Bash", "WebFetch", "TodoWrite"],
-      "deny": ["Bash(git push --force:*)"]
+      "allow": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Edit",
+        "Write",
+        "Bash",
+        "WebFetch",
+        "TodoWrite"
+      ],
+      "deny": [
+        "Bash(git push --force:*)"
+      ]
     }
   },
   "report": {

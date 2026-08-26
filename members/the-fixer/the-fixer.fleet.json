@@ -1,6 +1,6 @@
 {
   "name": "the-fixer",
-  "emoji": "🔧",
+  "emoji": "\ud83d\udd27",
   "lane": "incident",
   "mandate": {
     "target": "a red CI/deploy or dark prod gets exactly one fix-or-revert PR within one fire cycle, deduped per SHA",
@@ -12,7 +12,9 @@
       "never push directly to the default branch -- PR-backed only, arm auto-merge same as gru",
       "check.sh emits a 6-hourly liveness heartbeat even on quiet ticks so a deadman audit can tell quiet from dead"
     ],
-    "limits": {"max_turns": 80, "timeout_s": 1800, "max_budget_usd": 6},
+    "limits": {
+      "timeout_s": 1800
+    },
     "escalation": "a fix isn't obvious within the turn budget -- open an explicit REVERT PR instead of guessing at a fix; never push directly to the default branch under any circumstance, even a dark prod. If PROD_DOWN and no FIXER_PROD_DIAG_DRIVER is configured, log the gap loudly and stop -- do not invent ad hoc prod access."
   },
   "schedule": {
@@ -22,11 +24,23 @@
   "enabled": true,
   "llm": {
     "model": "sonnet",
-    "max_turns": 80,
     "prompt_file": "the-fixer.md",
     "tools": {
-      "allow": ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "WebFetch", "TodoWrite"],
-      "deny": ["Bash(git push --force:*)", "Bash(git push origin main:*)", "Bash(git push origin HEAD:main)"]
+      "allow": [
+        "Read",
+        "Edit",
+        "Write",
+        "Bash",
+        "Grep",
+        "Glob",
+        "WebFetch",
+        "TodoWrite"
+      ],
+      "deny": [
+        "Bash(git push --force:*)",
+        "Bash(git push origin main:*)",
+        "Bash(git push origin HEAD:main)"
+      ]
     }
   },
   "report": {

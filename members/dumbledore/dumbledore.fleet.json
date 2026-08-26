@@ -1,6 +1,6 @@
 {
   "name": "dumbledore",
-  "emoji": "🧙🏼‍♂️",
+  "emoji": "\ud83e\uddd9\ud83c\udffc\u200d\u2642\ufe0f",
   "kind": "llm",
   "lane": "governance",
   "mandate": {
@@ -16,7 +16,9 @@
       "file the epic's first tranche (3-5 items) as backlog issues, never more than 5 unmerged epic items live at once",
       "cut as much prose from charters/prompts as you add -- a charter that only grows costs more than it saves"
     ],
-    "limits": {"max_turns": 100, "timeout_s": 3600, "max_budget_usd": 15},
+    "limits": {
+      "timeout_s": 3600
+    },
     "escalation": "a defect's real cause spans authority you don't have (needs a genuine human product decision, or prod access with no FLEET_PROD_DIAG_DRIVER configured) -- file it plainly as the ONE thing a human must decide in your report, then continue the rest of the pass. Never touch the merge-gate machinery that judges every other member -- a change to what judges the fleet is never self-approved, even by you."
   },
   "schedule": {
@@ -26,11 +28,22 @@
   "enabled": true,
   "llm": {
     "model": "sonnet",
-    "max_turns": 100,
     "prompt_file": "dumbledore.md",
     "tools": {
-      "allow": ["Read", "Grep", "Glob", "Edit", "Write", "Bash", "WebFetch", "TodoWrite"],
-      "deny": ["Bash(gh pr merge:*)", "Bash(git push --force:*)"]
+      "allow": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Edit",
+        "Write",
+        "Bash",
+        "WebFetch",
+        "TodoWrite"
+      ],
+      "deny": [
+        "Bash(gh pr merge:*)",
+        "Bash(git push --force:*)"
+      ]
     }
   },
   "report": {

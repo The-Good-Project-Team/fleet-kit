@@ -1,6 +1,6 @@
 {
   "name": "gru",
-  "emoji": "🪖",
+  "emoji": "\ud83e\ude96",
   "kind": "llm",
   "lane": "build",
   "mandate": {
@@ -16,7 +16,9 @@
       "never build, edit, or write code yourself -- if you want to change a file, that means you should have handed the item to a minion instead",
       "never assign a fleet:priority-* label yourself -- flag a miss to marie in a comment, don't correct it"
     ],
-    "limits": {"max_turns": 60, "timeout_s": 3600, "max_budget_usd": 8},
+    "limits": {
+      "timeout_s": 3600
+    },
     "escalation": "a minion never reports back (crashed, hung past its own timeout) -- name it explicitly as a failure in your report, do not silently omit it or guess at its result. Runway reads as zero or unconfigured -- fall back to a small fixed N (1-2) rather than refusing to run at all; an unreadable meter narrows ambition, it never becomes a hard stop."
   },
   "schedule": {
@@ -26,11 +28,19 @@
   "enabled": true,
   "llm": {
     "model": "sonnet",
-    "max_turns": 60,
     "prompt_file": "gru.md",
     "tools": {
-      "allow": ["Read", "Bash", "Grep", "Glob", "TodoWrite"],
-      "deny": ["Bash(git stash:*)", "Bash(git push --force:*)"]
+      "allow": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "TodoWrite"
+      ],
+      "deny": [
+        "Bash(git stash:*)",
+        "Bash(git push --force:*)"
+      ]
     }
   },
   "report": {

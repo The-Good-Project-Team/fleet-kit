@@ -67,7 +67,16 @@ _PLACEHOLDER_RE = re.compile(r"\{\{[A-Z_]+\}\}")
 # Every member's behavior is a prompt run through claude -p. Tools (including a member's own
 # helper scripts, reached via Bash) are how it acts -- never a substitute for having a goal.
 _REQUIRED = ("name", "emoji", "mandate", "schedule", "timeout_s", "enabled", "report", "llm")
-_LLM_REQUIRED = ("model", "max_turns", "prompt_file", "tools")
+# max_turns is deliberately NOT required: an absent cap means UNCAPPED, and that is the fleet's
+# default posture as of 2026-08-26. Measured on 142 real minion runs, 43 hit the 60-turn wall
+# while only 8 came near the budget cap -- every `stop_reason: tool_use` row sat at ~61 turns,
+# the CLI cutting a pass mid-tool-call with budget to spare. A truncated pass still spends
+# everything it spent before the cut and lands `reported_nothing`, so the cap converted
+# expensive-but-finishable work into paid-for nothing. Control moved to SELECTION (gru sizes
+# each hour's work to what maxx says the hour affords) and to CHARTER QUALITY (jefe prunes a
+# rambling prompt; dumbledore manages jefe). Reif, 2026-08-26: "we must control via
+# intelligence vs by force." A spec MAY still set max_turns; if it does, it must be valid.
+_LLM_REQUIRED = ("model", "prompt_file", "tools")
 
 
 class SpecError(ValueError):
@@ -172,8 +181,9 @@ def validate(spec: dict, *, filename: str = "<dict>") -> dict:
     _require(isinstance(tools, dict) and isinstance(tools.get("allow"), list) and tools["allow"],
              f"{where}llm.tools.allow must be a non-empty list")
     _require(isinstance(tools.get("deny", []), list), f"{where}llm.tools.deny must be a list")
-    _require(isinstance(llm["max_turns"], int) and llm["max_turns"] > 0,
-             f"{where}llm.max_turns must be a positive int")
+    if "max_turns" in llm:
+        _require(isinstance(llm["max_turns"], int) and llm["max_turns"] > 0,
+                 f"{where}llm.max_turns must be a positive int when set (omit it for uncapped)")
 
     report = spec["report"]
     _require(isinstance(report, dict), f"{where}report must be an object")
