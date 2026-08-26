@@ -18,10 +18,12 @@
 # own helper script (roomba.py, the-fixer.sh) as one Bash-reachable tool among its allowlist,
 # same as any other tool, rather than the script BEING the member's whole behavior.
 #
-# Usage: run_member.sh <member-name> [--dry-run] [--item <issue-number>]
+# Usage: run_member.sh <member-name> [--dry-run] [--item <issue-number>] [--task "<instruction>"]
 #   e.g.  run_member.sh dumbledore
 #         run_member.sh roomba --dry-run     # print the resolved command, run nothing
 #         run_member.sh minion --item 3072   # gru spawns minion this way -- see gru.md
+#         run_member.sh marie --task "rescore complexity on everything opened today"
+#                                            # ad-hoc: the member's full charter PLUS one instruction
 set -uo pipefail
 
 # set -a/+a around the source: a plain `.` only sets these as local shell variables, which
@@ -52,14 +54,16 @@ REPO="${FLEET_REPO:?set FLEET_REPO in fleet.env}"
 LOG_DIR="${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}"
 mkdir -p "$LOG_DIR"
 
-MEMBER="${1:?usage: run_member.sh <member-name> [--dry-run] [--item <issue-number>]}"
+MEMBER="${1:?usage: run_member.sh <member-name> [--dry-run] [--item <issue-number>] [--task \"<instruction>\"]}"
 shift || true
 DRY_RUN=0
 ITEM=""
+TASK=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
     --item) ITEM="${2:?--item needs an issue number}"; shift 2 ;;
+    --task) TASK="${2:?--task needs an instruction}"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -115,7 +119,11 @@ if [ "$ENABLED" != "True" ] && [ "${FLEET_RUN_NOW:-0}" != "1" ]; then
   exit 0
 fi
 
-RUN_ID="${MEMBER}${ITEM:+-item$ITEM}-$$-$(date +%s)"
+# `-adhoc` in the run_id marks an operator-directed pass. It matters for CALIBRATION: gru
+# derives what a normal pass costs from real run records, and a one-off "go rescore everything"
+# is not a normal pass -- averaging it in would skew every future estimate. Filter these out
+# when calibrating (`run_id NOT LIKE '%-adhoc-%'`).
+RUN_ID="${MEMBER}${ITEM:+-item$ITEM}${TASK:+-adhoc}-$$-$(date +%s)"
 
 # A member MAY declare its own runner (e.g. judge-judy's judge-judy.sh, which reviews a
 # diff as untrusted TEXT with zero tools -- a shape the generic claude -p path below can't
@@ -251,6 +259,26 @@ fi
 # even though every concurrently-spawned minion runs the exact same charter file.
 if [ -n "$ITEM" ]; then
   PROMPT="Your assigned issue number for this run is #$ITEM. Do not work any other issue.
+
+$PROMPT"
+fi
+
+# --task is the same mechanism, generalised: run any member ad-hoc with one extra instruction
+# on top of its normal charter. `run_member.sh marie --task "rescore everything under 3 days
+# old"` gives you marie, with all of marie's judgment and constraints, pointed at one thing.
+#
+# It ADDS to the charter, never replaces it -- a member's mandate, checklist and escalation
+# rules still apply, so an ad-hoc run cannot be used to talk a member out of its own bounds.
+# Placed after --item so a run can carry both, and BEFORE the charter for the same reason
+# --item is: the first thing read frames everything after it.
+if [ -n "$TASK" ]; then
+  PROMPT="THIS RUN HAS AN ADDITIONAL INSTRUCTION FROM THE OPERATOR:
+
+$TASK
+
+Do this IN ADDITION TO your charter below, which still governs -- its mandate, checklist,
+limits and escalation rules all still apply and this instruction never overrides them. If the
+instruction conflicts with your charter, say so plainly in your report and follow the charter.
 
 $PROMPT"
 fi
