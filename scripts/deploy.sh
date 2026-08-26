@@ -91,6 +91,15 @@ run_args() {
         mkdir -p "$FLEET_CREDS_DIR/.claude-$acct"
         account_mounts+=(-v "$FLEET_CREDS_DIR/.claude-$acct:/root/.claude-$acct")
     done
+    # Analysis credentials (datta/nerd): a read-only mount of the directory holding the
+    # service-account JSON that GSC/GA4 need. Optional and skipped when unset, so an instance
+    # that does not analyse those lanes is unaffected -- but WITHOUT it a growth or datadog
+    # nerd cannot measure its own KPI and files "no credential" forever. :ro because a pass
+    # only ever reads these; nothing in the fleet should be able to rewrite a key.
+    local analytics_mounts=()
+    if [ -n "${FLEET_ANALYTICS_CREDS_DIR:-}" ] && [ -d "$FLEET_ANALYTICS_CREDS_DIR" ]; then
+        analytics_mounts+=(-v "$FLEET_ANALYTICS_CREDS_DIR:/fleet-kit/.analytics:ro")
+    fi
     echo -d --name "$name" \
         -e FLEET_REPO_URL="$FLEET_REPO_URL" \
         -e FLEET_VIEW_PORT="$view_port" \
@@ -103,6 +112,7 @@ run_args() {
         -v "$INSTANCE_DIR/fleet.env:/fleet-kit/fleet.env" \
         -v "$INSTANCE_DIR/webhook_secret:/fleet-kit/.webhook_secret" \
         "${account_mounts[@]}" \
+        "${analytics_mounts[@]}" \
         -p "$view_port:$view_port" -p "$webhook_port:$webhook_port" \
         "$IMAGE" cron-foreground
 }
