@@ -148,6 +148,52 @@ def _rsi_lines_survive_to_the_next_pass():
             == "capturing these lines closes the loop"
 
 
+def _fanout_n_is_arithmetic_not_judgment():
+    """N scales with real budget, and the ladder is not secretly capped.
+
+    The job: give the fleet more build throughput when there is budget for it. 69 real fanouts
+    of a model deciding N in prose produced N wandering 1-4 with no relationship to headroom,
+    so the failure this guards is a REGRESSION TO A CLAMP -- someone reintroducing a quiet
+    ceiling and starving throughput again, which is exactly what the deleted
+    "don't spawn more minions than there are live accounts" rule did.
+    """
+    import fanout
+    # More budget must mean more minions, monotonically, well past any old cap.
+    ns = [fanout.n_from_headroom(b, 1.36, headroom_fraction=0.5)
+          for b in (2, 10, 20, 40, 80, 200)]
+    assert ns == sorted(ns), ns
+    assert ns[0] == 1, ns
+    assert ns[-1] > 20, f"ladder is capped somewhere: {ns}"
+    # Fibonacci rungs only -- N moves in decisions, not noise.
+    rungs = {1, 2, 3, 5, 8, 13, 21, 34, 55, 89}
+    assert set(ns) <= rungs, ns
+
+    # The backlog binds when it is smaller than what budget affords, and never pads past it.
+    rich = fanout.explain(200.0, 1.36, claimable=2)
+    assert rich["n"] == 2 and rich["binding"] == "claimable_items", rich
+    assert fanout.explain(200.0, 1.36, claimable=0)["n"] == 0, "spawned with nothing to build"
+
+    # Broke, but still tries one item -- a low meter must never stop the fleet dead.
+    assert fanout.n_from_headroom(0.0, 1.36) == 1
+    # An operator ceiling is honored only when explicitly asked for; absent by default.
+    assert fanout.n_from_headroom(200.0, 1.36, ceiling=8) == 8
+    assert fanout.n_from_headroom(200.0, 1.36) > 8, "a default cap crept back in"
+
+    # Caller misconfiguration is loud, never a silent 0 or 1 that looks like a budget state.
+    for bad in (0, -1):
+        try:
+            fanout.n_from_headroom(20.0, bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"spend_per_build={bad} silently accepted")
+
+    # The derivation is exposed -- this is what makes N inspectable rather than opaque, and
+    # is the whole answer to why the original fanout.py was deleted.
+    for k in ("n", "binding", "planned_usd", "spend_per_build", "budget_affords"):
+        assert k in rich, k
+
+
 def _overrides_are_narrow():
     import overrides
     with tempfile.TemporaryDirectory() as d:
@@ -325,6 +371,7 @@ if __name__ == "__main__":
     check("member_spec's OWN default MEMBERS_DIR resolves (not just an explicit path)", _members_dir_default_is_right)
     check("report contract: ok + silence is recorded", _report_contract)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
+    check("minion count N scales with budget and is never secretly capped", _fanout_n_is_arithmetic_not_judgment)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)

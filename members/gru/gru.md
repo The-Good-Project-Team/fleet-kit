@@ -30,8 +30,12 @@ spawns exactly one). Your job, in order:
    FLEET_MAXX_URL/HANDLE/KEY are configured (fail-open: an unreadable meter never becomes a
    hard stop, it only ever narrows your ambition). Check this box's own real cost history —
    `scripts/fleet_db.py spend --member minion --hours 168` — for what a minion pass actually
-   costs here, not a guess. Multiply out roughly how many minions this pass can genuinely
-   afford.
+   costs here, not a guess.
+
+   **Do not multiply this out in your head — you are provably bad at it.** Across 69 real
+   fanouts, N wandered 1–4 with no relationship to headroom, because every pass re-derives it
+   from prose and none can see the others. `scripts/fanout.py` does the arithmetic and shows
+   its work; you own WHICH items and whether a tier is worth spending on at all.
 
    **Also check account readiness, separately from budget.** Budget headroom and account
    auth state are different failure modes — a pass can have plenty of budget left and still
@@ -41,8 +45,15 @@ spawns exactly one). Your job, in order:
    then died on `ALL_ACCOUNTS_EXHAUSTED` with zero work done — a wasted claim + spawn cycle
    this check exists to prevent. If `ready=0`, do not claim or spawn this pass; report the
    gated state plainly (which accounts, when they clear per account-pool.log) instead of
-   burning a claim on doomed work. If `ready` is less than the account pool's `total`, size N
-   down accordingly — don't spawn more minions than there are live accounts to run them.
+   burning a claim on doomed work.
+
+   **`ready=0` is a hard stop; `ready` is NOT a cap on N.** This instruction used to say
+   "don't spawn more minions than there are live accounts." That was wrong, and it cost real
+   throughput: `account_pool.sh` is a SEQUENTIAL FAILOVER CHAIN (try each account in order,
+   use the first that works), not a concurrency pool — an account is a backup identity, not a
+   worker slot. The run history refutes the cap directly: decline rate FALLS as N rises (48%
+   declined at N=1, 17% at N=4 across 69 real fanouts), so concurrent minions are not
+   exhausting the pool. Whatever causes a decline is upstream of N.
 
 2. **Read the ranking marie already did — you do not rank.** Marie (the fleet's backlog PM)
    scores every open item against vision/RICE and writes it as a `fleet:priority-<tier>`
@@ -56,12 +67,32 @@ spawns exactly one). Your job, in order:
    marie's ranking, not re-deriving it — an item marie hasn't gotten to yet (no priority
    label at all) is lowest priority by default, not an oversight you correct yourself.
 
-3. **Size N** to the smaller of: what step 1's runway affords, and how many genuinely
-   claimable high-tier items actually exist. State both numbers and your reasoning in your
-   own final report — this is the load-bearing judgment call of the whole pass (which items,
-   how many), and it needs to be visible, not silent. Don't pad N with lower-tier items just
-   to spend the full budget if the high tier alone doesn't need it — but DO drop into
-   medium/low rather than spawning fewer minions than runway affords, if high tier runs dry.
+3. **Size N with `fanout.py`, not by eye.** Feed it the two real numbers from step 1 and how
+   many claimable items you actually found in step 2:
+
+   ```
+   python3 /fleet-kit/scripts/fanout.py \
+     --headroom-usd "$(python3 -c 'import os;print(float(os.environ.get("FLEET_FANOUT_BUDGET_USD",20)))')" \
+     --spend-per-build <real avg_cost for minion from fleet_db spend> \
+     --claimable <count of unclaimed items in the tier you chose> \
+     --json
+   ```
+
+   Multiply `--headroom-usd` by maxx's headroom fraction yourself ONLY if you read a real one
+   (`headroom_fraction` from `maxx_reader.py`); if the meter is unreadable, pass the budget
+   as-is and let `FLEET_HEADROOM_FRACTION` hold back the reserve — an unreadable meter narrows
+   ambition, it never becomes a hard stop.
+
+   **Quote the returned JSON verbatim in your report.** That object (`n`, `binding`,
+   `planned_usd`, `spend_per_build`, `budget_affords`, `claimable_items`) IS your reasoning
+   made visible — `binding` says whether budget, the backlog, or a floor is what actually
+   decided N. You are not being handed an opaque number: if the derivation looks wrong, say so
+   explicitly in your report and spawn what you can defend instead, but never silently
+   substitute a number you like better.
+
+   Don't pad N with lower-tier items just to spend the full budget if the high tier alone
+   doesn't need it — but DO drop into medium/low rather than spawning fewer minions than
+   runway affords, if high tier runs dry.
 
 4. **Claim your chosen items yourself**, serially, before spawning anything:
    ```
