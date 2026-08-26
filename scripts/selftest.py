@@ -310,6 +310,20 @@ def _one_deploy_at_a_time_and_a_countable_drain():
     assert "exec 9>" in auto, "flock needs a held fd or the lock is released immediately"
     assert "flock -n 9" in auto, "lock must be non-blocking -- a queued deploy is a slow duplicate"
 
+    # The flock fd MUST NOT reach `podman run`. Its helpers (conmon, slirp4netns) live as long
+    # as the container, so an inherited fd is held for hours -- measured 2026-08-26: conmon
+    # held fd 9 with an elapsed time matching the container's StartedAt, every tick hit the
+    # lock-taken branch, and deploys were silently dead for ~2 hours. Reproduced in isolation:
+    # a child spawned without `9>&-` keeps the lock after its parent exits; with it, the lock
+    # frees immediately.
+    dep2 = (Path(__file__).parent / "deploy.sh").read_text()
+    for line in dep2.splitlines():
+        if line.strip().startswith("podman run "):
+            assert "9>&-" in line, \
+                "podman run inherits the deploy lock fd -- the container will hold it forever"
+    assert "STALE LOCK" in auto, \
+        "a wedged lock exits 0 through the quiet path; without an alarm it is invisible"
+
     dep = (Path(__file__).parent / "deploy.sh").read_text()
     i = dep.find("inflight=\"$(podman exec")
     assert i != -1, "drain no longer counts in-flight passes"

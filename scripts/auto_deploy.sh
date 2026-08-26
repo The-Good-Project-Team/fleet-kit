@@ -54,6 +54,19 @@ if command -v flock >/dev/null 2>&1; then
     if ! flock -n 9; then
         # Quiet by default: with a 30-minute drain this is the EXPECTED state for five ticks
         # out of six, and logging each one would bury the real deploy lines in noise.
+        #
+        # BUT silence is exactly what hid the worst bug this lock has caused. On 2026-08-26 the
+        # fd leaked into `podman run`, whose helpers (conmon, slirp4netns) live as long as the
+        # CONTAINER -- so the running container held the lock, every tick took this branch, and
+        # the deploy pipeline was DEAD for ~2 hours with nothing in the log. deploy.sh now
+        # closes the fd (`9>&-`), and this alarm is the backstop: a lock held longer than any
+        # legitimate deploy is STALE, and that must be loud even though a held lock normally
+        # is not. Same lesson as #93/#102 -- the failure that says nothing is the expensive one.
+        held_by="$(lsof -t "$LOCKFILE" 2>/dev/null | head -1)"
+        held_age="$(ps -o etimes= -p "${held_by:-0}" 2>/dev/null | tr -d ' ')"
+        if [ -n "$held_age" ] && [ "$held_age" -gt "$(( ${FLEET_DRAIN_MAX_S:-1800} + 900 ))" ]; then
+            log "STALE LOCK: pid $held_by has held $LOCKFILE for ${held_age}s, longer than any real deploy -- DEPLOYS ARE BLOCKED. If that pid is a container helper (conmon/slirp4netns), the flock fd leaked into podman run; deploy.sh must close it with 9>&-."
+        fi
         exit 0
     fi
 fi
