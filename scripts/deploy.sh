@@ -40,7 +40,10 @@ INSTANCE_DIR="${FLEET_INSTANCE_DIR:?set FLEET_INSTANCE_DIR -- e.g. /home/ubuntu/
 # its "primary" default. Sourcing it HERE makes deploy.sh self-contained regardless of caller,
 # same discipline run_agent_pass.sh/run_member.sh already apply (set -a/+a -- a plain `.` only
 # sets local shell vars, invisible to anything this script itself execs).
-[ -f "$INSTANCE_DIR/fleet.env" ] && { set -a; . "$INSTANCE_DIR/fleet.env"; set +a; }
+# `|| true` for the same set -e reason as the drain guard below: this is at TOP LEVEL, so a
+# false test (no fleet.env yet -- a first deploy, or an instance that keeps config elsewhere)
+# returns non-zero and aborts the whole script before it has logged a single line.
+[ -f "$INSTANCE_DIR/fleet.env" ] && { set -a; . "$INSTANCE_DIR/fleet.env"; set +a; } || true
 
 # The target repo this instance's agents work. Baked in as a literal until 2026-08-26, which
 # made deploy.sh the one file that could not serve a second instance: up.sh correctly passes
@@ -263,10 +266,24 @@ drain_inflight_passes() {
         # which is non-empty, fails -eq, and made the gate report a defer with nothing running.
         # Seen live 2026-08-26 ("drain: 0 / 0 agent pass(es) in flight"). Take the first line
         # and keep only digits, so any pgrep quirk still yields a number.
-        inflight="$(podman exec "$CONTAINER" pgrep -c -f 'bash .*run_member[.]sh' 2>/dev/null | head -1 | tr -cd '0-9')"
+        # `|| true` INSIDE the substitution, and it is the whole ballgame. This script runs
+        # under `set -o pipefail`, and `pgrep` exits 1 when it matches NOTHING -- so with an
+        # idle fleet the pipeline fails, the substitution fails, and `set -e` kills the deploy
+        # right here. The healthiest possible state (no passes in flight) was the ONE state
+        # that aborted every deploy, and it did so silently: the log showed a clean
+        # cordon/uncordon pair and then nothing, while the same build ran fine by hand.
+        # Measured 2026-08-26 across three consecutive DEPLOY FAILED at 328c1ac.
+        inflight="$(podman exec "$CONTAINER" pgrep -c -f 'bash .*run_member[.]sh' 2>/dev/null | head -1 | tr -cd '0-9' || true)"
         [ -z "$inflight" ] && inflight=0
         if [ "$inflight" -eq 0 ] 2>/dev/null; then
-            [ "$waited" -gt 0 ] && log "drain: clear after ${waited}s -- proceeding with deploy"
+            # `|| true`: a `[ cond ] && cmd` guard that evaluates FALSE returns non-zero, and
+            # under `set -e` that status propagates -- it killed the deploy on the exact path
+            # this branch exists for. When waited=0 (nothing in flight, the drain clears
+            # instantly), the guard is false, so the FASTEST, HEALTHIEST drain was the one that
+            # aborted the deploy, right after logging "uncordon" and looking like a clean pass.
+            # Measured 2026-08-26: three consecutive DEPLOY FAILED at 328c1ac, each dying at
+            # this line with no error, while the same build ran fine by hand.
+            [ "$waited" -gt 0 ] && log "drain: clear after ${waited}s -- proceeding with deploy" || true
             uncordon_fleet
             return 0
         fi
