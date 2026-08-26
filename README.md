@@ -224,6 +224,33 @@ FLEET_INSTANCE_DIR=/home/ubuntu/fleet-kit/instances/nonprofit-atlas bash scripts
 bash scripts/deploy.sh --rollback
 ```
 
+### A deploy waits for in-flight agent passes (2026-08-26)
+
+Blue-green protects *serving*. It does nothing for *work*: agent passes run as children of the
+blue container's cron, so the cutover's `podman stop` kills whatever is mid-pass. This ate a real
+marie pass 17 issues into a complexity-scoring run — and, because the run record is written only
+*after* `claude -p` returns, `runs.jsonl` got **no row at all**. ~$3 spent, and from every
+dashboard the pass had simply never run.
+
+So `deploy.sh` **drains before it builds**: while any pass is in flight it defers the whole
+deploy, up to `FLEET_DRAIN_MAX_S` (default 1800s). `auto_deploy.sh` is a 5-minute poll, so a
+deferred deploy just happens on a later tick. Past the bound it deploys anyway and says so —
+a stuck pass must not block deploys forever.
+
+Two consequences worth knowing:
+
+- **A deploy can now take half an hour.** That is the gate working, not a hang. `auto_deploy.log`
+  says `drain: N agent pass(es) in flight -- deferring cutover`. Watch the count fall.
+- **`auto_deploy.sh` holds an `flock`** so those long holds cannot stack. Without it, every
+  5-minute tick started *another* deploy (the state file is written only on success, so
+  `LAST_DEPLOYED` stays stale while a deploy drains) — observed live as two concurrent deploys,
+  the second heading for a cutover while the first still held.
+
+A pass killed anyway — past the drain bound, or by a hand-run `podman stop` — is now recorded
+with `status=killed`, distinct from `timed_out` (had time left) and `budget_declined` (was
+spending fine). It means **interrupted and safe to re-run**. `SIGKILL` still cannot be trapped by
+anyone, which is why the drain exists rather than relying on the trap alone.
+
 ### Why the box silently falls behind (confirmed live, 2026-08-26 — 19 commits behind)
 
 `auto_deploy.sh` polls `main` and deploys when it moves, so nobody watches it. It **refuses to
