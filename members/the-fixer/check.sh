@@ -73,6 +73,35 @@ DEP_CONC="${DEPLOY_STATE%% *}"; DEP_SHA="${DEPLOY_STATE#* }"
 #      wedged job never posts a conclusion at all, so it can sit "pending" forever with nothing
 #      ever going red. STALE_PENDING_HOURS is deliberately coarse (a 90-minute e2e suite is not
 #      stuck at minute 91) -- this catches "still running after lunch," not "running long."
+#   4. a non-draft PR past the same age with ZERO checks in the rollup -- "no-checks-at-all".
+#   5. a check whose conclusion is STARTUP_FAILURE/ACTION_REQUIRED/STALE, or state ERROR --
+#      "check-never-ran".
+#
+# SHAPES 4 AND 5 ARE THE "NO ANSWER" CLASS, and they are why this sweep missed real PRs.
+# The merge gate is binary -- it asks "is the required check green?" and arms on GREEN or
+# alarms on RED. There is a third outcome it was never built for: NEITHER. A workflow that
+# dies before its jobs launch (`startup_failure`) posts no check at all, and a workflow that
+# never triggers posts nothing either. The PR then sits BLOCKED forever: it cannot merge
+# (a required check is missing) and cannot alarm (nothing went red). Silent, indefinite.
+#
+# None of shapes 1-3 catch it, and each for its own reason:
+#   $failed  -- the conclusion is STARTUP_FAILURE, not FAILURE.
+#   $conflict-- the branch merges cleanly; nothing is DIRTY.
+#   $wedged  -- requires status != COMPLETED, and a startup failure IS completed. It completed
+#               by dying. A run that never started is not in the rollup at all, so every
+#               filter that iterates rollup entries has nothing to iterate.
+#
+# Measured live 2026-08-26: of 10 open PRs, THREE non-draft ones (#3298, #3307, #3308) were
+# BLOCKED with zero checks, aged 1-2h, while #3306/#3309 sat CLEAN with 3 checks each -- so
+# checks do fire on this repo; these shas simply never got a run (`gh run list` returns zero
+# runs for them, not a failed one). Separately, 2 of the last 25 workflow runs concluded
+# `startup_failure`. Both halves of the class are real and concurrent.
+#
+# Draft PRs are excluded from shape 4 deliberately: a draft with no checks is normal (many
+# workflows skip drafts on purpose), so alarming on it would be noise on every WIP branch.
+# Both shapes reuse the SAME staleness cutoff as $wedged rather than inventing a threshold --
+# a PR opened 90 seconds ago legitimately has no checks yet.
+#
 # A FAILURE conclusion only ever comes back on GitHub Actions checks (typename CheckRun).
 # judge-judy's own fleet-code-review gate posts through the legacy commit-status API instead
 # (typename StatusContext) -- same red X on the PR, but its failure lands in the `state` field,
@@ -98,8 +127,14 @@ read_stale_prs() { # -> space-separated "num:sha:reason" triples, oldest first, 
       ( [.statusCheckRollup[]?
           | select(.status != null and .status != "COMPLETED" and .startedAt != null and .startedAt < "'"$cutoff"'")
         ] | length > 0 ) as $wedged |
-      select($failed or $conflict or $wedged) |
-      "\(.number):\(.headRefOid):\(if $failed then "check-failed" elif $conflict then "merge-conflict" else "wedged-check" end)"
+      ( (.isDraft | not) and ([.statusCheckRollup[]?] | length == 0)
+        and .createdAt < "'"$cutoff"'" ) as $noanswer |
+      ( [.statusCheckRollup[]?
+          | select(.conclusion == "STARTUP_FAILURE" or .conclusion == "ACTION_REQUIRED"
+                   or .conclusion == "STALE" or .state == "ERROR")
+        ] | length > 0 ) as $noran |
+      select($failed or $conflict or $wedged or $noanswer or $noran) |
+      "\(.number):\(.headRefOid):\(if $failed then "check-failed" elif $conflict then "merge-conflict" elif $wedged then "wedged-check" elif $noran then "check-never-ran" else "no-checks-at-all" end)"
     ' 2>>"$LOG" | tr '\n' ' '
 }
 STALE_PRS=$(read_stale_prs)
