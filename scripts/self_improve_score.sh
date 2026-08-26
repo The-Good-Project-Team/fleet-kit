@@ -156,7 +156,16 @@ if not m:
 try:
     d = json.loads(m.group(0))
     score = max(1, min(100, int(d.get('score', 0))))
-    reasoning = str(d.get('reasoning', ''))[:600]
+    # 2000, not 600. The prompt above demands a PR number, its merge date, the before/after
+    # shift in the daily numbers, AND a justification clause -- that reliably runs 700-900
+    # chars, so a 600 cap guillotined EVERY score ever written (all stored rows measured
+    # exactly 600, each cut mid-word: 'shows th', 'noisy/multi-caused, n'). The model's actual
+    # conclusion -- the part that says WHY the score is what it is -- was the half discarded,
+    # and it was discarded at write time, so no UI change could recover it.
+    # Cut on a word boundary and SAY so, rather than stopping mid-token as if nothing was lost.
+    reasoning = str(d.get('reasoning', ''))
+    if len(reasoning) > 2000:
+        reasoning = reasoning[:2000].rsplit(' ', 1)[0] + ' [truncated]'
     print(json.dumps({'score': score, 'reasoning': reasoning}))
 except Exception:
     print('')
