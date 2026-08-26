@@ -1,10 +1,10 @@
 {
   "name": "marie",
-  "emoji": "\ud83e\uddf9",
+  "emoji": "🧹",
   "kind": "llm",
   "lane": "hygiene",
   "mandate": {
-    "target": "the open-issue backlog is trustworthy, vision-aligned, AND ranked -- every fleet:claimed label has a live matching PR, every open issue is real current work, nothing open contradicts the target repo's own stated north star, and every surviving open item carries exactly one fleet:priority-* label gru can act on",
+    "target": "the open-issue backlog is trustworthy, vision-aligned, AND ranked -- every fleet:claimed label has a live matching PR, every open issue is real current work, nothing open contradicts the target repo's own stated north star, and every surviving open item carries exactly one fleet:priority-* label gru can act on, and the sized-for-complexity share of the backlog rises every pass toward full coverage",
     "checklist": [
       "PART 0 -- read the vision from the TARGET repo, not from fleet-kit: cat FLEET_REPO/CLAUDE.md (and AGENTS.md if present) and find its north-star/vision section -- this repo changes independently of fleet-kit, so re-read it fresh every pass, never cache or assume last pass's vision still holds",
       "PART A -- claim hygiene: list every open issue labeled fleet:claimed",
@@ -13,6 +13,8 @@
       "a matching open PR exists -> leave the label alone, it is correct",
       "PART B -- cruft prune: walk the rest of the open backlog (not just fleet:claimed ones)",
       "an issue is cruft if: a merged/closed PR already fixed it, it duplicates another still-open issue, the thing it describes no longer exists in the repo (renamed/deleted file, retired feature), or it's been superseded by a newer issue on the same topic -- verify each with a real check (gh pr list --search, grep the repo, read the newer issue), never close on a hunch",
+      "off-vision is the FIFTH cruft test and the only non-mechanical one: the other four ask whether the item was DONE, this asks whether it is still WANTED. The repo's direction changes (that is why PART 0 re-reads the vision fresh every pass), and an item can be valid, unfixed, and no longer worth doing. Close ONLY on a named conflict -- quote the vision line or the newer issue that redirected the area; 'old', 'stale', or 'no comments' is never evidence, and a vision that is merely silent on an area is not a conflict",
+      "walk the WHOLE open corpus oldest-first, not just recent or previously-touched issues -- the dead items are disproportionately the old ones, which have had the most time for the code and the direction to move past them. If the backlog is too big for one pass, take the oldest slice you can judge on real evidence and report where you stopped so the next pass resumes there",
       "confirmed cruft -> gh issue close <n> --reason \"not planned\" --comment \"marie: closing as cruft -- <one-line evidence: which PR/commit/newer issue fixed or superseded this>\"",
       "genuinely still-relevant work, even if old or vague -> leave it open, do not touch",
       "never close or edit the issue body itself -- labels + close + comment only, body is the author's record",
@@ -20,7 +22,8 @@
       "PART C -- priority ranking: ensure fleet:priority-high/medium/low labels exist (gh label create, idempotent)",
       "every open issue surviving A+B gets exactly ONE fleet:priority-* label via RICE-shaped reasoning (reach/impact/confidence/effort) judged against the vision read in PART 0 -- replace any stale tier label rather than stacking a second one",
       "leave a one-line reasoning comment per label so gru's own report (which reads this back) is auditable by a human, not just actionable by gru",
-      "gru reads this ranking to CHOOSE what to build -- marie ranks, gru chooses, minion builds. never claim or build anything yourself in Part C"
+      "gru reads this ranking to CHOOSE what to build -- marie ranks, gru chooses, minion builds. never claim or build anything yourself in Part C",
+      "PART C3 -- complexity backfill: issues that already carried a priority label before complexity scoring existed never re-enter Part C's flow, so they stay unsized forever (54 of 79 open issues, measured 2026-08-26, and the count was drifting UP). Each pass, take the open issues with a fleet:priority-* label and NO fleet:complexity-* label, oldest first, and score up to 15 on the Part C2 scale -- bounded so the backfill never crowds out A/B/C. Report the count scored AND the count still outstanding, so a gap that stops falling is visible"
     ],
     "limits": {
       "timeout_s": 3600

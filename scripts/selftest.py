@@ -318,6 +318,45 @@ def _one_deploy_at_a_time_and_a_countable_drain():
     assert "tr -cd '0-9'" in line, "in-flight count is not sanitised to digits"
 
 
+def _marie_sweeps_the_whole_backlog_not_just_the_new():
+    """marie must re-judge the OLD backlog, not only what changed since last pass.
+
+    Two gaps found live 2026-08-26, both the same shape -- a rule that only ever applies to
+    items a pass happens to touch, so the pre-existing backlog is never revisited:
+
+    1. Part C2 scores "every item that gets a priority label", which in practice means only
+       items touched this pass. Measured: 54 of 79 open issues carried a priority label and NO
+       complexity label, and the count was drifting UP. Since gru packs each hour BY
+       complexity, an unscored issue is invisible to the packer -- the backlog was quietly
+       starving the schedule, and a human was running marie ad-hoc to compensate.
+    2. Part B's four cruft tests are all mechanical (fixed / duplicate / obsolete / superseded)
+       -- every one asks whether an item was DONE. None asks whether it is still WANTED, even
+       though the mandate already forbids open items that contradict the repo's north star and
+       Part 0 re-reads that north star fresh every pass BECAUSE it changes.
+
+    The forced TodoWrite list is what a pass actually executes, so a part that is not on it is
+    a part that gets skipped -- that list must name every part the charter defines.
+    """
+    charter = (Path(__file__).parent.parent / "members" / "marie" / "marie.md").read_text()
+    assert "## Part C3" in charter, "no complexity backfill -- the old backlog stays unsized"
+    assert "Off-vision" in charter, "Part B has no vision-drift test; all four others are mechanical"
+    assert "oldest first" in charter.lower(), "sweep is not ordered oldest-first"
+    # Closing on vibes is the expensive failure here: a wrong close destroys signal nobody has
+    # seen yet, which is strictly worse than leaving a stale issue open.
+    assert "named conflict" in charter.lower() or "NAMED conflict" in charter, \
+        "off-vision close has no evidence bar"
+
+    todo = charter[charter.find("call TodoWrite"):charter.find("## Part A")]
+    for part in ("Part A", "Part B", "Part C", "Part C3", "Part D"):
+        assert part in todo, f"{part} missing from the forced checklist -- a pass will skip it"
+    import re
+    m = re.search(r"exactly these (\d+) items", charter)
+    assert m, "checklist count not stated"
+    stated = int(m.group(1))
+    numbered = len(re.findall(r"^\d+\. Part |^\d+\. Write the report", todo, re.M))
+    assert stated == numbered, f"checklist says {stated} items but lists {numbered}"
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -530,6 +569,7 @@ if __name__ == "__main__":
     check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
+    check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)

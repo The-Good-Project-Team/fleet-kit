@@ -27,17 +27,18 @@ ranking and chooses what to build from it. If you don't rank an item, gru treats
 priority by default, not as an oversight it corrects. Your ranking is the only thing standing
 between "the fleet builds what matters most" and "the fleet builds whatever it finds first."
 
-**Before anything else, call TodoWrite with exactly these 5 items, then work them in order.**
+**Before anything else, call TodoWrite with exactly these 6 items, then work them in order.**
 A pilot's checklist is identical every run, on purpose (confirmed live 2026-08-23 on
 dont-shoot-the-messenger: without a forced plan, a real pass burned its whole turn budget on
 early steps and never reached the report at all — landed as `reported_nothing` despite real
 work done).
 
 1. Part A — claim hygiene (below)
-2. Part B — cruft prune (below)
-3. Part C — priority ranking (below)
-4. Part D — label-consistency sweep (below)
-5. Write the report (Report section below), literal Outcome:/Evidence: lines included
+2. Part B — cruft prune (below), including the off-vision test
+3. Part C + C2 — priority ranking and complexity score (below)
+4. Part C3 — complexity backfill on the OLD backlog (below)
+5. Part D — label-consistency sweep (below)
+6. Write the report (Report section below), literal Outcome:/Evidence: lines included
 
 ## Part A — claim hygiene
 
@@ -54,12 +55,37 @@ PR at all," not "PR not done yet."
 ## Part B — cruft prune
 
 Walk the rest of the open backlog (including issues you just left claimed-and-alive — skip
-those, they're active). For each remaining open issue, look for real evidence it's dead:
+those, they're active).
+
+**Walk the WHOLE corpus, not just what is new or what you touched last pass.** The dead items
+are disproportionately the OLD ones: an issue filed months ago has had the most time for the
+code to move past it and for the direction to change out from under it, and it is precisely the
+one no recent pass has re-read. A sweep biased toward recent issues re-triages the healthiest
+part of the backlog and never reaches the part that actually rots. Pull the full open list
+(`gh issue list --state open --limit 200`) and work it **oldest first**.
+
+If the backlog is too large to examine every issue properly in one pass, do NOT skim all of it
+badly — take the oldest slice you can judge on real evidence and say in your report where you
+stopped, so the next pass resumes there instead of restarting at the top. Depth beats coverage:
+a wrong close destroys signal a human has not seen yet.
+
+For each remaining open issue, look for real evidence it's dead:
 
 - **Already fixed** — a merged or closed PR actually resolved it. Check: `gh pr list --search "<issue number> in:body" --state merged`, or grep the repo for whether the described bug/gap still exists.
 - **Duplicate** — another still-open issue describes the same problem. Prefer keeping whichever has more detail/discussion; close the thinner one, pointing at the survivor.
 - **Obsolete** — the file/feature/route it describes was renamed, deleted, or retired since filing. Verify with a real `grep`/`git log` check, not a guess from the title alone.
 - **Superseded** — a newer, more specific issue replaced it on the same topic.
+- **Off-vision** — the repo changed direction and this item no longer serves it. The four tests
+  above are mechanical: they ask whether the item was DONE. This one asks whether it is still
+  WANTED. An issue can be perfectly valid, unfixed, and describe real work nobody should do any
+  more, because the north star moved after it was filed. Your mandate already says nothing open
+  may contradict the target repo's stated north star, and Part 0 makes you re-read that north
+  star fresh every pass precisely because it changes — this is the step that acts on it.
+  Judge it against the vision you read in Part 0, never against your memory of a previous pass.
+  Close only on a NAMED conflict — quote the line or section of the vision doc it contradicts,
+  or the newer issue/PR that redirected the area. "Feels stale", "is old", or "nobody commented"
+  are not evidence and never justify closing. When the vision is silent on an area rather than
+  against it, that is not a conflict: leave the item open.
 
 For each confirmed case:
 `gh issue close <n> --reason "not planned" --comment "marie: closing as cruft — <one-line evidence, e.g. 'fixed by PR #1234' / 'duplicate of #5678, keeping that one' / 'describes routes_old.py, removed in commit abc1234'>"`
@@ -171,6 +197,40 @@ actual spend every pass and corrects; a slightly-low guess self-corrects, while 
 scores make gru schedule less work than the hour can afford and the allowance is lost — an
 hour's unspent tokens do not roll over.
 
+## Part C3 — complexity backfill (the same safety net, for size)
+
+Part C2 scores "every item that gets a priority label" — which in practice means only the
+items YOU touched this pass. Every issue that already carried a priority label from before
+C2 existed never re-enters that flow, so it stays sized forever-unknown no matter how many
+passes run. Measured 2026-08-26: 54 of 79 open issues had a priority label and no complexity
+label, and the count was drifting UP, because new issues get both while the old ones are
+never revisited. Scheduled passes were not closing the gap; a human was running marie
+ad-hoc to do it by hand.
+
+That matters beyond tidiness: since gru packs each hour by complexity, an unscored issue is
+invisible to the packer. A backlog that is mostly unscored quietly starves the schedule.
+
+So every pass, close a slice of the gap:
+
+```
+gh issue list --state open --json number,labels --limit 200
+```
+
+Take the open issues carrying any `fleet:priority-*` label but NO `fleet:complexity-*`,
+**oldest first** (lowest issue number — those are the ones no recent pass has looked at), and
+score **up to 15 of them** using the exact C2 scale and comment format. Fifteen, not all of
+them: a full backfill of a large backlog is a whole pass's budget and would crowd out Parts
+A/B/C, which are the work that keeps the board TRUE. A bounded slice per pass drains even a
+100-issue gap in under a day of normal ticks, and the count only has to fall.
+
+Read enough of each issue to size it honestly — title alone is not enough for anything above
+a 3. If an issue is too vague to size, score it 5 (the documented median) and say in the
+comment that the score is a placeholder pending clarification, rather than skipping it: a
+skipped issue silently re-enters this same slice next pass and blocks the queue behind it.
+
+Report the count you scored and the number still outstanding, so a gap that stops falling is
+visible rather than something a human has to go count.
+
 ## Part D — label-consistency sweep (safety net for #3167)
 
 Part C's `--add-label fleet:priority-<tier>,fleet:backlog` habit only guards issues YOU touch
@@ -189,11 +249,19 @@ some OTHER path is writing priority labels without backlog and deserves its own 
 ## Report
 
 One line for each part: (A) how many `fleet:claimed` checked, how many cleared (issue numbers).
-(B) how many closed as cruft (issue numbers + one-word reason each), how many left alone
-because evidence was inconclusive, any A/B supersede conflicts flagged. (C) how many ranked
+(B) how many closed as cruft (issue numbers + one-word reason each: fixed/duplicate/obsolete/
+superseded/off-vision), how many left alone because evidence was inconclusive, any A/B
+supersede conflicts flagged, **how far back through the corpus you got** (oldest issue number
+examined) so the next pass can resume rather than restart, and for every off-vision close, the
+specific vision line or newer issue it contradicted — that is the one close a human is most
+likely to want to argue with, so make it easy to audit. (C) how many ranked
 high/medium/low this pass, and any item whose priority you changed from a prior pass (name it
 + why — a flip-flopping ranking is a signal something about your own judgment or the vision
-doc changed, worth surfacing, not hiding). (D) how many issues were missing `fleet:backlog`
-despite holding a priority label, and their numbers.
+doc changed, worth surfacing, not hiding). (C3) how many backlog issues you scored for
+complexity this pass, and **how many still carry a priority label with no complexity label** —
+that second number is the one to watch: it should fall every pass, and a run where it holds
+steady or rises means the backfill is not keeping up with new work and wants a bigger slice.
+(D) how many issues were missing `fleet:backlog` despite holding a priority label, and their
+numbers.
 
 Close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.
