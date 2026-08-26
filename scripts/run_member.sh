@@ -321,6 +321,50 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 log "pass start (kind=llm charter=$BEHAVIOR model=$MODEL max_turns=${MAX_TURNS:-uncapped} budget=${MAX_BUDGET:+\$}${MAX_BUDGET:-uncapped})"
+
+# A pass killed from OUTSIDE (deploy cutover stopping the container, operator `podman stop`,
+# an OOM kill) never reaches the run_report.py call ~40 lines below -- that write happens only
+# after `claude -p` returns. Found live 2026-08-26: auto_deploy landed #92 mid-pass, SIGKILLed
+# an ad-hoc marie run that had already scored 17 issues, and runs.jsonl got NOTHING. Not
+# `killed`, not an error -- no row at all. From the dashboard the pass had never run, while ~$3
+# was genuinely spent. Silent loss is the worst failure mode this kit has: every other outcome,
+# including a crash, lands a row you can see.
+#
+# This trap closes that. It fires on SIGTERM (what `podman stop` sends first, and what the
+# deploy drain gate below relies on being handled), writing the same shaped record any other
+# outcome writes so the run is VISIBLE as interrupted-and-safe-to-rerun. SIGKILL still cannot
+# be trapped by anyone -- that is why deploy.sh must drain rather than rely on this alone; the
+# two halves are complements, not alternatives.
+#
+# `exit 143` (128+15) rather than letting the shell die silently: run_report.py maps 137/143 to
+# status=killed, so the exit code IS the signal that classifies the row.
+#
+# THE SUBTLETY THAT MADE THE FIRST VERSION OF THIS USELESS (caught by mutation test, not by
+# reading it): bash does not run a trap while a FOREGROUND child is still going -- it defers
+# the handler until that child reaps. Measured: SIGTERM at t+1s against a `sleep 60` ran the
+# handler at t+60s, not t+1s. A pass sits in `claude -p` for up to an hour, and `podman stop`
+# escalates to SIGKILL after 10s, so a deferred handler would NEVER have fired in the exact
+# scenario it exists for -- it would have looked correct in review and recorded nothing in
+# prod. The trap therefore KILLS the pipeline's children first: that reaps the foreground job,
+# bash regains control immediately, and the handler body actually runs inside the grace window.
+KILLED_RECORDED=0
+record_killed_pass() {
+  [ "$KILLED_RECORDED" -eq 1 ] && return 0   # a trap that fires twice must not write two rows
+  KILLED_RECORDED=1
+  trap - TERM INT EXIT
+  # Reap the foreground pipeline (see the note above) -- without this the rest of this function
+  # does not run until `claude -p` exits on its own, which under a deploy cutover is never.
+  pkill -TERM -P $$ 2>/dev/null || true
+  log "pass KILLED by signal -- recording an interrupted run rather than vanishing"
+  # No FLEET-REPORT block exists (the pass never finished), so feed empty text and let
+  # exit_code alone classify it. --usage-file is omitted deliberately: the real token spend
+  # lives in the CLI's unread stream, and inventing a number here would be worse than null.
+  printf '' | python3 "$KIT_DIR/scripts/run_report.py" \
+    --member "$MEMBER" --run-id "$RUN_ID" --kind llm --exit-code 143 \
+    --pass-file - $VISION_FLAG >> "$LOG_DIR/runs.jsonl" 2>>"$LOG" || true
+  exit 143
+}
+trap record_killed_pass TERM INT
 # --dangerously-skip-permissions / --setting-sources user: same reasoning as worktree_builder.sh
 # -- an unattended pass can't answer an interactive approval prompt, and a target repo's own
 # CLAUDE.md/hooks would silently hijack this member's identity otherwise. See that script's
@@ -363,13 +407,29 @@ CAP_ARGS=()
 [ -n "$MAX_TURNS" ] && CAP_ARGS+=(--max-turns "$MAX_TURNS")
 [ -n "$MAX_BUDGET" ] && CAP_ARGS+=(--max-budget-usd "$MAX_BUDGET")
 
-account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" \
-  --model "$MODEL" --dangerously-skip-permissions --setting-sources user \
-  --output-format stream-json --verbose \
-  "${CAP_ARGS[@]}" "${TOOL_ARGS[@]}" 2>>"$LOG" \
-  | python3 "$KIT_DIR/scripts/stream_log.py" --result-out "$RESULT_FILE" \
-  | while IFS= read -r line; do log "$line"; done
-RC=${PIPESTATUS[0]}
+# Backgrounded + `wait`, NOT run in the foreground -- this is what makes the SIGTERM trap
+# above able to fire at all. Bash defers a trap handler while a foreground child runs, so with
+# this pipeline in the foreground the handler would not execute until `claude -p` returned on
+# its own (measured: SIGTERM at t+1s ran the handler at t+60s against a 60s sleep). `podman
+# stop` SIGKILLs 10s in, so the record would never have been written. With `wait`, bash is
+# idle-but-interruptible and the handler runs in ~1s.
+#
+# The inner subshell re-raises ${PIPESTATUS[0]} as its own exit status because `wait` reports
+# the status of the job, which for a bare pipeline is its LAST command (the `while read` loop,
+# always 0) -- not claude's. Dropping claude's real code would silently break the
+# budget_declined (3) and timed_out (124) classifications that already depend on it, trading
+# one fixed status for two broken ones. Verified: a subshell wrapping `(exit 42) | cat` returns
+# 42 through `wait`, while the bare pipeline returns 0.
+( account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" \
+    --model "$MODEL" --dangerously-skip-permissions --setting-sources user \
+    --output-format stream-json --verbose \
+    "${CAP_ARGS[@]}" "${TOOL_ARGS[@]}" 2>>"$LOG" \
+    | python3 "$KIT_DIR/scripts/stream_log.py" --result-out "$RESULT_FILE" \
+    | while IFS= read -r line; do log "$line"; done
+  exit "${PIPESTATUS[0]}" ) &
+PASS_PID=$!
+wait "$PASS_PID"
+RC=$?
 
 RAW=$(cat "$RESULT_FILE" 2>/dev/null)
 rm -f "$RESULT_FILE"

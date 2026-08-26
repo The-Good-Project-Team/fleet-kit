@@ -90,6 +90,7 @@ STATUS_NOTHING = "reported_nothing"
 STATUS_NO_VISION = "no_vision_link"
 STATUS_BUDGET_DECLINED = "budget_declined"
 STATUS_TIMED_OUT = "timed_out"
+STATUS_KILLED = "killed"
 
 # account_pool.sh's account_pool_run returns 3 for ALL_ACCOUNTS_EXHAUSTED: every account was
 # gated before a single `claude` call was made, so this pass spent ZERO tokens.
@@ -97,7 +98,17 @@ STATUS_TIMED_OUT = "timed_out"
 # mid-run -- it may have spent tokens, but never got to write a FLEET-REPORT block. Both cases
 # produce an empty `outcome`, exactly like a pass that ran to completion and simply said
 # nothing -- without exit_code, classify() cannot tell them apart (issue #3015).
-_EXIT_CODE_STATUS = {3: STATUS_BUDGET_DECLINED, 124: STATUS_TIMED_OUT}
+# 143 = 128+15 (SIGTERM), 137 = 128+9 (SIGKILL): the pass was killed by something OUTSIDE
+# itself -- in practice a deploy cutover stopping the container out from under an in-flight
+# pass (`podman stop -t 10` sends SIGTERM, then SIGKILL). Found live 2026-08-26: an ad-hoc
+# marie pass scoring issue complexity was SIGKILLed mid-run by auto_deploy landing #92, and
+# left NO runs.jsonl record at all -- the record write happens after `claude -p` returns, so a
+# killed pass simply never reached it. ~$3 of spend and 17 completed scores were invisible;
+# the only trace was a log that stopped mid-sentence. A killed pass is NOT timed_out (it had
+# time left) and NOT budget_declined (it was spending fine) -- it is work that was interrupted
+# and is safe to re-run, which is a different operator decision from either.
+_EXIT_CODE_STATUS = {3: STATUS_BUDGET_DECLINED, 124: STATUS_TIMED_OUT,
+                     137: STATUS_KILLED, 143: STATUS_KILLED}
 
 
 def parse_report(text: str) -> dict:
