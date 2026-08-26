@@ -118,6 +118,59 @@ audit.
 An item you're genuinely unsure about is `medium`, not a guess at high or low — don't invent
 false confidence in either direction.
 
+## Part C2 — complexity score (how BIG, separate from how important)
+
+Priority says what to build first. **Complexity says how much of an hour it eats** — and gru
+needs both, because its job is packing each hour's real token allowance with work, not
+counting minions. Without this, every item looks the same size and gru is guessing.
+
+Ensure the labels exist (same idempotent pattern as the priority ones):
+```
+for n in 1 2 3 4 5 6 7 8 9 10; do
+  gh label create "fleet:complexity-$n" --color ededed \
+    --description "marie's size estimate; exponential, 1.35^(n-1)" || true
+done
+```
+
+Every item that gets a priority label gets **exactly one** `fleet:complexity-<1-10>`, replacing
+any it already carries. **The scale is exponential, base 1.35** — each step is ~35% more work
+than the one below, so a 10 is about 15x a 1. It is NOT linear and NOT 10^n (a literal
+tenth-power scale would make a 10 ten billion times a 1; nothing in a backlog spans that).
+The base is calibrated to real data: across 142 measured minion runs the p90/p10 cost spread
+was 9x and max/min was 22x, so ~15x across the full range is the honest shape.
+
+Anchor every score to these, not to a feeling:
+
+| n | what it looks like |
+|---|---|
+| 1 | typo, copy tweak, a constant changed, one-line config |
+| 2 | single obvious bug with an obvious fix, no new tests needed |
+| 3 | single-function fix plus the test that proves it |
+| 4 | one file, several coordinated edits, existing patterns only |
+| 5 | multi-file change within one subsystem; the median real item |
+| 6 | multi-file plus schema/interface touch, needs care about callers |
+| 7 | new component or endpoint wired end to end |
+| 8 | new subsystem, or a change whose blast radius spans lanes |
+| 9 | the above plus migration/backfill or a risky cutover |
+| 10 | **the most a single minion should ever attempt in one pass** |
+
+**10 is a ceiling, not a size.** If an item is genuinely bigger than a 10, it is an EPIC and
+labeling it 10 is the wrong move — decompose it in Part D into pieces that each score 7 or
+below, and let gru build those. An item you score 10 should be rare and should make you ask
+whether it wants splitting anyway. Never score above 10 to signal "very big"; split instead.
+
+Score EFFORT ONLY. A trivial fix to a critical bug is `priority-high` + `complexity-1`, and
+that combination is exactly what gru wants most — maximum value per token. Do not let
+importance leak into the size number; that is what the priority label is for.
+
+State the score in the same comment as the priority so a human can audit both at once:
+`gh issue comment <n> --body "marie: priority=<tier> complexity=<n> — <reasoning>"`.
+
+Unsure between two adjacent scores? Take the LOWER one. gru measures its estimate against
+actual spend every pass and corrects; a slightly-low guess self-corrects, while inflated
+scores make gru schedule less work than the hour can afford and the allowance is lost — an
+hour's unspent tokens do not roll over.
+
 ## Part D — label-consistency sweep (safety net for #3167)
 
 Part C's `--add-label fleet:priority-<tier>,fleet:backlog` habit only guards issues YOU touch

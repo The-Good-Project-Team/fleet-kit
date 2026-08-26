@@ -1,172 +1,162 @@
 #!/usr/bin/env python3
-"""fanout — real budget headroom -> minion count N, as arithmetic instead of a judgment call.
+"""fanout — fill one hour's token allowance with work, in PERCENT OF WEEK.
 
-RESTORED 2026-08-26. This module existed, was deleted in 4daeed8 (Reif, 2026-08-21: "gru
-itself should decide runway/priority/N, not have N handed to it by a bash script it can't see
-the reasoning of"), and is back for a reason the deletion could not have known yet: 69 real
-fanouts later, N wanders 1-4 with no pattern, because a fresh `claude -p` pass re-derives it
-every hour from prose and cannot see its own history. The original directive this file was
-built around is still the one we want, and is still in force:
+THE JOB IS SELECTION, NOT COUNTING. Reif, 2026-08-26: "its more about choosing jobs to run
+(that max out the availability) than it is about choosing minions to spawn." N is an output
+of packing the hour, never an input. Earlier versions of this file answered "how many minions
+can I afford?" and both were wrong: the first in dollars, the second still counting minions
+as if every item were the same size.
 
-  "N should be the number of builders you can safely spawn given current token availability
-   -- never limit it."
+WHY PERCENT. The fleet runs on a subscription, so dollars are not the constraint and never
+were -- the constraint is share of the weekly token allowance. maxx is the authority, and it
+already applies BOTH buffers before we see a number:
 
-WHAT CHANGED SO THIS ISN'T JUST A REVERT. The 2026-08-21 objection was legitimate: a bash
-script handed gru a number with no visible reasoning. So this module does not hand gru a
-number -- it hands gru a number PLUS the full derivation (`explain()`, every input and the
-rung it landed on), which gru quotes in its own report. The judgment gru actually owns
-(WHICH items, whether the tier is worth spending on at all) stays gru's; only the arithmetic
-that a model cannot do reliably from prose -- multiply, divide, compare -- moves here.
+    weekly_max 0.925    holds back 7.5% of the week
+    per_diem_use 0.95   holds back another 5% of the day
+    per_diem_hourly_pct = the post-buffer allowance for ONE hour
 
-WHAT THE HISTORY SAYS, and why the ladder is still uncapped:
-  N=1: 27 passes, 48% declined, 0.44 PRs/pass
-  N=2: 30 passes, 55% declined, 0.63 PRs/pass
-  N=3:  9 passes, 19% declined, 0.44 PRs/pass
-  N=4:  3 passes, 17% declined, 0.67 PRs/pass
-Decline rate FALLS as N rises, so concurrent minions are not exhausting the account pool --
-whatever causes a decline is upstream of N, and clamping N never addressed it. That is the
-evidence for keeping the ladder unclamped.
+So a caller spends TO per_diem_hourly_pct. It must not hold back a further reserve of its own
+-- an earlier FLEET_HEADROOM_FRACTION=0.5 halved an already-buffered allowance, which is a
+large part of why the fleet chronically underspent.
 
-The counter-evidence, recorded honestly because it is the strongest argument against this
-file: on 2026-08-22, while THIS module was still driving fanout, eight consecutive passes ran
-at N=3-4 with zero declines and zero successes. Unlimited ambition produced nothing that day.
-N is a throughput ceiling, not a throughput cause -- raising it cannot fix a step that fails
-for its own reasons. Read `spend_per_build` from real history (fleet_db.py spend) so this
-stays anchored to what a minion actually costs, and watch PRs/pass, not N, to judge it.
+WHY THE HOUR IS THE UNIT. gru runs hourly precisely so each pass consumes one hour's slice.
+An unspent hour does NOT roll over -- the allowance refills and the remainder is simply gone.
+That makes underspending exactly as wrong as overspending, which is the opposite of how a
+budget usually behaves and the single most important thing for a caller to understand.
 
-Kept pure -- no network, no filesystem, no env reads at import -- so it is unit-testable and
-so a caller can never get a different answer than the one selftest checks.
+COMPLEXITY, NOT COUNT. marie scores every item fleet:complexity-1..10 on an exponential
+ladder (base 1.35, so a 10 is ~15x a 1 -- calibrated against a measured 9x p90/p10 and 22x
+max/min spread across 142 real minion runs). cost_pct(item) = unit_pct * 1.35^(c-5), anchored
+at 5 = the median item. Two 3s may fit an hour that one 9 would blow.
+
+SELF-CORRECTING. `unit_pct` is not a constant to be guessed -- the caller derives it from what
+passes ACTUALLY spent (calibrate() below) and re-derives it every pass. A wrong estimate is
+therefore a one-pass error, not a permanent bias.
+
+Pure: no network, no filesystem, no env reads at import. The caller supplies live numbers.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from collections.abc import Iterator
 
-# The fraction of reported headroom to plan against; the rest is reserve for every OTHER
-# consumer of the same token pool (gru's own pass, judge-judy, marie, the-fixer). Spending
-# 100% of headroom on minions starves the members that decide WHAT minions should build.
-DEFAULT_HEADROOM_FRACTION = 0.5
+# marie's ladder. Base and anchor must match members/marie/marie.md's Part C2 table exactly --
+# if one moves without the other, gru silently mis-sizes every item it schedules.
+COMPLEXITY_BASE = 1.35
+COMPLEXITY_ANCHOR = 5  # the median real item; cost multiplier here is exactly 1.0
+DEFAULT_COMPLEXITY = COMPLEXITY_ANCHOR  # an unlabelled item is assumed median, never free
 
 
-def fibonacci_ladder() -> Iterator[int]:
-    """Yields 1, 2, 3, 5, 8, 13, 21, 34, ... forever (deduplicated Fibonacci).
+def complexity_multiplier(c: int | None, base: float = COMPLEXITY_BASE) -> float:
+    """How many median-items one complexity-c item is worth. c=5 -> 1.0, c=10 -> ~4.5, c=1 -> ~0.29."""
+    if c is None:
+        c = DEFAULT_COMPLEXITY
+    c = max(1, min(10, int(c)))
+    return base ** (c - COMPLEXITY_ANCHOR)
 
-    A ladder rather than raw division so N moves in meaningful steps: going 5 -> 6 minions is
-    noise, 5 -> 8 is a decision. It also means a small headroom misread cannot swing N wildly.
+
+def calibrate(observed: list[dict], base: float = COMPLEXITY_BASE) -> float | None:
+    """Derive the cost of ONE median (complexity-5) item, as % of week, from real passes.
+
+    `observed` is [{"pct": <what it actually spent>, "complexity": <its label>}, ...]. Each
+    pass is normalised by its own multiplier before averaging, so a week of mostly-easy items
+    doesn't drag the unit down and make everything look cheap.
+
+    Returns None when there is nothing usable -- the caller must then say so rather than
+    invent a number. A fabricated unit silently mis-sizes every future pass.
     """
-    a, b = 1, 2
-    yield a
-    while True:
-        yield b
-        a, b = b, a + b
+    units = [o["pct"] / complexity_multiplier(o.get("complexity"), base)
+             for o in observed
+             if isinstance(o.get("pct"), (int, float)) and o["pct"] > 0]
+    return (sum(units) / len(units)) if units else None
 
 
-def n_from_headroom(
-    headroom_usd: float,
-    spend_per_build: float,
-    floor: int = 1,
-    ceiling: int | None = None,
-    headroom_fraction: float = DEFAULT_HEADROOM_FRACTION,
-) -> int:
-    """Largest Fibonacci rung <= (headroom_usd * headroom_fraction) / spend_per_build.
+def pack(items: list[dict], allowance_pct: float, unit_pct: float,
+         base: float = COMPLEXITY_BASE, min_items: int = 0) -> dict:
+    """Choose the item set that fills `allowance_pct` without exceeding it.
 
-    Never below `floor` -- a pass that can afford nothing still tries one item, because the
-    alternative is a fleet that silently stops building the moment a meter reads low.
+    `items` are ALREADY in the caller's priority order (marie ranks; gru does not re-rank).
+    Greedy in that order, skipping an item too big for the remaining room but continuing --
+    so a cheap high-priority item still gets in behind an expensive one that didn't fit. It
+    does NOT reorder by size: shipping the most important work beats shipping the most work.
 
-    `ceiling` is None by default, honoring "never limit it." It exists only so an operator can
-    impose a deliberate cap from fleet.env; it is not a safety mechanism and nothing in this
-    kit sets it.
-
-    Raises ValueError on a non-positive spend_per_build -- that is caller misconfiguration,
-    not a budget state, and must never be swallowed into a silent 0 or 1.
+    `min_items` floors the selection so a thin allowance still moves something forward rather
+    than idling the hour entirely -- but the caller is told, via `over_allowance`, when the
+    floor pushed it past the line. Silent overspend is the one outcome this must never produce.
     """
-    if spend_per_build <= 0:
-        raise ValueError(f"spend_per_build must be > 0, got {spend_per_build!r}")
-    if not 0.0 < headroom_fraction <= 1.0:
-        raise ValueError(f"headroom_fraction must be in (0, 1], got {headroom_fraction!r}")
+    if unit_pct <= 0:
+        raise ValueError(f"unit_pct must be > 0, got {unit_pct!r}")
 
-    units = max(0, int((max(0.0, headroom_usd) * headroom_fraction) // spend_per_build))
-    n = floor
-    for rung in fibonacci_ladder():
-        if rung > units:
-            break
-        n = rung
-    n = max(n, floor)
-    if ceiling is not None:
-        n = min(n, ceiling)
-    return n
+    chosen, skipped, spent = [], [], 0.0
+    for it in items:
+        c = it.get("complexity")
+        cost = unit_pct * complexity_multiplier(c, base)
+        if spent + cost <= allowance_pct:
+            chosen.append({**it, "est_pct": round(cost, 5)})
+            spent += cost
+        else:
+            skipped.append({**it, "est_pct": round(cost, 5), "why": "would exceed the hour"})
 
-
-def explain(
-    headroom_usd: float,
-    spend_per_build: float,
-    claimable: int | None = None,
-    floor: int = 1,
-    ceiling: int | None = None,
-    headroom_fraction: float = DEFAULT_HEADROOM_FRACTION,
-) -> dict:
-    """n_from_headroom plus every input that produced it, for gru to quote verbatim.
-
-    This is the whole answer to the 2026-08-21 objection: the caller is never handed a bare
-    integer whose reasoning it cannot see. `binding` names WHY N is what it is -- budget, the
-    backlog, the floor, or an operator ceiling -- which is the one thing a reader of gru's
-    report actually wants to know.
-    """
-    budget_n = n_from_headroom(headroom_usd, spend_per_build, floor=floor,
-                               ceiling=ceiling, headroom_fraction=headroom_fraction)
-    n = budget_n
-    binding = "budget"
-    # Never pad N with items that don't exist: spawning a minion with nothing claimable to
-    # hand it burns a spin-up to do nothing. gru still owns WHICH items -- this only refuses
-    # to let arithmetic outrun the backlog.
-    if claimable is not None and claimable < n:
-        n = max(claimable, 0)
-        binding = "claimable_items"
-    if n <= floor and binding == "budget" and budget_n <= floor:
-        binding = "floor"
-    if ceiling is not None and n == ceiling and budget_n >= ceiling:
-        binding = "operator_ceiling"
+    forced = 0
+    while len(chosen) < min_items and skipped:
+        nxt = skipped.pop(0)
+        nxt.pop("why", None)
+        chosen.append(nxt)
+        spent += nxt["est_pct"]
+        forced += 1
 
     return {
-        "n": n,
-        "binding": binding,
-        "headroom_usd": round(float(headroom_usd), 4),
-        "headroom_fraction": headroom_fraction,
-        "planned_usd": round(max(0.0, float(headroom_usd)) * headroom_fraction, 4),
-        "spend_per_build": round(float(spend_per_build), 4),
-        "budget_affords": budget_n,
-        "claimable_items": claimable,
-        "floor": floor,
-        "ceiling": ceiling,
+        "n": len(chosen),
+        "chosen": chosen,
+        "skipped": skipped,
+        "est_spend_pct": round(spent, 5),
+        "allowance_pct": round(allowance_pct, 5),
+        "headroom_left_pct": round(allowance_pct - spent, 5),
+        "utilization": round(spent / allowance_pct, 4) if allowance_pct > 0 else None,
+        "unit_pct": round(unit_pct, 6),
+        "forced_over_floor": forced,
+        "over_allowance": spent > allowance_pct,
+        "binding": ("nothing_claimable" if not items else
+                    "min_items_floor" if forced else
+                    "backlog_exhausted" if not skipped else "allowance"),
     }
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        description="Compute how many minions this pass can afford, and show the derivation.")
-    ap.add_argument("--headroom-usd", type=float, required=True,
-                    help="dollars of budget this pass may plan against")
-    ap.add_argument("--spend-per-build", type=float, required=True,
-                    help="real cost of one minion pass (fleet_db.py spend --member minion)")
-    ap.add_argument("--claimable", type=int, default=None,
-                    help="how many genuinely claimable items exist; N is never padded past it")
-    ap.add_argument("--floor", type=int, default=1)
-    ap.add_argument("--ceiling", type=int, default=None,
-                    help="deliberate operator cap; omitted by default ('never limit it')")
-    ap.add_argument("--headroom-fraction", type=float, default=DEFAULT_HEADROOM_FRACTION)
-    ap.add_argument("--json", action="store_true", help="print the full derivation, not just N")
+        description="Pack one hour's token allowance with backlog work (percent of week).")
+    ap.add_argument("--allowance-pct", type=float, required=True,
+                    help="this pass's share, already buffered (e.g. per_diem_hourly_pct * 0.70)")
+    ap.add_argument("--unit-pct", type=float,
+                    help="cost of one complexity-5 item as %% of week; omit to derive from --observed")
+    ap.add_argument("--items", required=True,
+                    help='JSON list in priority order: [{"number":123,"complexity":4}, ...] or "-" for stdin')
+    ap.add_argument("--observed",
+                    help='JSON list of real past passes to calibrate from: [{"pct":0.08,"complexity":5}, ...]')
+    ap.add_argument("--min-items", type=int, default=0)
+    ap.add_argument("--base", type=float, default=COMPLEXITY_BASE)
     a = ap.parse_args(argv)
 
+    items = json.loads(sys.stdin.read() if a.items == "-" else a.items)
+    unit = a.unit_pct
+    if unit is None:
+        if not a.observed:
+            print("ERROR: pass --unit-pct or --observed; refusing to invent a unit cost",
+                  file=sys.stderr)
+            return 2
+        unit = calibrate(json.loads(a.observed), base=a.base)
+        if unit is None:
+            print("ERROR: --observed had no usable pass; refusing to invent a unit cost",
+                  file=sys.stderr)
+            return 2
+
     try:
-        result = explain(a.headroom_usd, a.spend_per_build, claimable=a.claimable,
-                         floor=a.floor, ceiling=a.ceiling,
-                         headroom_fraction=a.headroom_fraction)
+        result = pack(items, a.allowance_pct, unit, base=a.base, min_items=a.min_items)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps(result, indent=2) if a.json else result["n"])
+    print(json.dumps(result, indent=2))
     return 0
 
 

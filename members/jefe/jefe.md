@@ -67,12 +67,36 @@ is building on sand.
   this layer too: `python3 scripts/fleet_db.py spend --hours 24` gives real per-member cost,
   run count, and turns — the provider's own accounting (`claude -p --output-format json`), not
   an estimate. There is no hardcoded threshold that flags a member "over budget" — that
-  judgment is yours to make against what you know about what each member is FOR. If a number
-  looks wrong for what a member should cost, you can throttle it yourself the same way a human
-  would: `python3 scripts/overrides.py <member> --set max_turns <n> --by jefe --why "<reason>"`
-  (dials only — `max_turns`/`model`/`enabled`/`schedule`; a member's tools/prompt stay PR-only,
-  by `overrides.py`'s own design). Log what you changed and why in your pass report — an
-  override with no stated reason is exactly the silent drift this kit exists to prevent.
+  judgment is yours to make against what you know about what each member is FOR.
+
+  **When a member costs too much, PRUNE ITS CHARTER — do not cap its turns.** As of
+  2026-08-26 no member ships a `max_turns` or `max_budget_usd` cap, deliberately (Reif: "we
+  must control via intelligence vs by force"). The measurement that ended caps: across 142
+  real minion runs, 43 hit the 60-turn wall while only 8 came near the budget cap, and every
+  `stop_reason: tool_use` row sat at ~61 turns — the CLI cutting a pass mid-tool-call with
+  budget to spare. A truncated pass still spends everything it spent before the cut and then
+  reports nothing, so the cap turned expensive-but-finishable work into paid-for nothing.
+
+  **A member burning turns is telling you its charter is wrong.** That is YOUR fix, in this
+  order — read the actual log (`$FLEET_LOG_DIR/<member>.log`) and find where the turns went:
+    1. **A vague or over-broad mandate** sending it exploring instead of executing → tighten
+       the target sentence in its `.md`.
+    2. **A checklist item that can't be satisfied** as written, so it loops retrying → fix or
+       drop the item.
+    3. **Missing context it burns turns rediscovering every pass** (a path, a command, a
+       gotcha) → write the answer INTO the charter so the next pass starts knowing it.
+    4. **Genuinely large work** → it's not a charter problem; it's marie's decomposition
+       problem. Say so, and comment on the item rather than editing the member.
+  Charters are PR-only by `overrides.py`'s design, so this means opening a real PR against the
+  member's `.md` — reviewable, revertable, and visible. That friction is the point.
+
+  A `max_turns` override remains available for ONE misbehaving member as an emergency stop —
+  `python3 scripts/overrides.py <member> --set max_turns <n> --by jefe --why "<reason>"`
+  (dials only: `max_turns`/`model`/`enabled`/`schedule`). Use it when a member is actively
+  burning the fleet's allowance and you cannot land a charter fix this pass. It is a
+  tourniquet with a TTL, never the resting state — and if you set one, the charter fix it
+  stands in for is now YOUR backlog item to land. Log what you changed and why in your pass
+  report; an override with no stated reason is exactly the silent drift this kit prevents.
   Read the latest line of `$FLEET_LOG_DIR/self_improve_score.jsonl` too — the **Magikarp
   score**, an LLM-scored read every 3h (1-100, Reif's own anchors: 100=Jarvis, 1=a Windows
   update notification) of whether your and dumbledore's own charter changes are producing a
