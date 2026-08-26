@@ -221,8 +221,24 @@ fi
 # Source the charter (frontmatter stripped), build --allowedTools/--disallowedTools from the
 # spec's own tools.allow/deny, run through the account pool, book real usage.
 MODEL=$(jget "['llm']['model']")
-MAX_TURNS=$(jget "['llm']['max_turns']")
-MAX_BUDGET=$(jget "['mandate']['limits'].get('max_budget_usd', 5)")
+# BOTH CAPS ARE OPTIONAL, and an absent one means UNCAPPED -- not a default.
+#
+# They used to default to 60 turns / $5, which made a cap the silent norm for every member
+# whose spec simply didn't mention one. Measured on 142 real minion runs: 43 hit the 60-turn
+# wall while only 8 came near $5 -- and every `stop_reason: tool_use` row sat at ~61 turns,
+# i.e. the CLI cutting the pass mid-tool-call with budget still to spare. A truncated pass
+# still spends everything it spent up to the cut and lands `reported_nothing`, so the cap was
+# converting completed-but-expensive work into paid-for nothing.
+#
+# The real control is SELECTION, not truncation: gru sizes each hour's work to what maxx says
+# the hour can afford (per_diem_hourly_pct, already buffered) and picks accordingly. A member
+# that needs 90 turns to finish an item marie scored complexity-9 should take them.
+#
+# Reif, 2026-08-26: "max turns - remove it ... dumbledore should be watching every x hours,
+# and it should prune prompt, etc. before it prunes turns." A turn cap MASKS a rambling
+# charter instead of fixing it; dumbledore's rot hunt owns that tuning.
+MAX_TURNS=$(jget "['llm'].get('max_turns') or ''")
+MAX_BUDGET=$(jget "['mandate']['limits'].get('max_budget_usd') or ''")
 
 PROMPT=$(awk 'BEGIN{d=0} /^---$/{d++; next} d>=2{print}' "$BEHAVIOR")
 if [ -z "$PROMPT" ]; then
@@ -272,11 +288,11 @@ TOOL_ARGS=()
 [ -n "$DENIED" ] && TOOL_ARGS+=(--disallowedTools "$DENIED")
 
 if [ "$DRY_RUN" -eq 1 ]; then
-  echo "[dry-run] claude -p <charter:$BEHAVIOR> --model $MODEL --max-turns $MAX_TURNS --max-budget-usd $MAX_BUDGET ${TOOL_ARGS[*]}"
+  echo "[dry-run] claude -p <charter:$BEHAVIOR> --model $MODEL${MAX_TURNS:+ --max-turns $MAX_TURNS}${MAX_BUDGET:+ --max-budget-usd $MAX_BUDGET} ${TOOL_ARGS[*]}"
   exit 0
 fi
 
-log "pass start (kind=llm charter=$BEHAVIOR model=$MODEL max_turns=$MAX_TURNS budget=\$$MAX_BUDGET)"
+log "pass start (kind=llm charter=$BEHAVIOR model=$MODEL max_turns=${MAX_TURNS:-uncapped} budget=${MAX_BUDGET:+\$}${MAX_BUDGET:-uncapped})"
 # --dangerously-skip-permissions / --setting-sources user: same reasoning as worktree_builder.sh
 # -- an unattended pass can't answer an interactive approval prompt, and a target repo's own
 # CLAUDE.md/hooks would silently hijack this member's identity otherwise. See that script's
@@ -313,10 +329,16 @@ fi
 # case. Found live on dino 2026-08-21: every real member pass failed rc=1 "other" silently
 # (account_pool.sh had no pattern for this error text) until traced to this guard directly.
 export IS_SANDBOX=1
+# Only pass a cap the spec actually set -- an empty value must not become `--max-turns ""`,
+# which the CLI rejects, nor a silent default (see the MAX_TURNS/MAX_BUDGET note above).
+CAP_ARGS=()
+[ -n "$MAX_TURNS" ] && CAP_ARGS+=(--max-turns "$MAX_TURNS")
+[ -n "$MAX_BUDGET" ] && CAP_ARGS+=(--max-budget-usd "$MAX_BUDGET")
+
 account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" \
   --model "$MODEL" --dangerously-skip-permissions --setting-sources user \
-  --max-turns "$MAX_TURNS" --output-format stream-json --verbose \
-  --max-budget-usd "$MAX_BUDGET" "${TOOL_ARGS[@]}" 2>>"$LOG" \
+  --output-format stream-json --verbose \
+  "${CAP_ARGS[@]}" "${TOOL_ARGS[@]}" 2>>"$LOG" \
   | python3 "$KIT_DIR/scripts/stream_log.py" --result-out "$RESULT_FILE" \
   | while IFS= read -r line; do log "$line"; done
 RC=${PIPESTATUS[0]}

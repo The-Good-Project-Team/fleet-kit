@@ -194,6 +194,32 @@ def _fanout_n_is_arithmetic_not_judgment():
         assert k in rich, k
 
 
+def _no_member_ships_a_cap():
+    """Caps are off fleet-wide: control by selection and charter quality, not truncation.
+
+    Reif, 2026-08-26: "all caps come off -- we must control via intelligence vs by force."
+    Measured on 142 real minion runs, 43 hit the 60-turn wall vs 8 near the budget cap, and
+    every `stop_reason: tool_use` row sat at ~61 turns -- the CLI cutting a pass mid-tool-call
+    with budget to spare, converting expensive-but-finishable work into paid-for nothing.
+
+    The regression this guards is a DEFAULT creeping back: `run_member.sh` used to default to
+    60 turns / $5 when a spec omitted them, so deleting the keys alone would have changed
+    nothing. An absent cap must reach the CLI as NO FLAG.
+    """
+    import member_spec
+    for s in member_spec.load_all():
+        assert "max_turns" not in s["llm"], f"{s['name']} ships a turn cap"
+        assert "max_budget_usd" not in s["mandate"]["limits"], f"{s['name']} ships a budget cap"
+        # timeout_s stays -- wall-clock is the one backstop a runaway pass still needs.
+        assert s["mandate"]["limits"].get("timeout_s"), f"{s['name']} lost its timeout backstop"
+
+    # An omitted cap must not be resurrected as a default by the runner.
+    src = (Path(__file__).parent / "run_member.sh").read_text()
+    assert "get('max_turns') or ''" in src, "run_member.sh reintroduced a max_turns default"
+    assert "get('max_budget_usd') or ''" in src, "run_member.sh reintroduced a budget default"
+    assert '[ -n "$MAX_TURNS" ] && CAP_ARGS+=' in src, "empty cap no longer omits the flag"
+
+
 def _overrides_are_narrow():
     import overrides
     with tempfile.TemporaryDirectory() as d:
@@ -203,7 +229,10 @@ def _overrides_are_narrow():
                                why="proving the dial works", store=store)
         eff, applied = overrides.apply(spec, store=store)
         assert eff["llm"]["max_turns"] == 7 and applied
-        assert spec["llm"]["max_turns"] != 7, "the git spec must not be mutated"
+        # The git spec must not be mutated. Specs ship UNCAPPED as of 2026-08-26 (no max_turns
+        # key at all), so the property to assert is "the source is untouched" -- absent stays
+        # absent -- not "it holds some other number."
+        assert spec["llm"].get("max_turns") != 7, "the git spec must not be mutated"
         # Authority is never live-tunable.
         try:
             overrides.set_override(spec["name"], "tools", ["x"], by="selftest",
@@ -372,6 +401,7 @@ if __name__ == "__main__":
     check("report contract: ok + silence is recorded", _report_contract)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
     check("minion count N scales with budget and is never secretly capped", _fanout_n_is_arithmetic_not_judgment)
+    check("no member ships a turn or budget cap", _no_member_ships_a_cap)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)

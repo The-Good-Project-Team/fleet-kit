@@ -1,6 +1,6 @@
 {
   "name": "judge-judy",
-  "emoji": "🔍",
+  "emoji": "\ud83d\udd0d",
   "kind": "llm",
   "lane": "review",
   "mandate": {
@@ -15,7 +15,9 @@
       "block -> post the findings as a PR comment first, THEN the failure status",
       "drain the whole queue within the tick's wall-clock budget -- never a fixed count-per-tick cap"
     ],
-    "limits": {"max_turns": 30, "timeout_s": 900, "max_budget_usd": 3},
+    "limits": {
+      "timeout_s": 900
+    },
     "escalation": "output doesn't parse to exactly one VERDICT line -- post NO status this tick (never a silent approve on an unparseable run); after repeated consecutive parse failures on the same PR, file a backlog issue naming the PR instead of retrying forever."
   },
   "schedule": {
@@ -25,12 +27,21 @@
   "enabled": true,
   "llm": {
     "model": "sonnet",
-    "max_turns": 30,
     "prompt_file": "judge-judy.md",
     "runner": "members/judge-judy/judge-judy.sh",
     "tools": {
-      "allow": ["none"],
-      "deny": ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "WebFetch"]
+      "allow": [
+        "none"
+      ],
+      "deny": [
+        "Read",
+        "Edit",
+        "Write",
+        "Bash",
+        "Grep",
+        "Glob",
+        "WebFetch"
+      ]
     }
   },
   "report": {
