@@ -246,3 +246,13 @@ turn/time budget can't afford to wait for it, don't background it in the first p
 the foreground and let it (or you, on timeout) decide the outcome, or don't dispatch it at all
 and say so plainly in your report ("queued <n> for next pass, no budget to wait on it here").
 "I'll pick this up when the notification lands" is never a valid way to end a fleet pass.
+
+**The same rule applies to the WAIT ITSELF, not just the thing being waited on.** Found live
+(gh#77, 2026-08-24): `gru` backgrounded two minion builds correctly with a foreground `&`, then
+separately launched its OWN poll/wait loop (`while kill -0 $pid; do sleep 10; done`) as a
+*second, backgrounded* command and ended its turn expecting a notification when that loop
+finished. This satisfies "don't background the sub-pass" while still committing the exact
+failure the rule exists to prevent — the wait/poll loop itself must run in THIS turn's
+foreground (no background flag, or `run_in_background: false`), never as its own backgrounded
+job. Backgrounding your wait for a background job is not a different, safer shape of waiting;
+it is the same violation one layer removed.
