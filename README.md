@@ -239,9 +239,29 @@ target and "fixed" a fleet that was already working.
 ### Which Claude account is the fleet actually spending?
 
 `FLEET_ACCOUNTS` is a space-separated list tried **in order**; each name maps to
-`$HOME/.claude-<name>` (so `claude-reif` → `~/.claude-claude-reif`, doubled prefix and all).
-`deploy.sh:81` mounts one credential dir per name, so a name with no logged-in dir is a
-failover target that cannot actually authenticate.
+`$FLEET_CREDS_DIR/.claude-<name>` (default `$HOME`). `deploy.sh:94` mounts one credential dir
+per name, so a name with no logged-in dir is a failover target that cannot actually
+authenticate.
+
+| account | email |
+|---|---|
+| `tgp` | reif@thegoodproject.net |
+| `gmail` | reiftauati@gmail.com |
+
+**Renaming an account is not a text edit.** The name is load-bearing in four places that must
+change together — the credential dir, `FLEET_ACCOUNTS`, the exhaustion state file's key, and
+the per-deploy bind mount — and every failure is silent. `deploy.sh:94` runs
+`mkdir -p .claude-<acct>` for every name, so renaming in `fleet.env` without moving the
+credential dir makes the next deploy create an **empty** one: the account comes up logged out
+and only ever reports `unauthenticated`. Use the script, which moves all four and dry-runs by
+default:
+
+```bash
+FLEET_INSTANCE_DIR=/home/ubuntu/fleet-kit/instances/nonprofit-atlas \
+  bash scripts/rename_account.sh <old> <new>          # dry run
+FLEET_INSTANCE_DIR=... bash scripts/rename_account.sh <old> <new> --apply
+FLEET_INSTANCE_DIR=... bash scripts/deploy.sh          # required: remounts under the new name
+```
 
 An account that has hit its weekly limit is recorded in the pool's exhaustion state file with
 its reset epoch, and every later tick **skips it without spending a call** until that time
