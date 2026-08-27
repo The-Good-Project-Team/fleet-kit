@@ -14,6 +14,7 @@ ran it.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -420,6 +421,34 @@ def _adhoc_task_adds_to_the_charter_never_replaces_it():
     assert "follow the charter" in block, "preamble does not resolve conflicts toward the charter"
     # An ad-hoc pass is marked so it can be excluded from cost calibration.
     assert "${TASK:+-adhoc}" in src, "ad-hoc runs are not distinguishable in run_id"
+
+
+def _a_run_records_the_item_it_worked():
+    """`run_member.sh --item N` must reach the DB's item_id column, not just the run_id string.
+
+    2026-08-27: EVERY row in the deployed fleet.db had item_id NULL -- including runs whose
+    run_id plainly encodes the item (`minion-item3280-4140-...`). run_member.sh parsed --item
+    into $ITEM and used it for the run_id, the worktree path and the prompt, but never passed
+    --item-id to run_report.py. The column, the CLI flag (`fleet_db.py query --item-id`) and
+    the whole downstream write path were all correct and had simply never been given a value.
+
+    This is the day's theme in its purest form: the field exists, the query runs, it returns
+    nothing, and nothing anywhere reports an error. It silently disabled `query --item-id`,
+    which is how you'd detect two minions working one item -- the exact open question that
+    found this bug.
+
+    Asserts the wiring at BOTH call sites, because the kill-trap path (a pass killed mid-work
+    is precisely when you most want to know which item was lost) is easy to fix and forget.
+    """
+    src = (ROOT / "scripts" / "run_member.sh").read_text()
+    calls = re.findall(r'python3 "\$KIT_DIR/scripts/run_report\.py"(.*?)>>', src, re.S)
+    if not calls:
+        raise AssertionError("no run_report.py call sites found in run_member.sh")
+    missing = [" ".join(c.split())[:80] for c in calls if "--item-id" not in c]
+    if missing:
+        raise AssertionError(
+            f"{len(missing)}/{len(calls)} run_report.py call(s) drop --item-id -- "
+            f"item_id lands NULL: {missing}")
 
 
 def _a_killed_pass_is_recorded_not_lost():
@@ -1144,6 +1173,7 @@ if __name__ == "__main__":
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
     check("datta dispatches by coverage, nerds analyse one lane", _datta_dispatches_and_nerds_analyse)
+    check("a run records the item it worked", _a_run_records_the_item_it_worked)
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
