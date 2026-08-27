@@ -911,12 +911,28 @@ async function renderStatsPage() {
       // disagreement, which is the most interesting signal on the card. The data was already
       // in /api/stats/self_improve_score's history; the UI simply threw it away.
       const siPasses = siHistory.slice().reverse();
+      // The newest pass is already rendered in full on the card above -- repeating it as the
+      // first row made the panel read as one long duplicated wall of text.
       const passRows = siPasses.map((h, i) => {
+        if (i === 0) return '';
         const c = h.score >= 66 ? '#1f8b4c' : h.score >= 33 ? '#a6720f' : '#c13a2e';
         const prev = siPasses[i + 1];
         const delta = prev ? h.score - prev.score : null;
         const arrow = delta === null || delta === 0 ? ''
           : `<span style="color:${delta > 0 ? '#1f8b4c' : '#c13a2e'};font-weight:600;">${delta > 0 ? '+' : ''}${delta}</span>`;
+        // An unchanged score whose reasoning is byte-identical to the pass below it argued
+        // nothing new. Render the number, skip the expander -- an expander that opens onto a
+        // repeat is worse than no expander.
+        const same = prev && (h.reasoning || '') === (prev.reasoning || '');
+        if (same) {
+          return `
+            <div style="border-top:1px solid var(--line);padding:8px 0;display:flex;align-items:baseline;gap:10px;">
+              <span style="font-weight:700;color:${c};min-width:34px;">${h.score}</span>
+              <span style="min-width:34px;font-size:12px;">${arrow}</span>
+              <span style="color:var(--dimmer);font-size:12px;">${esc(humanDate(h.date))}</span>
+              <span style="color:var(--dimmer);font-size:12px;">&middot; unchanged</span>
+            </div>`;
+        }
         return `
           <details style="border-top:1px solid var(--line);padding:8px 0;">
             <summary style="cursor:pointer;display:flex;align-items:baseline;gap:10px;list-style:none;">
@@ -966,6 +982,25 @@ async function renderStatsPage() {
         scales: { y: { min: 0, max: 100, grid: { color: '#eef0f3' } }, x: { grid: { display: false } } },
         plugins: { legend: { display: false } },
       },
+      // Same annotation-not-a-dataset pattern the minion/outcome charts use. A 1-100 line
+      // that lives entirely in the 18-42 band is unreadable against a 0-100 axis without
+      // them: every point looks like "about 20-ish" when the actual swing (22 -> 42 -> 22 in
+      // one morning) is the most interesting thing on the chart.
+      plugins: [{
+        id: 'karpValues',
+        afterDatasetsDraw(chart) {
+          const { ctx } = chart, meta = chart.getDatasetMeta(0);
+          if (!meta || !meta.data) return;
+          ctx.save();
+          ctx.font = '600 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+          ctx.fillStyle = '#6b7280'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+          meta.data.forEach((pt, i) => {
+            const v = chart.data.datasets[0].data[i];
+            if (v != null) ctx.fillText(String(v), pt.x, pt.y - 6);
+          });
+          ctx.restore();
+        },
+      }],
     });
   }
 
