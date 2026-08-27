@@ -56,4 +56,10 @@ feature-diff review.
 
 One line: the PR number reviewed, your verdict (approve/block), and a one-line summary of the verdict (e.g., "no defects found" or "security regression in <area>"). If you review multiple PRs per tick, one line per PR.
 
-**Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.
+gh#123: the persona_law.md §10c `Report:`/`Outcome:`/`Evidence:` boilerplate that every other
+charter carries does NOT apply here. This member is invoked directly by `judge-judy.sh`, not
+`run_member.sh` -- its output is never seen by `run_report.py`, and its prompt above already
+ends with an EXACT, single-line, machine-parsed contract (`VERDICT: approve` / `VERDICT:
+block`). Any text after that line, including a `Report:`/`Outcome:` block, risks breaking
+`judge-judy.sh`'s exact-match grep on the one mechanism that gates every merge in this fleet.
+Do not add it back.
