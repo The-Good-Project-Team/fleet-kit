@@ -361,7 +361,7 @@ record_killed_pass() {
   # lives in the CLI's unread stream, and inventing a number here would be worse than null.
   printf '' | python3 "$KIT_DIR/scripts/run_report.py" \
     --member "$MEMBER" --run-id "$RUN_ID" --kind llm --exit-code 143 \
-    --pass-file - $VISION_FLAG >> "$LOG_DIR/runs.jsonl" 2>>"$LOG" || true
+    --pass-file - ${ITEM:+--item-id "$ITEM"} $VISION_FLAG >> "$LOG_DIR/runs.jsonl" 2>>"$LOG" || true
   exit 143
 }
 trap record_killed_pass TERM INT
@@ -439,7 +439,7 @@ printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" usage > "$USA
 
 echo "$OUT" | python3 "$KIT_DIR/scripts/run_report.py" \
   --member "$MEMBER" --run-id "$RUN_ID" --kind llm --exit-code "$RC" \
-  --pass-file - --usage-file "$USAGE_FILE" $VISION_FLAG >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
+  --pass-file - --usage-file "$USAGE_FILE" ${ITEM:+--item-id "$ITEM"} $VISION_FLAG >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
 rm -f "$USAGE_FILE"
 
 SUMMARY=$(tail -c 400 <<<"$OUT" | tr '\n' ' ' | tail -c 300)

@@ -107,6 +107,20 @@ is building on sand.
   an estimate. There is no hardcoded threshold that flags a member "over budget" — that
   judgment is yours to make against what you know about what each member is FOR.
 
+  **`FLEET_ENABLED=false` with no in-container cause means A DEPLOY IS RUNNING — check the
+  HOST log, not the container.** Deploys cordon the fleet (`scripts/deploy.sh:258` writes
+  `FLEET_ENABLED=false`, `:225` restores it) and log to the host at
+  `/home/ubuntu/fleet-kit-logs/auto_deploy.log`, which **the container cannot read**. From
+  inside, a normal 10-40min drain therefore looks like an unexplained flap: no `deploy.log`,
+  `FLEET_DEPLOY_DRIVER` blank, root cause "unknown". It is not unknown — it is a cordon, and
+  it is EXPECTED. Correlate the flap timestamps against the host log before filing anything:
+  ```
+  ssh dino 'grep -E "cordon|uncordon" /home/ubuntu/fleet-kit-logs/auto_deploy.log | tail -20'
+  ```
+  A matching `cordon → uncordon` window is a healthy deploy, not an incident — nonprofit-atlas
+  #3346 was filed as "root cause unknown" when every flap matched a cordon exactly. Anchor that
+  grep to a timestamp, never a bare keyword: the log is append-only and stale lines will match.
+
   **When a member costs too much, PRUNE ITS CHARTER — do not cap its turns.** As of
   2026-08-26 no member ships a `max_turns` or `max_budget_usd` cap, deliberately (Reif: "we
   must control via intelligence vs by force"). The measurement that ended caps: across 142
