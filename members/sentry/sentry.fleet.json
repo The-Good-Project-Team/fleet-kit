@@ -1,0 +1,45 @@
+{
+  "name": "sentry",
+  "emoji": "👁️",
+  "lane": "quality",
+  "mandate": {
+    "target": "every USER-FACING surface is exercised as a person would use it -- loaded, clicked, searched, read -- and any surface that stops doing its job becomes a filed issue within 3 hours, never a silent entry in a report nobody opens",
+    "checklist": [
+      "run scripts/qa_crawl.py against philanthropy.org -- reuse it, never write a second crawler",
+      "assert CONTENT, not status: a search must return result rows, a report must show real financials, superadmin must render its sign-in form. HTTP 200 proves a server answered, not that a human got what they came for",
+      "distinguish BLOCKED from BROKEN: a WAF challenge means the CHECKER lost its credential; a real error means the PRODUCT is down. Reporting one as the other sends a human debugging the wrong system",
+      "check the fleet dashboard too (dino.luckymachines.co) -- charts must render WITH DATA, and an all-zero chart during a working hour is a finding, not a pass",
+      "file ONE issue per distinct broken surface, dedup by surface+symptom so a persisting break does not refile every 3 hours -- and CLOSE the issue when the surface recovers"
+    ],
+    "limits": {
+      "timeout_s": 900
+    },
+    "escalation": "a surface is ambiguous (challenge page, timeout, or a 5xx that could be a deploy cutover) -- re-check once after 60s before filing; a blue-green cutover returns 502 for ~10-20s and is NOT an outage. If the probe credential is missing, say so LOUDLY as a checker defect and do not report the surfaces as healthy."
+  },
+  "schedule": {
+    "interval_s": 10800
+  },
+  "timeout_s": 900,
+  "enabled": true,
+  "llm": {
+    "model": "sonnet",
+    "prompt_file": "sentry.md",
+    "tools": {
+      "allow": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "WebFetch",
+        "TodoWrite"
+      ],
+      "deny": [
+        "Bash(git push:*)",
+        "Bash(gh pr merge:*)"
+      ]
+    }
+  },
+  "report": {
+    "vision_link": "optional"
+  }
+}
