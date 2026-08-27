@@ -139,6 +139,10 @@ case "${1:-cron-foreground}" in
       # 01/08/15/22 keeps 15:13-ish (its long-standing slot) in the rotation and stays off the
       # :03/:21/:33/:41/:47/:51 minutes the other members already own.
       echo "13 1,8,15,22 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dumbledore >> $LOG_DIR/dumbledore.log 2>&1"
+      # sentry: every 3h, the USER-FACING surfaces (990 search/report, superadmin, this
+      # dashboard). Explicit hours for the same reason dumbledore uses them -- `*/3` restarts
+      # its pattern each day. :17 is unclaimed (:03/:12/:13/:21/:33/:41 are taken).
+      echo "17 0,3,6,9,12,15,18,21 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh sentry >> $LOG_DIR/sentry.log 2>&1"
     } > "$CRONTAB"
     chmod 0644 "$CRONTAB"
     echo "[entrypoint] installed crontab (token redacted, stored separately at $TOKEN_FILE, mode 600):"
