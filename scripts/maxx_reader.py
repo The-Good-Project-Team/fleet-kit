@@ -44,6 +44,17 @@ import urllib.parse
 import urllib.request
 
 SAFE_VERDICTS = {"ok", "degraded"}
+
+# maxx's own definitive "at/past the ceiling" answer -- a REAL restrictive reading, not a
+# broken meter. Kept separate from SAFE_VERDICTS so verdict=over routes to a real 0.0-headroom
+# result below, never through the unreadable-meter branch. Conflating the two is the exact
+# failure nonprofit-atlas's scripts/m_budget_maxx.py (board #9777937) already fixed once: an
+# `|| BUDGET_JSON=full` fallback overwrote a correctly-computed standby with a hardcoded
+# default because `over` and `unreadable` shared one bucket. Recurred here 2026-08-27 ~11:03
+# UTC: verdict=over on 3+ consecutive gru passes read as `maxx_verdict_over` (unreadable) and
+# fell back to a several-hours-stale cached allowance instead of the real "spend ~0" signal
+# maxx was actually sending (nonprofit-atlas#3422).
+OVER_VERDICTS = {"over"}
 TIMEOUT_S = 20.0  # matches m_budget_maxx.py's measured 2-6s real latency through Cloudflare
 
 
@@ -124,14 +135,20 @@ def get_headroom(
         return None, "maxx_unexpected_shape", {}
 
     verdict = str(budget.get("verdict", "")).lower()
-    if verdict not in SAFE_VERDICTS:
-        return None, f"maxx_verdict_{verdict or 'missing'}", {}
 
     allowance = {
         k: budget[k] for k in ("per_diem_hourly_pct", "reserved_pct", "week_bank_pct",
                                "per_diem_usable_pct", "sustainable_pct_per_hour", "verdict")
         if budget.get(k) is not None
     }
+
+    if verdict in OVER_VERDICTS:
+        # A REAL over-budget reading, not a broken meter -- 0.0 headroom is the honest answer,
+        # never None (None means "no trustworthy reading", which would send the caller back to
+        # a stale fallback instead of the fresh "spend ~0" signal maxx just gave it).
+        return 0.0, "over", allowance
+    if verdict not in SAFE_VERDICTS:
+        return None, f"maxx_verdict_{verdict or 'missing'}", allowance
 
     bank = budget.get("week_bank_pct")
     if bank is None:
