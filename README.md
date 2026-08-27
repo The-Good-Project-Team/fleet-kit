@@ -212,6 +212,51 @@ end, they are not this.
 | paths *inside* the container | `/fleet-kit/scripts/`, `/var/log/fleet-kit/` |
 | public endpoint | `https://dino.luckymachines.co` → 8420 |
 
+### Which fleet.env is live (there are two, only one is read)
+
+There are **two** files named `fleet.env` on the box and they are not copies of each other:
+
+| path | read by | role |
+|---|---|---|
+| `~/fleet-kit/instances/<instance>/fleet.env` | `deploy.sh:46`, bind-mounted to `/fleet-kit/fleet.env` (`deploy.sh:115`) | **live config — the only one that runs** |
+| `~/fleet-kit/fleet.env` | nothing | leftover from a pre-instances single-fleet layout; a decoy |
+
+`deploy.sh` requires `FLEET_INSTANCE_DIR` and sources only that directory's `fleet.env`. It
+never reads the repo-root one. Both are gitignored, so `git status` will not warn you that you
+edited the dead file.
+
+**Always confirm against the container, never the host checkout:**
+
+```bash
+podman exec <container> grep '^FLEET_ACCOUNTS=' /fleet-kit/fleet.env
+```
+
+Confirmed live 2026-08-27: the root file read `FLEET_ACCOUNTS="primary"` while the running
+fleet had `FLEET_ACCOUNTS="primary claude-reif"` and was failing over correctly. Anyone
+diagnosing account failover from the root file would have concluded the pool had no failover
+target and "fixed" a fleet that was already working.
+
+### Which Claude account is the fleet actually spending?
+
+`FLEET_ACCOUNTS` is a space-separated list tried **in order**; each name maps to
+`$HOME/.claude-<name>` (so `claude-reif` → `~/.claude-claude-reif`, doubled prefix and all).
+`deploy.sh:81` mounts one credential dir per name, so a name with no logged-in dir is a
+failover target that cannot actually authenticate.
+
+An account that has hit its weekly limit is recorded in the pool's exhaustion state file with
+its reset epoch, and every later tick **skips it without spending a call** until that time
+passes — that is the `budget verdict=gated:exhausted_until_<epoch>` line, produced by
+`_account_pool_budget_verdict()` (`account_pool.sh:100`) reading state this module wrote
+itself. It is normal, healthy output, not an error.
+
+```bash
+podman exec <container> tail -20 /var/log/fleet-kit/account-pool.log
+```
+
+Reading `gated:` on the first account plus `call succeeded` on the next is failover **working**.
+The fleet only stops when every account in the list is gated — the pool returns 3
+(`ACCOUNT_POOL_ALL_EXHAUSTED`) and says `ALL accounts in '<list>' failed this call`.
+
 Deploy is **blue-green** and is the only supported path — it builds a green candidate on alt
 ports 8571/8572, health-checks it, cuts over, and keeps the previous build stopped as
 `philanthropy-retired`:
@@ -366,8 +411,11 @@ characterising a traffic burst after the fact, not for authenticating anyone.
 
 ### Where the key lives, and how to get it
 
-`FLEET_API_KEY` in `fleet.env` on the fleet box — **that file is the only source of truth.** It
-is gitignored and never committed, so it is not in this repo and cannot be recovered from git.
+`FLEET_API_KEY` in the **instance's** `fleet.env` — `$FLEET_INSTANCE_DIR/fleet.env`, which on
+dino is `/home/ubuntu/fleet-kit/instances/nonprofit-atlas/fleet.env`. **That file is the only
+source of truth, and it is NOT the `fleet.env` at the repo root** — see "Which fleet.env is
+live" below. Both are gitignored and never committed, so neither is in this repo and neither
+can be recovered from git.
 There is no secret manager in this kit by design (see extension points below); `fleet.env` is
 where every other credential here lives too.
 
@@ -390,9 +438,10 @@ KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 printf '\nFLEET_API_KEY=%s\n' "$KEY" >> fleet.env
 ```
 
-Write it to **both** the host `fleet.env` and the container's copy if those are separate files
-(a container built from an image has its own baked-in copy — editing only the host's leaves the
-running server on the old value until rebuild). Restart the server so it picks the key up:
+Write it to the **instance** `fleet.env` (`$FLEET_INSTANCE_DIR/fleet.env`). That path is
+bind-mounted to `/fleet-kit/fleet.env`, so the container sees the edit with no rebuild — but
+read the truncate-and-rewrite rule in `deploy.sh:194` first: a bind mount follows the *inode*,
+so `sed -i` silently detaches the container's view. Restart the server so it picks the key up:
 `fleet_view_server.py` reads it from its environment at request time, but only sees what it was
 launched with.
 
