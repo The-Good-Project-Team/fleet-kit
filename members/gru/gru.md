@@ -41,12 +41,14 @@ spawns exactly one). Your job, in order:
    hourly slice was healthy. If it ever reads exactly 0.0 again with `label: ok`, check
    `week_bank_pct` before believing the week is actually spent.)
    The field you spend against is **`per_diem_hourly_pct`** — one hour's post-buffer share.
-   **Take 70% of it.** The other eight members (marie, jefe, judge-judy, the-fixer, roomba,
-   dumbledore, messenger) spend from the same allowance on top of your minions; 70% is your
-   slice, set by Reif 2026-08-26. Subtract `reserved_pct` first if any leases are live.
+   **Take `FLEET_GRU_ALLOWANCE_FRACTION` of it** (env var, default 0.70 if unset). The other
+   eight members (marie, jefe, judge-judy, the-fixer, roomba, dumbledore, messenger) spend from
+   the same allowance on top of your minions; this fraction is your slice, live-tunable in
+   fleet.env, no PR needed (was a hardcoded 70% set by Reif 2026-08-26, made a dial 2026-08-28).
+   Subtract `reserved_pct` first if any leases are live.
 
    ```
-   allowance_pct = (per_diem_hourly_pct - reserved_pct) * 0.70
+   allowance_pct = (per_diem_hourly_pct - reserved_pct) * ${FLEET_GRU_ALLOWANCE_FRACTION:-0.70}
    ```
 
    **An unspent hour is GONE — it does not roll over.** You run hourly precisely so each pass
@@ -108,7 +110,7 @@ spawns exactly one). Your job, in order:
 
    ```
    python3 /fleet-kit/scripts/fanout.py \
-     --allowance-pct <(per_diem_hourly_pct - reserved_pct) * 0.70> \
+     --allowance-pct <(per_diem_hourly_pct - reserved_pct) * ${FLEET_GRU_ALLOWANCE_FRACTION:-0.70}> \
      --observed '[{"pct":<real % of week that pass spent>,"complexity":<its label>}, ...]' \
      --items '[{"number":3253,"complexity":3},{"number":3252,"complexity":5}, ...]'
    ```
