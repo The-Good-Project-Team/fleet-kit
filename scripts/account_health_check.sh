@@ -41,6 +41,8 @@ POOL_LOG="$LOG_DIR/account-pool.log"
 NTFY_TOPIC="${NTFY_TOPIC:?set NTFY_TOPIC -- the ntfy.sh topic to page}"
 THRESHOLD_MINUTES="${ACCOUNT_HEALTH_THRESHOLD_MINUTES:-30}"
 STATE_FILE="${ACCOUNT_HEALTH_STATE_FILE:-$LOG_DIR/.account_health_paged.state}"
+CONTAINER_NAME="${FLEET_CONTAINER_NAME:-philanthropy}"
+RESTART_STATE_FILE="${ACCOUNT_HEALTH_RESTART_STATE_FILE:-$LOG_DIR/.account_health_restarted.state}"
 
 [ -f "$POOL_LOG" ] || { echo "[account_health_check] no pool log at $POOL_LOG yet -- nothing to check"; exit 0; }
 
@@ -62,7 +64,7 @@ if [[ "$last_line" != *"ALL accounts in"*"failed this call"* ]]; then
     _ntfy "fleet-kit: accounts recovered" \
       "Fleet account pool is succeeding again after an outage flagged at $already_paged." \
       "default"
-    rm -f "$STATE_FILE"
+    rm -f "$STATE_FILE" "$RESTART_STATE_FILE"
   fi
   echo "[account_health_check] healthy -- newest pool-log line is not a failure"
   exit 0
@@ -103,8 +105,59 @@ age_minutes=$(( (now_epoch - line_epoch) / 60 ))
 
 if [ "$age_minutes" -ge "$THRESHOLD_MINUTES" ] && [ -z "$already_paged" ]; then
   paged_at="$(date -u '+%Y-%m-%d %H:%M UTC')"
+
+  # Auto-recovery attempt, host-side, before paging a human -- but ONLY for the network-death
+  # failure class, never the auth-flap class. Confirmed live 2026-08-28: a dead slirp4netns
+  # process left the philanthropy container with no default route at all -- DNS unreachable,
+  # every `claude` call hangs to a timeout, and NOTHING inside the container (or a plain
+  # `podman restart`) can fix it; it needed the orphaned host slirp4netns process killed and a
+  # full stop+start to force a fresh netns. A real revoked/expired token produces the SAME
+  # "every account failing" symptom in account-pool.log, and restarting the pod does nothing
+  # for that case -- worse, it would hide a real credential problem behind a green-looking
+  # restart. So gate the restart on DNS actually being broken INSIDE the container right now,
+  # not on the account-pool symptom alone.
+  dns_broken=0
+  if ! podman exec "$CONTAINER_NAME" sh -c 'getent hosts api.anthropic.com' >/dev/null 2>&1; then
+    dns_broken=1
+  fi
+
+  already_restarted=""
+  [ -f "$RESTART_STATE_FILE" ] && already_restarted=$(cat "$RESTART_STATE_FILE")
+
+  if [ "$dns_broken" -eq 1 ] && [ -z "$already_restarted" ]; then
+    echo "[account_health_check] DNS unreachable inside $CONTAINER_NAME -- attempting auto-recovery"
+    # Orphaned slirp4netns processes from a prior crash can squat on a netns and are why a
+    # plain `podman restart` alone did not fix this live -- stop, clear anything slirp4netns
+    # has open for THIS container's netns, then start fresh. Best-effort: this container's own
+    # netns cleanup only, never touches other containers' netns/slirp processes.
+    podman stop "$CONTAINER_NAME" >/dev/null 2>&1
+    cid=$(podman inspect "$CONTAINER_NAME" --format '{{.Id}}' 2>/dev/null)
+    pkill -f "netns/cni-.*$CONTAINER_NAME" 2>/dev/null || true
+    podman start "$CONTAINER_NAME" >/dev/null 2>&1
+    sleep 5
+
+    if podman exec "$CONTAINER_NAME" sh -c 'getent hosts api.anthropic.com' >/dev/null 2>&1; then
+      echo "$paged_at" > "$RESTART_STATE_FILE"
+      _ntfy "fleet-kit: auto-recovered from a dead-network outage" \
+        "No fleet account had succeeded in ${age_minutes}+ minutes -- DNS inside $CONTAINER_NAME was unreachable (dead slirp4netns), same class as the 2026-08-28 outage. Restarted the container automatically; DNS resolves again. Watching for the next tick to confirm real recovery." \
+        "default"
+      echo "[account_health_check] auto-recovery restart succeeded -- DNS resolves again"
+      exit 0
+    else
+      echo "$paged_at" > "$RESTART_STATE_FILE"
+      _ntfy "🚨 fleet-kit: auto-recovery FAILED, needs a human" \
+        "DNS inside $CONTAINER_NAME was unreachable; attempted a container restart but DNS is still broken afterward. Last pool-log line: $last_line" \
+        "urgent"
+      echo "$paged_at" > "$STATE_FILE"
+      echo "[account_health_check] auto-recovery restart did NOT fix DNS -- PAGED"
+      exit 0
+    fi
+  fi
+
+  # Not a network problem (or we already tried the restart once this outage) -- this is the
+  # auth-flap/exhaustion class, which no restart can fix. Page a human, as before.
   _ntfy "🚨 fleet-kit: ALL accounts exhausted" \
-    "No fleet account has succeeded in ${age_minutes}+ minutes (threshold ${THRESHOLD_MINUTES}m). Last pool-log line: $last_line" \
+    "No fleet account has succeeded in ${age_minutes}+ minutes (threshold ${THRESHOLD_MINUTES}m). DNS check: $([ "$dns_broken" -eq 1 ] && echo 'broken (already attempted auto-restart)' || echo 'ok -- looks like a real account/auth problem, not network'). Last pool-log line: $last_line" \
     "urgent"
   echo "$paged_at" > "$STATE_FILE"
   echo "[account_health_check] PAGED -- last success was ${age_minutes}m ago"
