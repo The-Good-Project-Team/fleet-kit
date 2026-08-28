@@ -56,8 +56,9 @@ jobs:
     steps:
       - name: install cloudflared
         run: |
-          curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+          curl -fsL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
           chmod +x /usr/local/bin/cloudflared
+          /usr/local/bin/cloudflared --version
 
       - name: configure deploy key + tunnel proxy
         # `cloudflared access ssh` proxies through the tunnel with no auth prompt as long as
