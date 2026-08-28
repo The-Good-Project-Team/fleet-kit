@@ -1,5 +1,5 @@
 #!/bin/bash
-# self_improve_score.sh -- once a day, an LLM reads a digest of the fleet's own recent activity
+# self_improve_score.sh -- every 3h, an LLM reads a digest of the fleet's own recent activity
 # and scores how much the fleet is actually SELF-IMPROVING, on a 1-100 scale anchored by Reif's
 # own reference points: 100 = Jarvis (autonomously diagnoses itself, rewrites its own rules,
 # gets measurably better without being told), 1 = a Windows update notification (nags, repeats
@@ -26,7 +26,8 @@
 # fleet_view_server.py reads this file directly (same append-only jsonl pattern as runs.jsonl)
 # -- no new endpoint machinery, no DB.
 #
-# Run: cron, once daily. Needs FLEET_REPO, FLEET_LOG_DIR (same env every other script here uses).
+# Run: cron, hourly (self-no-ops outside its own 3h slot). Needs FLEET_REPO, FLEET_LOG_DIR
+# (same env every other script here uses).
 
 set -uo pipefail
 
