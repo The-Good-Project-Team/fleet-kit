@@ -118,7 +118,10 @@ case "${1:-cron-foreground}" in
       # ten-minute grid (*/10) -- :00/:20/:30/:40 all landed exactly on both, so every one of
       # these fired shoulder-to-shoulder with a poll every single time instead of getting a
       # clear tick to itself. Minutes below are arbitrary but deliberately off both grids.
-      echo "3 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_gru_fanout.sh"
+      # gru widened hourly -> every 2h (2026-08-28, Reif: "small build mode") -- paired with
+      # FLEET_GRU_ALLOWANCE_FRACTION=0.15 in fleet.env, this is a per-instance throttle, not
+      # a fleet-wide default; other instances stay hourly unless they opt in the same way.
+      echo "3 */2 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_gru_fanout.sh"
       echo "21 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh jefe >> $LOG_DIR/jefe.log 2>&1"
       echo "41 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh roomba >> $LOG_DIR/roomba.log 2>&1"
       echo "33 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh marie >> $LOG_DIR/marie.log 2>&1"
