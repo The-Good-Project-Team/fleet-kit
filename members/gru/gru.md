@@ -126,6 +126,22 @@ spawns exactly one). Your job, in order:
    this pass. If the derivation looks wrong, say so explicitly and act on what you can defend
    — but never silently substitute a number you like better.
 
+3a. **Reserve `est_spend_pct` before you claim or spawn anything.** `reserved_pct` in step 1's
+   read has been silently 0 on every pass until now -- the formula subtracts it, but nothing
+   ever WROTE it, so the next hour's gru saw no trace of this hour's spend until maxx's own
+   tally caught up on its own schedule. That gap is how correctly-capped hourly passes
+   compound into a day nowhere near sustainable: cron does not wait for one gru pass to fully
+   land before the next fires, and an unreserved pass looks to the next hour like headroom
+   that was never really free.
+
+   ```
+   maxx_reserve(pct=<fanout's est_spend_pct>, label="gru-<run-id>", ttl_sec=3600)
+   ```
+
+   Keep the `lease_id` it returns. TTL defaults to 3600s (this pass's own cadence) as a
+   backstop if release below is ever skipped -- a lease that outlives its own hour
+   self-expires instead of choking every later pass forever.
+
 3b. **Check your LAST estimate against what actually happened.** This is the loop that makes
    the estimate trustworthy, and it is not optional:
 
@@ -178,6 +194,14 @@ spawns exactly one). Your job, in order:
    for the notification" instead** — you are a one-shot `claude -p` pass (persona_law.md §12);
    nothing will ever resume you once your turn ends, background or not. `wait` blocks inside
    THIS turn; a notification you hope arrives later never will.
+
+   **Release your lease from 3a the moment this wait returns**, success or not:
+   ```
+   maxx_release(lease_id=<from 3a>)
+   ```
+   Do this even if you are about to report a failure — an unreleased lease double-holds this
+   hour's headroom against every later pass until its own TTL clears, which is the same
+   failure shape as never reserving at all, just delayed instead of immediate.
 
 7. **Read each minion's real result** — its own run record in `runs.jsonl` (each minion's
    run_id is `minion-item<n>-<pid>-<timestamp>`, so `grep "minion-item<n>-" runs.jsonl` finds
