@@ -491,6 +491,83 @@ def _a_killed_pass_is_recorded_not_lost():
         "backgrounded pipeline does not re-raise PIPESTATUS -- claude's exit code is lost"
 
 
+def _postflight_dirty_check_catches_a_leaked_absolute_path_write():
+    """fleet-kit#78 / nonprofit-atlas#3113 (15+ recurrences): worktree isolation is a `cd`, not
+    a sandbox -- it does not stop a tool call that names the shared checkout by its absolute
+    path instead of the worktree it was actually placed in. That write lands in $REPO for
+    real, uncommitted, where every other concurrently-running member reads and writes.
+    Every prior occurrence was found by a human or another pass noticing $REPO dirty, often
+    hours later, and rescued by hand -- no automated check existed.
+
+    This asserts the real behavior against a real git repo dirtied exactly the way every
+    incident describes (an untracked absolute-path write), not just that the source mentions
+    `git status` somewhere -- a clean $REPO must stay silent, and a dirty one must alert
+    loudly, attributed to the run that was live when it was found.
+    """
+    import subprocess
+    script_path = ROOT / "scripts" / "postflight_dirty_check.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp) / "repo"
+        repo.mkdir()
+        for cmd in (
+            ["git", "init", "-q"],
+            ["git", "config", "user.email", "t@t"],
+            ["git", "config", "user.name", "t"],
+        ):
+            subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+        (repo / "f.txt").write_text("x")
+        subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        member_log = log_dir / "member.log"
+        alerts_file = log_dir / "repo_dirty_alerts.log"
+
+        def run_check(label):
+            script = (
+                "set -uo pipefail\n"
+                f'REPO="{repo}"\n'
+                f'LOG_DIR="{log_dir}"\n'
+                f'log() {{ echo "$*" >> "{member_log}"; }}\n'
+                f'. "{script_path}"\n'
+                f'check_repo_clean_postflight "{label}"\n'
+            )
+            proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+            assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+
+        run_check("run-clean")
+        assert not alerts_file.exists(), "a clean $REPO alerted anyway"
+        assert not member_log.exists() or member_log.read_text().strip() == "", \
+            "a clean $REPO logged an alert"
+
+        (repo / "leaked.txt").write_text("leaked content")
+        run_check("run-dirty-123")
+
+        assert alerts_file.exists(), "a dirty $REPO produced no alert file at all"
+        alerts = alerts_file.read_text()
+        assert "run-dirty-123" in alerts, "alert does not attribute the leak to the run"
+        assert "leaked.txt" in alerts, "alert does not name the leaked path"
+        member_text = member_log.read_text()
+        assert "ALERT" in member_text, "no loud alert written to the per-member log"
+        assert "leaked.txt" in member_text, "per-member log does not name the leaked path"
+
+
+def _run_member_and_builder_check_repo_before_removing_the_worktree():
+    """Both isolated-worktree callers (the generic member path and the dedicated builder path)
+    must wire the postflight check in, and check $REPO BEFORE its worktree is torn down --
+    once the worktree is removed, WT_PATH/the branch name (often the only clue tying a leak
+    back to which pass caused it) is gone too.
+    """
+    for name in ("run_member.sh", "worktree_builder.sh"):
+        src = (ROOT / "scripts" / name).read_text()
+        assert "postflight_dirty_check.sh" in src, f"{name} does not source postflight_dirty_check.sh"
+        i = src.find("check_repo_clean_postflight")
+        j = src.find('git -C "$REPO" worktree remove')
+        assert i != -1, f"{name} never calls check_repo_clean_postflight"
+        assert j != -1 and i < j, f"{name} checks $REPO only after its worktree is already removed"
+
+
 def _deploy_drains_inflight_passes():
     """deploy.sh must not kill agent work to ship code.
 
@@ -1167,6 +1244,8 @@ if __name__ == "__main__":
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
     check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)
+    check("a leaked absolute-path write into $REPO is caught and alerted", _postflight_dirty_check_catches_a_leaked_absolute_path_write)
+    check("both worktree callers check $REPO before tearing the worktree down", _run_member_and_builder_check_repo_before_removing_the_worktree)
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
     check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)

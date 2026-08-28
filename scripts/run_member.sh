@@ -164,6 +164,7 @@ print(member_spec.behavior_path(spec))
 cd "$REPO" 2>/dev/null || { log "FATAL: repo missing at $REPO"; exit 1; }
 [ -f "$KIT_DIR/scripts/account_pool.sh" ] && . "$KIT_DIR/scripts/account_pool.sh"
 command -v account_pool_run >/dev/null 2>&1 || account_pool_run() { "$@"; }
+. "$KIT_DIR/scripts/postflight_dirty_check.sh"
 
 # --- isolate this pass in its own worktree (#3092) -------------------------------------------
 # Every prior run of this script just `cd`ed into the ONE shared $REPO checkout with no
@@ -218,6 +219,10 @@ if [ "$WORKTREE_ENABLED" = "True" ] && [ "$DRY_RUN" -ne 1 ]; then
     exit 1
   fi
   cleanup_run_worktree() {
+    # Check BEFORE removing the worktree: the dirt we're looking for is in $REPO, not
+    # $WT_PATH, but a leak is easiest to attribute to this exact pass while its worktree
+    # (and this trap) still exist -- see postflight_dirty_check.sh.
+    check_repo_clean_postflight "$RUN_ID"
     git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
     git -C "$REPO" worktree prune >/dev/null 2>&1 || true
   }
@@ -351,6 +356,9 @@ KILLED_RECORDED=0
 record_killed_pass() {
   [ "$KILLED_RECORDED" -eq 1 ] && return 0   # a trap that fires twice must not write two rows
   KILLED_RECORDED=1
+  # A kill signal bypasses cleanup_run_worktree's own EXIT trap (cleared below) -- check here
+  # too, since a leak can land in $REPO before the kill just as easily as before a clean exit.
+  [ "$WORKTREE_ENABLED" = "True" ] && check_repo_clean_postflight "$RUN_ID"
   trap - TERM INT EXIT
   # Reap the foreground pipeline (see the note above) -- without this the rest of this function
   # does not run until `claude -p` exits on its own, which under a deploy cutover is never.
