@@ -552,20 +552,127 @@ def _postflight_dirty_check_catches_a_leaked_absolute_path_write():
         assert "ALERT" in member_text, "no loud alert written to the per-member log"
         assert "leaked.txt" in member_text, "per-member log does not name the leaked path"
 
+        # The SAME leak, still sitting there uncleaned, must not get re-blamed on every later
+        # pass that happens to check next -- a real risk once N members share one $REPO.
+        member_log.unlink()
+        run_check("run-innocent-456")
+        alerts_after = alerts_file.read_text()
+        assert "run-innocent-456" not in alerts_after, \
+            "an unrelated later run got blamed for a leak it didn't cause"
+        assert not member_log.exists() or "ALERT" not in member_log.read_text(), \
+            "an unrelated later run raised a fresh ALERT for the same stale leak"
+
+        # A genuinely NEW leak (different content) after the repo goes clean again must still
+        # alert -- dedup must key off the actual dirt, not just "have we ever seen dirt before".
+        subprocess.run(["git", "add", "leaked.txt"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "absorb old leak"], cwd=repo, check=True, capture_output=True)
+        member_log.unlink()
+        (repo / "second_leak.txt").write_text("different leak")
+        run_check("run-dirty-789")
+        assert "run-dirty-789" in alerts_file.read_text(), "a fresh, different leak was not alerted"
+        assert "ALERT" in member_log.read_text(), "a fresh, different leak raised no ALERT"
+
+
+def _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure():
+    """A failed `git status` must not be read as "clean" -- that is the exact silent-failure
+    mode this check exists to end. Concurrent minions/builders tearing down worktrees against
+    the same $REPO at once is precisely when a transient git failure (lock contention, a
+    momentarily missing $REPO) is most likely, so treating it as "nothing to report" would
+    defeat the feature under its own target scenario.
+    """
+    import subprocess
+    script_path = ROOT / "scripts" / "postflight_dirty_check.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        not_a_repo = Path(tmp) / "not-a-repo"
+        not_a_repo.mkdir()
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        member_log = log_dir / "member.log"
+
+        script = (
+            "set -uo pipefail\n"
+            f'REPO="{not_a_repo}"\n'
+            f'LOG_DIR="{log_dir}"\n'
+            f'log() {{ echo "$*" >> "{member_log}"; }}\n'
+            f'. "{script_path}"\n'
+            'check_repo_clean_postflight "run-git-broken"\n'
+        )
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+
+        assert member_log.exists(), "a git-status failure produced no log output at all"
+        text = member_log.read_text()
+        assert "ALERT" in text, "a git-status failure was silently treated as a clean repo"
+        assert (log_dir / "repo_dirty_alerts.log").exists(), \
+            "a git-status failure did not reach the shared alerts file"
+
+
+def _run_member_rejects_a_non_numeric_item():
+    """--item flows unsanitized into RUN_ID, the worktree branch name, and (fleet-kit#78) the
+    postflight dirty-check's alert log -- validated as a plain issue number so a stray
+    character can't forge extra lines into what's meant to be a trustworthy cross-member
+    incident feed, or produce a git ref name `worktree add -b` then rejects outright.
+    """
+    import os
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, FLEET_REPO=tmp, FLEET_LOG_DIR=tmp, FLEET_ENV_FILE="/nonexistent")
+        proc = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "run_member.sh"), "minion", "--item", "123x"],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        assert proc.returncode == 2, \
+            f"a non-numeric --item did not exit 2: rc={proc.returncode} stderr={proc.stderr[:300]}"
+        assert "must be a plain issue number" in proc.stderr, \
+            "no clear FATAL message on a rejected --item"
+
 
 def _run_member_and_builder_check_repo_before_removing_the_worktree():
     """Both isolated-worktree callers (the generic member path and the dedicated builder path)
     must wire the postflight check in, and check $REPO BEFORE its worktree is torn down --
     once the worktree is removed, WT_PATH/the branch name (often the only clue tying a leak
     back to which pass caused it) is gone too.
+
+    Checked per call site, not by a global "does this string appear before that string
+    anywhere in the file" search -- run_member.sh has TWO call sites (its normal-exit
+    cleanup_run_worktree, and its kill-signal record_killed_pass, which never removes a
+    worktree at all), and a first-occurrence-anywhere check can pass by coincidence without
+    actually verifying either function's own internal ordering.
     """
-    for name in ("run_member.sh", "worktree_builder.sh"):
-        src = (ROOT / "scripts" / name).read_text()
-        assert "postflight_dirty_check.sh" in src, f"{name} does not source postflight_dirty_check.sh"
-        i = src.find("check_repo_clean_postflight")
-        j = src.find('git -C "$REPO" worktree remove')
-        assert i != -1, f"{name} never calls check_repo_clean_postflight"
-        assert j != -1 and i < j, f"{name} checks $REPO only after its worktree is already removed"
+    def function_body(src, def_line):
+        i = src.index(def_line)
+        # Bash functions here are all `name() {\n ... \n}` at zero indent -- the closing brace
+        # is the first line that is exactly "}" after the opening one.
+        j = src.index("\n}", i)
+        return src[i:j]
+
+    run_member_src = (ROOT / "scripts" / "run_member.sh").read_text()
+    assert "postflight_dirty_check.sh" in run_member_src, \
+        "run_member.sh does not source postflight_dirty_check.sh"
+
+    cleanup_body = function_body(run_member_src, "cleanup_run_worktree() {")
+    ci = cleanup_body.find("check_repo_clean_postflight")
+    cj = cleanup_body.find('git -C "$REPO" worktree remove')
+    assert ci != -1, "cleanup_run_worktree never calls check_repo_clean_postflight"
+    assert cj != -1 and ci < cj, \
+        "cleanup_run_worktree checks $REPO only after removing its own worktree"
+
+    killed_body = function_body(run_member_src, "record_killed_pass() {")
+    ki = killed_body.find("check_repo_clean_postflight")
+    kj = killed_body.find("trap - TERM INT EXIT")
+    assert ki != -1, "record_killed_pass never calls check_repo_clean_postflight"
+    assert kj != -1 and ki < kj, \
+        "record_killed_pass checks $REPO after clearing its own traps"
+
+    builder_src = (ROOT / "scripts" / "worktree_builder.sh").read_text()
+    assert "postflight_dirty_check.sh" in builder_src, \
+        "worktree_builder.sh does not source postflight_dirty_check.sh"
+    builder_cleanup = function_body(builder_src, "cleanup() {")
+    bi = builder_cleanup.find("check_repo_clean_postflight")
+    bj = builder_cleanup.find('git -C "$REPO" worktree remove')
+    assert bi != -1, "worktree_builder.sh's cleanup never calls check_repo_clean_postflight"
+    assert bj != -1 and bi < bj, \
+        "worktree_builder.sh's cleanup checks $REPO only after removing its own worktree"
 
 
 def _deploy_drains_inflight_passes():
@@ -1245,6 +1352,8 @@ if __name__ == "__main__":
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
     check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)
     check("a leaked absolute-path write into $REPO is caught and alerted", _postflight_dirty_check_catches_a_leaked_absolute_path_write)
+    check("a git-status failure alerts rather than reading as clean", _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure)
+    check("run_member.sh rejects a non-numeric --item", _run_member_rejects_a_non_numeric_item)
     check("both worktree callers check $REPO before tearing the worktree down", _run_member_and_builder_check_repo_before_removing_the_worktree)
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)

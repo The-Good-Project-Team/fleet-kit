@@ -114,7 +114,12 @@ fi
 BUILD_SUCCEEDED=0
 cleanup() {
   # Check BEFORE removing the worktree -- see postflight_dirty_check.sh (fleet-kit#78).
-  check_repo_clean_postflight "${RUN_ID:-build-$ITEM_ID}"
+  # RUN_ID isn't assigned until STEP 4 (after the build call) -- if this trap fires earlier
+  # (killed mid-build), fall back to WORKER_NAME, not just $ITEM_ID: WORKER_NAME already
+  # carries $$/a per-worker identity (see its default above), so the fallback stays as
+  # disambiguated as the real RUN_ID would have been, instead of collapsing to one label
+  # per item regardless of which concurrent attempt was actually running.
+  check_repo_clean_postflight "${RUN_ID:-build-$ITEM_ID-$WORKER_NAME}"
   git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
   git -C "$REPO" worktree prune >/dev/null 2>&1 || true
   rm -f "${USAGE_FILE:-}"

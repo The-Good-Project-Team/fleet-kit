@@ -62,7 +62,14 @@ TASK=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
-    --item) ITEM="${2:?--item needs an issue number}"; shift 2 ;;
+    --item)
+      ITEM="${2:?--item needs an issue number}"
+      # A plain issue number only -- it flows unsanitized into RUN_ID, the worktree branch
+      # name, and (fleet-kit#78) the postflight dirty-check's alert log, so anything odd in
+      # here (a stray newline, a git-ref-hostile character) belongs caught here, not silently
+      # forwarded into a log meant to be a trustworthy cross-member incident feed.
+      case "$ITEM" in (*[!0-9]*) echo "FATAL: --item must be a plain issue number, got: $ITEM" >&2; exit 2 ;; esac
+      shift 2 ;;
     --task) TASK="${2:?--task needs an instruction}"; shift 2 ;;
     *) shift ;;
   esac
