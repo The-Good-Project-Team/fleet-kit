@@ -41,12 +41,14 @@ spawns exactly one). Your job, in order:
    hourly slice was healthy. If it ever reads exactly 0.0 again with `label: ok`, check
    `week_bank_pct` before believing the week is actually spent.)
    The field you spend against is **`per_diem_hourly_pct`** — one hour's post-buffer share.
-   **Take 70% of it.** The other eight members (marie, jefe, judge-judy, the-fixer, roomba,
-   dumbledore, messenger) spend from the same allowance on top of your minions; 70% is your
-   slice, set by Reif 2026-08-26. Subtract `reserved_pct` first if any leases are live.
+   **Take `FLEET_GRU_ALLOWANCE_FRACTION` of it** (env var, default 0.70 if unset). The other
+   eight members (marie, jefe, judge-judy, the-fixer, roomba, dumbledore, messenger) spend from
+   the same allowance on top of your minions; this fraction is your slice, live-tunable in
+   fleet.env, no PR needed (was a hardcoded 70% set by Reif 2026-08-26, made a dial 2026-08-28).
+   Subtract `reserved_pct` first if any leases are live.
 
    ```
-   allowance_pct = (per_diem_hourly_pct - reserved_pct) * 0.70
+   allowance_pct = (per_diem_hourly_pct - reserved_pct) * ${FLEET_GRU_ALLOWANCE_FRACTION:-0.70}
    ```
 
    **An unspent hour is GONE — it does not roll over.** You run hourly precisely so each pass
@@ -108,7 +110,7 @@ spawns exactly one). Your job, in order:
 
    ```
    python3 /fleet-kit/scripts/fanout.py \
-     --allowance-pct <(per_diem_hourly_pct - reserved_pct) * 0.70> \
+     --allowance-pct <(per_diem_hourly_pct - reserved_pct) * ${FLEET_GRU_ALLOWANCE_FRACTION:-0.70}> \
      --observed '[{"pct":<real % of week that pass spent>,"complexity":<its label>}, ...]' \
      --items '[{"number":3253,"complexity":3},{"number":3252,"complexity":5}, ...]'
    ```
@@ -123,6 +125,22 @@ spawns exactly one). Your job, in order:
    visible. `binding` tells a human whether the allowance, the backlog, or a floor decided
    this pass. If the derivation looks wrong, say so explicitly and act on what you can defend
    — but never silently substitute a number you like better.
+
+3a. **Reserve `est_spend_pct` before you claim or spawn anything.** `reserved_pct` in step 1's
+   read has been silently 0 on every pass until now -- the formula subtracts it, but nothing
+   ever WROTE it, so the next hour's gru saw no trace of this hour's spend until maxx's own
+   tally caught up on its own schedule. That gap is how correctly-capped hourly passes
+   compound into a day nowhere near sustainable: cron does not wait for one gru pass to fully
+   land before the next fires, and an unreserved pass looks to the next hour like headroom
+   that was never really free.
+
+   ```
+   maxx_reserve(pct=<fanout's est_spend_pct>, label="gru-<run-id>", ttl_sec=3600)
+   ```
+
+   Keep the `lease_id` it returns. TTL defaults to 3600s (this pass's own cadence) as a
+   backstop if release below is ever skipped -- a lease that outlives its own hour
+   self-expires instead of choking every later pass forever.
 
 3b. **Check your LAST estimate against what actually happened.** This is the loop that makes
    the estimate trustworthy, and it is not optional:
@@ -176,6 +194,14 @@ spawns exactly one). Your job, in order:
    for the notification" instead** — you are a one-shot `claude -p` pass (persona_law.md §12);
    nothing will ever resume you once your turn ends, background or not. `wait` blocks inside
    THIS turn; a notification you hope arrives later never will.
+
+   **Release your lease from 3a the moment this wait returns**, success or not:
+   ```
+   maxx_release(lease_id=<from 3a>)
+   ```
+   Do this even if you are about to report a failure — an unreleased lease double-holds this
+   hour's headroom against every later pass until its own TTL clears, which is the same
+   failure shape as never reserving at all, just delayed instead of immediate.
 
 7. **Read each minion's real result** — its own run record in `runs.jsonl` (each minion's
    run_id is `minion-item<n>-<pid>-<timestamp>`, so `grep "minion-item<n>-" runs.jsonl` finds

@@ -94,6 +94,13 @@ case "${1:-cron-foreground}" in
     # schedule in members/*/*.fleet.json -- see schedulers/README.md for the human-readable
     # table. the-fixer keeps a coarse poll here as the prod-down backstop (no GitHub event
     # exists for "the site is dark with no failing workflow run") even with the webhook wired.
+    # Source fleet.env here too -- FLEET_GRU_CADENCE and any future crontab-shape dial must be
+    # visible to THIS shell (the heredoc below runs in entrypoint's own process) to affect the
+    # generated crontab at all; run_member.sh sourcing it per-job is a separate, later read that
+    # cannot retroactively change minutes already baked into the crontab file. set -a/+a per the same
+    # reasoning as run_member.sh's own sourcing (2026-08-22 GH_TOKEN incident writeup there).
+    [ -f "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}" ] && { set -a; . "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}"; set +a; }
+
     CRONTAB=/etc/cron.d/fleet-kit
     {
       echo "FLEET_ENV_FILE=/fleet-kit/fleet.env"
@@ -118,7 +125,11 @@ case "${1:-cron-foreground}" in
       # ten-minute grid (*/10) -- :00/:20/:30/:40 all landed exactly on both, so every one of
       # these fired shoulder-to-shoulder with a poll every single time instead of getting a
       # clear tick to itself. Minutes below are arbitrary but deliberately off both grids.
-      echo "3 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_gru_fanout.sh"
+      # gru's cron field is instance-tunable via FLEET_GRU_CADENCE (default "*", i.e.
+      # hourly at :03) -- 2026-08-28, Reif: instances doing "small build mode" set this to
+      # "*/2" in their own fleet.env without forking this file. Default is unchanged from
+      # the original hourly schedule.
+      echo "3 ${FLEET_GRU_CADENCE:-*} * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_gru_fanout.sh"
       echo "21 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh jefe >> $LOG_DIR/jefe.log 2>&1"
       echo "41 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh roomba >> $LOG_DIR/roomba.log 2>&1"
       echo "33 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh marie >> $LOG_DIR/marie.log 2>&1"
