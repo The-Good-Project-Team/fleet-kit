@@ -65,9 +65,11 @@ jobs:
         # documents and has actually run (docs/deployment-learnings.md #15: "does NOT need
         # cloudflared login"; infra-kit/setup-tunnel.sh notes Access is off by default and
         # needs a human dashboard click to turn on). No DINO_ACCESS_SERVICE_TOKEN_* secrets
-        # exist in this repo today, so if a human ever does enable Access on dino, this step
-        # env-wires TUNNEL_SERVICE_TOKEN_ID/SECRET automatically once those two secrets are
-        # added -- until then they resolve empty and cloudflared behaves exactly as before.
+        # exist in this repo today, so this step only writes SSH config; the optional
+        # TUNNEL_SERVICE_TOKEN_ID/SECRET env (for if a human ever enables Access on dino) has
+        # to live on the step below that actually spawns `cloudflared access ssh` as its
+        # ProxyCommand -- step-level `env:` here would never reach that process (GitHub
+        # Actions doesn't carry step env across steps).
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DINO_DEPLOY_SSH_KEY }}" > ~/.ssh/dino_deploy
@@ -81,11 +83,11 @@ jobs:
             ProxyCommand cloudflared access ssh --hostname dino.luckymachines.co/ssh
             StrictHostKeyChecking accept-new
           EOF
+
+      - name: deploy to dino (canary first, auto-rollback on failure)
         env:
           TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.DINO_ACCESS_SERVICE_TOKEN_ID }}
           TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.DINO_ACCESS_SERVICE_TOKEN_SECRET }}
-
-      - name: deploy to dino (canary first, auto-rollback on failure)
         run: |
           if ! ssh dino "${{ needs.build-and-push.outputs.image_ref }}"; then
             echo "::error::ssh to dino failed -- if dino.luckymachines.co now has a Cloudflare Access policy attached, this is an auth-config gap, not a deploy regression: add repo secrets DINO_ACCESS_SERVICE_TOKEN_ID/DINO_ACCESS_SERVICE_TOKEN_SECRET (docs/deployment-learnings.md #15)"
