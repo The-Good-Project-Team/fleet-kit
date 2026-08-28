@@ -50,6 +50,7 @@ fi
 cd "$REPO" 2>/dev/null || { log "FATAL: repo missing at $REPO"; exit 1; }
 [ -f "$KIT_DIR/scripts/account_pool.sh" ] && . "$KIT_DIR/scripts/account_pool.sh"
 command -v account_pool_run >/dev/null 2>&1 || account_pool_run() { "$@"; }
+. "$KIT_DIR/scripts/postflight_dirty_check.sh"
 
 # --- STEP 1: claim one item -------------------------------------------------------------------
 CLAIM_JSON=$(python3 "$KIT_DIR/scripts/board_github.py" claim "$WORKER_NAME" 1 2>>"$LOG")
@@ -112,6 +113,13 @@ fi
 # items already stuck claimed from an earlier run that had no release path).
 BUILD_SUCCEEDED=0
 cleanup() {
+  # Check BEFORE removing the worktree -- see postflight_dirty_check.sh (fleet-kit#78).
+  # RUN_ID isn't assigned until STEP 4 (after the build call) -- if this trap fires earlier
+  # (killed mid-build), fall back to WORKER_NAME, not just $ITEM_ID: WORKER_NAME already
+  # carries $$/a per-worker identity (see its default above), so the fallback stays as
+  # disambiguated as the real RUN_ID would have been, instead of collapsing to one label
+  # per item regardless of which concurrent attempt was actually running.
+  check_repo_clean_postflight "${RUN_ID:-build-$ITEM_ID-$WORKER_NAME}"
   git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
   git -C "$REPO" worktree prune >/dev/null 2>&1 || true
   rm -f "${USAGE_FILE:-}"

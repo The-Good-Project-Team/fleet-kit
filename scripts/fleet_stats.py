@@ -45,7 +45,7 @@ def _now_epoch() -> float:
 # these dilute "is the fleet actually doing good work" if counted alongside real attempts, so
 # signal rate is computed over executed runs only. Every other status counts as executed,
 # including reported_nothing/quiet -- those DID run, they just found nothing worth reporting.
-_NOT_EXECUTED_STATUSES = {"budget_declined"}
+_NOT_EXECUTED_STATUSES = {"budget_declined", "timed_out", "killed"}
 _OK_STATUSES = {"ok"}
 
 
