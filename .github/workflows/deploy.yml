@@ -60,6 +60,14 @@ jobs:
           chmod +x /usr/local/bin/cloudflared
 
       - name: configure deploy key + tunnel proxy
+        # `cloudflared access ssh` proxies through the tunnel with no auth prompt as long as
+        # dino.luckymachines.co has no Cloudflare Access policy attached -- the setup this repo
+        # documents and has actually run (docs/deployment-learnings.md #15: "does NOT need
+        # cloudflared login"; infra-kit/setup-tunnel.sh notes Access is off by default and
+        # needs a human dashboard click to turn on). No DINO_ACCESS_SERVICE_TOKEN_* secrets
+        # exist in this repo today, so if a human ever does enable Access on dino, this step
+        # env-wires TUNNEL_SERVICE_TOKEN_ID/SECRET automatically once those two secrets are
+        # added -- until then they resolve empty and cloudflared behaves exactly as before.
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DINO_DEPLOY_SSH_KEY }}" > ~/.ssh/dino_deploy
@@ -73,6 +81,13 @@ jobs:
             ProxyCommand cloudflared access ssh --hostname dino.luckymachines.co/ssh
             StrictHostKeyChecking accept-new
           EOF
+        env:
+          TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.DINO_ACCESS_SERVICE_TOKEN_ID }}
+          TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.DINO_ACCESS_SERVICE_TOKEN_SECRET }}
 
       - name: deploy to dino (canary first, auto-rollback on failure)
-        run: ssh dino "${{ needs.build-and-push.outputs.image_ref }}"
+        run: |
+          if ! ssh dino "${{ needs.build-and-push.outputs.image_ref }}"; then
+            echo "::error::ssh to dino failed -- if dino.luckymachines.co now has a Cloudflare Access policy attached, this is an auth-config gap, not a deploy regression: add repo secrets DINO_ACCESS_SERVICE_TOKEN_ID/DINO_ACCESS_SERVICE_TOKEN_SECRET (docs/deployment-learnings.md #15)"
+            exit 1
+          fi
