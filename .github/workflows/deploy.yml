@@ -1,0 +1,78 @@
+name: Deploy
+
+# Builds fleet-kit's image once on every merge to main, pushes it to GHCR, then rolls it
+# out to every registered instance on dino (canary first, health-checked, auto-rollback
+# on failure). Replaces each instance polling its own git remote independently -- see
+# fks-fleet/README.md "fleet-kit server -- NOT YET BUILT" for the gap this closes.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false  # never cancel a rollout mid-flight
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/the-good-project-team/fleet-kit
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      image_ref: ${{ steps.tag.outputs.image_ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: compute tag
+        id: tag
+        run: echo "image_ref=${IMAGE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.tag.outputs.image_ref }}
+            ${{ env.IMAGE }}:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: install cloudflared
+        run: |
+          curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+          chmod +x /usr/local/bin/cloudflared
+
+      - name: configure deploy key + tunnel proxy
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DINO_DEPLOY_SSH_KEY }}" > ~/.ssh/dino_deploy
+          chmod 600 ~/.ssh/dino_deploy
+          cat >> ~/.ssh/config <<EOF
+          Host dino
+            HostName dino.luckymachines.co
+            User ubuntu
+            IdentityFile ~/.ssh/dino_deploy
+            IdentitiesOnly yes
+            ProxyCommand cloudflared access ssh --hostname dino.luckymachines.co/ssh
+            StrictHostKeyChecking accept-new
+          EOF
+
+      - name: deploy to dino (canary first, auto-rollback on failure)
+        run: ssh dino "${{ needs.build-and-push.outputs.image_ref }}"
