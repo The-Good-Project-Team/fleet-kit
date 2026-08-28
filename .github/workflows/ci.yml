@@ -1,0 +1,31 @@
+name: CI
+
+# Runs selftest.py on every PR into main. Required check for branch protection + auto-merge
+# (see docs/ops/fleet-kit-governance.md). Mirrors nonprofit-atlas's ci.yml shape -- same
+# pattern, different repo, since fleet-kit had no CI at all before this (confirmed live
+# 2026-08-28: every fleet-kit merge to date was a direct human push to main, no check ever
+# ran automatically).
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: run selftest.py
+        run: python3 scripts/selftest.py
