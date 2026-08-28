@@ -1,0 +1,14 @@
+# Runtime state, never part of the build -- COPY . /fleet-kit was tarring this directory
+# including actively-growing log files, and podman's build hit "archive/tar: write too long"
+# when access.jsonl grew mid-copy (confirmed live 2026-08-28, deploy of a one-line HTML fix
+# failed for hours on this before the cause was found). instances/ is host-mounted into the
+# container at deploy time anyway (see docker-compose/deploy.sh bind mounts) -- it was never
+# supposed to be baked into the image.
+instances/
+*.log
+*.jsonl
+fleet.db
+__pycache__/
+*.pyc
+.DS_Store
+.git/
