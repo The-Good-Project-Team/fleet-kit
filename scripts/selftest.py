@@ -253,10 +253,18 @@ def _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing():
         f, lbl, b = maxx_reader.get_headroom(
             "https://example.invalid", "h", "k", fetcher=lambda *a, **k: bad)
         assert f is None and lbl == bad and b == {}, (f, lbl, b)
-    # A verdict this module does not vouch for is not spendable.
-    f, lbl, _ = maxx_reader.get_headroom(
+    # A REAL over-budget verdict is a spendable 0.0, never None -- None means "no trustworthy
+    # reading" and would send the caller back to a stale fallback instead of the fresh "spend
+    # ~0" signal maxx just gave it (contract fixed by PR #131).
+    f, lbl, b = maxx_reader.get_headroom(
         "https://example.invalid", "h", "k", fetcher=lambda *a, **k: {**live, "verdict": "over"})
-    assert f is None and lbl == "maxx_verdict_over", (f, lbl)
+    assert f == 0.0 and lbl == "over", (f, lbl)
+    assert b["verdict"] == "over", b
+
+    # A genuinely unrecognized verdict is still unreadable -> None, not a budget-shaped stand-in.
+    f, lbl, b = maxx_reader.get_headroom(
+        "https://example.invalid", "h", "k", fetcher=lambda *a, **k: {**live, "verdict": "sideways"})
+    assert f is None and lbl == "maxx_verdict_sideways" and b, (f, lbl, b)
 
     # The CLI prints the allowance fields, so a human (and gru) can see the real slice.
     import json as _json, subprocess
