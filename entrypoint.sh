@@ -94,6 +94,13 @@ case "${1:-cron-foreground}" in
     # schedule in members/*/*.fleet.json -- see schedulers/README.md for the human-readable
     # table. the-fixer keeps a coarse poll here as the prod-down backstop (no GitHub event
     # exists for "the site is dark with no failing workflow run") even with the webhook wired.
+    # Source fleet.env here too -- FLEET_GRU_CADENCE and any future crontab-shape dial must be
+    # visible to THIS shell (the heredoc below runs in entrypoint's own process) to affect the
+    # generated crontab at all; run_member.sh sourcing it per-job is a separate, later read that
+    # cannot retroactively change minutes already baked into the crontab file. set -a/+a per the same
+    # reasoning as run_member.sh's own sourcing (2026-08-22 GH_TOKEN incident writeup there).
+    [ -f "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}" ] && { set -a; . "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}"; set +a; }
+
     CRONTAB=/etc/cron.d/fleet-kit
     {
       echo "FLEET_ENV_FILE=/fleet-kit/fleet.env"
