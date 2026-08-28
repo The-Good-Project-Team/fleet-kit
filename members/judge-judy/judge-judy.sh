@@ -159,13 +159,25 @@ fi
 
 VERDICT=$(grep -E '^VERDICT: (approve|block)$' "$OUT_FILE" | tail -1)
 STRIKE_FILE="$STRIKE_DIR/pr-${PR}-${HEAD_SHA}.strikes"
+
+# A block with no findings text is as useless as no verdict at all -- it posts a hard,
+# required-check-blocking FAILURE with nothing a human or the-fixer can act on (issue #3170,
+# recurred 3x on nonprofit-atlas before this repo repointed to fleet-kit itself, where
+# fleet-code-review is a REQUIRED context -- an empty block here permastalls a PR, not just
+# noise). Treat it the same as unparseable output: strike and let the next tick retry.
+FINDINGS=""
+if [ "$VERDICT" = "VERDICT: block" ]; then
+  FINDINGS=$(sed '/^VERDICT: /d' "$OUT_FILE" | tail -c 60000)
+  [ -z "$(printf '%s' "$FINDINGS" | tr -d '[:space:]')" ] && VERDICT=""
+fi
+
 if [ -z "$VERDICT" ]; then
   N=$(( $(cat "$STRIKE_FILE" 2>/dev/null || echo 0) + 1 ))
   echo "$N" > "$STRIKE_FILE"
-  log "PR #$PR: unparseable review output (strike $N/$MAX_PARSE_STRIKES)"
+  log "PR #$PR: unparseable or empty-findings review output (strike $N/$MAX_PARSE_STRIKES)"
   if [ "$N" -ge "$MAX_PARSE_STRIKES" ]; then
-    post_status "$HEAD_SHA" "error" "Code review: reviewer output unparseable ${N}x at this head -- needs a look"
-    log "PR #$PR: posted state=error after $N unparseable runs"
+    post_status "$HEAD_SHA" "error" "Code review: reviewer output unparseable/empty ${N}x at this head -- needs a look"
+    log "PR #$PR: posted state=error after $N unparseable/empty runs"
   fi
   exit 1
 fi
@@ -185,7 +197,6 @@ if [ "$VERDICT" = "VERDICT: approve" ]; then
 else
   # Findings comment first, status second: a failure status pointing at nothing is worse
   # than no status at all.
-  FINDINGS=$(sed '/^VERDICT: /d' "$OUT_FILE" | tail -c 60000)
   gh pr comment "$PR" --body "**fleet-code-review: BLOCK** (local claude, model=$MODEL, head ${HEAD_SHA:0:12})
 
 $FINDINGS" >/dev/null 2>&1 || log "PR #$PR: WARN findings comment failed"

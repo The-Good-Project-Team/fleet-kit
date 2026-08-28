@@ -62,7 +62,14 @@ TASK=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
-    --item) ITEM="${2:?--item needs an issue number}"; shift 2 ;;
+    --item)
+      ITEM="${2:?--item needs an issue number}"
+      # A plain issue number only -- it flows unsanitized into RUN_ID, the worktree branch
+      # name, and (fleet-kit#78) the postflight dirty-check's alert log, so anything odd in
+      # here (a stray newline, a git-ref-hostile character) belongs caught here, not silently
+      # forwarded into a log meant to be a trustworthy cross-member incident feed.
+      case "$ITEM" in (*[!0-9]*) echo "FATAL: --item must be a plain issue number, got: $ITEM" >&2; exit 2 ;; esac
+      shift 2 ;;
     --task) TASK="${2:?--task needs an instruction}"; shift 2 ;;
     *) shift ;;
   esac
@@ -164,6 +171,7 @@ print(member_spec.behavior_path(spec))
 cd "$REPO" 2>/dev/null || { log "FATAL: repo missing at $REPO"; exit 1; }
 [ -f "$KIT_DIR/scripts/account_pool.sh" ] && . "$KIT_DIR/scripts/account_pool.sh"
 command -v account_pool_run >/dev/null 2>&1 || account_pool_run() { "$@"; }
+. "$KIT_DIR/scripts/postflight_dirty_check.sh"
 
 # --- isolate this pass in its own worktree (#3092) -------------------------------------------
 # Every prior run of this script just `cd`ed into the ONE shared $REPO checkout with no
@@ -218,6 +226,10 @@ if [ "$WORKTREE_ENABLED" = "True" ] && [ "$DRY_RUN" -ne 1 ]; then
     exit 1
   fi
   cleanup_run_worktree() {
+    # Check BEFORE removing the worktree: the dirt we're looking for is in $REPO, not
+    # $WT_PATH, but a leak is easiest to attribute to this exact pass while its worktree
+    # (and this trap) still exist -- see postflight_dirty_check.sh.
+    check_repo_clean_postflight "$RUN_ID"
     git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
     git -C "$REPO" worktree prune >/dev/null 2>&1 || true
   }
@@ -351,6 +363,9 @@ KILLED_RECORDED=0
 record_killed_pass() {
   [ "$KILLED_RECORDED" -eq 1 ] && return 0   # a trap that fires twice must not write two rows
   KILLED_RECORDED=1
+  # A kill signal bypasses cleanup_run_worktree's own EXIT trap (cleared below) -- check here
+  # too, since a leak can land in $REPO before the kill just as easily as before a clean exit.
+  [ "$WORKTREE_ENABLED" = "True" ] && check_repo_clean_postflight "$RUN_ID"
   trap - TERM INT EXIT
   # Reap the foreground pipeline (see the note above) -- without this the rest of this function
   # does not run until `claude -p` exits on its own, which under a deploy cutover is never.
