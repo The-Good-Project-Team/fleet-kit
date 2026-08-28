@@ -952,6 +952,24 @@ def _every_scheduled_member_is_actually_on_cron():
         "A spec does not schedule a member; entrypoint.sh's crontab does.")
 
 
+def _self_improve_score_is_actually_scheduled():
+    """self_improve_score.sh is not a member -- the check above can't see it, and it didn't.
+
+    Found live by dumbledore 2026-08-28: self_improve_score.jsonl did not exist anywhere under
+    FLEET_LOG_DIR, because entrypoint.sh's hand-written crontab had no line for it at all -- the
+    exact same "spec/reality exists, but nothing put it on cron" failure class as datta
+    (nonprofit-atlas#3321, fixed in #114), recurring in the one place #114's own fix cannot
+    reach: _every_scheduled_member_is_actually_on_cron only walks members/*/*.fleet.json, and
+    this script has no member spec to walk. dumbledore's and jefe's entire read of the Magikarp
+    score depends on this file existing; a silent gap here breaks the one feedback loop this
+    whole kit is built around, with no crash and no failing check -- until now.
+    """
+    entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
+    assert "self_improve_score.sh" in entry, (
+        "self_improve_score.sh has no line in entrypoint.sh's crontab -- it will never run, "
+        "so self_improve_score.jsonl never gets written and dumbledore/jefe read nothing.")
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -1176,6 +1194,7 @@ if __name__ == "__main__":
     check("a run records the item it worked", _a_run_records_the_item_it_worked)
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
+    check("self_improve_score.sh is actually scheduled", _self_improve_score_is_actually_scheduled)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)

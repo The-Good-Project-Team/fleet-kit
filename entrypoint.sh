@@ -143,6 +143,17 @@ case "${1:-cron-foreground}" in
       # dashboard). Explicit hours for the same reason dumbledore uses them -- `*/3` restarts
       # its pattern each day. :17 is unclaimed (:03/:12/:13/:21/:33/:41 are taken).
       echo "17 0,3,6,9,12,15,18,21 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh sentry >> $LOG_DIR/sentry.log 2>&1"
+      # self_improve_score.sh: NOT a member (no members/*/*.fleet.json), so it was invisible
+      # to selftest's "every scheduled member is actually on cron" check (#114) and had no
+      # line here at all -- the exact same missing-cron-line failure class that bit datta
+      # (nonprofit-atlas#3321), recurring in the one place that check cannot see because it
+      # only walks members/*/*.fleet.json. Found by dumbledore 2026-08-28: self_improve_score.jsonl
+      # did not exist anywhere under $LOG_DIR, so the Magikarp score dumbledore and jefe both
+      # read every pass had never been computed on this box, ever. Hourly at :07 (unclaimed --
+      # see the minute map in the comments above) is frequent enough to catch each 3h slot
+      # (00/03/06...) within an hour of it opening; the script's own SLOT idempotency guard
+      # makes every other tick inside the same window a fast, cheap no-op.
+      echo "7 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/self_improve_score.sh >> $LOG_DIR/self_improve_score_cron.log 2>&1"
     } > "$CRONTAB"
     chmod 0644 "$CRONTAB"
     echo "[entrypoint] installed crontab (token redacted, stored separately at $TOKEN_FILE, mode 600):"
