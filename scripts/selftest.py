@@ -499,6 +499,41 @@ def _a_killed_pass_is_recorded_not_lost():
         "backgrounded pipeline does not re-raise PIPESTATUS -- claude's exit code is lost"
 
 
+def _signal_rate_excludes_all_never_executed_statuses():
+    """fleet-kit#150: fleet_stats.py's `_NOT_EXECUTED_STATUSES` once listed only
+    `budget_declined`, while run_report.py classifies THREE statuses as "never got the chance
+    to do real work" -- `budget_declined`, `timed_out`, `killed` (see
+    `_a_killed_pass_is_recorded_not_lost` above). A run killed by a container restart/OOM, or
+    one that timed out, was silently counted as an executed-but-failed run: it dragged
+    signal_rate down below the fleet's true quality AND stopped `dormant` from firing for a
+    member whose recent runs were all kills/timeouts -- a real infra failure misread as a
+    quality problem.
+    """
+    import fleet_stats
+    now = fleet_stats._now_epoch()
+
+    def run(member, status, ts_offset=0):
+        return {"member": member, "status": status, "ts": now - ts_offset}
+
+    runs = [
+        run("a", "budget_declined"),
+        run("a", "timed_out"),
+        run("a", "killed"),
+        run("b", "ok"),
+        run("b", "reported_nothing"),
+    ]
+    summary = fleet_stats.runs_summary(runs, hours=24.0)
+    assert summary["executed"] == 2, (
+        f"executed = {summary['executed']}, want 2 -- killed/timed_out still counted as executed")
+    assert summary["signal_rate"] == 50, (
+        f"signal_rate = {summary['signal_rate']}, want 50 (1 ok / 2 executed)")
+
+    # A member whose every in-window run is some mix of the three never-executed statuses
+    # must show up as dormant -- that's the whole point of excluding them.
+    assert "a" in summary["dormant"], "member 'a' (all killed/timed_out/budget_declined) not dormant"
+    assert "b" not in summary["dormant"], "member 'b' (has real runs) wrongly marked dormant"
+
+
 def _postflight_dirty_check_catches_a_leaked_absolute_path_write():
     """fleet-kit#78 / nonprofit-atlas#3113 (15+ recurrences): worktree isolation is a `cd`, not
     a sandbox -- it does not stop a tool call that names the shared checkout by its absolute
@@ -1377,6 +1412,7 @@ if __name__ == "__main__":
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
     check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)
+    check("signal_rate/dormant exclude killed+timed_out, not just budget_declined", _signal_rate_excludes_all_never_executed_statuses)
     check("a leaked absolute-path write into $REPO is caught and alerted", _postflight_dirty_check_catches_a_leaked_absolute_path_write)
     check("a git-status failure alerts rather than reading as clean", _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure)
     check("run_member.sh rejects a non-numeric --item", _run_member_rejects_a_non_numeric_item)
