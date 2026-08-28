@@ -22,6 +22,8 @@ lease that outlives its own hour self-expires instead of choking every later pas
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import sys
@@ -31,6 +33,24 @@ from pathlib import Path
 
 LOG_DIR = Path(os.environ.get("FLEET_LOG_DIR", Path.home() / "Library" / "Logs" / "fleet-kit")).expanduser()
 STATE_FILE = LOG_DIR / "maxx-leases.json"
+
+
+@contextlib.contextmanager
+def _locked(state_file: Path):
+    """Exclusive, blocking lock around a read-modify-write cycle. Back-to-back gru passes
+    (cron does not wait for one to land before the next fires) can otherwise both read the
+    same on-disk list before either writes, silently clobbering one lease with the other's
+    write -- the same flat-file-state race class as fleet-kit#51. Serializing the whole
+    read+modify+write under one lock also means only one process is ever inside
+    `_write_leases` at a time, so its shared tmp path can't be raced out from under it either."""
+    lock_path = state_file.with_suffix(state_file.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _read_leases(state_file: Path) -> list[dict]:
@@ -54,12 +74,13 @@ def _unexpired(leases: list[dict], now: float) -> list[dict]:
 def maxx_reserve(pct: float, label: str, ttl_sec: int, state_file: Path | None = None) -> str:
     """Record a new lease and return its lease_id. Prunes expired leases while it's at it."""
     state_file = state_file or STATE_FILE
-    now = time.time()
     lease_id = f"{label}-{uuid.uuid4().hex[:8]}"
-    leases = _unexpired(_read_leases(state_file), now)
-    leases.append({"lease_id": lease_id, "pct": pct, "label": label,
-                    "created_at": now, "ttl_sec": ttl_sec})
-    _write_leases(state_file, leases)
+    with _locked(state_file):
+        now = time.time()
+        leases = _unexpired(_read_leases(state_file), now)
+        leases.append({"lease_id": lease_id, "pct": pct, "label": label,
+                        "created_at": now, "ttl_sec": ttl_sec})
+        _write_leases(state_file, leases)
     return lease_id
 
 
@@ -68,21 +89,23 @@ def maxx_release(lease_id: str, state_file: Path | None = None) -> None:
     is simply not found, never an error (gru.md step 6 calls this unconditionally, even on a
     failure path)."""
     state_file = state_file or STATE_FILE
-    leases = [lease for lease in _unexpired(_read_leases(state_file), time.time())
-              if lease["lease_id"] != lease_id]
-    _write_leases(state_file, leases)
+    with _locked(state_file):
+        leases = [lease for lease in _unexpired(_read_leases(state_file), time.time())
+                  if lease["lease_id"] != lease_id]
+        _write_leases(state_file, leases)
 
 
 def total_reserved_pct(state_file: Path | None = None) -> float:
     """Sum of every currently-unexpired lease's pct. Prunes expired leases as a side effect,
     same self-cleaning shape as account_pool.sh's exhaustion state file."""
     state_file = state_file or STATE_FILE
-    now = time.time()
-    leases = _read_leases(state_file)
-    live = _unexpired(leases, now)
-    if len(live) != len(leases):
-        _write_leases(state_file, live)
-    return sum(lease["pct"] for lease in live)
+    with _locked(state_file):
+        now = time.time()
+        leases = _read_leases(state_file)
+        live = _unexpired(leases, now)
+        if len(live) != len(leases):
+            _write_leases(state_file, live)
+        return sum(lease["pct"] for lease in live)
 
 
 def main() -> int:
