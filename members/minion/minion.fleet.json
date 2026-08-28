@@ -25,7 +25,7 @@
     "hourly_at_minute": 0
   },
   "timeout_s": 2400,
-  "enabled": true,
+  "enabled": false,
   "llm": {
     "model": "sonnet",
     "prompt_file": "minion.md",
