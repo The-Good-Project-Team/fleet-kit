@@ -575,3 +575,4 @@ one script — was worth the complexity. Track it the same way here.
 Every file below carries a comment naming the source-fleet file it was extracted from, for
 anyone who wants the fuller battle-tested version (dashboard integration, Cursor VM gate,
 Postgres-specific CI lanes, etc.) as a reference.
+# test: verifying judge-judy self-review instance (2026-08-28), safe to close/delete
