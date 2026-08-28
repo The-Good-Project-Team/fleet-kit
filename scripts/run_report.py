@@ -47,7 +47,7 @@ try:
 except ModuleNotFoundError:  # kit default: match the field, do not judge the claim
     import re as _re
     board_rice = None
-    _VISION_RE = _re.compile(r"^[ \t]*[*_]{0,2}Vision-link[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$",
+    _VISION_RE = _re.compile(r"^[ \t]*#{0,6}[ \t]*[*_]{0,2}Vision-link[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$",
                              _re.MULTILINE | _re.IGNORECASE)
 
 
@@ -63,15 +63,21 @@ _FIELD = {
     # text` (stars close after the colon) or `**Outcome**: text` (stars close before it).
     # gh#76: the un-wrapped version masked 283/322 (88%) of dont-shoot-the-messenger's runs
     # as `reported_nothing` when the pass had done real, evidenced work.
-    "outcome": re.compile(r"^[ \t]*[*_]{0,2}Outcome[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
-    "evidence": re.compile(r"^[ \t]*[*_]{0,2}Evidence[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
+    # #{0,6} tolerates the same field written as a markdown heading (`## Outcome:` /
+    # `### **Evidence:**`) -- gh#135: dont-shoot-the-messenger (haiku) reliably opens its
+    # report with `## Report **BOTTOM LINE:**` instead of the literal `Report:` line, the
+    # same over-decoration habit #76 already fixed for bold-wrapping, one markdown construct
+    # further. A field wrapped in a heading is still that field; the label text is what
+    # matters, not whether the model dressed it up as a section title.
+    "outcome": re.compile(r"^[ \t]*#{0,6}[ \t]*[*_]{0,2}Outcome[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
+    "evidence": re.compile(r"^[ \t]*#{0,6}[ \t]*[*_]{0,2}Evidence[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
     # Captured, never enforced -- a missing self-critique never changes `status` the way a
     # missing outcome does. Reif, 2026-08-21: "it should be inherent in every member to log
     # its findings -- like having a post mortem on the run." persona_law.md §11 is what tells
     # every member to write this line; this is just where it lands structurally, in the same
     # runs.jsonl every other leg of the report already lands in, so dumbledore's rot-hunt can
     # read every member's self-critique in aggregate instead of grepping N raw logs by hand.
-    "self_critique": re.compile(r"^[ \t]*[*_]{0,2}Self-critique[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
+    "self_critique": re.compile(r"^[ \t]*#{0,6}[ \t]*[*_]{0,2}Self-critique[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
     # The recursive-self-improvement leg (#83). Same treatment as self_critique -- captured,
     # never enforced, absence never changes `status`. These three lines are the only ones in
     # the report contract whose READER is the NEXT pass rather than a human: dumbledore's
@@ -80,9 +86,9 @@ _FIELD = {
     # only trace of them on disk was stream_log.py's truncated `thinking:` lines -- which are
     # intermediate reasoning, not the final answer, so the verdict had nothing to check
     # against and dumbledore's own score reasoning has cited the broken chain since 08-25.
-    "prediction": re.compile(r"^[ \t]*[*_]{0,2}Prediction[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
-    "score_now": re.compile(r"^[ \t]*[*_]{0,2}Score-now[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
-    "last_verdict": re.compile(r"^[ \t]*[*_]{0,2}Last-verdict[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
+    "prediction": re.compile(r"^[ \t]*#{0,6}[ \t]*[*_]{0,2}Prediction[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
+    "score_now": re.compile(r"^[ \t]*#{0,6}[ \t]*[*_]{0,2}Score-now[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
+    "last_verdict": re.compile(r"^[ \t]*#{0,6}[ \t]*[*_]{0,2}Last-verdict[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE),
 }
 
 # THE WRITTEN REPORT, and the only multi-LINE field in the contract. Reif, 2026-08-26: "I want
@@ -102,8 +108,8 @@ _FIELD = {
 # load-bearing would turn a formatting slip into a false failure, which is the exact bug §10b
 # exists to prevent.
 _REPORT_RE = re.compile(
-    r"^[ \t]*[*_]{0,2}Report[*_]{0,2}[ \t]*:[ \t]*\n?(.*?)"
-    r"(?=^[ \t]*[*_]{0,2}(?:Outcome|Evidence|Self-critique|Prediction|"
+    r"^[ \t]*#{0,6}[ \t]*[*_]{0,2}Report[*_]{0,2}[ \t]*:[ \t]*\n?(.*?)"
+    r"(?=^[ \t]*#{0,6}[ \t]*[*_]{0,2}(?:Outcome|Evidence|Self-critique|Prediction|"
     r"Score-now|Last-verdict|Vision-link)[*_]{0,2}[ \t]*:|\Z)",
     re.MULTILINE | re.IGNORECASE | re.DOTALL)
 
