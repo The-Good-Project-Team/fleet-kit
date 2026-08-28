@@ -2,6 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>fleet-kit console</title>
 <style>
   :root {
@@ -196,6 +197,22 @@
   .kpi-cell .kpi-label { color: var(--dim); font-size: 11.5px; }
   .kpi-cell .kpi-value { font-size: 24px; font-weight: 700; margin-top: 2px; }
   .kpi-cell .kpi-sub { color: var(--dimmer); font-size: 11px; margin-top: 2px; }
+
+  /* ---------- mobile: sidebar becomes a full-width overlay toggled by the ☰ button, detail
+     pane takes the full screen, KPI grid stacks to 2-up. Desktop layout above is untouched --
+     these rules only apply under the breakpoint. ---------- */
+  @media (max-width: 700px) {
+    #menuToggle { display: inline-block !important; }
+    .body { grid-template-columns: 1fr; position: relative; overflow: hidden; }
+    .sidebar { position: absolute; inset: 0; z-index: 20; width: 100%;
+      transform: translateX(-100%); transition: transform .18s ease; }
+    .body.sidebar-open .sidebar { transform: translateX(0); }
+    .detail, #detailPane { width: 100%; }
+    .runs-kpi-row { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .stats-card { padding: 12px; }
+    .stats-card canvas { max-height: 200px; }
+    .detail-actions, .dial-row { gap: 5px; }
+  }
 </style>
 <!-- Chart.js: Reif, 2026-08-25 -- "dont handroll, pick a nice graph element". This page already
      assumes internet access (calls GitHub's API, loads from a public domain), so a CDN script
@@ -206,6 +223,7 @@
 <body>
 <div class="shell">
   <div class="topbar">
+    <button class="btn small" id="menuToggle" style="display:none;" onclick="document.querySelector('.body').classList.toggle('sidebar-open')">☰</button>
     <span class="dot" id="dot"></span>
     <span class="brand">fleet-kit</span>
     <span class="stat" id="repo"></span>
@@ -394,10 +412,14 @@ agentListEl.addEventListener('click', e => {
   const row = e.target.closest('.agent-item');
   if (!row) return;
   selectAgent(row.dataset.agent);
+  document.querySelector('.body').classList.remove('sidebar-open'); // mobile: picking an agent closes the overlay
 });
 
 document.querySelectorAll('.side-nav-item').forEach(el => {
-  el.addEventListener('click', () => selectPage(el.dataset.page));
+  el.addEventListener('click', () => {
+    selectPage(el.dataset.page);
+    document.querySelector('.body').classList.remove('sidebar-open'); // mobile: picking a page closes the overlay
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
