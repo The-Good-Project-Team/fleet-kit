@@ -480,6 +480,46 @@ def _maxx_share_ceiling_subtracts_local_leases_not_just_the_remotes_reserved_pct
             maxx_share_ceiling.get_headroom = orig_headroom
 
 
+def _maxx_share_ceiling_respects_a_real_over_verdict_not_just_unreadable_meters():
+    """fleet-code-review BLOCK on PR #184: `verdict=="over"` is maxx's own DEFINITIVE "stop"
+    signal -- get_headroom() returns fraction=0.0 (never None) for it specifically, per
+    maxx_reader.py's own header, so a real stop can't be confused with an unreadable meter.
+    The ceiling script only checked `fraction is None` and then discarded `fraction`
+    entirely, recomputing purely from the hourly fields -- which are populated independently
+    of verdict and can look like real headroom even while verdict=="over". That let a real
+    hard-stop reading still yield a positive, spendable ceiling.
+
+    Failing scenario this reproduces: maxx returns verdict="over" (session/week over) but
+    with healthy-looking hourly numbers (sustainable=0.35, used=0.10) -- plausible in
+    practice, since those are independent signals.
+    """
+    import maxx_share_ceiling
+
+    over_but_hourly_looks_fine = {
+        "verdict": "over",
+        "sustainable_pct_per_hour": 0.35,
+        "per_diem_hourly_pct": 0.10,
+        "reserved_pct": 0,
+    }
+    orig = maxx_share_ceiling.get_headroom
+    try:
+        # get_headroom() itself returns (0.0, "over", ...) for this verdict -- match that
+        # real contract exactly (maxx_reader.py:147-151), not an arbitrary fraction.
+        maxx_share_ceiling.get_headroom = lambda: (0.0, "over", over_but_hourly_looks_fine)
+
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = maxx_share_ceiling.main(["prog", "1.0"])
+        assert rc == 0
+        assert float(buf.getvalue().strip()) == 0.0, (
+            f"verdict=='over' must yield a zero ceiling regardless of hourly fields, got: {buf.getvalue()!r}"
+        )
+    finally:
+        maxx_share_ceiling.get_headroom = orig
+
+
 def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
     """Arming auto-merge must not pass --squash/--merge/--rebase, and must not eat the error.
 
@@ -1811,6 +1851,7 @@ if __name__ == "__main__":
     check("maxx lease concurrent reserves don't clobber each other", _maxx_lease_concurrent_reserves_dont_clobber_each_other)
     check("maxx share ceiling uses hourly headroom, not the week bank", _maxx_share_ceiling_uses_hourly_headroom_not_the_week_bank)
     check("maxx share ceiling subtracts local leases, not just the remote's reserved_pct", _maxx_share_ceiling_subtracts_local_leases_not_just_the_remotes_reserved_pct)
+    check("maxx share ceiling respects a real over verdict, not just unreadable meters", _maxx_share_ceiling_respects_a_real_over_verdict_not_just_unreadable_meters)
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
     check("minion knows the browser in its own image exists", _minion_knows_the_browser_exists)
     check("score reasoning is not guillotined mid-word", _score_reasoning_is_not_guillotined_mid_word)

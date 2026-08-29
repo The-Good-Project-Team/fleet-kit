@@ -26,8 +26,9 @@ there is no trustworthy reading (unreadable meter -- FAILS OPEN, same law as
 maxx_reader.py's own header: a bad reading must only ever be usable to CONSERVE, i.e. an
 absent ceiling means "the caller falls back to its own pre-existing fixed cap," never
 "reserve nothing is the same as reserve unlimited"). A ceiling of exactly 0.0 (this hour
-already at or past sustainable pace, once other reservations are subtracted) is a real,
-honest answer, distinct from an unreadable meter -- always printed, never suppressed.
+already at or past sustainable pace, once other reservations are subtracted -- OR maxx's
+`verdict=="over"`, its own definitive hard-stop, distinct from an unreadable meter) is a
+real, honest answer -- always printed, never suppressed.
 """
 from __future__ import annotations
 
@@ -51,12 +52,26 @@ def main(argv: list[str]) -> int:
     # member's ceiling above the fleet's own real hourly headroom.
     share = min(share, 1.0)
 
-    fraction, _label, budget = get_headroom()
+    fraction, label, budget = get_headroom()
 
     if fraction is None:
         # Unreadable meter -- print nothing. The caller's documented contract: no ceiling
         # means "fall back to whatever fixed cap you already had," never "reserve 0."
         print("")
+        return 0
+
+    if fraction == 0.0 and label == "over":
+        # fleet-code-review BLOCK on this PR: `verdict=="over"` is maxx's own DEFINITIVE
+        # "stop" signal, not an unreadable meter -- get_headroom() returns fraction=0.0 (never
+        # None) for it specifically so a real stop can't be confused with "no reading" (see
+        # maxx_reader.py's own header/OVER_VERDICTS comment). The hourly fields below
+        # (sustainable_pct_per_hour, per_diem_hourly_pct) are populated independently of
+        # verdict and can still look like real headroom during an "over" reading (over on
+        # session/week terms, healthy-looking hourly numbers) -- computing the ceiling from
+        # them alone, without also checking this, would spend straight through maxx's own
+        # hard stop. An honest zero, not suppressed: this IS a real reading, distinct from
+        # the unreadable-meter branch above.
+        print("0.0000")
         return 0
 
     sustainable = budget.get("sustainable_pct_per_hour")
