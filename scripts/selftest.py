@@ -1178,6 +1178,27 @@ def _judge_judy_ticks_dont_overlap():
     assert call_j > contention_i, "pick_pr must not be reachable before the lock check"
 
 
+def _judge_judy_lock_lives_somewhere_persistent():
+    """fleet-kit#207: the single-tick mutex above only mutexes anything if concurrent ticks can
+    actually see each other's lockfile.
+
+    $HOME is the per-pass ephemeral container/worktree, so a lockfile under $HOME/.cache can
+    only ever contend against itself inside that same container -- it can never block a
+    concurrent tick running in a different container/worktree, which is exactly how cron ticks
+    and the blue/green deploy cutover both spawn processes here. Live-confirmed: a fresh 3-way
+    pass-start collision reproduced on PR #175 even after the flock fix (#200) was deployed, and
+    "another judge-judy tick still holds" never once fired across 106 pass-start events (~25h)
+    of log history. Same failure class as gh#215's check.sh fix (PR #216): default state onto
+    $FLEET_LOG_DIR, the confirmed cross-pass-persistent path.
+    """
+    src = (Path(__file__).parent.parent / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    lock_line = next(line for line in src.splitlines() if line.strip().startswith("LOCKFILE="))
+    assert "$HOME" not in lock_line, \
+        f"LOCKFILE must not default onto ephemeral $HOME: {lock_line!r}"
+    assert "LOG_DIR" in lock_line, \
+        f"LOCKFILE should live under the persistent LOG_DIR, not a fresh ad-hoc path: {lock_line!r}"
+
+
 def _judge_judy_strikes_are_scoped_by_head_and_leave_diagnosable_evidence():
     """gh#221: a parse-strike used to vanish with no evidence, and the strike count itself was
     never proven to be scoped to the head it fired at.
@@ -2100,6 +2121,7 @@ if __name__ == "__main__":
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
     check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
+    check("judge-judy lock lives somewhere persistent", _judge_judy_lock_lives_somewhere_persistent)
     check("judge-judy strikes are head-scoped and leave diagnosable evidence", _judge_judy_strikes_are_scoped_by_head_and_leave_diagnosable_evidence)
     check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
