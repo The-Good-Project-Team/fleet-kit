@@ -165,6 +165,12 @@ case "${1:-cron-foreground}" in
       # (00/03/06...) within an hour of it opening; the script's own SLOT idempotency guard
       # makes every other tick inside the same window a fast, cheap no-op.
       echo "7 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/self_improve_score.sh >> $LOG_DIR/self_improve_score_cron.log 2>&1"
+      # deploy_staleness_check.sh (gh#201): independent of deploy.sh/auto_deploy.sh, so it can
+      # catch the case where NEITHER ran in a window -- both delivery paths (#140 poll, #189
+      # push) were found down simultaneously with nothing noticing until a human-triggered
+      # nerd pass stumbled onto it. Hourly at :57 is unclaimed on the minute map above and
+      # comfortably inside the default 4h staleness budget (FLEET_DEPLOY_STALENESS_BUDGET_S).
+      echo "57 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/deploy_staleness_check.sh >> $LOG_DIR/deploy_staleness_check.log 2>&1"
     } > "$CRONTAB"
     chmod 0644 "$CRONTAB"
     echo "[entrypoint] installed crontab (token redacted, stored separately at $TOKEN_FILE, mode 600):"
