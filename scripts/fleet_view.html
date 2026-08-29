@@ -226,6 +226,7 @@
     <button class="btn small" id="menuToggle" style="display:none;" onclick="document.querySelector('.body').classList.toggle('sidebar-open')">☰</button>
     <span class="dot" id="dot"></span>
     <span class="brand">fleet-kit</span>
+    <select class="btn small" id="siblingSwitch" style="display:none;"></select>
     <span class="stat" id="repo"></span>
     <span class="spacer"></span>
     <span class="stat" id="globalSpend"></span>
@@ -1224,21 +1225,57 @@ async function renderStatsPage() {
 // Settings page (sidebar item): the fleet-wide master toggle -- pulled out of the topbar so the
 // topbar stays a status strip, not a place with a destructive action one misclick away.
 // ---------------------------------------------------------------------------------------------
+// DIAL_FIELDS mirrors fleet_view_server.py's own list -- purely a label lookup for the
+// inputs below; the server re-validates against its own copy on write, this is not the
+// security boundary.
+const DIAL_FIELDS = [
+  ['FLEET_SHARE_FRACTION', 'Share fraction'],
+  ['FLEET_GRU_ALLOWANCE_FRACTION', 'Gru allowance fraction'],
+  ['FLEET_GRU_CADENCE', 'Gru cadence (cron minute field)'],
+  ['FLEET_CADENCE_BUILD', 'Build cadence'],
+  ['FLEET_CADENCE_REVIEW', 'Review cadence'],
+  ['FLEET_CADENCE_GITPULL', 'Git-pull cadence'],
+  ['FLEET_BUILDER_MODEL', 'Builder model'],
+  ['FLEET_CODE_REVIEW_MODEL', 'Code review model'],
+  ['FLEET_QUEUE_CAP', 'Queue cap'],
+  ['FLEET_MAX_BUDGET_USD', 'Max budget (USD)'],
+];
+
 function renderSettingsPage() {
   if (PAGE !== 'settings') return;
   detailHeadEl.innerHTML = `<div class="title-row"><h2>Settings</h2></div>`;
   const on = !!FLEET_STATE.FLEET_ENABLED;
+  const dialRows = DIAL_FIELDS.map(([key, label]) => `
+    <label style="display:block;font-size:11.5px;color:var(--dim);margin-top:10px">${esc(label)}
+      <input class="dial-input" data-key="${key}" value="${esc(FLEET_STATE[key] || '')}"
+        style="display:block;width:100%;box-sizing:border-box;margin-top:3px;padding:5px 7px;
+          background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);
+          font-family:inherit;font-size:12.5px">
+    </label>`).join('');
   runListEl.innerHTML = `
     <div class="settings-block">
       <h3>Fleet</h3>
       <div class="rmeta" style="margin-bottom:8px">repo: ${esc(REPO_URL || '—')}</div>
       <button class="btn ${on ? 'danger' : 'go'}" id="masterToggle">${on ? '■ stop fleet' : '● start fleet'}</button>
+    </div>
+    <div class="settings-block">
+      <h3>Dials</h3>
+      ${dialRows}
+      <button class="btn go" id="saveDials" style="margin-top:12px">Save</button>
+      <span id="dialsMsg" class="rmeta" style="margin-left:10px"></span>
     </div>`;
   document.getElementById('masterToggle').onclick = async () => {
     if (on && !confirm('stop the WHOLE fleet? every member exits on its next tick.')) return;
     await fetch('/api/fleet_toggle', { method: 'POST', body: JSON.stringify({ target: 'fleet', value: !on }) });
     await renderFleetState();
     renderSettingsPage();
+  };
+  document.getElementById('saveDials').onclick = async () => {
+    const body = {};
+    runListEl.querySelectorAll('.dial-input').forEach(i => { body[i.dataset.key] = i.value; });
+    const resp = await (await fetch('/api/fleet_settings', { method: 'POST', body: JSON.stringify(body) })).json();
+    await renderFleetState();
+    document.getElementById('dialsMsg').textContent = resp.ok ? `saved ${resp.written.length} field(s)` : 'save failed';
   };
 }
 
@@ -1315,6 +1352,21 @@ async function renderFleetState() {
   FLEET_STATE = state;
   REPO_URL = state.REPO_URL || '';
   document.getElementById('repo').textContent = REPO_URL ? REPO_URL.replace(/^https?:\/\//, '') : '';
+  renderSiblingSwitch(state.SIBLINGS || []);
+}
+
+// Sibling-instance dropdown in the topbar -- only when FLEET_SIBLINGS is configured (see
+// fleet_view_server.py's _resolve_siblings). A plain link-out, same "no new authority" spirit
+// as every other control here: picking one just navigates the browser, no cross-instance API
+// call, no shared state. Rebuilt on every fleet_state poll -- the list is tiny and static, not
+// worth diffing against the DOM.
+function renderSiblingSwitch(siblings) {
+  const el = document.getElementById('siblingSwitch');
+  if (!siblings.length) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  el.innerHTML = `<option value="">switch instance&hellip;</option>` +
+    siblings.map(s => `<option value="${esc(s.url)}">${esc(s.name)}</option>`).join('');
+  el.onchange = () => { if (el.value) location.href = el.value; };
 }
 
 async function loadMembers() {
