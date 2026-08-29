@@ -150,6 +150,95 @@ def _rsi_lines_survive_to_the_next_pass():
             == "capturing these lines closes the loop"
 
 
+def _fleet_db_run_id_collisions_dont_lose_a_verdict():
+    """#212: judge-judy's run_id is `review-<pr>-<sha>`, not per-invocation, so two genuinely
+    different concurrent reviews of the same PR head used to collide on fleet.db's bare
+    run_id PRIMARY KEY -- INSERT OR REPLACE silently kept only one verdict. Live-quantified:
+    286 runs.jsonl lines / 280 distinct run_ids vs. 280 rows in fleet.db, 3 of the 6 colliding
+    pairs holding outright contradictory verdicts. AC1-3 of the PRD, exercised the same way
+    #83's RSI test is: through runs.jsonl -> fleet.db, not a unit assertion on a helper alone.
+    """
+    import io
+    import sqlite3
+    from contextlib import redirect_stderr
+    import fleet_db
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+
+        # AC1: two distinct runs sharing judge-judy's collision-prone run_id, different
+        # recorded_at, both persist as separate rows.
+        runs = d / "runs.jsonl"
+        blocked = {"run_id": "review-175-817e99187df8", "member": "judge-judy",
+                   "outcome": "blocked PR #175", "_recorded_at": 100.0}
+        approved = {"run_id": "review-175-817e99187df8", "member": "judge-judy",
+                    "outcome": "approved PR #175", "_recorded_at": 200.0}
+        runs.write_text(json.dumps(blocked) + "\n" + json.dumps(approved) + "\n")
+        conn = fleet_db.connect(d / "fleet.db")
+        n = fleet_db.sync(conn, runs_file=runs)
+        assert n == 2, n
+        rows = conn.execute(
+            "SELECT outcome FROM runs WHERE run_id = ? ORDER BY recorded_at",
+            ("review-175-817e99187df8",)).fetchall()
+        assert rows == [("blocked PR #175",), ("approved PR #175",)], rows
+
+        # AC2: re-syncing the same lines (e.g. after an offset reset) must not duplicate --
+        # idempotency is keyed on (run_id, recorded_at), which a literal re-read reproduces
+        # exactly, not on run_id alone.
+        conn.execute("UPDATE sync_state SET offset = 0"); conn.commit()
+        fleet_db.sync(conn, runs_file=runs)
+        rows2 = conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE run_id = ?", ("review-175-817e99187df8",)
+        ).fetchone()[0]
+        assert rows2 == 2, f"re-sync duplicated rows: {rows2}"
+
+        # AC3: a genuine collision -- same run_id AND same recorded_at, different content --
+        # must be LOGGED, not silently discarded. This is the failure mode the PRD's Non-goal
+        # section says is worse than a missing row: a confident, complete-looking wrong one.
+        collide = d / "collide.jsonl"
+        first = {"run_id": "dup-1", "member": "m", "outcome": "first", "_recorded_at": 5.0}
+        second = {"run_id": "dup-1", "member": "m", "outcome": "second", "_recorded_at": 5.0}
+        collide.write_text(json.dumps(first) + "\n" + json.dumps(second) + "\n")
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            fleet_db.sync(conn, runs_file=collide)
+        assert "COLLISION" in buf.getvalue() and "dup-1" in buf.getvalue(), buf.getvalue()
+
+        # A live fleet.db predates this fix and still has run_id as a bare PRIMARY KEY --
+        # CREATE TABLE IF NOT EXISTS is a no-op against it (same reason _ADD_COLUMNS exists),
+        # so without an in-place migration the fix would reach only a freshly rebuilt db. The
+        # legacy shape here is today's base SCHEMA (every column _ADD_COLUMNS doesn't own)
+        # with the old bare run_id PRIMARY KEY, matching what a real pre-#212 fleet.db has.
+        old = d / "legacy.db"
+        legacy = sqlite3.connect(str(old))
+        legacy.executescript("""
+            CREATE TABLE runs (
+              run_id TEXT PRIMARY KEY, member TEXT NOT NULL, kind TEXT, item_id TEXT, pr TEXT,
+              status TEXT, exit_code INTEGER, outcome TEXT, evidence TEXT, vision_link TEXT,
+              self_critique TEXT, cost_usd REAL, num_turns INTEGER, input_tokens INTEGER,
+              output_tokens INTEGER, cache_read_tokens INTEGER, cache_creation_tokens INTEGER,
+              duration_ms INTEGER, stop_reason TEXT, recorded_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_runs_member_time ON runs(member, recorded_at);
+            CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+            CREATE INDEX IF NOT EXISTS idx_runs_item ON runs(item_id);
+        """)
+        legacy.execute("INSERT INTO runs (run_id, member, outcome, recorded_at) "
+                       "VALUES ('legacy-1','marie','a row written before the migration', 1.0)")
+        legacy.commit(); legacy.close()
+
+        conn2 = fleet_db.connect(old)
+        pk_cols = [r[1] for r in conn2.execute("PRAGMA table_info(runs)") if r[5]]
+        assert pk_cols == ["run_id", "recorded_at"], pk_cols
+        row = conn2.execute("SELECT member, outcome FROM runs WHERE run_id = 'legacy-1'").fetchone()
+        assert row == ("marie", "a row written before the migration"), row
+        fleet_db.sync(conn2, runs_file=runs)
+        migrated_rows = conn2.execute(
+            "SELECT COUNT(*) FROM runs WHERE run_id = ?", ("review-175-817e99187df8",)
+        ).fetchone()[0]
+        assert migrated_rows == 2, migrated_rows
+
+
 def _fanout_packs_the_hour_by_complexity():
     """gru fills an hour's allowance with WORK; N is an output of that, never an input.
 
@@ -2022,6 +2111,7 @@ if __name__ == "__main__":
     check("member_spec's OWN default MEMBERS_DIR resolves (not just an explicit path)", _members_dir_default_is_right)
     check("report contract: ok + silence is recorded", _report_contract)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
+    check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
     check("maxx lease reserves, releases, and self-expires", _maxx_lease_reserves_releases_and_self_expires)
