@@ -1,0 +1,12 @@
+[Unit]
+Description=fleet-kit account-pool health pager — pages when every account has been failing for a sustained stretch (scripts/account_health_check.sh)
+
+[Service]
+Type=oneshot
+# account_health_check.sh reads these directly (it does not source fleet.env like the other
+# jobs in this directory -- it must stay a plain host process, zero Claude Code dependency,
+# per its own header comment) -- Environment= here, not FLEET_ENV_FILE.
+Environment=FLEET_LOG_DIR={{LOG_DIR}}
+Environment=NTFY_TOPIC={{NTFY_TOPIC}}
+ExecStart={{KIT_PATH}}/scripts/account_health_check.sh
+User={{USER}}
