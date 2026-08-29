@@ -260,6 +260,23 @@ MODEL=$(jget "['llm']['model']")
 MAX_TURNS=$(jget "['llm'].get('max_turns') or ''")
 MAX_BUDGET=$(jget "['mandate']['limits'].get('max_budget_usd') or ''")
 
+# FLEET_SHARE_FRACTION -- this instance's slice of the fleet-wide sustainable pace, applied
+# to EVERY member's own spend ceiling (not just gru's, which already scales its own sizing
+# the same way via FLEET_GRU_ALLOWANCE_FRACTION -- see gru.md). Only reached when an operator
+# has explicitly set FLEET_SHARE_FRACTION < 1.0 on this instance -- an instance that never
+# sets it never calls maxx_share_check.py at all, so every member stays exactly as uncapped
+# as before this change. When it IS set, a member with its own max_budget_usd gets it
+# scaled down; a member with NO cap gets a synthesized one (see maxx_share_check.py's own
+# header) -- otherwise most of the fleet (uncapped by design) would see zero effect from
+# this dial. Fails open on an unreadable maxx meter (script's own contract).
+if [ "${FLEET_SHARE_FRACTION:-1.0}" != "1.0" ]; then
+  SCALED_BUDGET=$(python3 "$KIT_DIR/scripts/maxx_share_check.py" "${FLEET_SHARE_FRACTION:-1.0}" "$MAX_BUDGET" 2>>"$LOG")
+  if [ -n "$SCALED_BUDGET" ]; then
+    log "$MEMBER: max_budget_usd scaled by FLEET_SHARE_FRACTION=${FLEET_SHARE_FRACTION}: \$${MAX_BUDGET:-uncapped} -> \$${SCALED_BUDGET}"
+    MAX_BUDGET="$SCALED_BUDGET"
+  fi
+fi
+
 PROMPT=$(awk 'BEGIN{d=0} /^---$/{d++; next} d>=2{print}' "$BEHAVIOR")
 if [ -z "$PROMPT" ]; then
   log "FATAL: charter empty after frontmatter strip ($BEHAVIOR)"
