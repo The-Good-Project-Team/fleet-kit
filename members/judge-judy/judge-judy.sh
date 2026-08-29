@@ -141,7 +141,17 @@ EXPLICIT_PR="${1:-}"
 # ordering alone, no diff change). Same flock-over-a-pidfile pattern auto_deploy.sh/deploy.sh
 # already use (fleet-kit#194). flock over a held fd releases automatically if this process is
 # killed or crashes, so a dead tick can never wedge the lock.
-LOCKFILE="$HOME/.cache/fleet-kit/judge-judy.lock"
+#
+# Lives under $LOG_DIR, NOT $HOME/.cache -- confirmed live 2026-08-29 (fleet-kit gh#207, same
+# failure class as gh#215/PR#216's check.sh fix): $HOME is the per-pass ephemeral
+# container/worktree, so a lockfile there can only ever contend against itself inside that same
+# container -- it can never block a concurrent tick running in a different container/worktree,
+# which is exactly how cron ticks and the blue/green deploy cutover both spawn processes here.
+# Live-reproduced: a fresh 3-way pass-start collision on PR #175 happened even after PR #200's
+# flock was confirmed deployed, and "another judge-judy tick still holds" has never once fired
+# across 106 pass-start events (~25h) of log history -- zero evidence the mutex ever blocked a
+# tick. $LOG_DIR is proven persistent (judge-judy.log itself spans days).
+LOCKFILE="$LOG_DIR/judge-judy.lock"
 mkdir -p "$(dirname "$LOCKFILE")"
 exec 9>"$LOCKFILE"
 if command -v flock >/dev/null 2>&1; then
