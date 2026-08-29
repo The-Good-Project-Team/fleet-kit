@@ -274,6 +274,80 @@ def _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing():
     assert "per_diem_hourly_pct" in payload and "headroom_fraction" in payload, payload
 
 
+def _maxx_lease_reserves_releases_and_self_expires():
+    """gh#161 part 2: reserve/release were documented in gru.md since forever but never
+    implemented -- reserved_pct stayed permanently 0 no matter how many leases should
+    logically be live. This proves the local ledger actually holds, drops, and self-expires
+    a lease, and that maxx_reader.py's CLI surfaces the total on top of the remote reading."""
+    import maxx_lease
+
+    with tempfile.TemporaryDirectory() as d:
+        state_file = Path(d) / "maxx-leases.json"
+
+        assert maxx_lease.total_reserved_pct(state_file) == 0.0
+
+        lease_id = maxx_lease.maxx_reserve(pct=0.05, label="gru-test", ttl_sec=3600,
+                                           state_file=state_file)
+        assert lease_id
+        assert abs(maxx_lease.total_reserved_pct(state_file) - 0.05) < 1e-9
+
+        # A second, concurrent lease adds on top -- this is the whole point (back-to-back gru
+        # passes must see each other's in-flight spend).
+        lease_id2 = maxx_lease.maxx_reserve(pct=0.03, label="gru-test2", ttl_sec=3600,
+                                            state_file=state_file)
+        assert abs(maxx_lease.total_reserved_pct(state_file) - 0.08) < 1e-9
+
+        maxx_lease.maxx_release(lease_id, state_file=state_file)
+        assert abs(maxx_lease.total_reserved_pct(state_file) - 0.03) < 1e-9
+        # Releasing an already-released (or never-existent) lease is a no-op, never an error --
+        # gru.md step 6 calls this unconditionally, even on a failure path.
+        maxx_lease.maxx_release(lease_id, state_file=state_file)
+
+        # A lease past its own TTL self-expires WITHOUT an explicit release -- gru.md's
+        # documented backstop ("a lease that outlives its own hour self-expires instead of
+        # choking every later pass forever").
+        maxx_lease.maxx_release(lease_id2, state_file=state_file)
+        expired_id = maxx_lease.maxx_reserve(pct=0.5, label="gru-expired", ttl_sec=-1,
+                                             state_file=state_file)
+        assert expired_id
+        assert maxx_lease.total_reserved_pct(state_file) == 0.0
+
+
+def _maxx_lease_concurrent_reserves_dont_clobber_each_other():
+    """fleet-code-review BLOCK on PR #163: unlocked read-modify-write meant two overlapping
+    gru passes calling maxx_reserve at once could silently clobber each other's write (a lost
+    lease, no error), and the shared non-unique .tmp path could raise a bare FileNotFoundError
+    out of a concurrent caller. Fired real threads at the same state file to prove the fix
+    (an flock-guarded critical section) actually serializes them -- every lease survives and
+    nothing raises."""
+    import threading
+
+    import maxx_lease
+
+    with tempfile.TemporaryDirectory() as d:
+        state_file = Path(d) / "maxx-leases.json"
+        n = 20
+        errors = []
+
+        def _reserve(i):
+            try:
+                maxx_lease.maxx_reserve(pct=0.01, label=f"concurrent-{i}", ttl_sec=3600,
+                                        state_file=state_file)
+            except Exception as exc:  # noqa: BLE001 -- capturing for the assert below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_reserve, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"concurrent maxx_reserve raised: {errors}"
+        leases = json.loads(state_file.read_text())
+        assert len(leases) == n, f"expected {n} surviving leases, got {len(leases)} -- lost a write"
+        assert abs(maxx_lease.total_reserved_pct(state_file) - n * 0.01) < 1e-9
+
+
 def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
     """Arming auto-merge must not pass --squash/--merge/--rebase, and must not eat the error.
 
@@ -1407,6 +1481,38 @@ def _pool_logs_successes_so_downtime_is_measurable():
     assert 'last_line=$(tail -1 "$POOL_LOG")\nage' not in check_src
 
 
+def _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror():
+    """No script or charter may read instances/<name>/logs/*.jsonl as a live data source.
+
+    #132: `/fleet-kit/instances/nonprofit-atlas/logs/runs.jsonl` froze at 1798 lines while the
+    canonical `$FLEET_LOG_DIR/runs.jsonl` (bind-mounted from a host instances/<name>/logs/ dir
+    by deploy.sh, see up.sh:13) kept growing -- reading the frozen copy made all 12 roster
+    members look stale-by-hours simultaneously, indistinguishable from a fleet-wide scheduler
+    outage that per-member raw logs proved was not happening. `instances/` is gitignored and
+    dockerignored on purpose (host/deployment state, never baked into the image or the repo),
+    so the only fix this repo can own is refusing to let any script grow a habit of reading
+    that path directly -- everything must go through $FLEET_LOG_DIR instead.
+
+    #132's PRD cites a prior fix for the same drift class on a `roomba_ghosts_state.json` file;
+    that file was not found anywhere in this repo when this check was written (grepped clean),
+    so this check cannot be pinned to it -- it stands alone, generalized to the whole
+    instances/*/logs/*.jsonl file class rather than one name.
+    """
+    pattern = re.compile(r"""instances/[^/\s"'{}]+/logs/\S*\.jsonl""")
+    hits = []
+    for path in ROOT.rglob("*"):
+        if path.is_dir() or path == Path(__file__).resolve():
+            continue
+        if ".git" in path.parts or path.suffix not in {".py", ".sh", ".md"}:
+            continue
+        try:
+            text = path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        hits.extend(f"{path.relative_to(ROOT)}: {m.group(0)}" for m in pattern.finditer(text))
+    assert not hits, f"hardcoded read of the frozen instances/*/logs mirror: {hits}"
+
+
 if __name__ == "__main__":
     check("member specs load and validate", _member_specs_validate)
     check("member_spec's OWN default MEMBERS_DIR resolves (not just an explicit path)", _members_dir_default_is_right)
@@ -1414,6 +1520,8 @@ if __name__ == "__main__":
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
+    check("maxx lease reserves, releases, and self-expires", _maxx_lease_reserves_releases_and_self_expires)
+    check("maxx lease concurrent reserves don't clobber each other", _maxx_lease_concurrent_reserves_dont_clobber_each_other)
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
     check("minion knows the browser in its own image exists", _minion_knows_the_browser_exists)
     check("score reasoning is not guillotined mid-word", _score_reasoning_is_not_guillotined_mid_word)
@@ -1447,6 +1555,7 @@ if __name__ == "__main__":
     check("exhaustion with no stated reset backs off minutes, not an hour", _unparseable_exhaustion_gates_briefly_not_for_an_hour)
     check("a stated reset time is honored over the fallback", _a_real_reset_time_is_still_honored)
     check("pool logs successes so outage length is measurable", _pool_logs_successes_so_downtime_is_measurable)
+    check("nothing hardcodes a read of the frozen instances/*/logs mirror", _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror)
 
     for n in ok:
         print(f"  ok    {n}")
