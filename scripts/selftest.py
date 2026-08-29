@@ -13,6 +13,7 @@ ran it.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import re
 import sys
@@ -1878,9 +1879,21 @@ def _unparseable_exhaustion_gates_briefly_not_for_an_hour():
 
 
 def _a_real_reset_time_is_still_honored():
-    """A stated reset must win over the short fallback, so we don't hammer a genuine limit."""
+    """A stated reset must win over the short fallback, so we don't hammer a genuine limit.
+
+    The reset hour must be derived from `now`, not hardcoded: a fixed "1pm" sits under 600s
+    from rolling to tomorrow in the ~10 minutes before 13:00 UTC, which turned this into a
+    false CI failure independent of any code change (#210 -- confirmed live on PR#209's
+    2026-08-29T12:53:12Z run). Picking an hour a few hours ahead of `now` keeps the asserted
+    gap (a real reset, not the 300s no-reset-time fallback) comfortably over 600s regardless
+    of wall-clock time, including across a midnight rollover.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    target_hour = (now.hour + 3) % 24
+    ampm = "am" if target_hour < 12 else "pm"
+    h12 = target_hour % 12 or 12
     out = _bash_eval(
-        "", '_account_pool_mark_exhausted acct "hit your weekly limit, resets 1pm (UTC)" >/dev/null; '
+        "", f'_account_pool_mark_exhausted acct "hit your weekly limit, resets {h12}{ampm} (UTC)" >/dev/null; '
             'now=$(date +%s); epoch=$(awk \'{print $2}\' "$ACCOUNT_POOL_STATE_FILE"); '
             'echo $(( epoch - now ))'
     )
