@@ -355,8 +355,11 @@ function lastRunFor(name) {
 function statusClass(status) {
   if (status === 'ok') return 'ok';
   if (status === 'quiet') return 'warn';
+  // reported_nothing is a known classify() parser-miss (#135/#167), not a confirmed failure --
+  // paint it the same "uncertain, go check" amber as quiet rather than burying real fails in it.
+  if (status === 'reported_nothing') return 'warn';
   if (!status) return 'off';
-  return 'bad'; // reported_nothing, no_vision_link, fail, etc.
+  return 'bad'; // no_vision_link, fail, etc.
 }
 
 let SIDEBAR_ORDER = null; // cached agent-name order -- computed once per resort, not per render
