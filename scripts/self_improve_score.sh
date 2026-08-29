@@ -72,8 +72,58 @@ command -v account_pool_run >/dev/null 2>&1 || account_pool_run() { "$@"; }
 
 cd "$FLEET_REPO" || exit 1
 
-SELF_EVO_JEFE=$(gh pr list --state merged --search "head:jefe/" --json number,title,mergedAt --limit 15 2>/dev/null)
-SELF_EVO_DUMBLEDORE=$(gh pr list --state merged --search "head:dumbledore/" --json number,title,mergedAt --limit 15 2>/dev/null)
+# Self-evolution PRs must come from BOTH the product repo ($FLEET_REPO) AND fleet-kit's own
+# repo (KIT_DIR, wherever the checkout running THIS script actually lives) -- #176: since
+# 2026-08-21 the fleet's actual jefe/dumbledore charter fixes land almost entirely in fleet-kit
+# itself, so a query scoped to $FLEET_REPO alone (nonprofit-atlas, on this box) never sees them
+# and the score reads flat/low despite real self-evolution happening the whole time. No new env
+# var: both repo slugs are derived from the checkouts that already exist (git remote), per
+# fleet.env.example's own note that a second instance may point FLEET_REPO elsewhere while the
+# fleet-kit code itself always lives at KIT_DIR.
+_repo_slug() { git -C "$1" remote get-url origin 2>/dev/null | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##'; }
+FLEET_REPO_SLUG="$(_repo_slug "$FLEET_REPO")"
+KIT_REPO_SLUG="$(_repo_slug "$KIT_DIR")"
+
+_repo_arg=()
+[ -n "$FLEET_REPO_SLUG" ] && _repo_arg=(--repo "$FLEET_REPO_SLUG")
+SELF_EVO_JEFE=$(gh pr list --state merged --search "head:jefe/" --json number,title,mergedAt --limit 15 "${_repo_arg[@]}" 2>/dev/null)
+SELF_EVO_DUMBLEDORE=$(gh pr list --state merged --search "head:dumbledore/" --json number,title,mergedAt --limit 15 "${_repo_arg[@]}" 2>/dev/null)
+
+# Only query fleet-kit's repo a second time if it's actually a different repo -- if
+# $FLEET_REPO already IS fleet-kit (this container's current config), the query above already
+# covered it and a second identical query would just duplicate every PR in the evidence set.
+SELF_EVO_JEFE_KIT=""
+SELF_EVO_DUMBLEDORE_KIT=""
+if [ -n "$KIT_REPO_SLUG" ] && [ "$KIT_REPO_SLUG" != "$FLEET_REPO_SLUG" ]; then
+  SELF_EVO_JEFE_KIT=$(gh pr list --repo "$KIT_REPO_SLUG" --state merged --search "head:jefe/" --json number,title,mergedAt --limit 15 2>/dev/null)
+  SELF_EVO_DUMBLEDORE_KIT=$(gh pr list --repo "$KIT_REPO_SLUG" --state merged --search "head:dumbledore/" --json number,title,mergedAt --limit 15 2>/dev/null)
+fi
+
+# Merge each pair into one evidence set, tagging every entry with which repo it came from --
+# PR numbers can collide across two repos, and the scoring prompt's "name the specific PR"
+# instruction needs an unambiguous handle. Fail-open: a failed/empty gh call on either side
+# (network error, unauth'd for that repo, rate limit) just yields "[]" for that half, same
+# fail-open shape DAILY_OUTCOMES already has below -- never a hard exit.
+export SELF_EVO_JEFE SELF_EVO_JEFE_KIT SELF_EVO_DUMBLEDORE SELF_EVO_DUMBLEDORE_KIT FLEET_REPO_SLUG KIT_REPO_SLUG
+_merge_evidence() {
+  python3 -c "
+import json, os
+def load(var, repo):
+    raw = os.environ.get(var) or ''
+    try:
+        arr = json.loads(raw) if raw.strip() else []
+    except Exception:
+        arr = []
+    for x in arr:
+        x['repo'] = repo
+    return arr
+primary = load('$1', os.environ.get('FLEET_REPO_SLUG') or 'unknown')
+kit = load('$2', os.environ.get('KIT_REPO_SLUG') or 'unknown')
+print(json.dumps(primary + kit))
+"
+}
+SELF_EVO_JEFE="$(_merge_evidence SELF_EVO_JEFE SELF_EVO_JEFE_KIT)"
+SELF_EVO_DUMBLEDORE="$(_merge_evidence SELF_EVO_DUMBLEDORE SELF_EVO_DUMBLEDORE_KIT)"
 
 # Per-DAY outcome counts, not one 7-day aggregate -- the score has to be able to see whether
 # signal rate actually moved after a specific jefe/dumbledore PR's merge date, not just that
