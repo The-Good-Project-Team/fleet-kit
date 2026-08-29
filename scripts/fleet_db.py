@@ -20,6 +20,8 @@ to run on must already have it, no `pip install` step to silently fail on a fres
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import sqlite3
@@ -91,6 +93,27 @@ _ADD_COLUMNS = (
 )
 
 
+@contextlib.contextmanager
+def _migration_lock(db_path: Path):
+    """`connect()` is called from multiple threads (fleet_view_server's background tail
+    thread and per-request handlers all call `fleet_db.connect()` independently), and
+    `_migrate_composite_pk` below is a rename/rebuild/drop of `runs`, not an idempotent
+    ADD COLUMN -- two threads both seeing the pre-migration schema at once would both try to
+    rename the same table and one gets a raw `sqlite3.OperationalError`. Same flock-over-a-
+    sidecar-file pattern maxx_lease.py already uses for its own read-modify-write race:
+    serialize the whole migration so only one thread is ever inside it, and every later
+    thread's own PRAGMA table_info check (taken after acquiring the lock) then sees the
+    already-migrated schema and returns immediately."""
+    lock_path = db_path.with_suffix(db_path.suffix + ".migrate.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def _migrate_composite_pk(conn: sqlite3.Connection) -> None:
     """fleet-kit#212: a live fleet.db predating the composite key still has run_id as a bare
     PRIMARY KEY -- CREATE TABLE IF NOT EXISTS is a no-op against it, same reason _ADD_COLUMNS
@@ -125,8 +148,9 @@ def _migrate_composite_pk(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
-    _migrate_composite_pk(conn)
+def _migrate(conn: sqlite3.Connection, db_path: Path) -> None:
+    with _migration_lock(db_path):
+        _migrate_composite_pk(conn)
     have = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
     for name, decl in _ADD_COLUMNS:
         if name not in have:
@@ -138,7 +162,7 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(p))
     conn.executescript(SCHEMA)
-    _migrate(conn)
+    _migrate(conn, p)
     conn.execute("INSERT OR IGNORE INTO sync_state (id, offset) VALUES (0, 0)")
     conn.commit()
     return conn

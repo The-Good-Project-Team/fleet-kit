@@ -249,6 +249,70 @@ def _fleet_db_run_id_collisions_dont_lose_a_verdict():
         assert expected <= idx_names, idx_names
 
 
+def _fleet_db_composite_pk_migration_is_lock_serialized():
+    """#212: fleet_view_server.py calls `fleet_db.connect()` from several independent
+    threads -- the background tail thread and per-request handlers -- and
+    `_migrate_composite_pk` is a rename/rebuild/drop of `runs`, not an idempotent ADD COLUMN.
+    Without serializing it, two threads racing `connect()` against the same not-yet-migrated
+    legacy db could both see the old schema and both try to rename the same table, raising a
+    raw sqlite3.OperationalError and (for the background thread) silently killing the live
+    run feed. Reproduces the race directly: N threads call connect() against one legacy db at
+    once; none may raise, and the migration must still run exactly once."""
+    import sqlite3
+    import threading
+
+    import fleet_db
+
+    with tempfile.TemporaryDirectory() as d:
+        old = Path(d) / "legacy.db"
+        legacy = sqlite3.connect(str(old))
+        legacy.executescript("""
+            CREATE TABLE runs (
+              run_id TEXT PRIMARY KEY, member TEXT NOT NULL, kind TEXT, item_id TEXT, pr TEXT,
+              status TEXT, exit_code INTEGER, outcome TEXT, evidence TEXT, vision_link TEXT,
+              self_critique TEXT, cost_usd REAL, num_turns INTEGER, input_tokens INTEGER,
+              output_tokens INTEGER, cache_read_tokens INTEGER, cache_creation_tokens INTEGER,
+              duration_ms INTEGER, stop_reason TEXT, recorded_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_runs_member_time ON runs(member, recorded_at);
+            CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+            CREATE INDEX IF NOT EXISTS idx_runs_item ON runs(item_id);
+        """)
+        legacy.execute("INSERT INTO runs (run_id, member, outcome, recorded_at) "
+                       "VALUES ('legacy-1','marie','pre-migration row', 1.0)")
+        legacy.commit(); legacy.close()
+
+        errors = []
+        lock = threading.Lock()
+
+        def worker():
+            try:
+                # sqlite3 connections are thread-affine (check_same_thread defaults True) --
+                # connect and close within the same worker thread; only pass/fail crosses back.
+                c = fleet_db.connect(old)
+                c.close()
+            except Exception as e:  # noqa: BLE001 -- the race under test raises sqlite3 errors
+                with lock:
+                    errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"concurrent connect() raised: {errors!r}"
+        check_conn = fleet_db.connect(old)
+        pk_cols = [r[1] for r in check_conn.execute("PRAGMA table_info(runs)") if r[5]]
+        assert pk_cols == ["run_id", "recorded_at"], pk_cols
+        row = check_conn.execute(
+            "SELECT member, outcome FROM runs WHERE run_id = 'legacy-1'").fetchone()
+        assert row == ("marie", "pre-migration row"), row
+        idx_names = {r[1] for r in check_conn.execute("PRAGMA index_list(runs)")}
+        expected = {"idx_runs_member_time", "idx_runs_status", "idx_runs_item"}
+        assert expected <= idx_names, idx_names
+
+
 def _fanout_packs_the_hour_by_complexity():
     """gru fills an hour's allowance with WORK; N is an output of that, never an input.
 
@@ -2197,6 +2261,7 @@ if __name__ == "__main__":
     check("report contract: ok + silence is recorded", _report_contract)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
     check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
+    check("fleet.db composite-PK migration is lock-serialized", _fleet_db_composite_pk_migration_is_lock_serialized)
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
     check("maxx lease reserves, releases, and self-expires", _maxx_lease_reserves_releases_and_self_expires)
