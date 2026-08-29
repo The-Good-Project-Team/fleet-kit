@@ -479,6 +479,36 @@ def _score_reasoning_is_not_guillotined_mid_word():
     assert "[truncated]" in src, "a truncated reasoning does not say it was truncated"
 
 
+def _self_evo_evidence_covers_both_repos():
+    """The Magikarp score's self-evolution evidence must not be single-repo-scoped again.
+
+    #176: `self_improve_score.sh`'s `gh pr list` calls ran from `cd "$FLEET_REPO"` with no
+    `--repo` flag, so on any box where $FLEET_REPO points somewhere other than fleet-kit's own
+    checkout (this container: FLEET_REPO=/repo=nonprofit-atlas), the query only ever saw
+    nonprofit-atlas PRs -- but since 2026-08-21 the fleet's actual jefe/dumbledore charter
+    fixes land almost entirely in fleet-kit's own repo. The score read flat/low for four days,
+    blind to the exact compounding activity it exists to detect. This regression check is the
+    static half of the fix (acceptance criterion 5 of #176); the live half was a manual re-run
+    confirming a fleet-kit PR became citable in the next self_improve_score.jsonl entry.
+    """
+    src = (ROOT / "scripts/self_improve_score.sh").read_text()
+    # Both sources must be present: $FLEET_REPO-relative (the product repo) AND a
+    # KIT_DIR-relative source (fleet-kit's own repo, wherever this script's checkout lives).
+    assert "FLEET_REPO_SLUG" in src, "no repo slug derived from $FLEET_REPO for the evidence query"
+    assert "KIT_REPO_SLUG" in src, "no repo slug derived from KIT_DIR -- fleet-kit's own PRs are unreachable again"
+    assert 'git -C "$1" remote get-url origin' in src or "remote get-url origin" in src, \
+        "repo slug is no longer derived from an existing checkout's git remote"
+    # Must not query the same repo twice when $FLEET_REPO already IS fleet-kit's own repo.
+    assert '"$KIT_REPO_SLUG" != "$FLEET_REPO_SLUG"' in src, \
+        "no guard against querying fleet-kit's repo twice when it's already $FLEET_REPO"
+    # Each merged PR entry must be tagged with its source repo -- PR numbers can collide
+    # across two repos, and the prompt's 'name the specific PR' instruction needs a handle
+    # that's unambiguous across both.
+    assert "x['repo'] = repo" in src, "merged evidence entries are not tagged with their source repo"
+    # Fail-open: a failed/empty gh call on either side must not hard-exit the script.
+    assert "except Exception" in src, "evidence merge has no fail-open path for a bad/empty gh response"
+
+
 def _adhoc_task_adds_to_the_charter_never_replaces_it():
     """`--task` runs a member ad-hoc with one extra instruction, charter still governing.
 
@@ -1575,6 +1605,7 @@ if __name__ == "__main__":
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
     check("minion knows the browser in its own image exists", _minion_knows_the_browser_exists)
     check("score reasoning is not guillotined mid-word", _score_reasoning_is_not_guillotined_mid_word)
+    check("self-evolution evidence covers fleet-kit's own repo, not just $FLEET_REPO", _self_evo_evidence_covers_both_repos)
     check("jefe can unstick a PR that is merely behind its base", _jefe_can_unstick_a_pr_that_is_merely_behind)
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
