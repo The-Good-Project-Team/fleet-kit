@@ -124,6 +124,25 @@ report_run() { # <pr> <head_sha> <usage_file> <outcome-line> <evidence-line>
     --pass-file - --usage-file "$3" --pr "$1" >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
 }
 
+# --- single-tick mutex -------------------------------------------------------------------
+# PR #182 turned this from a single-PR-per-tick script into a loop that drains the whole
+# queue up to TICK_BUDGET_USD, so a busy tick can legitimately run past the 15-minute cron
+# interval (entrypoint.sh:123) -- long enough for the next cron fire to start a second, fully
+# concurrent process. Two processes racing pick_pr's read-then-post_status can both pick the
+# same head and both call post_status; whichever POST lands last wins, silently flipping a
+# fresher verdict back to a stale one (live-confirmed on PR #175: approve -> block from race
+# ordering alone, no diff change). Same flock-over-a-pidfile pattern auto_deploy.sh/deploy.sh
+# already use (fleet-kit#194). Non-blocking (-n): a queued review is just a slower duplicate
+# of the one already running -- the next cron tick is the retry. flock over a held fd releases
+# automatically if this process is killed or crashes, so a dead tick can never wedge the lock.
+LOCKFILE="$HOME/.cache/fleet-kit/judge-judy.lock"
+mkdir -p "$(dirname "$LOCKFILE")"
+exec 9>"$LOCKFILE"
+if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
+  log "another judge-judy tick still holds $LOCKFILE -- exiting without picking a PR"
+  exit 0
+fi
+
 EXPLICIT_PR="${1:-}"
 SPENT_USD="0"
 LAST_CALL_USD="0"

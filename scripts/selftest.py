@@ -872,6 +872,39 @@ def _one_deploy_at_a_time_and_a_countable_drain():
     assert "tr -cd '0-9'" in line, "in-flight count is not sanitised to digits"
 
 
+def _judge_judy_ticks_dont_overlap():
+    """A judge-judy cron tick that overlaps a still-running prior tick must not review.
+
+    fleet-kit#194: PR #182 turned judge-judy.sh from a single-PR-per-tick script into a loop
+    that drains the whole PR queue up to FLEET_TICK_BUDGET_USD, so a busy tick can legitimately
+    run past the 15-minute cron interval -- long enough for the next cron fire to start a
+    second, fully concurrent process. Two processes racing pick_pr's read-then-post_status can
+    both pick the same head and both post a status; whichever POST lands last wins, silently
+    flipping a fresher verdict back to a stale one -- live-confirmed on PR #175 (approve ->
+    block from race ordering alone). Same flock-over-a-pidfile pattern as
+    auto_deploy.sh/deploy.sh (see _one_deploy_at_a_time_and_a_countable_drain above).
+    """
+    src = (Path(__file__).parent.parent / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    assert "flock" in src, "judge-judy has no lock -- overlapping ticks can double-review a head"
+    assert "exec 9>" in src, "flock needs a held fd or the lock is released immediately"
+    assert "flock -n 9" in src, "lock must be non-blocking -- a queued tick is a slow duplicate"
+
+    # The lock must be acquired before pick_pr is ever CALLED (not just before it's defined --
+    # the function definition itself always precedes its first call site in this file).
+    lock_i = src.find('exec 9>"$LOCKFILE"')
+    call_j = src.find('pick_pr "$EXPLICIT_PR" "$SKIPPED_THIS_TICK"')
+    assert lock_i != -1 and call_j != -1 and lock_i < call_j, \
+        "lock must be acquired before pick_pr's first call site in the tick loop"
+
+    # On lock contention the script must exit clean without picking, reviewing, or posting --
+    # a non-zero exit here would make a routine overlap look like a cron failure.
+    contention_i = src.find("! flock -n 9")
+    assert contention_i != -1, "no lock-contention branch"
+    tail = src[contention_i:contention_i + 200]
+    assert "exit 0" in tail, "lock-held branch must exit 0 -- overlap is expected, not an error"
+    assert call_j > contention_i, "pick_pr must not be reachable before the lock check"
+
+
 def _marie_sweeps_the_whole_backlog_not_just_the_new():
     """marie must re-judge the OLD backlog, not only what changed since last pass.
 
@@ -1536,6 +1569,7 @@ if __name__ == "__main__":
     check("both worktree callers check $REPO before tearing the worktree down", _run_member_and_builder_check_repo_before_removing_the_worktree)
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
+    check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
     check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
