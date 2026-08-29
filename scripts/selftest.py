@@ -423,6 +423,63 @@ def _maxx_share_ceiling_uses_hourly_headroom_not_the_week_bank():
         maxx_share_ceiling.get_headroom = orig
 
 
+def _maxx_share_ceiling_subtracts_local_leases_not_just_the_remotes_reserved_pct():
+    """fleet-code-review BLOCK on PR #184: the ceiling formula read `budget["reserved_pct"]`
+    from `get_headroom()` (the plain function), but that field only ever carries whatever the
+    REMOTE maxx endpoint reports -- which today is nothing, because the remote never learns
+    about a LOCAL maxx_lease.py reservation (gh#161 part 2). The merge of local leases into
+    reserved_pct only happened inside maxx_reader.py's own CLI `main()`, which
+    maxx_share_ceiling.py never goes through. Net effect: two concurrent callers (this
+    instance's judge-judy running twice, or the OTHER instance) each saw the SAME generous
+    ceiling and each reserved against it, seeing none of each other's live leases --
+    reproducing, in a new form, the exact "no coordination" problem this PR set out to fix.
+
+    This test exercises the REAL integration (an actual on-disk maxx_lease reservation, not a
+    mocked reserved_pct in the dict) so it cannot pass the way the original, weaker version of
+    this test did -- that one monkeypatched get_headroom with a dict that ALREADY contained
+    reserved_pct, which is exactly the value the real code path never produces on its own.
+    """
+    import tempfile
+    from pathlib import Path
+
+    import maxx_lease
+    import maxx_share_ceiling
+
+    with tempfile.TemporaryDirectory() as d:
+        state_file = Path(d) / "maxx-leases.json"
+        orig_state = maxx_lease.STATE_FILE
+        orig_headroom = maxx_share_ceiling.get_headroom
+        try:
+            maxx_lease.STATE_FILE = state_file
+
+            # The remote's own reserved_pct is 0 (its honest, real-world default -- it has no
+            # idea a local lease exists). sustainable=0.35, used=0.10 -> raw headroom 0.25.
+            remote_budget = {
+                "verdict": "ok", "sustainable_pct_per_hour": 0.35,
+                "per_diem_hourly_pct": 0.10, "reserved_pct": 0,
+            }
+            maxx_share_ceiling.get_headroom = lambda: (1.0, "ok", remote_budget)
+
+            import io
+            from contextlib import redirect_stdout
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                maxx_share_ceiling.main(["prog", "1.0"])
+            assert abs(float(buf.getvalue().strip()) - 0.25) < 1e-6, buf.getvalue()
+
+            # A REAL concurrent lease exists on disk (e.g. judge-judy on the other instance,
+            # or an earlier call this same instance made) -- the remote still reports
+            # reserved_pct=0 (it never learns about this), but the ceiling MUST see it anyway.
+            maxx_lease.maxx_reserve(pct=0.08, label="concurrent-caller", ttl_sec=3600)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                maxx_share_ceiling.main(["prog", "1.0"])
+            assert abs(float(buf.getvalue().strip()) - 0.17) < 1e-6, buf.getvalue()  # 0.25-0.08
+        finally:
+            maxx_lease.STATE_FILE = orig_state
+            maxx_share_ceiling.get_headroom = orig_headroom
+
+
 def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
     """Arming auto-merge must not pass --squash/--merge/--rebase, and must not eat the error.
 
@@ -1648,6 +1705,7 @@ if __name__ == "__main__":
     check("maxx lease reserves, releases, and self-expires", _maxx_lease_reserves_releases_and_self_expires)
     check("maxx lease concurrent reserves don't clobber each other", _maxx_lease_concurrent_reserves_dont_clobber_each_other)
     check("maxx share ceiling uses hourly headroom, not the week bank", _maxx_share_ceiling_uses_hourly_headroom_not_the_week_bank)
+    check("maxx share ceiling subtracts local leases, not just the remote's reserved_pct", _maxx_share_ceiling_subtracts_local_leases_not_just_the_remotes_reserved_pct)
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
     check("minion knows the browser in its own image exists", _minion_knows_the_browser_exists)
     check("score reasoning is not guillotined mid-word", _score_reasoning_is_not_guillotined_mid_word)

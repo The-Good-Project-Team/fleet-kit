@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import sys
 
+import maxx_lease
 from maxx_reader import get_headroom
 
 
@@ -64,7 +65,21 @@ def main(argv: list[str]) -> int:
         print("")
         return 0
 
-    reserved = budget.get("reserved_pct") or 0.0
+    # `budget["reserved_pct"]` (from get_headroom(), the plain function) only ever carries
+    # whatever the REMOTE maxx endpoint reports -- which today is nothing (the remote never
+    # learns about local leases). The merge with maxx_lease.total_reserved_pct() normally
+    # happens inside maxx_reader.py's own CLI main(), which this script never goes through.
+    # Real BLOCK finding on this PR: without this line, two concurrent callers (this
+    # instance's own judge-judy running twice, or the OTHER instance) each compute the same
+    # generous ceiling and each reserve against it, seeing none of each other's live leases --
+    # reproducing, in a new form, the exact "no coordination" problem #173/this PR set out to
+    # fix. Fails open the same way maxx_reader.py's own merge does: a broken local lease file
+    # must never crash this CLI's otherwise-guaranteed always-parseable output.
+    try:
+        local_reserved = maxx_lease.total_reserved_pct()
+    except Exception:
+        local_reserved = 0.0
+    reserved = (budget.get("reserved_pct") or 0.0) + local_reserved
     hourly_headroom_pct = max(0.0, sustainable - hourly_used - reserved)
     ceiling_pct = hourly_headroom_pct * share
 
