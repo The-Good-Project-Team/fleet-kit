@@ -314,7 +314,14 @@ drain_inflight_passes() {
 drain_inflight_passes
 
 log "building $IMAGE from $KIT_DIR"
-podman build -t "$IMAGE" "$KIT_DIR"
+# Baked into the image as --build-arg, not written into KIT_DIR itself: KIT_DIR is a live git
+# checkout (the build context), and dropping a file into it would leave an untracked artifact
+# in the working tree on every deploy. gh#201: the running container's /fleet-kit is `COPY .
+# /fleet-kit` with .git excluded (.dockerignore) -- never a real checkout on any instance built
+# from this Dockerfile -- so this SHA baked at build time is the only way a later staleness
+# check can know what was actually shipped, without needing podman/host access itself.
+DEPLOY_SHA="$(git -C "$KIT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+podman build --build-arg DEPLOY_SHA="$DEPLOY_SHA" -t "$IMAGE" "$KIT_DIR"
 
 log "starting green candidate (${CONTAINER}-green) on alt ports $GREEN_VIEW_PORT/$GREEN_WEBHOOK_PORT"
 if exists "${CONTAINER}-green"; then
