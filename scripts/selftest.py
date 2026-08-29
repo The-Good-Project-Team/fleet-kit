@@ -1360,6 +1360,48 @@ def _self_improve_score_is_actually_scheduled():
         "so self_improve_score.jsonl never gets written and dumbledore/jefe read nothing.")
 
 
+def _deploy_staleness_check_is_actually_scheduled():
+    """Same failure class as _self_improve_score_is_actually_scheduled, one script over.
+
+    gh#201: deploy_staleness_check.sh is the independent gate that catches a deploy that never
+    ran at all -- it is worthless if nothing puts it on cron, exactly the "spec/reality exists,
+    but nothing scheduled it" gap that bit datta (nonprofit-atlas#3321) and self_improve_score.sh
+    (gh#196-adjacent) before it.
+    """
+    entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
+    assert "deploy_staleness_check.sh" in entry, (
+        "deploy_staleness_check.sh has no line in entrypoint.sh's crontab -- it will never run, "
+        "so a dark deploy pipeline goes back to being invisible until a human stumbles onto it.")
+
+
+def _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget():
+    """The check must compare something REAL (a SHA baked at build time), and must only write
+    a durable record when actually past budget -- not on every tick, or the STALE line this
+    issue exists to produce drowns in routine noise the same way auto_deploy.sh's own comment
+    warns against for its lock-contention branch.
+
+    gh#201: /fleet-kit is never a real git checkout in production (Dockerfile's own
+    `COPY . /fleet-kit` with .dockerignore excluding .git/), so the check can't `git log` the
+    live tree -- it has to read back a SHA deploy.sh baked in at build time and compare it to
+    main's current HEAD over the GitHub API.
+    """
+    src = (ROOT / "scripts" / "deploy_staleness_check.sh").read_text()
+    assert ".deploy_sha" in src, "does not read the SHA deploy.sh bakes into the image at build time"
+    assert "STALENESS_BUDGET_S" in src, "no staleness budget -- would alert on every normal deploy lag"
+    assert 'log "STALE' in src, "no distinguishable STALE record -- same gap gh#196 fixed for a normal deploy line"
+    # The in-sync path must not itself write the durable STALE line.
+    quiet_branch = src[src.find('if [ "$DEPLOYED_SHA" = "$MAIN_SHA" ]'):src.find("# Diverged.")]
+    assert "log " not in quiet_branch, "logs even when in sync -- would bury the STALE line in noise"
+
+    deploy_src = (ROOT / "scripts" / "deploy.sh").read_text()
+    assert "DEPLOY_SHA=" in deploy_src and "--build-arg DEPLOY_SHA=" in deploy_src, \
+        "deploy.sh does not bake the built SHA into the image -- the staleness check has nothing to read"
+
+    docker_src = (ROOT / "Dockerfile").read_text()
+    assert "ARG DEPLOY_SHA" in docker_src and ".deploy_sha" in docker_src, \
+        "Dockerfile does not accept/write DEPLOY_SHA -- deploy.sh's build-arg has nowhere to land"
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -1625,6 +1667,8 @@ if __name__ == "__main__":
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
     check("self_improve_score.sh is actually scheduled", _self_improve_score_is_actually_scheduled)
+    check("deploy staleness check is actually scheduled", _deploy_staleness_check_is_actually_scheduled)
+    check("deploy staleness check reads a baked SHA and only alerts past budget", _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("deploy.sh's log is durable regardless of caller", _deploy_log_is_durable_regardless_of_caller)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
