@@ -16,11 +16,10 @@ quiet one) and for a human tailing the log live.
 Usage: claude -p ... --output-format stream-json --verbose \
          | stream_log.py --result-out /tmp/result.json >> member.log
 
---result-out writes the final `result` event's JSON to a separate file -- its `result` text
-field is overridden (see _rewrite_result below) when a real report was written earlier in the
-stream; every other key (usage, cost, turns) is passed through unchanged, so
-pass_accounting.py's `split()` still expects exactly one JSON blob, same as it always has with
---output-format json.
+--result-out writes the final `result` event's JSON to a separate file, UNMODIFIED, always --
+every key (including `result`'s own text) is passed through exactly as the provider returned
+it, so pass_accounting.py's `split()` still expects exactly one JSON blob, same as it always
+has with --output-format json.
 
 gh#167: the stream-json protocol's own `result` field is Claude Code's last-assistant-turn
 text ONLY, by design -- not something fleet-kit computes. If a pass writes its full
@@ -29,16 +28,19 @@ followed by a short wrap-up sentence), that wrap-up -- not the report -- becomes
 run_report.py never sees the real report at all. Confirmed live, fleet-wide (jefe, the-fixer,
 datta, dont-shoot-the-messenger): 12 of 13 `reported_nothing` rows in one window had every
 contract field null despite real work being reported seconds before the pass's actual last
-turn. Fix: this script already sees every assistant text block as it streams by (that's what
-the `thinking:` log lines are, per _CODE_TOOLS note above -- every text block, not literal
-extended thinking); it now also keeps the full (non-preview) text and raw stream position of
-each one, and if the block immediately preceding the final one has a contract line the final
-turn lacks -- and the two are close together in the raw event stream -- that block's text
-replaces `result`. Scoped narrowly on purpose, tightened further after fleet-code-review
-BLOCKed the first cut for being able to resurrect an early, later-abandoned draft: only the
-IMMEDIATELY preceding text block is ever eligible (never an arbitrary scan back through turn
-history), and only within a small event-count gap (see _MAX_TRAILING_EVENT_GAP), so a pass
-whose report already IS the last turn (the common case) is byte-for-byte unaffected.
+turn.
+
+This script does NOT try to recover from that loss by rewriting `result` -- three attempts at
+exactly that (2026-08-29T04:33, T08:33, T09:34) were each BLOCKed by fleet-code-review for a
+narrower version of the same flaw: any heuristic that resurrects an earlier text block as the
+"real" report can't distinguish a genuine trailing wrap-up from a pass that wrote a report,
+then in its very next turn discovered a problem and reverted -- and silently substituting a
+since-invalidated report is worse than the visible `reported_nothing` it would replace. The
+actual fix for the loss lives in persona_law.md (added alongside this change): stop after your
+report block, no trailing turn. What this script does instead is DETECT the gh#167 shape (see
+`_detect_trailing_loss`) and print a WARNING log line naming it, so a human or dumbledore's own
+log read can find residual occurrences (`grep 'gh#167 trailing-turn'`) without any risk of
+fabricating fleet.db/runs.jsonl data.
 """
 from __future__ import annotations
 
@@ -174,35 +176,41 @@ def _looks_like_report(text: str) -> bool:
 _MAX_TRAILING_EVENT_GAP = 8
 
 
-def _rewrite_result(result_line: str | None, assistant_texts: list[tuple[int, str]]) -> str | None:
-    """gh#167, scoped after fleet-code-review BLOCKed the original full backward scan on PR
-    #175 (a scan through all of turn history could resurrect an early aspirational Outcome:/
-    Evidence: draft -- stated intent later revised or abandoned -- and silently fabricate a
-    report that was never actually shipped, which is worse than the bug it fixed). This now
-    requires BOTH: the candidate is the text block immediately preceding the final one (never
-    further back into history), AND the two are within _MAX_TRAILING_EVENT_GAP raw stream
-    events of each other, so a stale draft separated by real intervening work -- even work that
-    happens to contain no text blocks of its own -- is unreachable. No-op (byte-identical)
-    whenever the final turn already looks like the report, there's no qualifying
-    immediately-preceding block, or the gap is too wide -- all of which include the common
-    case."""
+def _detect_trailing_loss(result_line: str | None, assistant_texts: list[tuple[int, str]]) -> str | None:
+    """gh#167, detect-only after fleet-code-review BLOCKed three straight attempts at
+    *rewriting* `result` (2026-08-29T04:33, T08:33, T09:34) -- each narrower scoping still left
+    a residual path where a real report gets silently overwritten by a stale/since-reverted
+    draft, which is worse than the visible `reported_nothing` it replaces (a member that writes
+    a report, then in its very next turn discovers the fix regressed something and reverts,
+    produces exactly the same "report-shaped block immediately followed by a short non-report
+    wrap-up" event shape as the trailing-turn bug -- no gap/adjacency heuristic can tell those
+    two apart from the stream alone).
+
+    So this never touches `result`: `pass_accounting.py`/`run_report.py` see exactly what the
+    provider returned, always, with zero fabrication risk. What it DOES do is name the loss --
+    when the immediately-preceding text block looks like a real report and the final block does
+    not, close together in the raw stream, that's the gh#167 shape, and this prints a WARNING
+    log line so a human or dumbledore's own log read can find it (`grep 'gh#167 trailing-turn'`)
+    without silently trusting a resurrected value. The real fix for the loss itself is
+    persona_law.md's own rule (added alongside this change): stop after your report block, no
+    trailing turn -- this function is a visibility backstop for passes that don't yet comply,
+    not a substitute for that rule."""
     if not result_line or len(assistant_texts) < 2:
-        return result_line
+        return None
     try:
         obj = json.loads(result_line)
     except json.JSONDecodeError:
-        return result_line
+        return None
     (final_idx, final_text), (prev_idx, prev_text) = assistant_texts[-1], assistant_texts[-2]
     if _looks_like_report(final_text):
-        return result_line
+        return None
     if not _looks_like_report(prev_text):
-        return result_line
+        return None
     if final_idx - prev_idx > _MAX_TRAILING_EVENT_GAP:
-        return result_line
-    if obj.get("result", "").strip() != prev_text.strip():
-        obj["result"] = prev_text
-        return json.dumps(obj)
-    return result_line
+        return None
+    if obj.get("result", "").strip() == prev_text.strip():
+        return None
+    return prev_text
 
 
 def main() -> int:
@@ -230,12 +238,20 @@ def main() -> int:
         if rendered:
             print(rendered, flush=True)
 
+    lost = _detect_trailing_loss(result_line, assistant_texts)
+    if lost is not None:
+        print("WARNING: gh#167 trailing-turn report loss detected -- a report-shaped block "
+              "was found immediately before the pass's real final turn, which does not look "
+              "like a report. `result` is left untouched (no fabrication risk); the likely-"
+              "lost text follows for a human or dumbledore to read:\n" + lost, flush=True)
+
     if args.result_out:
         with open(args.result_out, "w") as fh:
             # Empty (not missing) if the pass never produced a result line -- e.g. it was
             # killed mid-stream. run_member.sh treats an empty/unreadable file the same as a
-            # failed pass_accounting.py parse: no usage captured, never a crash.
-            fh.write(_rewrite_result(result_line, assistant_texts) or "")
+            # failed pass_accounting.py parse: no usage captured, never a crash. Never rewritten
+            # -- see _detect_trailing_loss's docstring for why recovery-by-rewrite was dropped.
+            fh.write(result_line or "")
     return 0
 
 
