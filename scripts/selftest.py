@@ -1419,8 +1419,10 @@ def _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror():
     so the only fix this repo can own is refusing to let any script grow a habit of reading
     that path directly -- everything must go through $FLEET_LOG_DIR instead.
 
-    This mirrors the fix already applied for the sibling drift on `roomba_ghosts_state.json`,
-    generalized to catch the whole instances/*/logs/*.jsonl file class rather than one name.
+    #132's PRD cites a prior fix for the same drift class on a `roomba_ghosts_state.json` file;
+    that file was not found anywhere in this repo when this check was written (grepped clean),
+    so this check cannot be pinned to it -- it stands alone, generalized to the whole
+    instances/*/logs/*.jsonl file class rather than one name.
     """
     pattern = re.compile(r"""instances/[^/\s"'{}]+/logs/\S*\.jsonl""")
     hits = []
