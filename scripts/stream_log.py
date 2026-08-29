@@ -130,17 +130,28 @@ def render_event(evt: dict) -> str | None:
     return None
 
 
-# Mirrors run_report.py's own Outcome: matcher just enough to detect "this text block contains
-# a real contract line" -- deliberately not imported, so this script has no dependency on
-# run_report.py's internals and can't be broken by an unrelated change there.
+# Mirrors run_report.py's own Outcome:/Evidence: matchers just enough to detect "this text
+# block contains the real contract, not just a stray mention of it" -- deliberately not
+# imported, so this script has no dependency on run_report.py's internals and can't be broken
+# by an unrelated change there.
 _OUTCOME_RE = re.compile(r"^[ \t]*[*_]{0,2}Outcome[*_]{0,2}[ \t]*:", re.MULTILINE | re.IGNORECASE)
+_EVIDENCE_RE = re.compile(r"^[ \t]*[*_]{0,2}Evidence[*_]{0,2}[ \t]*:", re.MULTILINE | re.IGNORECASE)
+
+
+def _looks_like_report(text: str) -> bool:
+    """A bare Outcome: line is too weak a signal on its own -- a draft aside ("Outcome: (draft,
+    ignore)") or a recital of this very contract template ("Write it as:\\nOutcome: <one
+    line>") both match it without being a real report. Requiring BOTH Outcome: and Evidence:
+    lines mirrors the actual contract (persona_law.md #10b requires both together), which a
+    stray non-report mention essentially never satisfies."""
+    return bool(_OUTCOME_RE.search(text) and _EVIDENCE_RE.search(text))
 
 
 def _rewrite_result(result_line: str | None, assistant_texts: list[str]) -> str | None:
     """gh#167: if a LATER turn overwrote the real report with a trailing wrap-up, restore the
-    last assistant text block that actually contains an Outcome: line. No-op (returns
-    result_line unchanged) whenever the final turn already is the report, or no block ever
-    had one -- both the common case and the current behavior."""
+    last assistant text block that actually looks like the report. No-op (returns result_line
+    unchanged) whenever the final turn already is the report, or no block ever had one -- both
+    the common case and the current behavior."""
     if not result_line or not assistant_texts:
         return result_line
     try:
@@ -148,7 +159,7 @@ def _rewrite_result(result_line: str | None, assistant_texts: list[str]) -> str 
     except json.JSONDecodeError:
         return result_line
     for text in reversed(assistant_texts):
-        if _OUTCOME_RE.search(text):
+        if _looks_like_report(text):
             if obj.get("result") != text:
                 obj["result"] = text
                 return json.dumps(obj)
