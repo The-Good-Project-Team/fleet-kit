@@ -31,11 +31,14 @@ datta, dont-shoot-the-messenger): 12 of 13 `reported_nothing` rows in one window
 contract field null despite real work being reported seconds before the pass's actual last
 turn. Fix: this script already sees every assistant text block as it streams by (that's what
 the `thinking:` log lines are, per _CODE_TOOLS note above -- every text block, not literal
-extended thinking); it now also keeps the full (non-preview) text of each one, and if the
-LAST block containing a contract line differs from the final `result` text, that block's text
-replaces `result`. Scoped narrowly on purpose: only overrides when an earlier block actually
-has a contract line the final turn lacks, so a pass whose report already IS the last turn (the
-common case) is byte-for-byte unaffected.
+extended thinking); it now also keeps the full (non-preview) text and raw stream position of
+each one, and if the block immediately preceding the final one has a contract line the final
+turn lacks -- and the two are close together in the raw event stream -- that block's text
+replaces `result`. Scoped narrowly on purpose, tightened further after fleet-code-review
+BLOCKed the first cut for being able to resurrect an early, later-abandoned draft: only the
+IMMEDIATELY preceding text block is ever eligible (never an arbitrary scan back through turn
+history), and only within a small event-count gap (see _MAX_TRAILING_EVENT_GAP), so a pass
+whose report already IS the last turn (the common case) is byte-for-byte unaffected.
 """
 from __future__ import annotations
 
@@ -160,23 +163,45 @@ def _looks_like_report(text: str) -> bool:
     return True
 
 
-def _rewrite_result(result_line: str | None, assistant_texts: list[str]) -> str | None:
-    """gh#167: if a LATER turn overwrote the real report with a trailing wrap-up, restore the
-    last assistant text block that actually looks like the report. No-op (returns result_line
-    unchanged) whenever the final turn already is the report, or no block ever had one -- both
-    the common case and the current behavior."""
-    if not result_line or not assistant_texts:
+# gh#167's own failure shape is exactly one tool round-trip between the real report and the
+# trailing wrap-up that overwrote it -- a handful of raw stream-json events (assistant
+# tool_use, user tool_result, at most one more of each). "Continues working, hits a blocker,
+# reverts the change" -- the fabrication risk fleet-code-review flagged on PR #175's first cut
+# -- spans many more real tool calls than that for any actual edit/investigation. This bound is
+# deliberately generous (covers several tool calls, not just one) while still being orders of
+# magnitude below what sustained work between an early draft and a final abandonment would
+# produce, so it discriminates the two shapes without needing to parse turn semantics.
+_MAX_TRAILING_EVENT_GAP = 8
+
+
+def _rewrite_result(result_line: str | None, assistant_texts: list[tuple[int, str]]) -> str | None:
+    """gh#167, scoped after fleet-code-review BLOCKed the original full backward scan on PR
+    #175 (a scan through all of turn history could resurrect an early aspirational Outcome:/
+    Evidence: draft -- stated intent later revised or abandoned -- and silently fabricate a
+    report that was never actually shipped, which is worse than the bug it fixed). This now
+    requires BOTH: the candidate is the text block immediately preceding the final one (never
+    further back into history), AND the two are within _MAX_TRAILING_EVENT_GAP raw stream
+    events of each other, so a stale draft separated by real intervening work -- even work that
+    happens to contain no text blocks of its own -- is unreachable. No-op (byte-identical)
+    whenever the final turn already looks like the report, there's no qualifying
+    immediately-preceding block, or the gap is too wide -- all of which include the common
+    case."""
+    if not result_line or len(assistant_texts) < 2:
         return result_line
     try:
         obj = json.loads(result_line)
     except json.JSONDecodeError:
         return result_line
-    for text in reversed(assistant_texts):
-        if _looks_like_report(text):
-            if obj.get("result") != text:
-                obj["result"] = text
-                return json.dumps(obj)
-            break
+    (final_idx, final_text), (prev_idx, prev_text) = assistant_texts[-1], assistant_texts[-2]
+    if _looks_like_report(final_text):
+        return result_line
+    if not _looks_like_report(prev_text):
+        return result_line
+    if final_idx - prev_idx > _MAX_TRAILING_EVENT_GAP:
+        return result_line
+    if obj.get("result", "").strip() != prev_text.strip():
+        obj["result"] = prev_text
+        return json.dumps(obj)
     return result_line
 
 
@@ -186,8 +211,8 @@ def main() -> int:
     args = ap.parse_args()
 
     result_line = None
-    assistant_texts: list[str] = []
-    for raw in sys.stdin:
+    assistant_texts: list[tuple[int, str]] = []
+    for event_idx, raw in enumerate(sys.stdin):
         raw = raw.strip()
         if not raw:
             continue
@@ -200,7 +225,7 @@ def main() -> int:
         if evt.get("type") == "assistant":
             for block in (evt.get("message") or {}).get("content") or []:
                 if block.get("type") == "text" and block.get("text", "").strip():
-                    assistant_texts.append(block["text"])
+                    assistant_texts.append((event_idx, block["text"]))
         rendered = render_event(evt)
         if rendered:
             print(rendered, flush=True)
