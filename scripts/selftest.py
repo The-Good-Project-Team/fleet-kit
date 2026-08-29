@@ -950,6 +950,56 @@ def _deploy_cordons_then_drains_and_always_uncordons():
         "cutover trap is set before the drain runs -- it would clobber the uncordon trap"
 
 
+def _deploy_log_is_durable_regardless_of_caller():
+    """deploy.sh's log() must survive the run whether or not auto_deploy.sh is the caller.
+
+    gh#196: auto_deploy.sh only captures deploy.sh's stdout into auto_deploy.log because IT
+    redirects the child process (`bash deploy.sh >> "$LOG" 2>&1`) -- a human running deploy.sh
+    directly, up.sh, or any future push-based trigger left zero durable record. log() must
+    append to its own file under FLEET_LOG_DIR, same convention auto_deploy.sh already uses.
+    """
+    import subprocess
+    src = (ROOT / "scripts" / "deploy.sh").read_text()
+    assert "DEPLOY_LOG" in src and ">> \"$DEPLOY_LOG\"" in src, \
+        "log() does not append to a durable file -- stdout only, same gap as gh#196"
+    i = src.find("LOG_DIR=")
+    j = src.find("\nlog() {")
+    assert i != -1 and j != -1 and i < j, "log destination must be set up before log() is defined"
+    setup = src[i:j]
+    assert '${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}' in setup, \
+        "deploy.sh does not reuse auto_deploy.sh's own FLEET_LOG_DIR convention"
+
+    # A failed deploy must be distinguishable from a success by grepping the log alone, not by
+    # a human parsing prose closely -- every failure/rollback log line must say FAILED or ERROR.
+    for marker in ("FAILED: green never answered", "FAILED mid-cutover", "FAILED after cutover",
+                   "FATAL ERROR: no live"):
+        assert marker in src, f"failure path no longer logs a distinguishable line: {marker!r}"
+
+    log_body = src[src.find("log() {"):src.find("\n}", src.find("log() {"))]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        script = (
+            "set -euo pipefail\n"
+            f'export FLEET_LOG_DIR="{tmp}"\n'
+            f"{setup}\n{log_body}\n}}\n"
+            'log "first run"\n'
+        )
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        deploy_log = Path(tmp) / "deploy.log"
+        assert deploy_log.exists(), "log() ran but produced no deploy.log at all"
+        assert "first run" in deploy_log.read_text()
+
+        # Second, separate invocation -- simulates a second deploy.sh run, not a second log()
+        # call in the same process -- must append, never truncate the first run's entry.
+        script2 = script.replace('log "first run"', 'log "second run FAILED"')
+        proc2 = subprocess.run(["bash", "-c", script2], capture_output=True, text=True, timeout=30)
+        assert proc2.returncode == 0, f"bash failed: {proc2.stderr.strip()[:300]}"
+        text = deploy_log.read_text()
+        assert "first run" in text and "second run FAILED" in text, \
+            "a second run clobbered the first instead of appending"
+
+
 def _marie_writes_a_prd_and_minion_reads_it():
     """marie is m-PM: she must make an item BUILDABLE, and minion must consume that.
 
@@ -1572,6 +1622,7 @@ if __name__ == "__main__":
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
     check("self_improve_score.sh is actually scheduled", _self_improve_score_is_actually_scheduled)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
+    check("deploy.sh's log is durable regardless of caller", _deploy_log_is_durable_regardless_of_caller)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("overrides store never resolves under $HOME/.claude", _overrides_store_is_not_under_home_dot_claude)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
