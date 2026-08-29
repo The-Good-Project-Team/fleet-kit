@@ -107,6 +107,15 @@ def _migrate_composite_pk(conn: sqlite3.Connection) -> None:
     )]
     if pk_cols != ["run_id"]:
         return  # already migrated (or a fresh db that never had the old schema)
+    # `ALTER TABLE ... RENAME TO` carries every index over onto the renamed table (SQLite
+    # keeps indexes attached by table, not by name), so idx_runs_member_time/_status/_item
+    # would still exist afterward -- just pointing at runs_legacy_pk. SCHEMA's `CREATE INDEX
+    # IF NOT EXISTS` then no-ops on those exact names (the check is name-only, not
+    # name+table), and DROP TABLE below cascades and deletes them for good. Drop them by name
+    # first so the names are free for SCHEMA to reattach to the new `runs` table.
+    conn.execute("DROP INDEX IF EXISTS idx_runs_member_time")
+    conn.execute("DROP INDEX IF EXISTS idx_runs_status")
+    conn.execute("DROP INDEX IF EXISTS idx_runs_item")
     conn.execute("ALTER TABLE runs RENAME TO runs_legacy_pk")
     conn.executescript(SCHEMA)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(runs_legacy_pk)")]

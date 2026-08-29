@@ -238,6 +238,16 @@ def _fleet_db_run_id_collisions_dont_lose_a_verdict():
         ).fetchone()[0]
         assert migrated_rows == 2, migrated_rows
 
+        # `ALTER TABLE RENAME` carries indexes over onto the renamed table by table, not by
+        # name, so `CREATE INDEX IF NOT EXISTS` in SCHEMA name-matches the ones still attached
+        # to the dropped runs_legacy_pk and no-ops -- the migration used to silently leave the
+        # rebuilt `runs` table with zero of its three indexes. member/time, status and item
+        # lookups this file exists to make fast (its own module docstring) would fall back to
+        # a full table scan with no error and no log line.
+        idx_names = {r[1] for r in conn2.execute("PRAGMA index_list(runs)")}
+        expected = {"idx_runs_member_time", "idx_runs_status", "idx_runs_item"}
+        assert expected <= idx_names, idx_names
+
 
 def _fanout_packs_the_hour_by_complexity():
     """gru fills an hour's allowance with WORK; N is an output of that, never an input.
