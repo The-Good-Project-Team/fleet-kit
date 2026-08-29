@@ -429,7 +429,7 @@ document.querySelectorAll('.side-nav-item').forEach(el => {
 const DIAL_KEYS = ['max_turns', 'model', 'enabled', 'schedule'];
 function dialValue(eff, key) {
   if (key === 'enabled') return eff.enabled;
-  if (key === 'schedule') return JSON.stringify(eff.schedule);
+  if (key === 'schedule') return eff.schedule;
   return (eff.llm || {})[key];
 }
 
