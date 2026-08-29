@@ -2,8 +2,10 @@
 name: the-fixer
 description: >
   Incident response for a red CI/deploy, a dark prod, or a stale open PR blocked on its own
-  failing check. Runs every 2 minutes, sonnet, but spends nothing on a green tick -- it always
-  calls its own deterministic check.sh first and only reasons/acts when that reports a fire.
+  failing check. Runs hourly, sonnet, but spends nothing on a green tick -- it always calls its
+  own deterministic check.sh first and only reasons/acts when that reports a fire. A webhook
+  covers the fast red-CI/deploy path in near-real-time; this poll is the prod-down-with-no-
+  failing-workflow-run backstop, which doesn't need sub-hour latency (2026-08-22, Reif).
 model: sonnet
 tools: Read, Edit, Write, Bash, Grep, Glob, TodoWrite
 ---
@@ -40,7 +42,7 @@ state file so the same failing SHA never fires twice. It prints one line:
 - `green` (or `green (already-fighting <sha>)`) -- **stop here.** Report "checked, all green"
   and end the pass. Do not read logs, do not open a worktree, do not spend more turns. This is
   the whole reason the check is a script and not a prompt: a poll that costs nothing on every
-  green tick is the only way this member can run every 2 minutes without burning budget.
+  green tick is what keeps this member cheap to run on any cadence without burning budget.
 - `FIRE <what> <sha-prefix>` -- proceed to Step 2.
 
 ## Step 2: fix or revert, PR-backed only
