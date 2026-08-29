@@ -94,7 +94,16 @@ _repo_slug() {
   printf '%s' "$url" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##'
 }
 FLEET_REPO_SLUG="$(_repo_slug "$FLEET_REPO")"
-KIT_REPO_SLUG="$(_repo_slug "$KIT_DIR")"
+# #178: in production KIT_DIR is /fleet-kit, a vendored snapshot with no .git at all (confirmed
+# live -- see docs/ops notes on the frozen vendored copy), so git-remote derivation always
+# fails there and this always fell back to the pre-#176 single-repo behavior on every real
+# cron run. KIT_REPO_SLUG in fleet.env lets an operator state it explicitly for exactly that
+# deployment shape; a live git checkout (e.g. a dev worktree of fleet-kit itself) still derives
+# it automatically and doesn't need the override.
+KIT_REPO_SLUG="${KIT_REPO_SLUG:-$(_repo_slug "$KIT_DIR")}"
+if [ -z "$KIT_REPO_SLUG" ]; then
+  echo "self_improve_score.sh: could not determine fleet-kit's own repo slug (no .git at $KIT_DIR and KIT_REPO_SLUG not set in fleet.env) -- self-evolution evidence from fleet-kit's own repo will be MISSING this run, not merely deduped against FLEET_REPO" >&2
+fi
 
 _repo_arg=()
 [ -n "$FLEET_REPO_SLUG" ] && _repo_arg=(--repo "$FLEET_REPO_SLUG")
