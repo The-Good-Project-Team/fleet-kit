@@ -24,7 +24,10 @@
 #     approve -> commit status success.
 #     unparseable output -> NO status this tick; after MAX_PARSE_STRIKES consecutive
 #     unparseable runs at the same head, posts state=error so the failure is visible on the PR
-#     instead of an invisible retry loop.
+#     instead of an invisible retry loop. Every strike (unparseable OR empty-findings) copies
+#     the raw model output to $STRIKE_DIR (durable, non-tmp) before cleanup, and the
+#     state=error PR comment points at it -- gh#221, so a live-blocked PR leaves evidence
+#     instead of forcing a guess from judge-judy.log alone.
 #   - The PR's code is NEVER executed here: the model sees the diff + PR body as TEXT with no
 #     tools — a malicious diff can lie to the reviewer, but it cannot reach this box.
 #
@@ -294,17 +297,36 @@ VERDICT: block"
   if [ -z "$VERDICT" ]; then
     N=$(( $(cat "$STRIKE_FILE" 2>/dev/null || echo 0) + 1 ))
     echo "$N" > "$STRIKE_FILE"
-    log "PR #$PR: unparseable or empty-findings review output (strike $N/$MAX_PARSE_STRIKES)"
+    # gh#221: a strike used to leave no artifact -- $OUT_FILE is a mktemp'd file cleaned up by
+    # cleanup_pass below, so by the time a human noticed the resulting state=error, the raw
+    # model output that caused it was already gone. Copy it to a durable, non-tmp location
+    # BEFORE cleanup_pass runs, on every strike (not just the one that trips state=error), so
+    # root-causing "did the model drift format, or genuinely emit an empty block" is possible
+    # after the fact instead of guesswork from judge-judy.log alone.
+    RAW_CAPTURE="$STRIKE_DIR/pr-${PR}-${HEAD_SHA}.strike${N}.raw"
+    cp "$OUT_FILE" "$RAW_CAPTURE" 2>/dev/null \
+      && log "PR #$PR: unparseable or empty-findings review output (strike $N/$MAX_PARSE_STRIKES) -- raw output saved to $RAW_CAPTURE" \
+      || log "PR #$PR: unparseable or empty-findings review output (strike $N/$MAX_PARSE_STRIKES) -- WARN raw output capture to $RAW_CAPTURE failed"
     if [ "$N" -ge "$MAX_PARSE_STRIKES" ]; then
-      post_status "$HEAD_SHA" "error" "Code review: reviewer output unparseable/empty ${N}x at this head -- needs a look"
-      log "PR #$PR: posted state=error after $N unparseable/empty runs"
+      post_status "$HEAD_SHA" "error" "Code review: reviewer output unparseable/empty ${N}x at this head -- raw output: $RAW_CAPTURE"
+      # The description above is truncated to 139 chars (post_status), which a full path keyed
+      # by PR + a 40-char sha can easily blow through -- a PR comment has no such limit and is
+      # what a human (or jefe, diagnosing a live-blocked PR) actually reads.
+      gh pr comment "$PR" --body "**fleet-code-review: error** -- reviewer output was unparseable or empty ${N}x in a row at head ${HEAD_SHA:0:12}, so no verdict could be posted.
+
+Raw model output from the last attempt is saved on the review box at:
+\`$RAW_CAPTURE\`
+
+This reflects a parse/format issue in the reviewer's own output, not a finding about this diff -- see gh#221." >/dev/null 2>&1 \
+        || log "PR #$PR: WARN state=error PR comment failed"
+      log "PR #$PR: posted state=error after $N unparseable/empty runs, raw output at $RAW_CAPTURE"
     fi
     SKIPPED_THIS_TICK="$SKIPPED_THIS_TICK $PR"
     cleanup_pass
     [ -n "$EXPLICIT_PR" ] && break
     continue
   fi
-  rm -f "$STRIKE_FILE"
+  rm -f "$STRIKE_FILE" "$STRIKE_DIR/pr-${PR}-${HEAD_SHA}".strike*.raw
 
   if [ "$VERDICT" = "VERDICT: approve" ]; then
     post_status "$HEAD_SHA" "success" "Code review passed (local claude, model=$MODEL)" \
