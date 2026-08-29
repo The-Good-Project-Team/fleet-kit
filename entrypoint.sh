@@ -171,6 +171,24 @@ case "${1:-cron-foreground}" in
       # nerd pass stumbled onto it. Hourly at :57 is unclaimed on the minute map above and
       # comfortably inside the default 4h staleness budget (FLEET_DEPLOY_STALENESS_BUDGET_S).
       echo "57 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/deploy_staleness_check.sh >> $LOG_DIR/deploy_staleness_check.log 2>&1"
+      # account_health_check.sh + tunnel_health_check.sh (gh#171): the fleet's only outage
+      # pagers per README step 6. PR#169 wired both into schedulers/systemd + schedulers/launchd
+      # -- the bare-host path -- but never into THIS heredoc, the container-native path, so
+      # every container deployment has run with zero outage paging since #154 was closed. Same
+      # failure class as self_improve_score.sh above: a script existing and being documented as
+      # required does not mean anything schedules it here.
+      #
+      # Neither script sources fleet.env (see each script's own header -- both must stay plain
+      # bash, zero Claude Code dependency, so the watcher never depends on the thing it's
+      # watching), so their env vars are exported explicitly on the cron line itself, same shape
+      # as GH_TOKEN above. NTFY_TOPIC/PUBLIC_URL are read from fleet.env here (already sourced
+      # into entrypoint's own shell above) and baked into the generated crontab text at boot --
+      # neither is currently set (confirmed: grep -c NTFY_TOPIC fleet.env = 0 on the box this
+      # issue was filed from), which per gh#171's PRD is a deliberate operator/credential
+      # decision left open, not a bug this pass fixes: each script's own `:?` guard fails loudly
+      # and logs why until an operator sets one, rather than silently doing nothing.
+      echo "27 * * * * root export FLEET_LOG_DIR=$LOG_DIR NTFY_TOPIC=${NTFY_TOPIC:-} && bash /fleet-kit/scripts/account_health_check.sh >> $LOG_DIR/account_health_check.log 2>&1"
+      echo "37 * * * * root export PUBLIC_URL=${PUBLIC_URL:-} FLEET_VIEW_PORT=${FLEET_VIEW_PORT:-8420} NTFY_TOPIC=${NTFY_TOPIC:-} && bash /fleet-kit/scripts/tunnel_health_check.sh >> $LOG_DIR/tunnel_health_check.log 2>&1"
     } > "$CRONTAB"
     chmod 0644 "$CRONTAB"
     echo "[entrypoint] installed crontab (token redacted, stored separately at $TOKEN_FILE, mode 600):"
