@@ -759,24 +759,30 @@ def _run_member_logs_critical_when_postflight_dirty_check_fails_to_source():
     scheduler entry). A merged fix to postflight_dirty_check.sh can be absent there even though
     `main` already has it -- and under `set -uo pipefail` (no -e), a plain `.` on a missing file
     used to no-op silently: check_repo_clean_postflight was simply never defined, and the
-    worktree-leak safety net (#78) vanished with no trace. Extracts the REAL guard block out of
-    run_member.sh (not a reimplementation) and proves both failure shapes -- the source itself
-    failing, and it "succeeding" while the function still ends up undefined -- log a line
-    containing CRITICAL, and that a healthy source stays silent.
+    worktree-leak safety net (#78) vanished with no trace. Checked at BOTH isolated-worktree
+    call sites (run_member.sh's generic member path, worktree_builder.sh's dedicated builder
+    path -- same pairing _run_member_and_builder_check_repo_before_removing_the_worktree already
+    checks for the postflight CALL, this checks the postflight SOURCE). Extracts the REAL guard
+    block out of each script (not a reimplementation) and proves both failure shapes -- the
+    source itself failing, and it "succeeding" while the function still ends up undefined --
+    log a line containing CRITICAL, and that a healthy source stays silent.
     """
     import subprocess
 
-    run_member_src = (ROOT / "scripts" / "run_member.sh").read_text()
     start_marker = 'if ! { . "$KIT_DIR/scripts/postflight_dirty_check.sh"; }'
-    assert start_marker in run_member_src, \
-        "run_member.sh no longer guards its postflight_dirty_check.sh source -- did the gh#183 fix regress?"
-    i = run_member_src.index(start_marker)
-    j = run_member_src.index("\nfi\n", i) + len("\nfi")
-    guard_snippet = run_member_src[i:j]
-    assert "CRITICAL" in guard_snippet, \
-        "the postflight-source guard no longer logs CRITICAL on failure"
 
-    def run_guard(kit_dir, tmp):
+    def extract_guard(script_name):
+        src = (ROOT / "scripts" / script_name).read_text()
+        assert start_marker in src, \
+            f"{script_name} no longer guards its postflight_dirty_check.sh source -- did the gh#183 fix regress?"
+        i = src.index(start_marker)
+        j = src.index("\nfi\n", i) + len("\nfi")
+        snippet = src[i:j]
+        assert "CRITICAL" in snippet, \
+            f"{script_name}'s postflight-source guard no longer logs CRITICAL on failure"
+        return snippet
+
+    def run_guard(guard_snippet, kit_dir, tmp):
         log_file = Path(tmp) / "member.log"
         repo_dir = Path(tmp) / "repo"
         repo_dir.mkdir(exist_ok=True)
@@ -793,26 +799,29 @@ def _run_member_logs_critical_when_postflight_dirty_check_fails_to_source():
         assert proc.returncode == 0, f"guard snippet itself failed: {proc.stderr.strip()[:300]}"
         return log_file.read_text() if log_file.exists() else ""
 
-    with tempfile.TemporaryDirectory() as tmp:
-        # Stale vendored copy: the file plain doesn't exist at $KIT_DIR/scripts/.
-        missing_dir = Path(tmp) / "missing"
-        (missing_dir / "scripts").mkdir(parents=True)
-        text = run_guard(missing_dir, tmp)
-        assert "CRITICAL" in text, \
-            "a missing postflight_dirty_check.sh produced no CRITICAL log line"
-        assert "DISABLED" in text or "SKIPPED" in text, \
-            "a missing postflight_dirty_check.sh's CRITICAL line doesn't say what it costs"
+    for script_name in ("run_member.sh", "worktree_builder.sh"):
+        guard_snippet = extract_guard(script_name)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        # Healthy vendored copy: the real file is present and defines the function -- must stay
-        # quiet, this guard exists for the ABSENCE case only (fleet-kit#183's own non-goal).
-        healthy_dir = Path(tmp) / "healthy"
-        (healthy_dir / "scripts").mkdir(parents=True)
-        real = (ROOT / "scripts" / "postflight_dirty_check.sh").read_text()
-        (healthy_dir / "scripts" / "postflight_dirty_check.sh").write_text(real)
-        text = run_guard(healthy_dir, tmp)
-        assert "CRITICAL" not in text, \
-            "a present, working postflight_dirty_check.sh still logged CRITICAL -- false alarm"
+        with tempfile.TemporaryDirectory() as tmp:
+            # Stale vendored copy: the file plain doesn't exist at $KIT_DIR/scripts/.
+            missing_dir = Path(tmp) / "missing"
+            (missing_dir / "scripts").mkdir(parents=True)
+            text = run_guard(guard_snippet, missing_dir, tmp)
+            assert "CRITICAL" in text, \
+                f"{script_name}: a missing postflight_dirty_check.sh produced no CRITICAL log line"
+            assert "DISABLED" in text or "SKIPPED" in text, \
+                f"{script_name}: the CRITICAL line doesn't say what it costs"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Healthy vendored copy: the real file is present and defines the function -- must
+            # stay quiet, this guard exists for the ABSENCE case only (gh#183's own non-goal).
+            healthy_dir = Path(tmp) / "healthy"
+            (healthy_dir / "scripts").mkdir(parents=True)
+            real = (ROOT / "scripts" / "postflight_dirty_check.sh").read_text()
+            (healthy_dir / "scripts" / "postflight_dirty_check.sh").write_text(real)
+            text = run_guard(guard_snippet, healthy_dir, tmp)
+            assert "CRITICAL" not in text, \
+                f"{script_name}: a present, working postflight_dirty_check.sh still logged CRITICAL -- false alarm"
 
 
 def _run_member_rejects_a_non_numeric_item():
