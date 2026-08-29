@@ -198,7 +198,23 @@ print(member_spec.behavior_path(spec))
 cd "$REPO" 2>/dev/null || { log "FATAL: repo missing at $REPO"; exit 1; }
 [ -f "$KIT_DIR/scripts/account_pool.sh" ] && . "$KIT_DIR/scripts/account_pool.sh"
 command -v account_pool_run >/dev/null 2>&1 || account_pool_run() { "$@"; }
-. "$KIT_DIR/scripts/postflight_dirty_check.sh"
+
+# gh#183: /fleet-kit is a vendored copy baked into the container image, refreshed only by
+# auto_deploy.sh (#140, no scheduler entry -- separate issue). A merged fix to THIS file
+# (postflight_dirty_check.sh) can be absent here even though `main` already has it. Under
+# `set -uo pipefail` (no -e) a plain `.` on a missing file just no-ops: check_repo_clean_postflight
+# is never defined, and every later call to it fails "command not found" -- silently, since -e
+# is off -- so the worktree-leak safety net (#78/nonprofit-atlas#3113) vanishes with zero trace
+# (confirmed live: 21 occurrences fleet-wide since 2026-08-28). Check BOTH failure shapes -- the
+# source itself failing, and it "succeeding" while still leaving the function undefined -- and
+# make the guard's absence loud. Non-fatal by design (see gh#183's own UNKNOWN): hard-failing
+# every pass fleet-wide the next time this drifts risks being worse than the guard it protects.
+if ! { . "$KIT_DIR/scripts/postflight_dirty_check.sh"; } 2>>"$LOG" || ! command -v check_repo_clean_postflight >/dev/null 2>&1; then
+  log "CRITICAL: postflight_dirty_check.sh failed to source from $KIT_DIR/scripts/postflight_dirty_check.sh -- worktree-leak safety net is DISABLED for this pass (stale vendored /fleet-kit copy? see gh#183/#140)"
+  check_repo_clean_postflight() {
+    log "CRITICAL: check_repo_clean_postflight called but the real guard never loaded -- worktree-leak check SKIPPED (run ${1:-unknown})"
+  }
+fi
 
 # --- isolate this pass in its own worktree (#3092) -------------------------------------------
 # Every prior run of this script just `cd`ed into the ONE shared $REPO checkout with no

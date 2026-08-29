@@ -927,6 +927,76 @@ def _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure():
             "a git-status failure did not reach the shared alerts file"
 
 
+def _run_member_logs_critical_when_postflight_dirty_check_fails_to_source():
+    """gh#183: /fleet-kit is a vendored copy that only refreshes via auto_deploy.sh (#140, no
+    scheduler entry). A merged fix to postflight_dirty_check.sh can be absent there even though
+    `main` already has it -- and under `set -uo pipefail` (no -e), a plain `.` on a missing file
+    used to no-op silently: check_repo_clean_postflight was simply never defined, and the
+    worktree-leak safety net (#78) vanished with no trace. Checked at BOTH isolated-worktree
+    call sites (run_member.sh's generic member path, worktree_builder.sh's dedicated builder
+    path -- same pairing _run_member_and_builder_check_repo_before_removing_the_worktree already
+    checks for the postflight CALL, this checks the postflight SOURCE). Extracts the REAL guard
+    block out of each script (not a reimplementation) and proves both failure shapes -- the
+    source itself failing, and it "succeeding" while the function still ends up undefined --
+    log a line containing CRITICAL, and that a healthy source stays silent.
+    """
+    import subprocess
+
+    start_marker = 'if ! { . "$KIT_DIR/scripts/postflight_dirty_check.sh"; }'
+
+    def extract_guard(script_name):
+        src = (ROOT / "scripts" / script_name).read_text()
+        assert start_marker in src, \
+            f"{script_name} no longer guards its postflight_dirty_check.sh source -- did the gh#183 fix regress?"
+        i = src.index(start_marker)
+        j = src.index("\nfi\n", i) + len("\nfi")
+        snippet = src[i:j]
+        assert "CRITICAL" in snippet, \
+            f"{script_name}'s postflight-source guard no longer logs CRITICAL on failure"
+        return snippet
+
+    def run_guard(guard_snippet, kit_dir, tmp):
+        log_file = Path(tmp) / "member.log"
+        repo_dir = Path(tmp) / "repo"
+        repo_dir.mkdir(exist_ok=True)
+        script = (
+            f'KIT_DIR="{kit_dir}"\n'
+            f'LOG="{log_file}"\n'
+            f'LOG_DIR="{tmp}"\n'
+            f'REPO="{repo_dir}"\n'
+            f'log() {{ echo "$*" >> "{log_file}"; }}\n'
+            f"{guard_snippet}\n"
+            'check_repo_clean_postflight "test-run"\n'
+        )
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, f"guard snippet itself failed: {proc.stderr.strip()[:300]}"
+        return log_file.read_text() if log_file.exists() else ""
+
+    for script_name in ("run_member.sh", "worktree_builder.sh"):
+        guard_snippet = extract_guard(script_name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Stale vendored copy: the file plain doesn't exist at $KIT_DIR/scripts/.
+            missing_dir = Path(tmp) / "missing"
+            (missing_dir / "scripts").mkdir(parents=True)
+            text = run_guard(guard_snippet, missing_dir, tmp)
+            assert "CRITICAL" in text, \
+                f"{script_name}: a missing postflight_dirty_check.sh produced no CRITICAL log line"
+            assert "DISABLED" in text or "SKIPPED" in text, \
+                f"{script_name}: the CRITICAL line doesn't say what it costs"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Healthy vendored copy: the real file is present and defines the function -- must
+            # stay quiet, this guard exists for the ABSENCE case only (gh#183's own non-goal).
+            healthy_dir = Path(tmp) / "healthy"
+            (healthy_dir / "scripts").mkdir(parents=True)
+            real = (ROOT / "scripts" / "postflight_dirty_check.sh").read_text()
+            (healthy_dir / "scripts" / "postflight_dirty_check.sh").write_text(real)
+            text = run_guard(guard_snippet, healthy_dir, tmp)
+            assert "CRITICAL" not in text, \
+                f"{script_name}: a present, working postflight_dirty_check.sh still logged CRITICAL -- false alarm"
+
+
 def _run_member_rejects_a_non_numeric_item():
     """--item flows unsanitized into RUN_ID, the worktree branch name, and (fleet-kit#78) the
     postflight dirty-check's alert log -- validated as a plain issue number so a stray
@@ -1970,6 +2040,7 @@ if __name__ == "__main__":
     check("signal_rate/dormant exclude killed+timed_out, not just budget_declined", _signal_rate_excludes_all_never_executed_statuses)
     check("a leaked absolute-path write into $REPO is caught and alerted", _postflight_dirty_check_catches_a_leaked_absolute_path_write)
     check("a git-status failure alerts rather than reading as clean", _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure)
+    check("run_member.sh logs CRITICAL when postflight_dirty_check.sh fails to source", _run_member_logs_critical_when_postflight_dirty_check_fails_to_source)
     check("run_member.sh rejects a non-numeric --item", _run_member_rejects_a_non_numeric_item)
     check("both worktree callers check $REPO before tearing the worktree down", _run_member_and_builder_check_repo_before_removing_the_worktree)
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)

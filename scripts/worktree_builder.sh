@@ -50,7 +50,17 @@ fi
 cd "$REPO" 2>/dev/null || { log "FATAL: repo missing at $REPO"; exit 1; }
 [ -f "$KIT_DIR/scripts/account_pool.sh" ] && . "$KIT_DIR/scripts/account_pool.sh"
 command -v account_pool_run >/dev/null 2>&1 || account_pool_run() { "$@"; }
-. "$KIT_DIR/scripts/postflight_dirty_check.sh"
+
+# gh#183: same guard as run_member.sh -- see its own comment for the full incident writeup.
+# A stale vendored /fleet-kit copy can be missing this file even though `main` already has it;
+# under `set -uo pipefail` (no -e) a plain `.` on a missing file used to no-op silently, leaving
+# check_repo_clean_postflight undefined and the worktree-leak safety net (#78) silently off.
+if ! { . "$KIT_DIR/scripts/postflight_dirty_check.sh"; } 2>>"$LOG" || ! command -v check_repo_clean_postflight >/dev/null 2>&1; then
+  log "CRITICAL: postflight_dirty_check.sh failed to source from $KIT_DIR/scripts/postflight_dirty_check.sh -- worktree-leak safety net is DISABLED for this pass (stale vendored /fleet-kit copy? see gh#183/#140)"
+  check_repo_clean_postflight() {
+    log "CRITICAL: check_repo_clean_postflight called but the real guard never loaded -- worktree-leak check SKIPPED (run ${1:-unknown})"
+  }
+fi
 
 # --- STEP 1: claim one item -------------------------------------------------------------------
 CLAIM_JSON=$(python3 "$KIT_DIR/scripts/board_github.py" claim "$WORKER_NAME" 1 2>>"$LOG")
