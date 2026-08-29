@@ -1266,9 +1266,11 @@ document.body.addEventListener('click', async (e) => {
   }
   if (act === 'edit-dial') {
     const key = b.dataset.key;
-    const value = prompt(`new value for ${b.dataset.member}.${key} (JSON):`);
+    const m = SPECS.find(s => s.spec.name === b.dataset.member);
+    const current = m ? JSON.stringify(dialValue(m.effective, key)) : undefined;
+    const value = prompt(`new value for ${b.dataset.member}.${key} (JSON):`, current);
     if (value === null) return;
-    const why = prompt('why? (required)', 'tuned from console');
+    const why = prompt('why? (required)');
     if (!why) return;
     let parsed; try { parsed = JSON.parse(value); } catch { parsed = value; }
     const r = await fetch('/api/steer', { method: 'POST', body: JSON.stringify({ member: b.dataset.member, key, value: parsed, why }) });
