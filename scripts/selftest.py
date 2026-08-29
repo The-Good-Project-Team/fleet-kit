@@ -1407,6 +1407,36 @@ def _pool_logs_successes_so_downtime_is_measurable():
     assert 'last_line=$(tail -1 "$POOL_LOG")\nage' not in check_src
 
 
+def _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror():
+    """No script or charter may read instances/<name>/logs/*.jsonl as a live data source.
+
+    #132: `/fleet-kit/instances/nonprofit-atlas/logs/runs.jsonl` froze at 1798 lines while the
+    canonical `$FLEET_LOG_DIR/runs.jsonl` (bind-mounted from a host instances/<name>/logs/ dir
+    by deploy.sh, see up.sh:13) kept growing -- reading the frozen copy made all 12 roster
+    members look stale-by-hours simultaneously, indistinguishable from a fleet-wide scheduler
+    outage that per-member raw logs proved was not happening. `instances/` is gitignored and
+    dockerignored on purpose (host/deployment state, never baked into the image or the repo),
+    so the only fix this repo can own is refusing to let any script grow a habit of reading
+    that path directly -- everything must go through $FLEET_LOG_DIR instead.
+
+    This mirrors the fix already applied for the sibling drift on `roomba_ghosts_state.json`,
+    generalized to catch the whole instances/*/logs/*.jsonl file class rather than one name.
+    """
+    pattern = re.compile(r"""instances/[^/\s"'{}]+/logs/\S*\.jsonl""")
+    hits = []
+    for path in ROOT.rglob("*"):
+        if path.is_dir() or path == Path(__file__).resolve():
+            continue
+        if ".git" in path.parts or path.suffix not in {".py", ".sh", ".md"}:
+            continue
+        try:
+            text = path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        hits.extend(f"{path.relative_to(ROOT)}: {m.group(0)}" for m in pattern.finditer(text))
+    assert not hits, f"hardcoded read of the frozen instances/*/logs mirror: {hits}"
+
+
 if __name__ == "__main__":
     check("member specs load and validate", _member_specs_validate)
     check("member_spec's OWN default MEMBERS_DIR resolves (not just an explicit path)", _members_dir_default_is_right)
@@ -1447,6 +1477,7 @@ if __name__ == "__main__":
     check("exhaustion with no stated reset backs off minutes, not an hour", _unparseable_exhaustion_gates_briefly_not_for_an_hour)
     check("a stated reset time is honored over the fallback", _a_real_reset_time_is_still_honored)
     check("pool logs successes so outage length is measurable", _pool_logs_successes_so_downtime_is_measurable)
+    check("nothing hardcodes a read of the frozen instances/*/logs mirror", _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror)
 
     for n in ok:
         print(f"  ok    {n}")
