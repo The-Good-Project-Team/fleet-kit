@@ -214,25 +214,31 @@ while :; do
   fi
   gh pr view "$PR" --json title,body -q '"TITLE: \(.title)\n\n\(.body)"' > "$BODY_FILE" 2>/dev/null || true
 
-  # Self-reserve against FLEET_SHARE_CEILING_PCT (run_member.sh, if FLEET_SHARE_FRACTION is
-  # active on this instance) right before spending, not once for the whole tick: the ceiling
-  # is a snapshot of what's available RIGHT NOW, and other leases (this instance's own
-  # earlier PRs, or the other instance's members) can expire and free up real headroom
-  # mid-tick -- reserving the whole ceiling up front would hold headroom idle that a
-  # concurrent pass elsewhere could have used. Sized as a fixed slice of the current ceiling
-  # (not the full thing) since one PR review is a small fraction of an hour's work; released
-  # immediately after this call returns (cleanup_pass, below) so the hold is only as long as
-  # the actual spend, never the whole tick. Best-effort: an unset ceiling (FLEET_SHARE_
-  # FRACTION inactive, or the meter was unreadable) means no reservation is made or needed --
-  # LEASE_ID stays empty, and release is a no-op on an empty id (maxx_lease.py's own
-  # contract).
+  # Self-reserve against a FRESH ceiling reading right before spending, not the one
+  # run_member.sh computed once at tick-start: this tick's loop can review the whole
+  # backlog (up to TICK_BUDGET_USD, many minutes), and FLEET_SHARE_CEILING_PCT (the env var
+  # run_member.sh exported) is a snapshot from before this loop even began -- fleet-code-
+  # review BLOCK on this PR: holding that stale number for the whole tick means a ceiling
+  # that was generous at tick-start stays generous even after other concurrent
+  # instances/members have since consumed real headroom, and mid-tick lease expiries
+  # elsewhere never get picked up. Re-running maxx_share_ceiling.py here (same script
+  # run_member.sh calls, same FLEET_SHARE_FRACTION) gets the real-time number every PR
+  # instead. Sized as a fixed slice of the current ceiling (not the full thing) since one PR
+  # review is a small fraction of an hour's work; released immediately after this call
+  # returns (cleanup_pass, below) so the hold is only as long as the actual spend, never the
+  # whole tick. Best-effort: FLEET_SHARE_FRACTION unset/1.0 (inactive on this instance) or an
+  # unreadable meter means no reservation is made or needed -- LEASE_ID stays empty, and
+  # release is a no-op on an empty id (maxx_lease.py's own contract).
   LEASE_ID=""
-  if [ -n "${FLEET_SHARE_CEILING_PCT:-}" ]; then
-    RESERVE_PCT=$(awk -v c="$FLEET_SHARE_CEILING_PCT" 'BEGIN { printf "%.6f", c * 0.1 }')
-    if awk -v r="$RESERVE_PCT" 'BEGIN { exit !(r > 0) }'; then
-      LEASE_ID=$(python3 "$KIT_DIR/scripts/maxx_lease.py" reserve --pct "$RESERVE_PCT" \
-        --label "judge-judy-pr${PR}" --ttl-sec 900 2>>"$LOG" \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id",""))' 2>/dev/null)
+  if [ "${FLEET_SHARE_FRACTION:-1.0}" != "1.0" ]; then
+    CEILING_PCT=$(python3 "$KIT_DIR/scripts/maxx_share_ceiling.py" "${FLEET_SHARE_FRACTION:-1.0}" 2>>"$LOG")
+    if [ -n "$CEILING_PCT" ]; then
+      RESERVE_PCT=$(awk -v c="$CEILING_PCT" 'BEGIN { printf "%.6f", c * 0.1 }')
+      if awk -v r="$RESERVE_PCT" 'BEGIN { exit !(r > 0) }'; then
+        LEASE_ID=$(python3 "$KIT_DIR/scripts/maxx_lease.py" reserve --pct "$RESERVE_PCT" \
+          --label "judge-judy-pr${PR}" --ttl-sec 900 2>>"$LOG" \
+          | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id",""))' 2>/dev/null)
+      fi
     fi
   fi
 

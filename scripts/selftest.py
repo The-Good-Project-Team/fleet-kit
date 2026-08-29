@@ -1632,6 +1632,100 @@ def _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget():
         "Dockerfile does not accept/write DEPLOY_SHA -- deploy.sh's build-arg has nowhere to land"
 
 
+def _run_member_generic_path_self_reserves_against_the_ceiling():
+    """fleet-code-review BLOCK on PR #184: FLEET_SHARE_CEILING_PCT was exported for every
+    member but only ever CONSUMED by judge-judy (a custom-runner member that exits before the
+    generic path). Every generic-path member (marie, minion, roomba, the-fixer, dumbledore,
+    messenger, jefe) exported the ceiling into their env and never read it -- an instance
+    running FLEET_SHARE_FRACTION=0.25 could still spend up to 100% of the account through any
+    of them, with zero warning. This test exercises the ACTUAL reserve/release lines from
+    run_member.sh (extracted by anchor comment, not hand-copied -- so it breaks loudly if
+    someone renames/moves the block instead of silently testing a stale duplicate) against a
+    real maxx_lease.py ledger.
+    """
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    src = (HERE / "run_member.sh").read_text()
+    start_marker = "# fleet-code-review BLOCK: the FLEET_SHARE_CEILING_PCT block above only ever got consumed by"
+    reserve_end_marker = "\n\n# Backgrounded + `wait`, NOT run in the foreground"
+    release_marker = 'if [ -n "$GENERIC_LEASE_ID" ]; then\n  python3 "$KIT_DIR/scripts/maxx_lease.py" release --lease-id "$GENERIC_LEASE_ID"'
+    assert start_marker in src, "reserve block anchor comment not found -- did run_member.sh change?"
+    reserve_start = src.index(start_marker)
+    reserve_end = src.index(reserve_end_marker, reserve_start)
+    reserve_block = src[reserve_start:reserve_end]
+
+    assert release_marker in src, "release block anchor not found -- did run_member.sh change?"
+    release_start = src.index(release_marker)
+    release_end = src.index("\nfi\n", release_start) + len("\nfi")
+    release_block = src[release_start:release_end]
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "scripts").mkdir()
+        import shutil
+        shutil.copy(HERE / "maxx_lease.py", d / "scripts" / "maxx_lease.py")
+        log_file = d / "test.log"
+
+        harness = f"""#!/bin/bash
+set -uo pipefail
+KIT_DIR="{d}"
+LOG="{log_file}"
+MEMBER="roomba"
+RUN_ID="roomba-test-123"
+MAX_BUDGET="${{TEST_MAX_BUDGET:-}}"
+CAP_ARGS=()
+log() {{ echo "[log] $*" >> "$LOG"; }}
+
+{reserve_block}
+
+echo "LEASE_ID=$GENERIC_LEASE_ID"
+echo "CAP_ARGS=${{CAP_ARGS[*]:-}}"
+
+{release_block}
+"""
+        harness_path = d / "harness.sh"
+        harness_path.write_text(harness)
+
+        def run(ceiling, max_budget=""):
+            env = {"HOME": str(d), "FLEET_LOG_DIR": str(d), "PATH": "/usr/bin:/bin:/usr/local/bin"}
+            if ceiling is not None:
+                env["FLEET_SHARE_CEILING_PCT"] = str(ceiling)
+            env["TEST_MAX_BUDGET"] = max_budget
+            out = subprocess.run(["bash", str(harness_path)], capture_output=True, text=True, env=env)
+            assert out.returncode == 0, out.stderr
+            return out.stdout
+
+        # A positive ceiling -> reserves, and the reservation is visible in the ledger while
+        # the (simulated) pass would be running -- the real fix for the BLOCK's failing
+        # scenario (two members/instances each reserving against a REAL, shared number).
+        out = run(ceiling="0.30")
+        assert "LEASE_ID=roomba-roomba-test-123-" in out, out
+        # released immediately after -- same run's release line already executed by the time
+        # we check, so total is back to 0.
+        total = json.loads(subprocess.run(
+            ["python3", str(d / "scripts" / "maxx_lease.py"), "total"],
+            capture_output=True, text=True, env={"HOME": str(d), "FLEET_LOG_DIR": str(d)},
+        ).stdout)
+        assert total["reserved_pct"] == 0, f"lease leaked: {total}"
+
+        # A ceiling of exactly 0 (real maxx verdict=='over', or this hour already at pace) --
+        # THE actual failing scenario from the BLOCK: a member with no cap of its own
+        # (MAX_BUDGET empty) must get a hard $0 for this pass, not run uncapped.
+        out = run(ceiling="0", max_budget="")
+        assert "LEASE_ID=\n" in out or out.strip().endswith("LEASE_ID="), out
+        assert "CAP_ARGS=--max-budget-usd 0" in out, (
+            f"ceiling=0 must hard-cap an otherwise-uncapped member at $0, got: {out!r}"
+        )
+
+        # FLEET_SHARE_FRACTION inactive on this instance (ceiling never set) -> no-op, member
+        # runs exactly as before this whole mechanism existed.
+        out = run(ceiling=None)
+        assert "LEASE_ID=\n" in out or out.strip().endswith("LEASE_ID=")
+        assert "CAP_ARGS=\n" in out or out.strip().endswith("CAP_ARGS="), out
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -1877,6 +1971,7 @@ if __name__ == "__main__":
     check("maxx share ceiling uses hourly headroom, not the week bank", _maxx_share_ceiling_uses_hourly_headroom_not_the_week_bank)
     check("maxx share ceiling subtracts local leases, not just the remote's reserved_pct", _maxx_share_ceiling_subtracts_local_leases_not_just_the_remotes_reserved_pct)
     check("maxx share ceiling respects a real over verdict, not just unreadable meters", _maxx_share_ceiling_respects_a_real_over_verdict_not_just_unreadable_meters)
+    check("run_member.sh generic path self-reserves against the ceiling", _run_member_generic_path_self_reserves_against_the_ceiling)
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
     check("minion knows the browser in its own image exists", _minion_knows_the_browser_exists)
     check("score reasoning is not guillotined mid-word", _score_reasoning_is_not_guillotined_mid_word)

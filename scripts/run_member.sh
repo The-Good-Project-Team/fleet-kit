@@ -395,6 +395,14 @@ record_killed_pass() {
   # A kill signal bypasses cleanup_run_worktree's own EXIT trap (cleared below) -- check here
   # too, since a leak can land in $REPO before the kill just as easily as before a clean exit.
   [ "$WORKTREE_ENABLED" = "True" ] && check_repo_clean_postflight "$RUN_ID"
+  # Same reasoning: a kill signal bypasses the normal release-after-RC=$? path further down,
+  # so a maxx lease reserved for this pass would otherwise sit held until its own ttl_sec
+  # (3600s) even though the pass that justified it is already gone. GENERIC_LEASE_ID is only
+  # ever non-empty once the reserve call below has actually run -- unset is fine under set -u
+  # via the default-expansion, since a kill before that point has nothing to release.
+  if [ -n "${GENERIC_LEASE_ID:-}" ]; then
+    python3 "$KIT_DIR/scripts/maxx_lease.py" release --lease-id "$GENERIC_LEASE_ID" >/dev/null 2>>"$LOG" || true
+  fi
   trap - TERM INT EXIT
   # Reap the foreground pipeline (see the note above) -- without this the rest of this function
   # does not run until `claude -p` exits on its own, which under a deploy cutover is never.
@@ -451,6 +459,31 @@ CAP_ARGS=()
 [ -n "$MAX_TURNS" ] && CAP_ARGS+=(--max-turns "$MAX_TURNS")
 [ -n "$MAX_BUDGET" ] && CAP_ARGS+=(--max-budget-usd "$MAX_BUDGET")
 
+# fleet-code-review BLOCK: the FLEET_SHARE_CEILING_PCT block above only ever got consumed by
+# judge-judy (a custom-runner member, exits at the branch above and never reaches here) --
+# every member on THIS generic path (marie, minion, roomba, the-fixer, dumbledore, messenger,
+# jefe) exported the ceiling into their env but never read it, so an instance running
+# FLEET_SHARE_FRACTION=0.25 could still spend up to 100% of the account through any of them.
+# Unlike judge-judy's own internal loop (many PRs, many calls, one ceiling read at tick
+# start), this path makes exactly ONE claude -p call per run_member.sh invocation -- so
+# there's no "stale snapshot held across a long loop" risk to design around: reserve the
+# WHOLE ceiling for this one call (no reason to under-reserve when nothing else in this
+# process will spend against it), release right after, same as judge-judy's own pattern.
+GENERIC_LEASE_ID=""
+if [ -n "${FLEET_SHARE_CEILING_PCT:-}" ]; then
+  if awk -v c="$FLEET_SHARE_CEILING_PCT" 'BEGIN { exit !(c > 0) }'; then
+    GENERIC_LEASE_ID=$(python3 "$KIT_DIR/scripts/maxx_lease.py" reserve --pct "$FLEET_SHARE_CEILING_PCT" \
+      --label "${MEMBER}-${RUN_ID}" --ttl-sec 3600 2>>"$LOG" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id",""))' 2>/dev/null)
+  else
+    # Ceiling computed to exactly 0 (this hour already at/past sustainable pace, or a real
+    # maxx verdict=="over") -- an honest zero cap, not a meter failure. Enforce it the same
+    # way the old formula did: a member with no cap of its own gets a hard $0 for this pass.
+    [ -z "$MAX_BUDGET" ] && CAP_ARGS+=(--max-budget-usd "0")
+    log "$MEMBER: FLEET_SHARE_CEILING_PCT=0 -- this hour has no headroom to reserve, capping this pass"
+  fi
+fi
+
 # Backgrounded + `wait`, NOT run in the foreground -- this is what makes the SIGTERM trap
 # above able to fire at all. Bash defers a trap handler while a foreground child runs, so with
 # this pipeline in the foreground the handler would not execute until `claude -p` returned on
@@ -474,6 +507,11 @@ CAP_ARGS=()
 PASS_PID=$!
 wait "$PASS_PID"
 RC=$?
+
+if [ -n "$GENERIC_LEASE_ID" ]; then
+  python3 "$KIT_DIR/scripts/maxx_lease.py" release --lease-id "$GENERIC_LEASE_ID" >/dev/null 2>>"$LOG" \
+    || log "WARN: maxx lease release failed for $GENERIC_LEASE_ID (self-expires via its own ttl_sec)"
+fi
 
 RAW=$(cat "$RESULT_FILE" 2>/dev/null)
 rm -f "$RESULT_FILE"
