@@ -80,7 +80,19 @@ cd "$FLEET_REPO" || exit 1
 # var: both repo slugs are derived from the checkouts that already exist (git remote), per
 # fleet.env.example's own note that a second instance may point FLEET_REPO elsewhere while the
 # fleet-kit code itself always lives at KIT_DIR.
-_repo_slug() { git -C "$1" remote get-url origin 2>/dev/null | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##'; }
+# "origin" by convention, but fall back to whatever remote IS configured -- a checkout with a
+# renamed remote (e.g. "upstream") must not silently fall back to the old cwd-only, single-repo
+# gh inference with no warning, which would quietly reproduce #176's exact bug.
+_repo_slug() {
+  local url
+  url="$(git -C "$1" remote get-url origin 2>/dev/null)"
+  if [ -z "$url" ]; then
+    local first_remote
+    first_remote="$(git -C "$1" remote 2>/dev/null | head -1)"
+    [ -n "$first_remote" ] && url="$(git -C "$1" remote get-url "$first_remote" 2>/dev/null)"
+  fi
+  printf '%s' "$url" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##'
+}
 FLEET_REPO_SLUG="$(_repo_slug "$FLEET_REPO")"
 KIT_REPO_SLUG="$(_repo_slug "$KIT_DIR")"
 
