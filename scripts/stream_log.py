@@ -16,15 +16,32 @@ quiet one) and for a human tailing the log live.
 Usage: claude -p ... --output-format stream-json --verbose \
          | stream_log.py --result-out /tmp/result.json >> member.log
 
---result-out writes the final `result` event's raw JSON to a separate file, unmodified --
-that file is what pass_accounting.py reads (its `split()` still expects exactly one JSON
-blob, same as it always has with --output-format json; this script never changes that
-contract, it just captures the one line the pass eventually produces that matches it).
+--result-out writes the final `result` event's JSON to a separate file -- its `result` text
+field is overridden (see _rewrite_result below) when a real report was written earlier in the
+stream; every other key (usage, cost, turns) is passed through unchanged, so
+pass_accounting.py's `split()` still expects exactly one JSON blob, same as it always has with
+--output-format json.
+
+gh#167: the stream-json protocol's own `result` field is Claude Code's last-assistant-turn
+text ONLY, by design -- not something fleet-kit computes. If a pass writes its full
+Report:/Outcome:/Evidence: contract block, then makes one more turn (e.g. a trailing tool call
+followed by a short wrap-up sentence), that wrap-up -- not the report -- becomes `result`, and
+run_report.py never sees the real report at all. Confirmed live, fleet-wide (jefe, the-fixer,
+datta, dont-shoot-the-messenger): 12 of 13 `reported_nothing` rows in one window had every
+contract field null despite real work being reported seconds before the pass's actual last
+turn. Fix: this script already sees every assistant text block as it streams by (that's what
+the `thinking:` log lines are, per _CODE_TOOLS note above -- every text block, not literal
+extended thinking); it now also keeps the full (non-preview) text of each one, and if the
+LAST block containing a contract line differs from the final `result` text, that block's text
+replaces `result`. Scoped narrowly on purpose: only overrides when an earlier block actually
+has a contract line the final turn lacks, so a pass whose report already IS the last turn (the
+common case) is byte-for-byte unaffected.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 
 
@@ -113,12 +130,39 @@ def render_event(evt: dict) -> str | None:
     return None
 
 
+# Mirrors run_report.py's own Outcome: matcher just enough to detect "this text block contains
+# a real contract line" -- deliberately not imported, so this script has no dependency on
+# run_report.py's internals and can't be broken by an unrelated change there.
+_OUTCOME_RE = re.compile(r"^[ \t]*[*_]{0,2}Outcome[*_]{0,2}[ \t]*:", re.MULTILINE | re.IGNORECASE)
+
+
+def _rewrite_result(result_line: str | None, assistant_texts: list[str]) -> str | None:
+    """gh#167: if a LATER turn overwrote the real report with a trailing wrap-up, restore the
+    last assistant text block that actually contains an Outcome: line. No-op (returns
+    result_line unchanged) whenever the final turn already is the report, or no block ever
+    had one -- both the common case and the current behavior."""
+    if not result_line or not assistant_texts:
+        return result_line
+    try:
+        obj = json.loads(result_line)
+    except json.JSONDecodeError:
+        return result_line
+    for text in reversed(assistant_texts):
+        if _OUTCOME_RE.search(text):
+            if obj.get("result") != text:
+                obj["result"] = text
+                return json.dumps(obj)
+            break
+    return result_line
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--result-out", help="write the final result event's raw JSON here")
     args = ap.parse_args()
 
     result_line = None
+    assistant_texts: list[str] = []
     for raw in sys.stdin:
         raw = raw.strip()
         if not raw:
@@ -129,6 +173,10 @@ def main() -> int:
             continue  # a torn/partial line must never kill a live pass's logging
         if evt.get("type") == "result":
             result_line = raw
+        if evt.get("type") == "assistant":
+            for block in (evt.get("message") or {}).get("content") or []:
+                if block.get("type") == "text" and block.get("text", "").strip():
+                    assistant_texts.append(block["text"])
         rendered = render_event(evt)
         if rendered:
             print(rendered, flush=True)
@@ -138,7 +186,7 @@ def main() -> int:
             # Empty (not missing) if the pass never produced a result line -- e.g. it was
             # killed mid-stream. run_member.sh treats an empty/unreadable file the same as a
             # failed pass_accounting.py parse: no usage captured, never a crash.
-            fh.write(result_line or "")
+            fh.write(_rewrite_result(result_line, assistant_texts) or "")
     return 0
 
 
