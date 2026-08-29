@@ -43,6 +43,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import maxx_lease
+
 SAFE_VERDICTS = {"ok", "degraded"}
 
 # maxx's own definitive "at/past the ceiling" answer -- a REAL restrictive reading, not a
@@ -175,7 +177,18 @@ def main() -> int:
         )
     else:
         fraction, label, budget = get_headroom()
-    print(json.dumps({"headroom_fraction": fraction, "label": label, **budget}))
+    output = {"headroom_fraction": fraction, "label": label, **budget}
+    # gh#161 part 2: reserved_pct is a LOCAL contribution on top of whatever the remote
+    # returned (today, nothing -- the remote never learns about gru's in-flight leases).
+    # Fails open per this module's own contract above: a broken local lease file (bad
+    # permissions, corrupted JSON, unwritable $FLEET_LOG_DIR) must never crash the CLI's
+    # otherwise-guaranteed always-parseable output.
+    try:
+        local_reserved_pct = maxx_lease.total_reserved_pct()
+    except Exception:
+        local_reserved_pct = 0.0
+    output["reserved_pct"] = budget.get("reserved_pct", 0.0) + local_reserved_pct
+    print(json.dumps(output))
     return 0 if fraction is not None else 1
 
 
