@@ -2,9 +2,11 @@
 
 Templates for both macOS (launchd) and Linux (systemd timer). Fill the `{{...}}` placeholders
 — `{{REPO_PATH}}` (your `FLEET_REPO`), `{{KIT_PATH}}` (where this kit lives, e.g. `{{REPO_PATH}}/.fleet`),
-`{{USER}}` (the account running the fleet), `{{LOG_DIR}}` (your `FLEET_LOG_DIR`), and
-`{{WEBHOOK_PORT}}` (your `FLEET_WEBHOOK_PORT`, e.g. `8562`) — then install per your platform's
-normal mechanism.
+`{{USER}}` (the account running the fleet), `{{LOG_DIR}}` (your `FLEET_LOG_DIR`),
+`{{WEBHOOK_PORT}}` (your `FLEET_WEBHOOK_PORT`, e.g. `8562`), `{{NTFY_TOPIC}}` (the ntfy.sh
+topic both health pagers below page to), `{{PUBLIC_URL}}` (the public tunnel URL
+tunnel-health checks, e.g. `https://your-fleet.example.com/`), and `{{VIEW_PORT}}` (your
+`FLEET_VIEW_PORT`, e.g. `8420`) — then install per your platform's normal mechanism.
 
 | Job | Cadence | Script | Required? |
 |---|---|---|---|
@@ -14,6 +16,8 @@ normal mechanism.
 | review | 15 min | `members/judge-judy/judge-judy.sh` | **required** if you don't have another review gate |
 | ceo | hourly | your `agents/ceo.md`-driven pass | optional; the fleet still runs without one, just with no self-healing |
 | architect | daily | your `agents/architect.md`-driven pass | optional; without it the fleet only ever ships PR-sized increments, never features |
+| account-health | 5 min | `scripts/account_health_check.sh` | **required** — pages when every fleet account has failed for a sustained stretch; the only thing watching for a fully-dead account pool |
+| tunnel-health | 5 min | `scripts/tunnel_health_check.sh` | **required** if you expose the fleet through a public tunnel — self-heals ingress drift, pages when the public URL is not serving |
 | view | always-on (not interval-scheduled) | `scripts/fleet_view_server.py` | optional — a live window onto `runs.jsonl` + `gh` state; kill it and the loop above is untouched. See `fleetkit-view.service` / `com.fleetkit.view.plist` (a long-running service, not a timer/interval job like the rest of this table). |
 
 launchd: `cp <file> ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/<file>`
