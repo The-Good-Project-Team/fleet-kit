@@ -55,7 +55,19 @@ read_latest() { # <workflow> [branch] -> "conclusion sha"
 }
 
 CI_STATE=$(read_latest "${FIXER_CI_WORKFLOW:-ci.yml}" "${FIXER_DEFAULT_BRANCH:-main}")
-DEPLOY_STATE=$(read_latest "${FIXER_DEPLOY_WORKFLOW:-deploy.yml}")
+# A workflow file that's since been deleted from the default branch (e.g. reverted) can never
+# produce a new run again -- but `gh run list` still returns its last historical run forever,
+# so without this guard a single old failure (91eb91a9228c / PR #149, reverted via PR #188 at
+# 04:52 UTC 2026-08-29) becomes an eternal false "failure" that re-fires FIRE every time the
+# dedup state file is ever reset for any reason (confirmed live: it re-fired at 23:47 UTC the
+# same day, 19h after the revert, despite the workflow file no longer existing in $REPO).
+DEPLOY_WF="${FIXER_DEPLOY_WORKFLOW:-deploy.yml}"
+if [ -f "$REPO/.github/workflows/$DEPLOY_WF" ]; then
+  DEPLOY_STATE=$(read_latest "$DEPLOY_WF")
+else
+  DEPLOY_STATE="none none"
+  log "deploy workflow $DEPLOY_WF not present in \$REPO -- ignoring its stale historical run"
+fi
 CI_CONC="${CI_STATE%% *}";      CI_SHA="${CI_STATE#* }"
 DEP_CONC="${DEPLOY_STATE%% *}"; DEP_SHA="${DEPLOY_STATE#* }"
 
