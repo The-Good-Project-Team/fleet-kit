@@ -1579,6 +1579,31 @@ def _deploy_staleness_check_is_actually_scheduled():
         "so a dark deploy pipeline goes back to being invisible until a human stumbles onto it.")
 
 
+def _account_and_tunnel_health_checks_are_actually_scheduled():
+    """Same failure class as _self_improve_score_is_actually_scheduled, two scripts over.
+
+    gh#171: account_health_check.sh and tunnel_health_check.sh are the fleet's only outage
+    pagers (README step 6 names them explicitly). PR#169 wired both into schedulers/systemd
+    and schedulers/launchd -- the bare-host path -- but entrypoint.sh's own crontab, the
+    container-native path every container deployment actually uses, had zero lines for
+    either. #154 (which asked for these to be scheduled) closed with the container path still
+    unfixed -- a closed issue naming a live gap is worse than an open one.
+    """
+    # Match the actual cron invocation, not just the bare filename -- both scripts are also
+    # named in surrounding comment prose (this very check's own docstring included), so a
+    # bare `"account_health_check.sh" in entry` would still pass with the cron line deleted.
+    entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
+    missing = [
+        s for s in ("bash /fleet-kit/scripts/account_health_check.sh", "bash /fleet-kit/scripts/tunnel_health_check.sh")
+        if s not in entry
+    ]
+    assert not missing, (
+        f"{missing} have no cron line in entrypoint.sh -- the fleet's only outage pagers "
+        "will never run on a container deployment, so an all-accounts-exhausted event or a "
+        "502'd tunnel pages nobody."
+    )
+
+
 def _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget():
     """The check must compare something REAL (a SHA baked at build time), and must only write
     a durable record when actually past budget -- not on every tick, or the STALE line this
@@ -1877,6 +1902,7 @@ if __name__ == "__main__":
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
     check("self_improve_score.sh is actually scheduled", _self_improve_score_is_actually_scheduled)
     check("deploy staleness check is actually scheduled", _deploy_staleness_check_is_actually_scheduled)
+    check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
     check("deploy staleness check reads a baked SHA and only alerts past budget", _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("deploy.sh's log is durable regardless of caller", _deploy_log_is_durable_regardless_of_caller)
