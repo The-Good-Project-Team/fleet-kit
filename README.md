@@ -552,8 +552,11 @@ room for one more podman container)? Skip straight to step 1 below.
    confirm it claims the seed issue, opens a worktree, and (even if it can't finish the task)
    exits cleanly with a report. This is the fastest way to catch a misconfigured `fleet.env`.
 6. **Install the scheduler.** `schedulers/` has both launchd (macOS) and systemd timer
-   (Linux) templates for: gitpull, rank, build, review, ceo, architect. Fill the `{{...}}`
-   placeholders (repo path, label prefix) and install per your platform's normal mechanism.
+   (Linux) templates for: gitpull, rank, build, review, ceo, architect, account-health,
+   tunnel-health. The last two are the fleet's only outage pagers (a fully-dead account pool,
+   a 502'd public tunnel) — install them too, not just the build/review loop. Fill the
+   `{{...}}` placeholders (repo path, label prefix, ntfy topic, public URL) and install per
+   your platform's normal mechanism.
 7. **Branch protection** (one-time, human call — this changes repo settings):
    ```
    gh api -X PUT repos/{owner}/{repo}/branches/main/protection \
