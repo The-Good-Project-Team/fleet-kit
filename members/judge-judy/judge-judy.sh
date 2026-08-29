@@ -11,8 +11,12 @@
 # review locally through your own account.
 #
 # CONTRACT
-#   - Reviews ONE PR per invocation (run on a schedule; one PR per tick keeps a single hung
-#     review from starving the queue — the next tick picks the next PR).
+#   - Reviews PRs one at a time in a loop, oldest-created first, until either the queue is
+#     empty or FLEET_TICK_BUDGET_USD (default $15/tick) is spent -- so a quiet repo still
+#     reviews everything in one tick instead of trickling one PR per 15-min schedule run.
+#     Budget is checked BEFORE each pick using the actual cost of the last call made this
+#     tick (first call in a tick always runs -- there's no prior cost to check against), so
+#     one hung/expensive review can't silently blow through many multiples of the cap.
 #   - Selection: open, non-draft PRs whose head has NO fleet-code-review status yet, skipping
 #     heads with a failing/absent required check-run (reviewing a dead head is pure spend).
 #   - Verdict: the model must end with one line `VERDICT: approve` or `VERDICT: block`.
@@ -27,7 +31,8 @@
 # Env (see fleet.env.example): FLEET_REPO, FLEET_LOG_DIR, FLEET_CODE_REVIEW_MODEL (default
 # sonnet), FLEET_CODE_REVIEW_TIMEOUT (default 900s), FLEET_REQUIRED_CHECKS (space-separated
 # check-run names that must not be red before reviewing a head — default empty, meaning no
-# filter). PR override: judge-judy.sh <pr>.
+# filter), FLEET_TICK_BUDGET_USD (default $15, total spend cap across all PRs in one tick).
+# PR override: judge-judy.sh <pr> (reviews just that one PR, ignores the tick budget loop).
 set -uo pipefail
 
 [ -f "${FLEET_ENV_FILE:-./fleet.env}" ] && . "${FLEET_ENV_FILE:-./fleet.env}"
@@ -41,6 +46,7 @@ TIMEOUT_S="${FLEET_CODE_REVIEW_TIMEOUT:-900}"
 REQUIRED_CHECKS="${FLEET_REQUIRED_CHECKS:-}"
 MAX_PARSE_STRIKES=2
 STRIKE_DIR="$HOME/.cache/fleet-kit/judge-judy-strikes"
+TICK_BUDGET_USD="${FLEET_TICK_BUDGET_USD:-15}"
 # The diff is capped, not because big diffs don't deserve review, but because an unbounded
 # prompt can blow the context window and produce an unparseable half-answer — which then
 # reads as a reviewer outage.
@@ -79,11 +85,18 @@ post_status() { # <sha> <state> <description>
 }
 
 # --- pick ONE PR ------------------------------------------------------------------------------
+# <skip_list> is a space-separated list of PR numbers already attempted this tick (a failed
+# claude call or an unresolved strike doesn't post a status, so without this pick_pr would
+# hand back the same broken PR every iteration and burn the whole tick budget on it alone).
 pick_pr() {
-  local pr head statuses review_seen checks
-  for pr in $(gh pr list --state open --json number,isDraft \
-                -q '.[] | select(.isDraft | not) | .number' 2>/dev/null); do
-    [ -n "${1:-}" ] && [ "$pr" != "$1" ] && continue
+  local pr head statuses review_seen checks explicit="${1:-}" skip_list="${2:-}"
+  # Oldest-created first: gh pr list's default (newest-first) order lets a steady stream of
+  # new PRs starve a long-lived one indefinitely -- fleet-kit#181 measured PR#149 skipped 8
+  # consecutive ticks (~2h) because newer PRs kept landing ahead of it in list order.
+  for pr in $(gh pr list --state open --json number,isDraft,createdAt \
+                -q 'sort_by(.createdAt) | .[] | select(.isDraft | not) | .number' 2>/dev/null); do
+    [ -n "$explicit" ] && [ "$pr" != "$explicit" ] && continue
+    case " $skip_list " in *" $pr "*) continue ;; esac
     head=$(gh pr view "$pr" --json headRefOid -q '.headRefOid' 2>/dev/null) || continue
     [ -z "$head" ] && continue
     statuses=$(gh api "repos/${REPO_SLUG}/statuses/${head}" 2>/dev/null || echo "[]")
@@ -105,23 +118,56 @@ pick_pr() {
   return 1
 }
 
-PICK=$(pick_pr "${1:-}") || { log "no PR needs review this tick"; exit 0; }
-PR=${PICK% *}
-HEAD_SHA=${PICK#* }
-log "PR #$PR head ${HEAD_SHA:0:12} -- reviewing (model=$MODEL)"
+report_run() { # <pr> <head_sha> <usage_file> <outcome-line> <evidence-line>
+  printf 'Outcome: %s\nEvidence: %s\n' "$4" "$5" | python3 "$KIT_DIR/scripts/run_report.py" \
+    --member "judge-judy" --run-id "review-${1}-${2:0:12}" --kind llm --exit-code 0 \
+    --pass-file - --usage-file "$3" --pr "$1" >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
+}
 
-DIFF_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_review_diff.XXXXXX")
-BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_review_body.XXXXXX")
-OUT_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_review_out.XXXXXX")
-trap 'rm -f "$DIFF_FILE" "$BODY_FILE" "$OUT_FILE" "${USAGE_FILE:-}"' EXIT
+EXPLICIT_PR="${1:-}"
+SPENT_USD="0"
+LAST_CALL_USD="0"
+REVIEWED_COUNT=0
+SKIPPED_THIS_TICK=""
 
-gh pr diff "$PR" > "$DIFF_FILE" 2>/dev/null || { log "PR #$PR: gh pr diff failed"; exit 1; }
-TRUNC_NOTE=""
-if [ "$(wc -c < "$DIFF_FILE")" -gt "$MAX_DIFF_BYTES" ]; then
-  head -c "$MAX_DIFF_BYTES" "$DIFF_FILE" > "${DIFF_FILE}.t" && mv "${DIFF_FILE}.t" "$DIFF_FILE"
-  TRUNC_NOTE="NOTE: the diff was truncated at ${MAX_DIFF_BYTES} bytes; flag that in your review if it limits confidence."
-fi
-gh pr view "$PR" --json title,body -q '"TITLE: \(.title)\n\n\(.body)"' > "$BODY_FILE" 2>/dev/null || true
+while :; do
+  # Budget gate before each pick: skip on the FIRST call of the tick (nothing spent yet to
+  # check against), then bail once spent-so-far + the last call's cost would clear the cap --
+  # using the last call as the estimate for the next, since PR diffs are similar-order-of-
+  # magnitude in cost and there's no cheaper signal available before the call runs.
+  if [ "$REVIEWED_COUNT" -gt 0 ] && awk -v s="$SPENT_USD" -v l="$LAST_CALL_USD" -v b="$TICK_BUDGET_USD" \
+      'BEGIN { exit !(s + l > b) }'; then
+    log "tick budget reached (spent \$${SPENT_USD}, cap \$${TICK_BUDGET_USD}) -- stopping, remaining PRs wait for next tick"
+    break
+  fi
+
+  PICK=$(pick_pr "$EXPLICIT_PR" "$SKIPPED_THIS_TICK") || { [ "$REVIEWED_COUNT" -eq 0 ] && log "no PR needs review this tick"; break; }
+  PR=${PICK% *}
+  HEAD_SHA=${PICK#* }
+  log "PR #$PR head ${HEAD_SHA:0:12} -- reviewing (model=$MODEL)"
+
+  DIFF_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_review_diff.XXXXXX")
+  BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_review_body.XXXXXX")
+  OUT_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_review_out.XXXXXX")
+  USAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_usage.XXXXXX")
+  # No RETURN/EXIT trap here (RETURN doesn't fire for a while-loop body, and one EXIT trap
+  # can't hold a growing file list across iterations) -- cleanup_pass is called explicitly
+  # at every exit point of this iteration instead, plus a final catch-all after the loop.
+  cleanup_pass() { rm -f "$DIFF_FILE" "$BODY_FILE" "$OUT_FILE" "$USAGE_FILE"; }
+
+  if ! gh pr diff "$PR" > "$DIFF_FILE" 2>/dev/null; then
+    log "PR #$PR: gh pr diff failed"
+    SKIPPED_THIS_TICK="$SKIPPED_THIS_TICK $PR"
+    cleanup_pass
+    [ -n "$EXPLICIT_PR" ] && break
+    continue
+  fi
+  TRUNC_NOTE=""
+  if [ "$(wc -c < "$DIFF_FILE")" -gt "$MAX_DIFF_BYTES" ]; then
+    head -c "$MAX_DIFF_BYTES" "$DIFF_FILE" > "${DIFF_FILE}.t" && mv "${DIFF_FILE}.t" "$DIFF_FILE"
+    TRUNC_NOTE="NOTE: the diff was truncated at ${MAX_DIFF_BYTES} bytes; flag that in your review if it limits confidence."
+  fi
+  gh pr view "$PR" --json title,body -q '"TITLE: \(.title)\n\n\(.body)"' > "$BODY_FILE" 2>/dev/null || true
 
 # See judge-judy.md (this member's own charter) for the annotated version of this template.
 PROMPT="You are the merge-blocking code reviewer for this repo. Review the diff below for
@@ -143,66 +189,75 @@ VERDICT: approve
 or
 VERDICT: block"
 
-# --output-format json for the provider's own per-call cost/token accounting (see
-# pass_accounting.py) -- text still lands in $OUT_FILE unchanged so the VERDICT: grep below
-# doesn't need to know the call shape changed.
-RAW=$(account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" --model "$MODEL" \
-  --output-format json --max-budget-usd "${FLEET_MAX_BUDGET_USD:-5}" 2>>"$LOG")
-RC=$?
-printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" text > "$OUT_FILE"
-USAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_usage.XXXXXX")
-printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" usage > "$USAGE_FILE" 2>/dev/null
-if [ "$RC" -ne 0 ]; then
-  log "PR #$PR: claude -p failed rc=$RC (account=${ACCOUNT_POOL_SELECTED:-none} reason=${ACCOUNT_POOL_LAST_REASON:-}) -- no status posted, next tick retries"
-  exit 1
-fi
-
-VERDICT=$(grep -E '^VERDICT: (approve|block)$' "$OUT_FILE" | tail -1)
-STRIKE_FILE="$STRIKE_DIR/pr-${PR}-${HEAD_SHA}.strikes"
-
-# A block with no findings text is as useless as no verdict at all -- it posts a hard,
-# required-check-blocking FAILURE with nothing a human or the-fixer can act on (issue #3170,
-# recurred 3x on nonprofit-atlas before this repo repointed to fleet-kit itself, where
-# fleet-code-review is a REQUIRED context -- an empty block here permastalls a PR, not just
-# noise). Treat it the same as unparseable output: strike and let the next tick retry.
-FINDINGS=""
-if [ "$VERDICT" = "VERDICT: block" ]; then
-  FINDINGS=$(sed '/^VERDICT: /d' "$OUT_FILE" | tail -c 60000)
-  [ -z "$(printf '%s' "$FINDINGS" | tr -d '[:space:]')" ] && VERDICT=""
-fi
-
-if [ -z "$VERDICT" ]; then
-  N=$(( $(cat "$STRIKE_FILE" 2>/dev/null || echo 0) + 1 ))
-  echo "$N" > "$STRIKE_FILE"
-  log "PR #$PR: unparseable or empty-findings review output (strike $N/$MAX_PARSE_STRIKES)"
-  if [ "$N" -ge "$MAX_PARSE_STRIKES" ]; then
-    post_status "$HEAD_SHA" "error" "Code review: reviewer output unparseable/empty ${N}x at this head -- needs a look"
-    log "PR #$PR: posted state=error after $N unparseable/empty runs"
+  # --output-format json for the provider's own per-call cost/token accounting (see
+  # pass_accounting.py) -- text still lands in $OUT_FILE unchanged so the VERDICT: grep below
+  # doesn't need to know the call shape changed.
+  RAW=$(account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" --model "$MODEL" \
+    --output-format json --max-budget-usd "${FLEET_MAX_BUDGET_USD:-5}" 2>>"$LOG")
+  RC=$?
+  printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" text > "$OUT_FILE"
+  printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" usage > "$USAGE_FILE" 2>/dev/null
+  REVIEWED_COUNT=$((REVIEWED_COUNT + 1))
+  CALL_COST=$(python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("total_cost_usd"); print(c if c is not None else 0)' < "$USAGE_FILE" 2>/dev/null)
+  [ -z "$CALL_COST" ] && CALL_COST=0
+  LAST_CALL_USD="$CALL_COST"
+  SPENT_USD=$(awk -v s="$SPENT_USD" -v c="$CALL_COST" 'BEGIN { printf "%.4f", s + c }')
+  if [ "$RC" -ne 0 ]; then
+    log "PR #$PR: claude -p failed rc=$RC (account=${ACCOUNT_POOL_SELECTED:-none} reason=${ACCOUNT_POOL_LAST_REASON:-}) -- no status posted, next tick retries"
+    SKIPPED_THIS_TICK="$SKIPPED_THIS_TICK $PR"
+    cleanup_pass
+    [ -n "$EXPLICIT_PR" ] && break
+    continue
   fi
-  exit 1
-fi
-rm -f "$STRIKE_FILE"
 
-report_run() { # <outcome-line> <evidence-line>
-  printf 'Outcome: %s\nEvidence: %s\n' "$1" "$2" | python3 "$KIT_DIR/scripts/run_report.py" \
-    --member "judge-judy" --run-id "review-${PR}-${HEAD_SHA:0:12}" --kind llm --exit-code 0 \
-    --pass-file - --usage-file "$USAGE_FILE" --pr "$PR" >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
-}
+  VERDICT=$(grep -E '^VERDICT: (approve|block)$' "$OUT_FILE" | tail -1)
+  STRIKE_FILE="$STRIKE_DIR/pr-${PR}-${HEAD_SHA}.strikes"
 
-if [ "$VERDICT" = "VERDICT: approve" ]; then
-  post_status "$HEAD_SHA" "success" "Code review passed (local claude, model=$MODEL)" \
-    && log "PR #$PR: APPROVED -- status posted" \
-    || log "PR #$PR: WARN approved but status POST failed"
-  report_run "approved PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: success"
-else
-  # Findings comment first, status second: a failure status pointing at nothing is worse
-  # than no status at all.
-  gh pr comment "$PR" --body "**fleet-code-review: BLOCK** (local claude, model=$MODEL, head ${HEAD_SHA:0:12})
+  # A block with no findings text is as useless as no verdict at all -- it posts a hard,
+  # required-check-blocking FAILURE with nothing a human or the-fixer can act on (issue #3170,
+  # recurred 3x on nonprofit-atlas before this repo repointed to fleet-kit itself, where
+  # fleet-code-review is a REQUIRED context -- an empty block here permastalls a PR, not just
+  # noise). Treat it the same as unparseable output: strike and let the next tick retry.
+  FINDINGS=""
+  if [ "$VERDICT" = "VERDICT: block" ]; then
+    FINDINGS=$(sed '/^VERDICT: /d' "$OUT_FILE" | tail -c 60000)
+    [ -z "$(printf '%s' "$FINDINGS" | tr -d '[:space:]')" ] && VERDICT=""
+  fi
+
+  if [ -z "$VERDICT" ]; then
+    N=$(( $(cat "$STRIKE_FILE" 2>/dev/null || echo 0) + 1 ))
+    echo "$N" > "$STRIKE_FILE"
+    log "PR #$PR: unparseable or empty-findings review output (strike $N/$MAX_PARSE_STRIKES)"
+    if [ "$N" -ge "$MAX_PARSE_STRIKES" ]; then
+      post_status "$HEAD_SHA" "error" "Code review: reviewer output unparseable/empty ${N}x at this head -- needs a look"
+      log "PR #$PR: posted state=error after $N unparseable/empty runs"
+    fi
+    SKIPPED_THIS_TICK="$SKIPPED_THIS_TICK $PR"
+    cleanup_pass
+    [ -n "$EXPLICIT_PR" ] && break
+    continue
+  fi
+  rm -f "$STRIKE_FILE"
+
+  if [ "$VERDICT" = "VERDICT: approve" ]; then
+    post_status "$HEAD_SHA" "success" "Code review passed (local claude, model=$MODEL)" \
+      && log "PR #$PR: APPROVED -- status posted" \
+      || log "PR #$PR: WARN approved but status POST failed"
+    report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "approved PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: success"
+  else
+    # Findings comment first, status second: a failure status pointing at nothing is worse
+    # than no status at all.
+    gh pr comment "$PR" --body "**fleet-code-review: BLOCK** (local claude, model=$MODEL, head ${HEAD_SHA:0:12})
 
 $FINDINGS" >/dev/null 2>&1 || log "PR #$PR: WARN findings comment failed"
-  post_status "$HEAD_SHA" "failure" "Code review found blocking issues -- see PR comment" \
-    && log "PR #$PR: BLOCKED -- status + findings posted" \
-    || log "PR #$PR: WARN blocked but status POST failed"
-  report_run "blocked PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: failure, see PR comment"
-fi
+    post_status "$HEAD_SHA" "failure" "Code review found blocking issues -- see PR comment" \
+      && log "PR #$PR: BLOCKED -- status + findings posted" \
+      || log "PR #$PR: WARN blocked but status POST failed"
+    report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "blocked PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: failure, see PR comment"
+  fi
+
+  cleanup_pass
+  [ -n "$EXPLICIT_PR" ] && break
+done
+log "tick done: reviewed $REVIEWED_COUNT PR(s), spent \$${SPENT_USD} of \$${TICK_BUDGET_USD} budget"
 exit 0
