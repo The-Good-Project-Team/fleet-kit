@@ -134,25 +134,27 @@ RUN_ID="${MEMBER}${ITEM:+-item$ITEM}${TASK:+-adhoc}-$$-$(date +%s)"
 
 MAX_BUDGET=$(jget "['mandate']['limits'].get('max_budget_usd') or ''")
 
-# FLEET_SHARE_FRACTION -- this instance's slice of the fleet-wide sustainable pace, applied
-# to EVERY member's own spend ceiling, including a custom-runner member like judge-judy
-# (exported below as FLEET_MAX_BUDGET_USD, the env var judge-judy.sh already reads for its
-# own `claude -p --max-budget-usd`) -- not just the generic claude -p path further down, and
-# not just gru, which already scales its own sizing the same way via
-# FLEET_GRU_ALLOWANCE_FRACTION (see gru.md). Only reached when an operator has explicitly set
-# FLEET_SHARE_FRACTION < 1.0 on this instance -- an instance that never sets it never calls
-# maxx_share_check.py at all, so every member stays exactly as uncapped as before this change.
-# When it IS set, a member with its own max_budget_usd gets it scaled down; a member with NO
-# cap gets a synthesized one (see maxx_share_check.py's own header) -- otherwise most of the
-# fleet (uncapped by design) would see zero effect from this dial. Fails open on an unreadable
-# maxx meter (script's own contract). Skipped entirely under --dry-run: this is a live network
-# call (maxx_reader.get_headroom()), and --dry-run's own contract is "print the resolved
-# command, run nothing" (see this script's header comment).
+# FLEET_SHARE_FRACTION -- this instance's slice of the fleet's CURRENT hourly headroom,
+# exported as FLEET_SHARE_CEILING_PCT (percent-of-week units, maxx's own scale -- same units
+# maxx_lease.py's --pct takes). This is a CEILING, not a reservation: the member decides for
+# itself how much of it a given pass actually needs (a quiet judge-judy tick reviewing one PR
+# needs less than a five-PR backlog) and calls `python3 scripts/maxx_lease.py reserve --pct
+# <its own estimate, <= ceiling> --label ... --ttl-sec ...` itself, then `... release
+# --lease-id ...` when done -- see judge-judy.sh for a worked example. run_member.sh never
+# reserves on a member's behalf and never touches MAX_BUDGET/FLEET_MAX_BUDGET_USD for this.
+# Only exported when an operator has explicitly set FLEET_SHARE_FRACTION < 1.0 on this
+# instance -- an instance that never sets it never calls maxx_share_ceiling.py at all, so
+# every member behaves exactly as before this change. An unreadable maxx meter or missing
+# hourly fields prints nothing (fails open, script's own contract) -- FLEET_SHARE_CEILING_PCT
+# stays unset, and a member that checks for it before self-reserving simply skips reserving,
+# same as if FLEET_SHARE_FRACTION were never set. Skipped entirely under --dry-run: this is a
+# live network call (maxx_reader.get_headroom()), and --dry-run's own contract is "print the
+# resolved command, run nothing" (see this script's header comment).
 if [ "$DRY_RUN" -ne 1 ] && [ "${FLEET_SHARE_FRACTION:-1.0}" != "1.0" ]; then
-  SCALED_BUDGET=$(python3 "$KIT_DIR/scripts/maxx_share_check.py" "${FLEET_SHARE_FRACTION:-1.0}" "$MAX_BUDGET" 2>>"$LOG")
-  if [ -n "$SCALED_BUDGET" ]; then
-    log "$MEMBER: max_budget_usd scaled by FLEET_SHARE_FRACTION=${FLEET_SHARE_FRACTION}: \$${MAX_BUDGET:-uncapped} -> \$${SCALED_BUDGET}"
-    MAX_BUDGET="$SCALED_BUDGET"
+  CEILING_PCT=$(python3 "$KIT_DIR/scripts/maxx_share_ceiling.py" "${FLEET_SHARE_FRACTION:-1.0}" 2>>"$LOG")
+  if [ -n "$CEILING_PCT" ]; then
+    log "$MEMBER: FLEET_SHARE_CEILING_PCT=${CEILING_PCT} (FLEET_SHARE_FRACTION=${FLEET_SHARE_FRACTION} of this hour's real headroom)"
+    export FLEET_SHARE_CEILING_PCT="$CEILING_PCT"
   fi
 fi
 
@@ -283,8 +285,9 @@ MODEL=$(jget "['llm']['model']")
 # and it should prune prompt, etc. before it prunes turns." A turn cap MASKS a rambling
 # charter instead of fixing it; dumbledore's rot hunt owns that tuning.
 MAX_TURNS=$(jget "['llm'].get('max_turns') or ''")
-# MAX_BUDGET (incl. FLEET_SHARE_FRACTION scaling) is computed earlier, before the
-# custom-runner branch, so a member like judge-judy also sees it -- see that block's comment.
+# MAX_BUDGET is computed earlier, before the custom-runner branch, unscaled -- FLEET_SHARE_
+# CEILING_PCT (also computed earlier) is a separate signal a member self-reserves against via
+# maxx_lease.py, not a multiplier on this. See that block's comment.
 
 PROMPT=$(awk 'BEGIN{d=0} /^---$/{d++; next} d>=2{print}' "$BEHAVIOR")
 if [ -z "$PROMPT" ]; then
