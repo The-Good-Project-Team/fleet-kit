@@ -134,17 +134,30 @@ def render_event(evt: dict) -> str | None:
 # block contains the real contract, not just a stray mention of it" -- deliberately not
 # imported, so this script has no dependency on run_report.py's internals and can't be broken
 # by an unrelated change there.
-_OUTCOME_RE = re.compile(r"^[ \t]*[*_]{0,2}Outcome[*_]{0,2}[ \t]*:", re.MULTILINE | re.IGNORECASE)
-_EVIDENCE_RE = re.compile(r"^[ \t]*[*_]{0,2}Evidence[*_]{0,2}[ \t]*:", re.MULTILINE | re.IGNORECASE)
+_OUTCOME_RE = re.compile(r"^[ \t]*[*_]{0,2}Outcome[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE)
+_EVIDENCE_RE = re.compile(r"^[ \t]*[*_]{0,2}Evidence[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE)
+
+# A recital of the contract template itself ("Write it as:\nOutcome: <one line>\nEvidence:
+# <one line>") satisfies both regexes above without being a real report -- charters spell the
+# template out in exactly this bracketed-placeholder shape, so this is the realistic false
+# positive, not a contrived one.
+_PLACEHOLDER_RE = re.compile(r"^<.*>$")
 
 
 def _looks_like_report(text: str) -> bool:
     """A bare Outcome: line is too weak a signal on its own -- a draft aside ("Outcome: (draft,
     ignore)") or a recital of this very contract template ("Write it as:\\nOutcome: <one
     line>") both match it without being a real report. Requiring BOTH Outcome: and Evidence:
-    lines mirrors the actual contract (persona_law.md #10b requires both together), which a
-    stray non-report mention essentially never satisfies."""
-    return bool(_OUTCOME_RE.search(text) and _EVIDENCE_RE.search(text))
+    lines mirrors the actual contract (persona_law.md #10b requires both together); rejecting
+    angle-bracket placeholder content additionally defeats a template quote, which a plain
+    both-lines check does not."""
+    outcome_m = _OUTCOME_RE.search(text)
+    evidence_m = _EVIDENCE_RE.search(text)
+    if not (outcome_m and evidence_m):
+        return False
+    if _PLACEHOLDER_RE.match(outcome_m.group(1)) or _PLACEHOLDER_RE.match(evidence_m.group(1)):
+        return False
+    return True
 
 
 def _rewrite_result(result_line: str | None, assistant_texts: list[str]) -> str | None:
