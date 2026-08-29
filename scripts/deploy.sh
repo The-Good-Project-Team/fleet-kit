@@ -72,7 +72,20 @@ GREEN_WEBHOOK_PORT="${FLEET_GREEN_WEBHOOK_PORT:-8572}"
 HEALTH_TIMEOUT_S="${FLEET_HEALTH_TIMEOUT_S:-30}"
 GH_TOKEN="${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}"
 
-log() { echo "[deploy $(date '+%Y-%m-%d %H:%M:%S %Z')] $*"; }
+# Durable receipt regardless of caller. auto_deploy.sh only captures this script's stdout into
+# auto_deploy.log when IT is the one invoking deploy.sh -- a human running deploy.sh directly,
+# up.sh, or a future push-based trigger (#189) previously left zero durable record (gh#196).
+# Same FLEET_LOG_DIR convention auto_deploy.sh already uses (auto_deploy.sh:28), own filename
+# so a direct run doesn't interleave with auto_deploy's own poll-tick log.
+LOG_DIR="${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}"
+mkdir -p "$LOG_DIR"
+DEPLOY_LOG="$LOG_DIR/deploy.log"
+
+log() {
+    local line="[deploy $(date '+%Y-%m-%d %H:%M:%S %Z')] $*"
+    echo "$line"
+    echo "$line" >> "$DEPLOY_LOG"
+}
 
 # One place both the green candidate and the real cutover build their `podman run` args from --
 # duplicating this list between call sites is exactly how a mount silently drifts between "what
@@ -158,7 +171,7 @@ do_rollback() {
         log "restored $RETIRED_MARKER -> $CONTAINER and started it"
         exit 1
     fi
-    log "FATAL: no live $CONTAINER and no $RETIRED_MARKER to restore from -- recreate by hand"
+    log "FATAL ERROR: no live $CONTAINER and no $RETIRED_MARKER to restore from -- recreate by hand"
     exit 2
 }
 
