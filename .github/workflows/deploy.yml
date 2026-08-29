@@ -1,0 +1,96 @@
+name: Deploy
+
+# Builds fleet-kit's image once on every merge to main, pushes it to GHCR, then rolls it
+# out to every registered instance on dino (canary first, health-checked, auto-rollback
+# on failure). Replaces each instance polling its own git remote independently -- see
+# fks-fleet/README.md "fleet-kit server -- NOT YET BUILT" for the gap this closes.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false  # never cancel a rollout mid-flight
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/the-good-project-team/fleet-kit
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      image_ref: ${{ steps.tag.outputs.image_ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: compute tag
+        id: tag
+        run: echo "image_ref=${IMAGE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.tag.outputs.image_ref }}
+            ${{ env.IMAGE }}:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: install cloudflared
+        run: |
+          curl -fsL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+          chmod +x /usr/local/bin/cloudflared
+          /usr/local/bin/cloudflared --version
+
+      - name: configure deploy key + tunnel proxy
+        # `cloudflared access ssh` proxies through the tunnel with no auth prompt as long as
+        # dino.luckymachines.co has no Cloudflare Access policy attached -- the setup this repo
+        # documents and has actually run (docs/deployment-learnings.md #15: "does NOT need
+        # cloudflared login"; infra-kit/setup-tunnel.sh notes Access is off by default and
+        # needs a human dashboard click to turn on). No DINO_ACCESS_SERVICE_TOKEN_* secrets
+        # exist in this repo today, so this step only writes SSH config; the optional
+        # TUNNEL_SERVICE_TOKEN_ID/SECRET env (for if a human ever enables Access on dino) has
+        # to live on the step below that actually spawns `cloudflared access ssh` as its
+        # ProxyCommand -- step-level `env:` here would never reach that process (GitHub
+        # Actions doesn't carry step env across steps).
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DINO_DEPLOY_SSH_KEY }}" > ~/.ssh/dino_deploy
+          chmod 600 ~/.ssh/dino_deploy
+          cat >> ~/.ssh/config <<EOF
+          Host dino
+            HostName dino.luckymachines.co
+            User ubuntu
+            IdentityFile ~/.ssh/dino_deploy
+            IdentitiesOnly yes
+            ProxyCommand cloudflared access ssh --hostname dino.luckymachines.co/ssh
+            StrictHostKeyChecking accept-new
+          EOF
+
+      - name: deploy to dino (canary first, auto-rollback on failure)
+        env:
+          TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.DINO_ACCESS_SERVICE_TOKEN_ID }}
+          TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.DINO_ACCESS_SERVICE_TOKEN_SECRET }}
+        run: |
+          if ! ssh dino "${{ needs.build-and-push.outputs.image_ref }}"; then
+            echo "::error::ssh to dino failed -- if dino.luckymachines.co now has a Cloudflare Access policy attached, this is an auth-config gap, not a deploy regression: add repo secrets DINO_ACCESS_SERVICE_TOKEN_ID/DINO_ACCESS_SERVICE_TOKEN_SECRET (docs/deployment-learnings.md #15)"
+            exit 1
+          fi
