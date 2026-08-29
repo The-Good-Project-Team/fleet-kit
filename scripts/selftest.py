@@ -1267,6 +1267,81 @@ def _judge_judy_ticks_dont_overlap():
     assert call_j > contention_i, "pick_pr must not be reachable before the lock check"
 
 
+def _judge_judy_lock_lives_somewhere_persistent():
+    """fleet-kit#207: the single-tick mutex above only mutexes anything if concurrent ticks can
+    actually see each other's lockfile.
+
+    $HOME is the per-pass ephemeral container/worktree, so a lockfile under $HOME/.cache can
+    only ever contend against itself inside that same container -- it can never block a
+    concurrent tick running in a different container/worktree, which is exactly how cron ticks
+    and the blue/green deploy cutover both spawn processes here. Live-confirmed: a fresh 3-way
+    pass-start collision reproduced on PR #175 even after the flock fix (#200) was deployed, and
+    "another judge-judy tick still holds" never once fired across 106 pass-start events (~25h)
+    of log history. Same failure class as gh#215's check.sh fix (PR #216): default state onto
+    $FLEET_LOG_DIR, the confirmed cross-pass-persistent path.
+    """
+    src = (Path(__file__).parent.parent / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    lock_line = next(line for line in src.splitlines() if line.strip().startswith("LOCKFILE="))
+    assert "$HOME" not in lock_line, \
+        f"LOCKFILE must not default onto ephemeral $HOME: {lock_line!r}"
+    assert "LOG_DIR" in lock_line, \
+        f"LOCKFILE should live under the persistent LOG_DIR, not a fresh ad-hoc path: {lock_line!r}"
+
+
+def _judge_judy_strikes_are_scoped_by_head_and_leave_diagnosable_evidence():
+    """gh#221: a parse-strike used to vanish with no evidence, and the strike count itself was
+    never proven to be scoped to the head it fired at.
+
+    Three PRs (fleet-kit#182, #184, #219) hit consecutive unparseable/empty reviewer output and
+    got a hard, merge-blocking `state=error` -- #182 and #184 later merged (most likely via a
+    follow-up push producing a new head), #219 sat live-blocked with no follow-up commit and no
+    way to inspect what the model had actually returned, since `$OUT_FILE` is a `mktemp` file
+    judge-judy.sh's own `cleanup_pass` deletes every iteration.
+
+    This asserts, statically, the two properties #221's PRD makes acceptance criteria on:
+    1. `STRIKE_FILE`'s key already includes `$HEAD_SHA` -- so a genuinely new head (a follow-up
+       push) can never inherit a stale strike count from an old sha. This is the assertion
+       AC3 asks for explicitly: it was implied by the existing code path but never checked by a
+       test.
+    2. Every strike (not only the one that trips `state=error`) copies the raw model output to
+       a durable, non-tmp location UNDER `$STRIKE_DIR` -- and does so BEFORE `cleanup_pass` (the
+       function that deletes `$OUT_FILE`) is ever called on that same iteration -- so a
+       live-blocked PR like #219 always leaves something to diagnose.
+    """
+    src = (Path(__file__).parent.parent / "members" / "judge-judy" / "judge-judy.sh").read_text()
+
+    # AC3: the strike file is scoped by BOTH pr and head sha, so a new push (new $HEAD_SHA)
+    # starts its own key and cannot inherit an old head's strike count.
+    assert 'STRIKE_FILE="$STRIKE_DIR/pr-${PR}-${HEAD_SHA}.strikes"' in src, \
+        "STRIKE_FILE is no longer keyed by pr-<PR>-<HEAD_SHA> -- a new head could inherit a stale strike count"
+
+    # AC1: on every strike, the raw output is captured to a durable path under STRIKE_DIR
+    # (never under the tmp dir cleanup_pass empties), keyed by pr+head so it doesn't collide
+    # across PRs or heads.
+    assert 'RAW_CAPTURE="$STRIKE_DIR/pr-${PR}-${HEAD_SHA}' in src, \
+        "no durable, pr+head-keyed raw-output capture path on a parse strike"
+    assert 'cp "$OUT_FILE" "$RAW_CAPTURE"' in src, \
+        "a strike no longer copies the raw $OUT_FILE content anywhere durable"
+
+    # The capture must happen INSIDE the unparseable-verdict branch, strictly before
+    # cleanup_pass is invoked for that same iteration -- capturing after cleanup would copy a
+    # file that's already gone.
+    strike_branch = src.index('if [ -z "$VERDICT" ]; then')
+    capture_i = src.index('cp "$OUT_FILE" "$RAW_CAPTURE"', strike_branch)
+    cleanup_i = src.index("cleanup_pass", capture_i)
+    assert strike_branch < capture_i < cleanup_i, \
+        "raw-output capture does not run, inside the strike branch, before cleanup_pass deletes $OUT_FILE"
+
+    # AC2: the human-facing side (state=error) must point at where the capture lives, not just
+    # log it -- a PR comment has no length limit, unlike post_status's 139-char description.
+    error_branch = src.index('post_status "$HEAD_SHA" "error"', strike_branch)
+    error_window = src[error_branch:error_branch + 900]
+    assert "RAW_CAPTURE" in error_window, \
+        "state=error path does not reference the raw-output capture path at all"
+    assert "gh pr comment" in error_window, \
+        "state=error has no PR comment pointing a human at the captured raw output"
+
+
 def _marie_sweeps_the_whole_backlog_not_just_the_new():
     """marie must re-judge the OLD backlog, not only what changed since last pass.
 
@@ -2136,6 +2211,8 @@ if __name__ == "__main__":
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
     check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
+    check("judge-judy lock lives somewhere persistent", _judge_judy_lock_lives_somewhere_persistent)
+    check("judge-judy strikes are head-scoped and leave diagnosable evidence", _judge_judy_strikes_are_scoped_by_head_and_leave_diagnosable_evidence)
     check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
