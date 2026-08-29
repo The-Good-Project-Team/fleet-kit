@@ -479,6 +479,36 @@ def _score_reasoning_is_not_guillotined_mid_word():
     assert "[truncated]" in src, "a truncated reasoning does not say it was truncated"
 
 
+def _self_evo_evidence_covers_both_repos():
+    """The Magikarp score's self-evolution evidence must not be single-repo-scoped again.
+
+    #176: `self_improve_score.sh`'s `gh pr list` calls ran from `cd "$FLEET_REPO"` with no
+    `--repo` flag, so on any box where $FLEET_REPO points somewhere other than fleet-kit's own
+    checkout (this container: FLEET_REPO=/repo=nonprofit-atlas), the query only ever saw
+    nonprofit-atlas PRs -- but since 2026-08-21 the fleet's actual jefe/dumbledore charter
+    fixes land almost entirely in fleet-kit's own repo. The score read flat/low for four days,
+    blind to the exact compounding activity it exists to detect. This regression check is the
+    static half of the fix (acceptance criterion 5 of #176); the live half was a manual re-run
+    confirming a fleet-kit PR became citable in the next self_improve_score.jsonl entry.
+    """
+    src = (ROOT / "scripts/self_improve_score.sh").read_text()
+    # Both sources must be present: $FLEET_REPO-relative (the product repo) AND a
+    # KIT_DIR-relative source (fleet-kit's own repo, wherever this script's checkout lives).
+    assert "FLEET_REPO_SLUG" in src, "no repo slug derived from $FLEET_REPO for the evidence query"
+    assert "KIT_REPO_SLUG" in src, "no repo slug derived from KIT_DIR -- fleet-kit's own PRs are unreachable again"
+    assert 'git -C "$1" remote get-url origin' in src or "remote get-url origin" in src, \
+        "repo slug is no longer derived from an existing checkout's git remote"
+    # Must not query the same repo twice when $FLEET_REPO already IS fleet-kit's own repo.
+    assert '"$KIT_REPO_SLUG" != "$FLEET_REPO_SLUG"' in src, \
+        "no guard against querying fleet-kit's repo twice when it's already $FLEET_REPO"
+    # Each merged PR entry must be tagged with its source repo -- PR numbers can collide
+    # across two repos, and the prompt's 'name the specific PR' instruction needs a handle
+    # that's unambiguous across both.
+    assert "x['repo'] = repo" in src, "merged evidence entries are not tagged with their source repo"
+    # Fail-open: a failed/empty gh call on either side must not hard-exit the script.
+    assert "except Exception" in src, "evidence merge has no fail-open path for a bad/empty gh response"
+
+
 def _adhoc_task_adds_to_the_charter_never_replaces_it():
     """`--task` runs a member ad-hoc with one extra instruction, charter still governing.
 
@@ -1363,6 +1393,48 @@ def _self_improve_score_is_actually_scheduled():
         "so self_improve_score.jsonl never gets written and dumbledore/jefe read nothing.")
 
 
+def _deploy_staleness_check_is_actually_scheduled():
+    """Same failure class as _self_improve_score_is_actually_scheduled, one script over.
+
+    gh#201: deploy_staleness_check.sh is the independent gate that catches a deploy that never
+    ran at all -- it is worthless if nothing puts it on cron, exactly the "spec/reality exists,
+    but nothing scheduled it" gap that bit datta (nonprofit-atlas#3321) and self_improve_score.sh
+    (gh#196-adjacent) before it.
+    """
+    entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
+    assert "deploy_staleness_check.sh" in entry, (
+        "deploy_staleness_check.sh has no line in entrypoint.sh's crontab -- it will never run, "
+        "so a dark deploy pipeline goes back to being invisible until a human stumbles onto it.")
+
+
+def _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget():
+    """The check must compare something REAL (a SHA baked at build time), and must only write
+    a durable record when actually past budget -- not on every tick, or the STALE line this
+    issue exists to produce drowns in routine noise the same way auto_deploy.sh's own comment
+    warns against for its lock-contention branch.
+
+    gh#201: /fleet-kit is never a real git checkout in production (Dockerfile's own
+    `COPY . /fleet-kit` with .dockerignore excluding .git/), so the check can't `git log` the
+    live tree -- it has to read back a SHA deploy.sh baked in at build time and compare it to
+    main's current HEAD over the GitHub API.
+    """
+    src = (ROOT / "scripts" / "deploy_staleness_check.sh").read_text()
+    assert ".deploy_sha" in src, "does not read the SHA deploy.sh bakes into the image at build time"
+    assert "STALENESS_BUDGET_S" in src, "no staleness budget -- would alert on every normal deploy lag"
+    assert 'log "STALE' in src, "no distinguishable STALE record -- same gap gh#196 fixed for a normal deploy line"
+    # The in-sync path must not itself write the durable STALE line.
+    quiet_branch = src[src.find('if [ "$DEPLOYED_SHA" = "$MAIN_SHA" ]'):src.find("# Diverged.")]
+    assert "log " not in quiet_branch, "logs even when in sync -- would bury the STALE line in noise"
+
+    deploy_src = (ROOT / "scripts" / "deploy.sh").read_text()
+    assert "DEPLOY_SHA=" in deploy_src and "--build-arg DEPLOY_SHA=" in deploy_src, \
+        "deploy.sh does not bake the built SHA into the image -- the staleness check has nothing to read"
+
+    docker_src = (ROOT / "Dockerfile").read_text()
+    assert "ARG DEPLOY_SHA" in docker_src and ".deploy_sha" in docker_src, \
+        "Dockerfile does not accept/write DEPLOY_SHA -- deploy.sh's build-arg has nowhere to land"
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -1608,6 +1680,7 @@ if __name__ == "__main__":
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
     check("minion knows the browser in its own image exists", _minion_knows_the_browser_exists)
     check("score reasoning is not guillotined mid-word", _score_reasoning_is_not_guillotined_mid_word)
+    check("self-evolution evidence covers fleet-kit's own repo, not just $FLEET_REPO", _self_evo_evidence_covers_both_repos)
     check("jefe can unstick a PR that is merely behind its base", _jefe_can_unstick_a_pr_that_is_merely_behind)
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
@@ -1628,6 +1701,8 @@ if __name__ == "__main__":
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
     check("self_improve_score.sh is actually scheduled", _self_improve_score_is_actually_scheduled)
+    check("deploy staleness check is actually scheduled", _deploy_staleness_check_is_actually_scheduled)
+    check("deploy staleness check reads a baked SHA and only alerts past budget", _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("deploy.sh's log is durable regardless of caller", _deploy_log_is_durable_regardless_of_caller)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
