@@ -20,7 +20,8 @@
 set -uo pipefail
 
 REPO="${FLEET_REPO:?set FLEET_REPO}"
-LOG="${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}/the-fixer.log"
+LOG_DIR="${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}"
+LOG="$LOG_DIR/the-fixer.log"
 # FIXER_STATE_FILE override exists so a human/agent can dry-run this script against a real PR
 # to verify a fix (exactly what happened testing PR #46's own StatusContext detection fix,
 # 2026-08-24) without corrupting the fleet's real dedup state -- before this, a manual run wrote
@@ -28,8 +29,16 @@ LOG="${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}/the-fixer.log"
 # and no-op'd on a fire nobody had actually fought yet. Verification runs now pass
 # FIXER_STATE_FILE=/tmp/whatever; cron's real invocation is unaffected (falls through to the
 # same default path as before).
-STATE="${FIXER_STATE_FILE:-$HOME/.cache/fleet-kit/the-fixer.state}"
-HB_STAMP="$HOME/.cache/fleet-kit/the-fixer.hb"
+#
+# Default lives under $LOG_DIR, NOT $HOME/.cache -- confirmed live 2026-08-29 (fleet-kit
+# gh#215): $HOME is the per-pass ephemeral overlay (a fresh worktree/container each run), while
+# $FLEET_LOG_DIR is the one bind-mounted, cross-pass-persistent path (the-fixer.log itself has
+# entries spanning days, proving it survives). A dedup file on $HOME/.cache silently resets
+# between passes, so the SAME already-fought SHA (91eb91a, reverted via PR #188 at 04:52 UTC)
+# re-fired as a fresh FIRE almost 11 hours later -- the exact "fire twice per SHA" bug this
+# state file exists to prevent.
+STATE="${FIXER_STATE_FILE:-$LOG_DIR/the-fixer.state}"
+HB_STAMP="$LOG_DIR/the-fixer.hb"
 
 mkdir -p "$(dirname "$LOG")" "$(dirname "$STATE")"
 ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
