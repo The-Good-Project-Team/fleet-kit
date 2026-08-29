@@ -81,8 +81,11 @@ post_status() { # <sha> <state> <description>
 # --- pick ONE PR ------------------------------------------------------------------------------
 pick_pr() {
   local pr head statuses review_seen checks
-  for pr in $(gh pr list --state open --json number,isDraft \
-                -q '.[] | select(.isDraft | not) | .number' 2>/dev/null); do
+  # Oldest-created first: gh pr list's default (newest-first) order lets a steady stream of
+  # new PRs starve a long-lived one indefinitely -- fleet-kit#181 measured PR#149 skipped 8
+  # consecutive ticks (~2h) because newer PRs kept landing ahead of it in list order.
+  for pr in $(gh pr list --state open --json number,isDraft,createdAt \
+                -q 'sort_by(.createdAt) | .[] | select(.isDraft | not) | .number' 2>/dev/null); do
     [ -n "${1:-}" ] && [ "$pr" != "$1" ] && continue
     head=$(gh pr view "$pr" --json headRefOid -q '.headRefOid' 2>/dev/null) || continue
     [ -z "$head" ] && continue
