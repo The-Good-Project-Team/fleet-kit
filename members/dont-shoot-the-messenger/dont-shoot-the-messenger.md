@@ -53,3 +53,21 @@ distinct error, do not retry-spam every tick on a misconfiguration nothing will 
 One line: shipped/no-op/driver-error, and whether you found a repeating pattern worth filing.
 
 **Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.
+
+**Copy this shape exactly -- plain text, no `##` heading, no bold on the labels** (confirmed
+live, 2026-08-28: this member kept opening with `## Report **BOTTOM LINE:**` instead, a
+markdown-decorated title rather than the literal lines below, and `run_report.py` found none
+of the contract fields in that output -- gh#135):
+
+```
+Report:
+BOTTOM LINE: <no-op / shipped / driver-error, one sentence>
+
+1. <what you found in the log tail>
+
+WHAT TO IMPROVE: <file it, or say nothing needed>
+
+Outcome: <shipped/no-op/driver-error, plus a #issue number if you filed one>
+Evidence: <the log line or count that proves it>
+Self-critique: <one line, or "none">
+```
