@@ -1146,6 +1146,70 @@ def _marie_sweeps_the_whole_backlog_not_just_the_new():
     assert stated == numbered, f"checklist says {stated} items but lists {numbered}"
 
 
+def _deploy_sh_host_log_dir_survives_sourcing_the_instances_container_scoped_fleet_env():
+    """Real production incident, 2026-08-29: deploy.sh sources the instance's fleet.env
+    (needed for FLEET_ACCOUNTS/FLEET_REPO_URL), but that file's FLEET_LOG_DIR is meant for
+    the CONTAINER (/var/log/fleet-kit -- what run_member.sh and every member see once
+    running inside), while deploy.sh itself runs on the HOST. Sourcing it unguarded let
+    fleet.env's container-scoped value silently overwrite whatever the caller (auto_deploy.sh,
+    a human, cron) had already exported, so `mkdir -p "$LOG_DIR"` tried to create
+    /var/log/fleet-kit ON THE HOST -- root:syslog-owned, not writable by the operator account.
+    Both fleet instances' auto_deploy.sh failed at deploy.sh's very first real line, every
+    5-minute tick, the moment main actually moved for the first time in a while (104
+    consecutive failures observed before this was caught and fixed).
+
+    Proves the actual save/restore lines from deploy.sh (extracted by content, not
+    hand-copied) leave a caller-provided FLEET_LOG_DIR untouched by the instance's fleet.env.
+    """
+    import tempfile
+    from pathlib import Path
+
+    src = (HERE / "deploy.sh").read_text()
+    marker_save = 'CALLER_LOG_ENV="${FLEET_LOG_DIR:-}"'
+    marker_source = '[ -f "$INSTANCE_DIR/fleet.env" ] && { set -a; . "$INSTANCE_DIR/fleet.env"; set +a; } || true'
+    marker_restore = 'FLEET_LOG_DIR="$CALLER_LOG_ENV"'
+    for m in (marker_save, marker_source, marker_restore):
+        assert m in src, f"deploy.sh's save/source/restore sequence changed -- expected to find: {m!r}"
+    # The three lines must appear in THIS order (save, then source, then restore) -- any other
+    # order reintroduces the clobber.
+    i1, i2, i3 = src.index(marker_save), src.index(marker_source), src.index(marker_restore)
+    assert i1 < i2 < i3, "save/source/restore lines are out of order in deploy.sh"
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "fleet.env").write_text(
+            "FLEET_REPO_URL=https://example.invalid/repo.git\n"
+            "FLEET_LOG_DIR=/var/log/fleet-kit\n"  # the real, always-present container path
+        )
+        harness = f"""#!/bin/bash
+set -euo pipefail
+INSTANCE_DIR="{d}"
+{marker_save}
+{marker_source}
+{marker_restore}
+LOG_DIR="${{FLEET_LOG_DIR:-$HOME/fallback-logs}}"
+echo "$LOG_DIR"
+"""
+        harness_path = d / "harness.sh"
+        harness_path.write_text(harness)
+
+        import subprocess
+        # Case 1: caller already exported a real host path -- must survive the source untouched.
+        out = subprocess.run(["bash", str(harness_path)], capture_output=True, text=True,
+                              env={"HOME": "/tmp", "FLEET_LOG_DIR": "/home/ubuntu/real-host-logs"})
+        assert out.stdout.strip() == "/home/ubuntu/real-host-logs", (
+            f"caller's FLEET_LOG_DIR was clobbered by fleet.env's container-scoped value: {out.stdout!r}"
+        )
+
+        # Case 2: caller set nothing -- must fall through to the script's own host default,
+        # never to fleet.env's /var/log/fleet-kit (which mkdir -p cannot create on the host).
+        out = subprocess.run(["bash", str(harness_path)], capture_output=True, text=True,
+                              env={"HOME": "/tmp"})
+        assert out.stdout.strip() == "/tmp/fallback-logs", (
+            f"no caller override still resolved to the container path: {out.stdout!r}"
+        )
+
+
 def _deploy_cordons_then_drains_and_always_uncordons():
     """The drain must stop NEW work, not just wait, and must never leave the fleet off.
 
@@ -1197,9 +1261,14 @@ def _deploy_log_is_durable_regardless_of_caller():
     src = (ROOT / "scripts" / "deploy.sh").read_text()
     assert "DEPLOY_LOG" in src and ">> \"$DEPLOY_LOG\"" in src, \
         "log() does not append to a durable file -- stdout only, same gap as gh#196"
-    i = src.find("LOG_DIR=")
+    # Newline-anchored: a bare `\nLOG_DIR=` search would also match `FLEET_LOG_DIR=` (the
+    # save/restore lines added around the fleet.env source, see the ceiling test above) --
+    # this must find the LOCAL LOG_DIR assignment specifically, not any line ending in that
+    # substring.
+    i = src.find("\nLOG_DIR=")
     j = src.find("\nlog() {")
     assert i != -1 and j != -1 and i < j, "log destination must be set up before log() is defined"
+    i += 1  # drop the leading newline so `setup` starts at "LOG_DIR=", not mid-blank-line
     setup = src[i:j]
     assert '${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}' in setup, \
         "deploy.sh does not reuse auto_deploy.sh's own FLEET_LOG_DIR convention"
@@ -1904,6 +1973,7 @@ if __name__ == "__main__":
     check("deploy staleness check is actually scheduled", _deploy_staleness_check_is_actually_scheduled)
     check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
     check("deploy staleness check reads a baked SHA and only alerts past budget", _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget)
+    check("deploy.sh's host log dir survives sourcing the instance's container-scoped fleet.env", _deploy_sh_host_log_dir_survives_sourcing_the_instances_container_scoped_fleet_env)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("deploy.sh's log is durable regardless of caller", _deploy_log_is_durable_regardless_of_caller)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
