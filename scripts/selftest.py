@@ -1162,6 +1162,15 @@ def _datta_dispatches_and_nerds_analyse():
     assert spec["enabled"] is False, "nerd self-fires -- it would run lanes datta never chose"
     assert spec.get("schedule"), "empty schedule fails member_spec validation (found live)"
 
+    # minion must never self-fire either: it has no logic to pick its own item, only to work
+    # whatever --item gru hands it. A cron-fired minion would either crash or improvise a claim
+    # outside gru's claim-race-safe dispatch path, corrupting the invariant claim hygiene
+    # depends on (fleet-kit#155).
+    minion_spec = json.loads((root / "members" / "minion" / "minion.fleet.json").read_text())
+    assert minion_spec["enabled"] is False, \
+        "minion self-fires -- it would improvise a claim outside gru's claim-race-safe dispatch path"
+    assert minion_spec.get("schedule"), "empty schedule fails member_spec validation (found live)"
+
 
 def _every_pass_files_a_written_report():
     """A pass costs real money; it owes a memo, not three one-line fields.
