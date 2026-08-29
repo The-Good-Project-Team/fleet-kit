@@ -150,10 +150,26 @@ while :; do
   BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_review_body.XXXXXX")
   OUT_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_review_out.XXXXXX")
   USAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_usage.XXXXXX")
+  # Initialized empty here (before cleanup_pass is defined, let alone called) -- the reserve
+  # call itself happens further down, AFTER the gh-pr-diff-failure exit point below, so
+  # cleanup_pass must be able to safely check LEASE_ID on an iteration that never got that
+  # far (set -u makes an unset-variable reference fatal, not just empty).
+  LEASE_ID=""
   # No RETURN/EXIT trap here (RETURN doesn't fire for a while-loop body, and one EXIT trap
   # can't hold a growing file list across iterations) -- cleanup_pass is called explicitly
   # at every exit point of this iteration instead, plus a final catch-all after the loop.
-  cleanup_pass() { rm -f "$DIFF_FILE" "$BODY_FILE" "$OUT_FILE" "$USAGE_FILE"; }
+  # Releasing the maxx lease here too (not just at the happy-path end) is what guarantees a
+  # reservation never outlives its own PR's review -- every early exit in this loop
+  # (gh pr diff failure, claude call failure, unparseable strike) already routes through
+  # cleanup_pass, so there is exactly one place that can leak a lease, not N.
+  cleanup_pass() {
+    rm -f "$DIFF_FILE" "$BODY_FILE" "$OUT_FILE" "$USAGE_FILE"
+    if [ -n "$LEASE_ID" ]; then
+      python3 "$KIT_DIR/scripts/maxx_lease.py" release --lease-id "$LEASE_ID" >/dev/null 2>>"$LOG" \
+        || log "WARN: maxx lease release failed for $LEASE_ID (self-expires via its own ttl_sec)"
+      LEASE_ID=""
+    fi
+  }
 
   if ! gh pr diff "$PR" > "$DIFF_FILE" 2>/dev/null; then
     log "PR #$PR: gh pr diff failed"
@@ -168,6 +184,28 @@ while :; do
     TRUNC_NOTE="NOTE: the diff was truncated at ${MAX_DIFF_BYTES} bytes; flag that in your review if it limits confidence."
   fi
   gh pr view "$PR" --json title,body -q '"TITLE: \(.title)\n\n\(.body)"' > "$BODY_FILE" 2>/dev/null || true
+
+  # Self-reserve against FLEET_SHARE_CEILING_PCT (run_member.sh, if FLEET_SHARE_FRACTION is
+  # active on this instance) right before spending, not once for the whole tick: the ceiling
+  # is a snapshot of what's available RIGHT NOW, and other leases (this instance's own
+  # earlier PRs, or the other instance's members) can expire and free up real headroom
+  # mid-tick -- reserving the whole ceiling up front would hold headroom idle that a
+  # concurrent pass elsewhere could have used. Sized as a fixed slice of the current ceiling
+  # (not the full thing) since one PR review is a small fraction of an hour's work; released
+  # immediately after this call returns (cleanup_pass, below) so the hold is only as long as
+  # the actual spend, never the whole tick. Best-effort: an unset ceiling (FLEET_SHARE_
+  # FRACTION inactive, or the meter was unreadable) means no reservation is made or needed --
+  # LEASE_ID stays empty, and release is a no-op on an empty id (maxx_lease.py's own
+  # contract).
+  LEASE_ID=""
+  if [ -n "${FLEET_SHARE_CEILING_PCT:-}" ]; then
+    RESERVE_PCT=$(awk -v c="$FLEET_SHARE_CEILING_PCT" 'BEGIN { printf "%.6f", c * 0.1 }')
+    if awk -v r="$RESERVE_PCT" 'BEGIN { exit !(r > 0) }'; then
+      LEASE_ID=$(python3 "$KIT_DIR/scripts/maxx_lease.py" reserve --pct "$RESERVE_PCT" \
+        --label "judge-judy-pr${PR}" --ttl-sec 900 2>>"$LOG" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id",""))' 2>/dev/null)
+    fi
+  fi
 
 # See judge-judy.md (this member's own charter) for the annotated version of this template.
 PROMPT="You are the merge-blocking code reviewer for this repo. Review the diff below for
