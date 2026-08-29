@@ -56,6 +56,11 @@ def main(argv: list[str]) -> int:
     except ValueError:
         print(f"bad fraction: {argv[1]!r}", file=sys.stderr)
         return 2
+    # Clamped to <= 1.0 -- this module's whole contract (see header) is "only ever SHRINKS an
+    # existing cap, never bypasses a member's own tighter one." run_member.sh's caller-side
+    # guard only checks `!= "1.0"`, so an operator typo like FLEET_SHARE_FRACTION=1.5 would
+    # otherwise raise a member's budget above its own spec value instead of scaling it down.
+    share = min(share, 1.0)
 
     base_str = argv[2].strip()
     if base_str:

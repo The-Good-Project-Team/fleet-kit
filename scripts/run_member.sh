@@ -132,6 +132,30 @@ fi
 # when calibrating (`run_id NOT LIKE '%-adhoc-%'`).
 RUN_ID="${MEMBER}${ITEM:+-item$ITEM}${TASK:+-adhoc}-$$-$(date +%s)"
 
+MAX_BUDGET=$(jget "['mandate']['limits'].get('max_budget_usd') or ''")
+
+# FLEET_SHARE_FRACTION -- this instance's slice of the fleet-wide sustainable pace, applied
+# to EVERY member's own spend ceiling, including a custom-runner member like judge-judy
+# (exported below as FLEET_MAX_BUDGET_USD, the env var judge-judy.sh already reads for its
+# own `claude -p --max-budget-usd`) -- not just the generic claude -p path further down, and
+# not just gru, which already scales its own sizing the same way via
+# FLEET_GRU_ALLOWANCE_FRACTION (see gru.md). Only reached when an operator has explicitly set
+# FLEET_SHARE_FRACTION < 1.0 on this instance -- an instance that never sets it never calls
+# maxx_share_check.py at all, so every member stays exactly as uncapped as before this change.
+# When it IS set, a member with its own max_budget_usd gets it scaled down; a member with NO
+# cap gets a synthesized one (see maxx_share_check.py's own header) -- otherwise most of the
+# fleet (uncapped by design) would see zero effect from this dial. Fails open on an unreadable
+# maxx meter (script's own contract). Skipped entirely under --dry-run: this is a live network
+# call (maxx_reader.get_headroom()), and --dry-run's own contract is "print the resolved
+# command, run nothing" (see this script's header comment).
+if [ "$DRY_RUN" -ne 1 ] && [ "${FLEET_SHARE_FRACTION:-1.0}" != "1.0" ]; then
+  SCALED_BUDGET=$(python3 "$KIT_DIR/scripts/maxx_share_check.py" "${FLEET_SHARE_FRACTION:-1.0}" "$MAX_BUDGET" 2>>"$LOG")
+  if [ -n "$SCALED_BUDGET" ]; then
+    log "$MEMBER: max_budget_usd scaled by FLEET_SHARE_FRACTION=${FLEET_SHARE_FRACTION}: \$${MAX_BUDGET:-uncapped} -> \$${SCALED_BUDGET}"
+    MAX_BUDGET="$SCALED_BUDGET"
+  fi
+fi
+
 # A member MAY declare its own runner (e.g. judge-judy's judge-judy.sh, which reviews a
 # diff as untrusted TEXT with zero tools -- a shape the generic claude -p path below can't
 # express safely). Default: none, every other member runs through the generic path.
@@ -147,6 +171,7 @@ if [ -n "$CUSTOM_RUNNER" ]; then
     exit 0
   fi
   log "pass start (custom runner=$CUSTOM_RUNNER)"
+  [ -n "$MAX_BUDGET" ] && export FLEET_MAX_BUDGET_USD="$MAX_BUDGET"
   "$RUNNER_PATH"
   RC=$?
   log "pass end rc=$RC (custom runner)"
@@ -258,24 +283,8 @@ MODEL=$(jget "['llm']['model']")
 # and it should prune prompt, etc. before it prunes turns." A turn cap MASKS a rambling
 # charter instead of fixing it; dumbledore's rot hunt owns that tuning.
 MAX_TURNS=$(jget "['llm'].get('max_turns') or ''")
-MAX_BUDGET=$(jget "['mandate']['limits'].get('max_budget_usd') or ''")
-
-# FLEET_SHARE_FRACTION -- this instance's slice of the fleet-wide sustainable pace, applied
-# to EVERY member's own spend ceiling (not just gru's, which already scales its own sizing
-# the same way via FLEET_GRU_ALLOWANCE_FRACTION -- see gru.md). Only reached when an operator
-# has explicitly set FLEET_SHARE_FRACTION < 1.0 on this instance -- an instance that never
-# sets it never calls maxx_share_check.py at all, so every member stays exactly as uncapped
-# as before this change. When it IS set, a member with its own max_budget_usd gets it
-# scaled down; a member with NO cap gets a synthesized one (see maxx_share_check.py's own
-# header) -- otherwise most of the fleet (uncapped by design) would see zero effect from
-# this dial. Fails open on an unreadable maxx meter (script's own contract).
-if [ "${FLEET_SHARE_FRACTION:-1.0}" != "1.0" ]; then
-  SCALED_BUDGET=$(python3 "$KIT_DIR/scripts/maxx_share_check.py" "${FLEET_SHARE_FRACTION:-1.0}" "$MAX_BUDGET" 2>>"$LOG")
-  if [ -n "$SCALED_BUDGET" ]; then
-    log "$MEMBER: max_budget_usd scaled by FLEET_SHARE_FRACTION=${FLEET_SHARE_FRACTION}: \$${MAX_BUDGET:-uncapped} -> \$${SCALED_BUDGET}"
-    MAX_BUDGET="$SCALED_BUDGET"
-  fi
-fi
+# MAX_BUDGET (incl. FLEET_SHARE_FRACTION scaling) is computed earlier, before the
+# custom-runner branch, so a member like judge-judy also sees it -- see that block's comment.
 
 PROMPT=$(awk 'BEGIN{d=0} /^---$/{d++; next} d>=2{print}' "$BEHAVIOR")
 if [ -z "$PROMPT" ]; then
