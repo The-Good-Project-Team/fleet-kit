@@ -1,0 +1,14 @@
+[Unit]
+Description=fleet-kit public-tunnel health pager — self-heals ingress drift and pages when the public URL is not serving (scripts/tunnel_health_check.sh)
+
+[Service]
+Type=oneshot
+# tunnel_health_check.sh reads these directly (it does not source fleet.env -- same
+# host-side-only reasoning as fleetkit-account-health.service) -- Environment= here, not
+# FLEET_ENV_FILE. CF_API_TOKEN_FILE/CF_ACCOUNT_ID_FILE/CONNECTOR_TOKEN_FILE are left at the
+# script's own /etc/cloudflared defaults; override here if your box keeps them elsewhere.
+Environment=PUBLIC_URL={{PUBLIC_URL}}
+Environment=FLEET_VIEW_PORT={{VIEW_PORT}}
+Environment=NTFY_TOPIC={{NTFY_TOPIC}}
+ExecStart={{KIT_PATH}}/scripts/tunnel_health_check.sh
+User={{USER}}
