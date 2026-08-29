@@ -13,6 +13,7 @@ ran it.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import re
 import sys
@@ -346,6 +347,178 @@ def _maxx_lease_concurrent_reserves_dont_clobber_each_other():
         leases = json.loads(state_file.read_text())
         assert len(leases) == n, f"expected {n} surviving leases, got {len(leases)} -- lost a write"
         assert abs(maxx_lease.total_reserved_pct(state_file) - n * 0.01) < 1e-9
+
+
+def _maxx_share_ceiling_uses_hourly_headroom_not_the_week_bank():
+    """Replaces the old maxx_share_check.py, which multiplied a member's budget by
+    `week_bank_pct` -- a LAGGING, already-spent number. The moment the week goes over pace
+    (bank negative), that clamps to 0.0 and zeros every member's spend even during an hour
+    with real headroom. This proves the ceiling is computed from `sustainable_pct_per_hour`
+    minus `per_diem_hourly_pct` minus `reserved_pct` instead -- a leading, real-time number
+    that stays positive on a healthy hour even while the week bank is deep negative.
+    """
+    import maxx_share_ceiling
+
+    # A week deep over pace (bank very negative) but a healthy CURRENT hour: sustainable
+    # pace is 0.35%/hr, only 0.10%/hr actually spent so far this hour, nothing reserved.
+    healthy_hour_bad_week = {
+        "verdict": "ok",
+        "week_bank_pct": -34.4,             # would clamp headroom_fraction to 0.0 under the
+                                             # old formula -- must NOT zero this ceiling.
+        "sustainable_pct_per_hour": 0.35,
+        "per_diem_hourly_pct": 0.10,
+        "reserved_pct": 0,
+    }
+    orig = maxx_share_ceiling.get_headroom
+    try:
+        maxx_share_ceiling.get_headroom = lambda: (1.0, "ok", healthy_hour_bad_week)
+        assert maxx_share_ceiling.main(["prog", "0.40"]) == 0
+
+        # Same computation, share=1.0, to isolate the raw hourly-headroom formula from the
+        # fraction multiply: (0.35 - 0.10 - 0) = 0.25.
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            maxx_share_ceiling.main(["prog", "1.0"])
+        assert abs(float(buf.getvalue().strip()) - 0.25) < 1e-6, buf.getvalue()
+
+        # Other members' live reservations subtract too -- a busy fleet has less ceiling
+        # left for the next member to self-reserve against.
+        maxx_share_ceiling.get_headroom = lambda: (
+            1.0, "ok", {**healthy_hour_bad_week, "reserved_pct": 0.20})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            maxx_share_ceiling.main(["prog", "1.0"])
+        assert abs(float(buf.getvalue().strip()) - 0.05) < 1e-6, buf.getvalue()  # 0.35-0.10-0.20
+
+        # An hour already at or past sustainable pace (once reservations are subtracted) is
+        # an honest, printed zero -- not suppressed, not negative.
+        maxx_share_ceiling.get_headroom = lambda: (
+            1.0, "ok", {**healthy_hour_bad_week, "per_diem_hourly_pct": 0.90})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            maxx_share_ceiling.main(["prog", "1.0"])
+        assert float(buf.getvalue().strip()) == 0.0, buf.getvalue()
+
+        # Unreadable meter -> prints nothing (fails open: caller falls back to its own
+        # pre-existing cap, never reads an absent ceiling as "reserve 0").
+        maxx_share_ceiling.get_headroom = lambda: (None, "maxx_unreachable", {})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            maxx_share_ceiling.main(["prog", "0.40"])
+        assert buf.getvalue().strip() == "", buf.getvalue()
+
+        # FLEET_SHARE_FRACTION > 1.0 (operator typo) must never raise the ceiling above the
+        # fleet's own real hourly headroom -- clamped to 1.0 same as the old script.
+        maxx_share_ceiling.get_headroom = lambda: (1.0, "ok", healthy_hour_bad_week)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            maxx_share_ceiling.main(["prog", "1.0"])
+        uncapped = float(buf.getvalue().strip())
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            maxx_share_ceiling.main(["prog", "1.5"])
+        assert float(buf.getvalue().strip()) == uncapped, (uncapped, buf.getvalue())
+    finally:
+        maxx_share_ceiling.get_headroom = orig
+
+
+def _maxx_share_ceiling_subtracts_local_leases_not_just_the_remotes_reserved_pct():
+    """fleet-code-review BLOCK on PR #184: the ceiling formula read `budget["reserved_pct"]`
+    from `get_headroom()` (the plain function), but that field only ever carries whatever the
+    REMOTE maxx endpoint reports -- which today is nothing, because the remote never learns
+    about a LOCAL maxx_lease.py reservation (gh#161 part 2). The merge of local leases into
+    reserved_pct only happened inside maxx_reader.py's own CLI `main()`, which
+    maxx_share_ceiling.py never goes through. Net effect: two concurrent callers (this
+    instance's judge-judy running twice, or the OTHER instance) each saw the SAME generous
+    ceiling and each reserved against it, seeing none of each other's live leases --
+    reproducing, in a new form, the exact "no coordination" problem this PR set out to fix.
+
+    This test exercises the REAL integration (an actual on-disk maxx_lease reservation, not a
+    mocked reserved_pct in the dict) so it cannot pass the way the original, weaker version of
+    this test did -- that one monkeypatched get_headroom with a dict that ALREADY contained
+    reserved_pct, which is exactly the value the real code path never produces on its own.
+    """
+    import tempfile
+    from pathlib import Path
+
+    import maxx_lease
+    import maxx_share_ceiling
+
+    with tempfile.TemporaryDirectory() as d:
+        state_file = Path(d) / "maxx-leases.json"
+        orig_state = maxx_lease.STATE_FILE
+        orig_headroom = maxx_share_ceiling.get_headroom
+        try:
+            maxx_lease.STATE_FILE = state_file
+
+            # The remote's own reserved_pct is 0 (its honest, real-world default -- it has no
+            # idea a local lease exists). sustainable=0.35, used=0.10 -> raw headroom 0.25.
+            remote_budget = {
+                "verdict": "ok", "sustainable_pct_per_hour": 0.35,
+                "per_diem_hourly_pct": 0.10, "reserved_pct": 0,
+            }
+            maxx_share_ceiling.get_headroom = lambda: (1.0, "ok", remote_budget)
+
+            import io
+            from contextlib import redirect_stdout
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                maxx_share_ceiling.main(["prog", "1.0"])
+            assert abs(float(buf.getvalue().strip()) - 0.25) < 1e-6, buf.getvalue()
+
+            # A REAL concurrent lease exists on disk (e.g. judge-judy on the other instance,
+            # or an earlier call this same instance made) -- the remote still reports
+            # reserved_pct=0 (it never learns about this), but the ceiling MUST see it anyway.
+            maxx_lease.maxx_reserve(pct=0.08, label="concurrent-caller", ttl_sec=3600)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                maxx_share_ceiling.main(["prog", "1.0"])
+            assert abs(float(buf.getvalue().strip()) - 0.17) < 1e-6, buf.getvalue()  # 0.25-0.08
+        finally:
+            maxx_lease.STATE_FILE = orig_state
+            maxx_share_ceiling.get_headroom = orig_headroom
+
+
+def _maxx_share_ceiling_respects_a_real_over_verdict_not_just_unreadable_meters():
+    """fleet-code-review BLOCK on PR #184: `verdict=="over"` is maxx's own DEFINITIVE "stop"
+    signal -- get_headroom() returns fraction=0.0 (never None) for it specifically, per
+    maxx_reader.py's own header, so a real stop can't be confused with an unreadable meter.
+    The ceiling script only checked `fraction is None` and then discarded `fraction`
+    entirely, recomputing purely from the hourly fields -- which are populated independently
+    of verdict and can look like real headroom even while verdict=="over". That let a real
+    hard-stop reading still yield a positive, spendable ceiling.
+
+    Failing scenario this reproduces: maxx returns verdict="over" (session/week over) but
+    with healthy-looking hourly numbers (sustainable=0.35, used=0.10) -- plausible in
+    practice, since those are independent signals.
+    """
+    import maxx_share_ceiling
+
+    over_but_hourly_looks_fine = {
+        "verdict": "over",
+        "sustainable_pct_per_hour": 0.35,
+        "per_diem_hourly_pct": 0.10,
+        "reserved_pct": 0,
+    }
+    orig = maxx_share_ceiling.get_headroom
+    try:
+        # get_headroom() itself returns (0.0, "over", ...) for this verdict -- match that
+        # real contract exactly (maxx_reader.py:147-151), not an arbitrary fraction.
+        maxx_share_ceiling.get_headroom = lambda: (0.0, "over", over_but_hourly_looks_fine)
+
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = maxx_share_ceiling.main(["prog", "1.0"])
+        assert rc == 0
+        assert float(buf.getvalue().strip()) == 0.0, (
+            f"verdict=='over' must yield a zero ceiling regardless of hourly fields, got: {buf.getvalue()!r}"
+        )
+    finally:
+        maxx_share_ceiling.get_headroom = orig
 
 
 def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
@@ -1044,6 +1217,70 @@ def _marie_sweeps_the_whole_backlog_not_just_the_new():
     assert stated == numbered, f"checklist says {stated} items but lists {numbered}"
 
 
+def _deploy_sh_host_log_dir_survives_sourcing_the_instances_container_scoped_fleet_env():
+    """Real production incident, 2026-08-29: deploy.sh sources the instance's fleet.env
+    (needed for FLEET_ACCOUNTS/FLEET_REPO_URL), but that file's FLEET_LOG_DIR is meant for
+    the CONTAINER (/var/log/fleet-kit -- what run_member.sh and every member see once
+    running inside), while deploy.sh itself runs on the HOST. Sourcing it unguarded let
+    fleet.env's container-scoped value silently overwrite whatever the caller (auto_deploy.sh,
+    a human, cron) had already exported, so `mkdir -p "$LOG_DIR"` tried to create
+    /var/log/fleet-kit ON THE HOST -- root:syslog-owned, not writable by the operator account.
+    Both fleet instances' auto_deploy.sh failed at deploy.sh's very first real line, every
+    5-minute tick, the moment main actually moved for the first time in a while (104
+    consecutive failures observed before this was caught and fixed).
+
+    Proves the actual save/restore lines from deploy.sh (extracted by content, not
+    hand-copied) leave a caller-provided FLEET_LOG_DIR untouched by the instance's fleet.env.
+    """
+    import tempfile
+    from pathlib import Path
+
+    src = (HERE / "deploy.sh").read_text()
+    marker_save = 'CALLER_LOG_ENV="${FLEET_LOG_DIR:-}"'
+    marker_source = '[ -f "$INSTANCE_DIR/fleet.env" ] && { set -a; . "$INSTANCE_DIR/fleet.env"; set +a; } || true'
+    marker_restore = 'FLEET_LOG_DIR="$CALLER_LOG_ENV"'
+    for m in (marker_save, marker_source, marker_restore):
+        assert m in src, f"deploy.sh's save/source/restore sequence changed -- expected to find: {m!r}"
+    # The three lines must appear in THIS order (save, then source, then restore) -- any other
+    # order reintroduces the clobber.
+    i1, i2, i3 = src.index(marker_save), src.index(marker_source), src.index(marker_restore)
+    assert i1 < i2 < i3, "save/source/restore lines are out of order in deploy.sh"
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "fleet.env").write_text(
+            "FLEET_REPO_URL=https://example.invalid/repo.git\n"
+            "FLEET_LOG_DIR=/var/log/fleet-kit\n"  # the real, always-present container path
+        )
+        harness = f"""#!/bin/bash
+set -euo pipefail
+INSTANCE_DIR="{d}"
+{marker_save}
+{marker_source}
+{marker_restore}
+LOG_DIR="${{FLEET_LOG_DIR:-$HOME/fallback-logs}}"
+echo "$LOG_DIR"
+"""
+        harness_path = d / "harness.sh"
+        harness_path.write_text(harness)
+
+        import subprocess
+        # Case 1: caller already exported a real host path -- must survive the source untouched.
+        out = subprocess.run(["bash", str(harness_path)], capture_output=True, text=True,
+                              env={"HOME": "/tmp", "FLEET_LOG_DIR": "/home/ubuntu/real-host-logs"})
+        assert out.stdout.strip() == "/home/ubuntu/real-host-logs", (
+            f"caller's FLEET_LOG_DIR was clobbered by fleet.env's container-scoped value: {out.stdout!r}"
+        )
+
+        # Case 2: caller set nothing -- must fall through to the script's own host default,
+        # never to fleet.env's /var/log/fleet-kit (which mkdir -p cannot create on the host).
+        out = subprocess.run(["bash", str(harness_path)], capture_output=True, text=True,
+                              env={"HOME": "/tmp"})
+        assert out.stdout.strip() == "/tmp/fallback-logs", (
+            f"no caller override still resolved to the container path: {out.stdout!r}"
+        )
+
+
 def _deploy_cordons_then_drains_and_always_uncordons():
     """The drain must stop NEW work, not just wait, and must never leave the fleet off.
 
@@ -1095,9 +1332,14 @@ def _deploy_log_is_durable_regardless_of_caller():
     src = (ROOT / "scripts" / "deploy.sh").read_text()
     assert "DEPLOY_LOG" in src and ">> \"$DEPLOY_LOG\"" in src, \
         "log() does not append to a durable file -- stdout only, same gap as gh#196"
-    i = src.find("LOG_DIR=")
+    # Newline-anchored: a bare `\nLOG_DIR=` search would also match `FLEET_LOG_DIR=` (the
+    # save/restore lines added around the fleet.env source, see the ceiling test above) --
+    # this must find the LOCAL LOG_DIR assignment specifically, not any line ending in that
+    # substring.
+    i = src.find("\nLOG_DIR=")
     j = src.find("\nlog() {")
     assert i != -1 and j != -1 and i < j, "log destination must be set up before log() is defined"
+    i += 1  # drop the leading newline so `setup` starts at "LOG_DIR=", not mid-blank-line
     setup = src[i:j]
     assert '${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}' in setup, \
         "deploy.sh does not reuse auto_deploy.sh's own FLEET_LOG_DIR convention"
@@ -1477,6 +1719,31 @@ def _deploy_staleness_check_is_actually_scheduled():
         "so a dark deploy pipeline goes back to being invisible until a human stumbles onto it.")
 
 
+def _account_and_tunnel_health_checks_are_actually_scheduled():
+    """Same failure class as _self_improve_score_is_actually_scheduled, two scripts over.
+
+    gh#171: account_health_check.sh and tunnel_health_check.sh are the fleet's only outage
+    pagers (README step 6 names them explicitly). PR#169 wired both into schedulers/systemd
+    and schedulers/launchd -- the bare-host path -- but entrypoint.sh's own crontab, the
+    container-native path every container deployment actually uses, had zero lines for
+    either. #154 (which asked for these to be scheduled) closed with the container path still
+    unfixed -- a closed issue naming a live gap is worse than an open one.
+    """
+    # Match the actual cron invocation, not just the bare filename -- both scripts are also
+    # named in surrounding comment prose (this very check's own docstring included), so a
+    # bare `"account_health_check.sh" in entry` would still pass with the cron line deleted.
+    entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
+    missing = [
+        s for s in ("bash /fleet-kit/scripts/account_health_check.sh", "bash /fleet-kit/scripts/tunnel_health_check.sh")
+        if s not in entry
+    ]
+    assert not missing, (
+        f"{missing} have no cron line in entrypoint.sh -- the fleet's only outage pagers "
+        "will never run on a container deployment, so an all-accounts-exhausted event or a "
+        "502'd tunnel pages nobody."
+    )
+
+
 def _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget():
     """The check must compare something REAL (a SHA baked at build time), and must only write
     a durable record when actually past budget -- not on every tick, or the STALE line this
@@ -1682,9 +1949,21 @@ def _unparseable_exhaustion_gates_briefly_not_for_an_hour():
 
 
 def _a_real_reset_time_is_still_honored():
-    """A stated reset must win over the short fallback, so we don't hammer a genuine limit."""
+    """A stated reset must win over the short fallback, so we don't hammer a genuine limit.
+
+    The reset hour must be derived from `now`, not hardcoded: a fixed "1pm" sits under 600s
+    from rolling to tomorrow in the ~10 minutes before 13:00 UTC, which turned this into a
+    false CI failure independent of any code change (#210 -- confirmed live on PR#209's
+    2026-08-29T12:53:12Z run). Picking an hour a few hours ahead of `now` keeps the asserted
+    gap (a real reset, not the 300s no-reset-time fallback) comfortably over 600s regardless
+    of wall-clock time, including across a midnight rollover.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    target_hour = (now.hour + 3) % 24
+    ampm = "am" if target_hour < 12 else "pm"
+    h12 = target_hour % 12 or 12
     out = _bash_eval(
-        "", '_account_pool_mark_exhausted acct "hit your weekly limit, resets 1pm (UTC)" >/dev/null; '
+        "", f'_account_pool_mark_exhausted acct "hit your weekly limit, resets {h12}{ampm} (UTC)" >/dev/null; '
             'now=$(date +%s); epoch=$(awk \'{print $2}\' "$ACCOUNT_POOL_STATE_FILE"); '
             'echo $(( epoch - now ))'
     )
@@ -1747,6 +2026,9 @@ if __name__ == "__main__":
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
     check("maxx lease reserves, releases, and self-expires", _maxx_lease_reserves_releases_and_self_expires)
     check("maxx lease concurrent reserves don't clobber each other", _maxx_lease_concurrent_reserves_dont_clobber_each_other)
+    check("maxx share ceiling uses hourly headroom, not the week bank", _maxx_share_ceiling_uses_hourly_headroom_not_the_week_bank)
+    check("maxx share ceiling subtracts local leases, not just the remote's reserved_pct", _maxx_share_ceiling_subtracts_local_leases_not_just_the_remotes_reserved_pct)
+    check("maxx share ceiling respects a real over verdict, not just unreadable meters", _maxx_share_ceiling_respects_a_real_over_verdict_not_just_unreadable_meters)
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
     check("minion knows the browser in its own image exists", _minion_knows_the_browser_exists)
     check("score reasoning is not guillotined mid-word", _score_reasoning_is_not_guillotined_mid_word)
@@ -1773,7 +2055,9 @@ if __name__ == "__main__":
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
     check("self_improve_score.sh is actually scheduled", _self_improve_score_is_actually_scheduled)
     check("deploy staleness check is actually scheduled", _deploy_staleness_check_is_actually_scheduled)
+    check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
     check("deploy staleness check reads a baked SHA and only alerts past budget", _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget)
+    check("deploy.sh's host log dir survives sourcing the instance's container-scoped fleet.env", _deploy_sh_host_log_dir_survives_sourcing_the_instances_container_scoped_fleet_env)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("deploy.sh's log is durable regardless of caller", _deploy_log_is_durable_regardless_of_caller)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
