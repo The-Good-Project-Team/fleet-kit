@@ -432,7 +432,7 @@ document.querySelectorAll('.side-nav-item').forEach(el => {
 const DIAL_KEYS = ['max_turns', 'model', 'enabled', 'schedule'];
 function dialValue(eff, key) {
   if (key === 'enabled') return eff.enabled;
-  if (key === 'schedule') return JSON.stringify(eff.schedule);
+  if (key === 'schedule') return eff.schedule;
   return (eff.llm || {})[key];
 }
 
@@ -1269,9 +1269,11 @@ document.body.addEventListener('click', async (e) => {
   }
   if (act === 'edit-dial') {
     const key = b.dataset.key;
-    const value = prompt(`new value for ${b.dataset.member}.${key} (JSON):`);
+    const m = SPECS.find(s => s.spec.name === b.dataset.member);
+    const current = m ? JSON.stringify(dialValue(m.effective, key)) : undefined;
+    const value = prompt(`new value for ${b.dataset.member}.${key} (JSON):`, current);
     if (value === null) return;
-    const why = prompt('why? (required)', 'tuned from console');
+    const why = prompt('why? (required)');
     if (!why) return;
     let parsed; try { parsed = JSON.parse(value); } catch { parsed = value; }
     const r = await fetch('/api/steer', { method: 'POST', body: JSON.stringify({ member: b.dataset.member, key, value: parsed, why }) });
@@ -1293,7 +1295,13 @@ document.body.addEventListener('click', async (e) => {
     alert((await r.json()).ok ? 'commented' : 'failed — see server log');
   } else if (act === 'close_issue') {
     if (!confirm(`close issue #${b.dataset.issue}?`)) return;
-    const reason = confirm('mark "not planned" (cancel = "completed")?') ? 'not planned' : 'completed';
+    const input = prompt('reason for closing — type "completed" or "not planned":', 'completed');
+    if (input === null) return;
+    const reason = input.trim().toLowerCase();
+    if (reason !== 'completed' && reason !== 'not planned') {
+      alert('reason must be exactly "completed" or "not planned" — aborted, nothing closed');
+      return;
+    }
     const r = await fetch('/api/close_issue', { method: 'POST', body: JSON.stringify({ issue: b.dataset.issue, reason }) });
     alert((await r.json()).ok ? 'closed' : 'failed — see server log');
   }
