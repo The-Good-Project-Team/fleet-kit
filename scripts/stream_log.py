@@ -208,7 +208,7 @@ def _detect_trailing_loss(result_line: str | None, assistant_texts: list[tuple[i
         return None
     if final_idx - prev_idx > _MAX_TRAILING_EVENT_GAP:
         return None
-    if obj.get("result", "").strip() == prev_text.strip():
+    if (obj.get("result") or "").strip() == prev_text.strip():
         return None
     return prev_text
 
