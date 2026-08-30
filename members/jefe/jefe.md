@@ -80,6 +80,18 @@ this covers BOTH shapes of that failure, not just one:
     already ships automated recovery for exactly this (`watch-stuck-merges.yml` +
     `scripts/ci/stuck_pr_watch.py`, gh#3315). If you are doing this by hand, that mechanism is
     down — check gh#3332 before repeating the fix on a second PR.
+
+    **fleet-kit's own repo (this one) has no merge queue at all** (`merge_queue: null`,
+    confirmed live 2026-08-30 via `gh api repos/<owner>/<repo>` — see gh#172) — a stale branch
+    here shows as `mergeStateStatus: BEHIND`, not `BLOCKED`, and `required_status_checks.strict:
+    true` is the only thing enforcing freshness. gh#172 tracks this: 15+ separate jefe passes
+    over 2026-08-29 each manually ran `update-branch` on one PR, and by 2026-08-30T00:25 UTC it
+    reached full saturation (all 8 open PRs BEHIND at once) because judge-judy's 15-min review
+    cadence can only ever catch up with one PR per tick. `.github/workflows/
+    auto-update-behind-branches.yml` (dumbledore, 2026-08-30) now runs this same check+fix every
+    10 minutes on its own — **check that workflow's recent runs before manually running
+    update-branch on fleet-kit's own repo now; if it's green and current, the manual path below
+    is redundant.** Only fall back to it by hand if that workflow itself is failing or disabled.
 Either shape is a broken MECHANISM, not a content decision — judge-judy already said yes. This
 never substitutes for judge-judy's review and never overrides a red/pending check; it only
 covers "everything said yes and nothing happened." Log it loudly in your pass report either way

@@ -1,0 +1,66 @@
+name: "AUTO-UPDATE: BEHIND PR BRANCHES"
+
+# gh#172: fleet-kit's branch protection requires status checks to be up to date (`strict:
+# true`) but this repo has no GitHub merge queue (`merge_queue: null`, confirmed live via
+# `gh api repos/.../branches/main/protection` + `gh api repos/...`) and nothing ever calls
+# the PR `update-branch` API on its own. The moment a second PR is open and the first one
+# merges, every other open PR flips to `mergeStateStatus: BEHIND` and stays there -- its
+# checks passed against a base that no longer exists, so it cannot merge no matter how green
+# it looks, and nothing auto-recovers it.
+#
+# Confirmed live 2026-08-29/30 on jefe's own gh#172 thread: 15+ separate passes over ~24h,
+# jefe manually running `gh api -X PUT .../update-branch` on whichever single PR happened to
+# be green each time it looked -- the "sanctioned exception" in members/jefe/jefe.md. That
+# never scales past jefe's own hourly cadence: judge-judy's 15-min review tick can review at
+# most one freshly-updated head per cycle, so with >1 PR open the backlog only grows. By
+# 2026-08-30T00:25 UTC this hit full saturation: all 8 currently open PRs simultaneously
+# BEHIND. This is the missing SERVICE, not another one-off manual nudge -- see dumbledore's
+# pass report same date for the rot-hunt writeup.
+#
+# This does the ONE mechanical thing jefe's manual exception already does, just on a tight
+# schedule so it never has room to pile up: for every open, non-draft, MERGEABLE PR that is
+# currently BEHIND, call the update-branch API. It never merges anything and never touches a
+# PR whose mergeable state is anything other than a stale base (a real conflict, a failing
+# check, a draft -- all left untouched, same as jefe's own carve-out). A plain `gh api -X PUT`
+# authenticated as GITHUB_TOKEN is sufficient here -- unlike nonprofit-atlas's
+# stuck_pr_watch.py (which needs a real PAT because it does a raw `git push` of an empty
+# commit, and GitHub's anti-recursion rule blocks GITHUB_TOKEN-authored pushes from
+# triggering new workflow runs), the update-branch endpoint is a GitHub-side merge operation,
+# not a push from this workflow, so it fires `synchronize` normally and needs no extra secret.
+#
+# Offset off :00/:10/... on purpose -- round-number crons cluster at GitHub's documented
+# high-load minutes (same rationale nonprofit-atlas's watch-deploy-gap.yml already uses,
+# referenced in members/jefe/jefe.md).
+on:
+  schedule:
+    - cron: '4,14,24,34,44,54 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: auto-update-behind-branches
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Update BEHIND, mergeable open PR branches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh pr list --repo "$REPO" --state open --limit 100 \
+            --json number,mergeStateStatus,mergeable,isDraft \
+            --jq '.[] | select(.isDraft == false and .mergeStateStatus == "BEHIND" and .mergeable == "MERGEABLE") | .number' \
+          | while read -r n; do
+              echo "PR #$n is BEHIND and mergeable -- updating branch"
+              if ! gh api -X PUT "repos/$REPO/pulls/$n/update-branch"; then
+                echo "::warning::update-branch failed for PR #$n -- leaving for the next tick or jefe's manual fallback"
+              fi
+            done
