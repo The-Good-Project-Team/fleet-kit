@@ -121,6 +121,17 @@ case "${1:-cron-foreground}" in
       # nothing about "is a transcript readable" needs sub-hour latency.
       echo "51 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dont-shoot-the-messenger >> $LOG_DIR/dont-shoot-the-messenger.log 2>&1"
       echo "*/15 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh judge-judy >> $LOG_DIR/judge-judy.log 2>&1"
+      # auto_update_branch.sh (gh#172): nothing else in this repo keeps an open PR's branch
+      # current with main, so one merge pushes every other open PR BEHIND/BLOCKED forever --
+      # confirmed live 2026-08-29/30 at "full saturation" (8/8 open PRs stuck simultaneously,
+      # the only remedy a human/jefe hand-running update-branch per PR). Not a member (no
+      # members/*/*.fleet.json, same shape as self_improve_score.sh below) so it needs its own
+      # line here -- a script existing and being documented does not mean anything schedules
+      # it (that exact gap already bit datta gh#3321 and self_improve_score.sh/account_health
+      # below). Minutes 5/20/35/50 run just ahead of judge-judy's :00/15/30/45 tick above, so a
+      # branch synced here has fresh checks ready in time for judge-judy's next pick instead of
+      # both mechanisms serializing their own separate waits.
+      echo "5,20,35,50 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/auto_update_branch.sh >> $LOG_DIR/auto_update_branch.log 2>&1"
       # Hourly/daily anchors nudged OFF the-fixer's even-minute grid (*/2) and gitpull's
       # ten-minute grid (*/10) -- :00/:20/:30/:40 all landed exactly on both, so every one of
       # these fired shoulder-to-shoulder with a poll every single time instead of getting a
