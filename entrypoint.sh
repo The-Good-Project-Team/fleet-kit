@@ -182,6 +182,16 @@ case "${1:-cron-foreground}" in
       # nerd pass stumbled onto it. Hourly at :57 is unclaimed on the minute map above and
       # comfortably inside the default 4h staleness budget (FLEET_DEPLOY_STALENESS_BUDGET_S).
       echo "57 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/deploy_staleness_check.sh >> $LOG_DIR/deploy_staleness_check.log 2>&1"
+      # auto_deploy_race_check.sh (gh#255): auto_deploy.sh's own guarded fetch/pull cannot
+      # produce a multi-branch fast-forward error or a ref-lock race -- when auto_deploy.cron.log
+      # (the HOST crontab's raw stdout/stderr capture, same bind-mounted $FLEET_LOG_DIR as this
+      # container reads) shows one anyway, some OTHER unidentified process is running unscoped
+      # git ops against the same checkout, and today that is silent until a human happens to
+      # tail a raw cron log. Runs inside the container (like deploy_staleness_check.sh above),
+      # not on the host: it only reads/appends plain log files, no podman needed. Hourly at :44
+      # (unclaimed on the minute map above) is enough to catch a race well inside the 5-minute
+      # auto_deploy poll cadence that produced it.
+      echo "44 * * * * root bash /fleet-kit/scripts/auto_deploy_race_check.sh >> $LOG_DIR/auto_deploy_race_check.log 2>&1"
       # account_health_check.sh + tunnel_health_check.sh (gh#171): the fleet's only outage
       # pagers per README step 6. PR#169 wired both into schedulers/systemd + schedulers/launchd
       # -- the bare-host path -- but never into THIS heredoc, the container-native path, so
