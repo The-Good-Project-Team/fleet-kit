@@ -154,6 +154,21 @@ Your own member's `## Report` section may still describe WHAT to summarize in pr
 that prose must be followed by the literal `Outcome:`/`Evidence:` lines naming the same
 content in the parseable form, every run, not instead of them.
 
+**This contract block must be the true final thing you ever output — no tool call, and no
+further turn, after it (gh#167).** The stream-json protocol's `result` field that
+`run_report.py` parses is Claude Code's LAST assistant turn only, by design — not a
+concatenation of everything you said. If you write this whole block, then make one more tool
+call, or add one more sentence in a new turn ("Report filed.", "Done.", a `TaskUpdate` to close
+out your own checklist), THAT later text — not your real report — silently becomes what gets
+parsed, and everything above vanishes as `reported_nothing`, even though you did the work and
+said the right thing seconds earlier. This is not hypothetical: 12 of 13 `reported_nothing`
+rows in one 2026-08-28 window had every contract field null despite real, evidenced work having
+been reported just before the pass's actual last turn (gh#167), and dumbledore's own pass on
+2026-08-29 08:19 UTC lost its own `Score-now:`/`Prediction:`/`Last-verdict:` lines this exact
+way — one no-op tool call after the report was enough. Once you have written this whole block
+(and `Report:`, and `Score-now:`/`Prediction:`/`Last-verdict:` if your charter requires them),
+stop: no more tool calls, no more text.
+
 ## 10c. Every run ends with a written REPORT — you were paid for the pass, file the memo
 
 Reif, 2026-08-26: *"I want a report after each run, I paid for it after all."* A pass costs

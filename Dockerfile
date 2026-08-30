@@ -76,6 +76,14 @@ COPY . /fleet-kit
 
 RUN chmod +x /fleet-kit/scripts/*.sh /fleet-kit/entrypoint.sh
 
+# gh#201: the commit this image was built from, so a running container can answer "what SHA is
+# actually live" without /fleet-kit being a git checkout (it isn't -- .dockerignore excludes
+# .git/ above, deliberately, per this Dockerfile's own history). deploy.sh passes this at build
+# time from the checkout it built FROM; scripts/deploy_staleness_check.sh reads it back to tell
+# whether the live tree has drifted from main.
+ARG DEPLOY_SHA=unknown
+RUN echo "$DEPLOY_SHA" > /fleet-kit/.deploy_sha
+
 # fleet_view_server.py (started by entrypoint.sh's cron-foreground mode) -- documents the
 # port for anyone inspecting the image; actual publishing still needs `-p` at `podman run`.
 EXPOSE 8420

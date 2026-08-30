@@ -24,7 +24,10 @@
 #     approve -> commit status success.
 #     unparseable output -> NO status this tick; after MAX_PARSE_STRIKES consecutive
 #     unparseable runs at the same head, posts state=error so the failure is visible on the PR
-#     instead of an invisible retry loop.
+#     instead of an invisible retry loop. Every strike (unparseable OR empty-findings) copies
+#     the raw model output to $STRIKE_DIR (durable, non-tmp) before cleanup, and the
+#     state=error PR comment points at it -- gh#221, so a live-blocked PR leaves evidence
+#     instead of forcing a guess from judge-judy.log alone.
 #   - The PR's code is NEVER executed here: the model sees the diff + PR body as TEXT with no
 #     tools — a malicious diff can lie to the reviewer, but it cannot reach this box.
 #
@@ -33,6 +36,8 @@
 # check-run names that must not be red before reviewing a head — default empty, meaning no
 # filter), FLEET_TICK_BUDGET_USD (default $15, total spend cap across all PRs in one tick).
 # PR override: judge-judy.sh <pr> (reviews just that one PR, ignores the tick budget loop).
+# Only one tick runs at a time (see the single-tick mutex below): a cron tick backs off
+# immediately if another is already running, but an explicit PR override waits for it instead.
 set -uo pipefail
 
 [ -f "${FLEET_ENV_FILE:-./fleet.env}" ] && . "${FLEET_ENV_FILE:-./fleet.env}"
@@ -125,6 +130,43 @@ report_run() { # <pr> <head_sha> <usage_file> <outcome-line> <evidence-line>
 }
 
 EXPLICIT_PR="${1:-}"
+
+# --- single-tick mutex -------------------------------------------------------------------
+# PR #182 turned this from a single-PR-per-tick script into a loop that drains the whole
+# queue up to TICK_BUDGET_USD, so a busy tick can legitimately run past the 15-minute cron
+# interval (entrypoint.sh:123) -- long enough for the next cron fire to start a second, fully
+# concurrent process. Two processes racing pick_pr's read-then-post_status can both pick the
+# same head and both call post_status; whichever POST lands last wins, silently flipping a
+# fresher verdict back to a stale one (live-confirmed on PR #175: approve -> block from race
+# ordering alone, no diff change). Same flock-over-a-pidfile pattern auto_deploy.sh/deploy.sh
+# already use (fleet-kit#194). flock over a held fd releases automatically if this process is
+# killed or crashes, so a dead tick can never wedge the lock.
+#
+# Lives under $LOG_DIR, NOT $HOME/.cache -- confirmed live 2026-08-29 (fleet-kit gh#207, same
+# failure class as gh#215/PR#216's check.sh fix): $HOME is the per-pass ephemeral
+# container/worktree, so a lockfile there can only ever contend against itself inside that same
+# container -- it can never block a concurrent tick running in a different container/worktree,
+# which is exactly how cron ticks and the blue/green deploy cutover both spawn processes here.
+# Live-reproduced: a fresh 3-way pass-start collision on PR #175 happened even after PR #200's
+# flock was confirmed deployed, and "another judge-judy tick still holds" has never once fired
+# across 106 pass-start events (~25h) of log history -- zero evidence the mutex ever blocked a
+# tick. $LOG_DIR is proven persistent (judge-judy.log itself spans days).
+LOCKFILE="$LOG_DIR/judge-judy.lock"
+mkdir -p "$(dirname "$LOCKFILE")"
+exec 9>"$LOCKFILE"
+if command -v flock >/dev/null 2>&1; then
+  if [ -n "$EXPLICIT_PR" ]; then
+    # An explicit `judge-judy.sh <pr>` call is a human/caller asking for THIS review to
+    # happen -- unlike a cron tick, it has no next-tick retry, so failing fast on contention
+    # would silently drop the request. Block instead: the review still happens, just after
+    # whichever tick is already running finishes.
+    flock 9
+  elif ! flock -n 9; then
+    log "another judge-judy tick still holds $LOCKFILE -- exiting without picking a PR"
+    exit 0
+  fi
+fi
+
 SPENT_USD="0"
 LAST_CALL_USD="0"
 REVIEWED_COUNT=0
@@ -150,10 +192,26 @@ while :; do
   BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_review_body.XXXXXX")
   OUT_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_review_out.XXXXXX")
   USAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_usage.XXXXXX")
+  # Initialized empty here (before cleanup_pass is defined, let alone called) -- the reserve
+  # call itself happens further down, AFTER the gh-pr-diff-failure exit point below, so
+  # cleanup_pass must be able to safely check LEASE_ID on an iteration that never got that
+  # far (set -u makes an unset-variable reference fatal, not just empty).
+  LEASE_ID=""
   # No RETURN/EXIT trap here (RETURN doesn't fire for a while-loop body, and one EXIT trap
   # can't hold a growing file list across iterations) -- cleanup_pass is called explicitly
   # at every exit point of this iteration instead, plus a final catch-all after the loop.
-  cleanup_pass() { rm -f "$DIFF_FILE" "$BODY_FILE" "$OUT_FILE" "$USAGE_FILE"; }
+  # Releasing the maxx lease here too (not just at the happy-path end) is what guarantees a
+  # reservation never outlives its own PR's review -- every early exit in this loop
+  # (gh pr diff failure, claude call failure, unparseable strike) already routes through
+  # cleanup_pass, so there is exactly one place that can leak a lease, not N.
+  cleanup_pass() {
+    rm -f "$DIFF_FILE" "$BODY_FILE" "$OUT_FILE" "$USAGE_FILE"
+    if [ -n "$LEASE_ID" ]; then
+      python3 "$KIT_DIR/scripts/maxx_lease.py" release --lease-id "$LEASE_ID" >/dev/null 2>>"$LOG" \
+        || log "WARN: maxx lease release failed for $LEASE_ID (self-expires via its own ttl_sec)"
+      LEASE_ID=""
+    fi
+  }
 
   if ! gh pr diff "$PR" > "$DIFF_FILE" 2>/dev/null; then
     log "PR #$PR: gh pr diff failed"
@@ -168,6 +226,28 @@ while :; do
     TRUNC_NOTE="NOTE: the diff was truncated at ${MAX_DIFF_BYTES} bytes; flag that in your review if it limits confidence."
   fi
   gh pr view "$PR" --json title,body -q '"TITLE: \(.title)\n\n\(.body)"' > "$BODY_FILE" 2>/dev/null || true
+
+  # Self-reserve against FLEET_SHARE_CEILING_PCT (run_member.sh, if FLEET_SHARE_FRACTION is
+  # active on this instance) right before spending, not once for the whole tick: the ceiling
+  # is a snapshot of what's available RIGHT NOW, and other leases (this instance's own
+  # earlier PRs, or the other instance's members) can expire and free up real headroom
+  # mid-tick -- reserving the whole ceiling up front would hold headroom idle that a
+  # concurrent pass elsewhere could have used. Sized as a fixed slice of the current ceiling
+  # (not the full thing) since one PR review is a small fraction of an hour's work; released
+  # immediately after this call returns (cleanup_pass, below) so the hold is only as long as
+  # the actual spend, never the whole tick. Best-effort: an unset ceiling (FLEET_SHARE_
+  # FRACTION inactive, or the meter was unreadable) means no reservation is made or needed --
+  # LEASE_ID stays empty, and release is a no-op on an empty id (maxx_lease.py's own
+  # contract).
+  LEASE_ID=""
+  if [ -n "${FLEET_SHARE_CEILING_PCT:-}" ]; then
+    RESERVE_PCT=$(awk -v c="$FLEET_SHARE_CEILING_PCT" 'BEGIN { printf "%.6f", c * 0.1 }')
+    if awk -v r="$RESERVE_PCT" 'BEGIN { exit !(r > 0) }'; then
+      LEASE_ID=$(python3 "$KIT_DIR/scripts/maxx_lease.py" reserve --pct "$RESERVE_PCT" \
+        --label "judge-judy-pr${PR}" --ttl-sec 900 2>>"$LOG" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id",""))' 2>/dev/null)
+    fi
+  fi
 
 # See judge-judy.md (this member's own charter) for the annotated version of this template.
 PROMPT="You are the merge-blocking code reviewer for this repo. Review the diff below for
@@ -227,17 +307,36 @@ VERDICT: block"
   if [ -z "$VERDICT" ]; then
     N=$(( $(cat "$STRIKE_FILE" 2>/dev/null || echo 0) + 1 ))
     echo "$N" > "$STRIKE_FILE"
-    log "PR #$PR: unparseable or empty-findings review output (strike $N/$MAX_PARSE_STRIKES)"
+    # gh#221: a strike used to leave no artifact -- $OUT_FILE is a mktemp'd file cleaned up by
+    # cleanup_pass below, so by the time a human noticed the resulting state=error, the raw
+    # model output that caused it was already gone. Copy it to a durable, non-tmp location
+    # BEFORE cleanup_pass runs, on every strike (not just the one that trips state=error), so
+    # root-causing "did the model drift format, or genuinely emit an empty block" is possible
+    # after the fact instead of guesswork from judge-judy.log alone.
+    RAW_CAPTURE="$STRIKE_DIR/pr-${PR}-${HEAD_SHA}.strike${N}.raw"
+    cp "$OUT_FILE" "$RAW_CAPTURE" 2>/dev/null \
+      && log "PR #$PR: unparseable or empty-findings review output (strike $N/$MAX_PARSE_STRIKES) -- raw output saved to $RAW_CAPTURE" \
+      || log "PR #$PR: unparseable or empty-findings review output (strike $N/$MAX_PARSE_STRIKES) -- WARN raw output capture to $RAW_CAPTURE failed"
     if [ "$N" -ge "$MAX_PARSE_STRIKES" ]; then
-      post_status "$HEAD_SHA" "error" "Code review: reviewer output unparseable/empty ${N}x at this head -- needs a look"
-      log "PR #$PR: posted state=error after $N unparseable/empty runs"
+      post_status "$HEAD_SHA" "error" "Code review: reviewer output unparseable/empty ${N}x at this head -- raw output: $RAW_CAPTURE"
+      # The description above is truncated to 139 chars (post_status), which a full path keyed
+      # by PR + a 40-char sha can easily blow through -- a PR comment has no such limit and is
+      # what a human (or jefe, diagnosing a live-blocked PR) actually reads.
+      gh pr comment "$PR" --body "**fleet-code-review: error** -- reviewer output was unparseable or empty ${N}x in a row at head ${HEAD_SHA:0:12}, so no verdict could be posted.
+
+Raw model output from the last attempt is saved on the review box at:
+\`$RAW_CAPTURE\`
+
+This reflects a parse/format issue in the reviewer's own output, not a finding about this diff -- see gh#221." >/dev/null 2>&1 \
+        || log "PR #$PR: WARN state=error PR comment failed"
+      log "PR #$PR: posted state=error after $N unparseable/empty runs, raw output at $RAW_CAPTURE"
     fi
     SKIPPED_THIS_TICK="$SKIPPED_THIS_TICK $PR"
     cleanup_pass
     [ -n "$EXPLICIT_PR" ] && break
     continue
   fi
-  rm -f "$STRIKE_FILE"
+  rm -f "$STRIKE_FILE" "$STRIKE_DIR/pr-${PR}-${HEAD_SHA}".strike*.raw
 
   if [ "$VERDICT" = "VERDICT: approve" ]; then
     post_status "$HEAD_SHA" "success" "Code review passed (local claude, model=$MODEL)" \

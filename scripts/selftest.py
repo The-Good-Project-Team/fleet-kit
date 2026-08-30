@@ -13,6 +13,7 @@ ran it.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import re
 import sys
@@ -147,6 +148,169 @@ def _rsi_lines_survive_to_the_next_pass():
         fleet_db.sync(conn2, runs_file=newruns)
         assert conn2.execute("SELECT prediction FROM runs WHERE run_id='rsi-1'").fetchone()[0] \
             == "capturing these lines closes the loop"
+
+
+def _fleet_db_run_id_collisions_dont_lose_a_verdict():
+    """#212: judge-judy's run_id is `review-<pr>-<sha>`, not per-invocation, so two genuinely
+    different concurrent reviews of the same PR head used to collide on fleet.db's bare
+    run_id PRIMARY KEY -- INSERT OR REPLACE silently kept only one verdict. Live-quantified:
+    286 runs.jsonl lines / 280 distinct run_ids vs. 280 rows in fleet.db, 3 of the 6 colliding
+    pairs holding outright contradictory verdicts. AC1-3 of the PRD, exercised the same way
+    #83's RSI test is: through runs.jsonl -> fleet.db, not a unit assertion on a helper alone.
+    """
+    import io
+    import sqlite3
+    from contextlib import redirect_stderr
+    import fleet_db
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+
+        # AC1: two distinct runs sharing judge-judy's collision-prone run_id, different
+        # recorded_at, both persist as separate rows.
+        runs = d / "runs.jsonl"
+        blocked = {"run_id": "review-175-817e99187df8", "member": "judge-judy",
+                   "outcome": "blocked PR #175", "_recorded_at": 100.0}
+        approved = {"run_id": "review-175-817e99187df8", "member": "judge-judy",
+                    "outcome": "approved PR #175", "_recorded_at": 200.0}
+        runs.write_text(json.dumps(blocked) + "\n" + json.dumps(approved) + "\n")
+        conn = fleet_db.connect(d / "fleet.db")
+        n = fleet_db.sync(conn, runs_file=runs)
+        assert n == 2, n
+        rows = conn.execute(
+            "SELECT outcome FROM runs WHERE run_id = ? ORDER BY recorded_at",
+            ("review-175-817e99187df8",)).fetchall()
+        assert rows == [("blocked PR #175",), ("approved PR #175",)], rows
+
+        # AC2: re-syncing the same lines (e.g. after an offset reset) must not duplicate --
+        # idempotency is keyed on (run_id, recorded_at), which a literal re-read reproduces
+        # exactly, not on run_id alone.
+        conn.execute("UPDATE sync_state SET offset = 0"); conn.commit()
+        fleet_db.sync(conn, runs_file=runs)
+        rows2 = conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE run_id = ?", ("review-175-817e99187df8",)
+        ).fetchone()[0]
+        assert rows2 == 2, f"re-sync duplicated rows: {rows2}"
+
+        # AC3: a genuine collision -- same run_id AND same recorded_at, different content --
+        # must be LOGGED, not silently discarded. This is the failure mode the PRD's Non-goal
+        # section says is worse than a missing row: a confident, complete-looking wrong one.
+        collide = d / "collide.jsonl"
+        first = {"run_id": "dup-1", "member": "m", "outcome": "first", "_recorded_at": 5.0}
+        second = {"run_id": "dup-1", "member": "m", "outcome": "second", "_recorded_at": 5.0}
+        collide.write_text(json.dumps(first) + "\n" + json.dumps(second) + "\n")
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            fleet_db.sync(conn, runs_file=collide)
+        assert "COLLISION" in buf.getvalue() and "dup-1" in buf.getvalue(), buf.getvalue()
+
+        # A live fleet.db predates this fix and still has run_id as a bare PRIMARY KEY --
+        # CREATE TABLE IF NOT EXISTS is a no-op against it (same reason _ADD_COLUMNS exists),
+        # so without an in-place migration the fix would reach only a freshly rebuilt db. The
+        # legacy shape here is today's base SCHEMA (every column _ADD_COLUMNS doesn't own)
+        # with the old bare run_id PRIMARY KEY, matching what a real pre-#212 fleet.db has.
+        old = d / "legacy.db"
+        legacy = sqlite3.connect(str(old))
+        legacy.executescript("""
+            CREATE TABLE runs (
+              run_id TEXT PRIMARY KEY, member TEXT NOT NULL, kind TEXT, item_id TEXT, pr TEXT,
+              status TEXT, exit_code INTEGER, outcome TEXT, evidence TEXT, vision_link TEXT,
+              self_critique TEXT, cost_usd REAL, num_turns INTEGER, input_tokens INTEGER,
+              output_tokens INTEGER, cache_read_tokens INTEGER, cache_creation_tokens INTEGER,
+              duration_ms INTEGER, stop_reason TEXT, recorded_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_runs_member_time ON runs(member, recorded_at);
+            CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+            CREATE INDEX IF NOT EXISTS idx_runs_item ON runs(item_id);
+        """)
+        legacy.execute("INSERT INTO runs (run_id, member, outcome, recorded_at) "
+                       "VALUES ('legacy-1','marie','a row written before the migration', 1.0)")
+        legacy.commit(); legacy.close()
+
+        conn2 = fleet_db.connect(old)
+        pk_cols = [r[1] for r in conn2.execute("PRAGMA table_info(runs)") if r[5]]
+        assert pk_cols == ["run_id", "recorded_at"], pk_cols
+        row = conn2.execute("SELECT member, outcome FROM runs WHERE run_id = 'legacy-1'").fetchone()
+        assert row == ("marie", "a row written before the migration"), row
+        fleet_db.sync(conn2, runs_file=runs)
+        migrated_rows = conn2.execute(
+            "SELECT COUNT(*) FROM runs WHERE run_id = ?", ("review-175-817e99187df8",)
+        ).fetchone()[0]
+        assert migrated_rows == 2, migrated_rows
+
+        # `ALTER TABLE RENAME` carries indexes over onto the renamed table by table, not by
+        # name, so `CREATE INDEX IF NOT EXISTS` in SCHEMA name-matches the ones still attached
+        # to the dropped runs_legacy_pk and no-ops -- the migration used to silently leave the
+        # rebuilt `runs` table with zero of its three indexes. member/time, status and item
+        # lookups this file exists to make fast (its own module docstring) would fall back to
+        # a full table scan with no error and no log line.
+        idx_names = {r[1] for r in conn2.execute("PRAGMA index_list(runs)")}
+        expected = {"idx_runs_member_time", "idx_runs_status", "idx_runs_item"}
+        assert expected <= idx_names, idx_names
+
+
+def _fleet_db_composite_pk_migration_is_lock_serialized():
+    """#212: fleet_view_server.py calls `fleet_db.connect()` from several independent
+    threads -- the background tail thread and per-request handlers -- and
+    `_migrate_composite_pk` is a rename/rebuild/drop of `runs`, not an idempotent ADD COLUMN.
+    Without serializing it, two threads racing `connect()` against the same not-yet-migrated
+    legacy db could both see the old schema and both try to rename the same table, raising a
+    raw sqlite3.OperationalError and (for the background thread) silently killing the live
+    run feed. Reproduces the race directly: N threads call connect() against one legacy db at
+    once; none may raise, and the migration must still run exactly once."""
+    import sqlite3
+    import threading
+
+    import fleet_db
+
+    with tempfile.TemporaryDirectory() as d:
+        old = Path(d) / "legacy.db"
+        legacy = sqlite3.connect(str(old))
+        legacy.executescript("""
+            CREATE TABLE runs (
+              run_id TEXT PRIMARY KEY, member TEXT NOT NULL, kind TEXT, item_id TEXT, pr TEXT,
+              status TEXT, exit_code INTEGER, outcome TEXT, evidence TEXT, vision_link TEXT,
+              self_critique TEXT, cost_usd REAL, num_turns INTEGER, input_tokens INTEGER,
+              output_tokens INTEGER, cache_read_tokens INTEGER, cache_creation_tokens INTEGER,
+              duration_ms INTEGER, stop_reason TEXT, recorded_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_runs_member_time ON runs(member, recorded_at);
+            CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+            CREATE INDEX IF NOT EXISTS idx_runs_item ON runs(item_id);
+        """)
+        legacy.execute("INSERT INTO runs (run_id, member, outcome, recorded_at) "
+                       "VALUES ('legacy-1','marie','pre-migration row', 1.0)")
+        legacy.commit(); legacy.close()
+
+        errors = []
+        lock = threading.Lock()
+
+        def worker():
+            try:
+                # sqlite3 connections are thread-affine (check_same_thread defaults True) --
+                # connect and close within the same worker thread; only pass/fail crosses back.
+                c = fleet_db.connect(old)
+                c.close()
+            except Exception as e:  # noqa: BLE001 -- the race under test raises sqlite3 errors
+                with lock:
+                    errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"concurrent connect() raised: {errors!r}"
+        check_conn = fleet_db.connect(old)
+        pk_cols = [r[1] for r in check_conn.execute("PRAGMA table_info(runs)") if r[5]]
+        assert pk_cols == ["run_id", "recorded_at"], pk_cols
+        row = check_conn.execute(
+            "SELECT member, outcome FROM runs WHERE run_id = 'legacy-1'").fetchone()
+        assert row == ("marie", "pre-migration row"), row
+        idx_names = {r[1] for r in check_conn.execute("PRAGMA index_list(runs)")}
+        expected = {"idx_runs_member_time", "idx_runs_status", "idx_runs_item"}
+        assert expected <= idx_names, idx_names
 
 
 def _fanout_packs_the_hour_by_complexity():
@@ -348,6 +512,178 @@ def _maxx_lease_concurrent_reserves_dont_clobber_each_other():
         assert abs(maxx_lease.total_reserved_pct(state_file) - n * 0.01) < 1e-9
 
 
+def _maxx_share_ceiling_uses_hourly_headroom_not_the_week_bank():
+    """Replaces the old maxx_share_check.py, which multiplied a member's budget by
+    `week_bank_pct` -- a LAGGING, already-spent number. The moment the week goes over pace
+    (bank negative), that clamps to 0.0 and zeros every member's spend even during an hour
+    with real headroom. This proves the ceiling is computed from `sustainable_pct_per_hour`
+    minus `per_diem_hourly_pct` minus `reserved_pct` instead -- a leading, real-time number
+    that stays positive on a healthy hour even while the week bank is deep negative.
+    """
+    import maxx_share_ceiling
+
+    # A week deep over pace (bank very negative) but a healthy CURRENT hour: sustainable
+    # pace is 0.35%/hr, only 0.10%/hr actually spent so far this hour, nothing reserved.
+    healthy_hour_bad_week = {
+        "verdict": "ok",
+        "week_bank_pct": -34.4,             # would clamp headroom_fraction to 0.0 under the
+                                             # old formula -- must NOT zero this ceiling.
+        "sustainable_pct_per_hour": 0.35,
+        "per_diem_hourly_pct": 0.10,
+        "reserved_pct": 0,
+    }
+    orig = maxx_share_ceiling.get_headroom
+    try:
+        maxx_share_ceiling.get_headroom = lambda: (1.0, "ok", healthy_hour_bad_week)
+        assert maxx_share_ceiling.main(["prog", "0.40"]) == 0
+
+        # Same computation, share=1.0, to isolate the raw hourly-headroom formula from the
+        # fraction multiply: (0.35 - 0.10 - 0) = 0.25.
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            maxx_share_ceiling.main(["prog", "1.0"])
+        assert abs(float(buf.getvalue().strip()) - 0.25) < 1e-6, buf.getvalue()
+
+        # Other members' live reservations subtract too -- a busy fleet has less ceiling
+        # left for the next member to self-reserve against.
+        maxx_share_ceiling.get_headroom = lambda: (
+            1.0, "ok", {**healthy_hour_bad_week, "reserved_pct": 0.20})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            maxx_share_ceiling.main(["prog", "1.0"])
+        assert abs(float(buf.getvalue().strip()) - 0.05) < 1e-6, buf.getvalue()  # 0.35-0.10-0.20
+
+        # An hour already at or past sustainable pace (once reservations are subtracted) is
+        # an honest, printed zero -- not suppressed, not negative.
+        maxx_share_ceiling.get_headroom = lambda: (
+            1.0, "ok", {**healthy_hour_bad_week, "per_diem_hourly_pct": 0.90})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            maxx_share_ceiling.main(["prog", "1.0"])
+        assert float(buf.getvalue().strip()) == 0.0, buf.getvalue()
+
+        # Unreadable meter -> prints nothing (fails open: caller falls back to its own
+        # pre-existing cap, never reads an absent ceiling as "reserve 0").
+        maxx_share_ceiling.get_headroom = lambda: (None, "maxx_unreachable", {})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            maxx_share_ceiling.main(["prog", "0.40"])
+        assert buf.getvalue().strip() == "", buf.getvalue()
+
+        # FLEET_SHARE_FRACTION > 1.0 (operator typo) must never raise the ceiling above the
+        # fleet's own real hourly headroom -- clamped to 1.0 same as the old script.
+        maxx_share_ceiling.get_headroom = lambda: (1.0, "ok", healthy_hour_bad_week)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            maxx_share_ceiling.main(["prog", "1.0"])
+        uncapped = float(buf.getvalue().strip())
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            maxx_share_ceiling.main(["prog", "1.5"])
+        assert float(buf.getvalue().strip()) == uncapped, (uncapped, buf.getvalue())
+    finally:
+        maxx_share_ceiling.get_headroom = orig
+
+
+def _maxx_share_ceiling_subtracts_local_leases_not_just_the_remotes_reserved_pct():
+    """fleet-code-review BLOCK on PR #184: the ceiling formula read `budget["reserved_pct"]`
+    from `get_headroom()` (the plain function), but that field only ever carries whatever the
+    REMOTE maxx endpoint reports -- which today is nothing, because the remote never learns
+    about a LOCAL maxx_lease.py reservation (gh#161 part 2). The merge of local leases into
+    reserved_pct only happened inside maxx_reader.py's own CLI `main()`, which
+    maxx_share_ceiling.py never goes through. Net effect: two concurrent callers (this
+    instance's judge-judy running twice, or the OTHER instance) each saw the SAME generous
+    ceiling and each reserved against it, seeing none of each other's live leases --
+    reproducing, in a new form, the exact "no coordination" problem this PR set out to fix.
+
+    This test exercises the REAL integration (an actual on-disk maxx_lease reservation, not a
+    mocked reserved_pct in the dict) so it cannot pass the way the original, weaker version of
+    this test did -- that one monkeypatched get_headroom with a dict that ALREADY contained
+    reserved_pct, which is exactly the value the real code path never produces on its own.
+    """
+    import tempfile
+    from pathlib import Path
+
+    import maxx_lease
+    import maxx_share_ceiling
+
+    with tempfile.TemporaryDirectory() as d:
+        state_file = Path(d) / "maxx-leases.json"
+        orig_state = maxx_lease.STATE_FILE
+        orig_headroom = maxx_share_ceiling.get_headroom
+        try:
+            maxx_lease.STATE_FILE = state_file
+
+            # The remote's own reserved_pct is 0 (its honest, real-world default -- it has no
+            # idea a local lease exists). sustainable=0.35, used=0.10 -> raw headroom 0.25.
+            remote_budget = {
+                "verdict": "ok", "sustainable_pct_per_hour": 0.35,
+                "per_diem_hourly_pct": 0.10, "reserved_pct": 0,
+            }
+            maxx_share_ceiling.get_headroom = lambda: (1.0, "ok", remote_budget)
+
+            import io
+            from contextlib import redirect_stdout
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                maxx_share_ceiling.main(["prog", "1.0"])
+            assert abs(float(buf.getvalue().strip()) - 0.25) < 1e-6, buf.getvalue()
+
+            # A REAL concurrent lease exists on disk (e.g. judge-judy on the other instance,
+            # or an earlier call this same instance made) -- the remote still reports
+            # reserved_pct=0 (it never learns about this), but the ceiling MUST see it anyway.
+            maxx_lease.maxx_reserve(pct=0.08, label="concurrent-caller", ttl_sec=3600)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                maxx_share_ceiling.main(["prog", "1.0"])
+            assert abs(float(buf.getvalue().strip()) - 0.17) < 1e-6, buf.getvalue()  # 0.25-0.08
+        finally:
+            maxx_lease.STATE_FILE = orig_state
+            maxx_share_ceiling.get_headroom = orig_headroom
+
+
+def _maxx_share_ceiling_respects_a_real_over_verdict_not_just_unreadable_meters():
+    """fleet-code-review BLOCK on PR #184: `verdict=="over"` is maxx's own DEFINITIVE "stop"
+    signal -- get_headroom() returns fraction=0.0 (never None) for it specifically, per
+    maxx_reader.py's own header, so a real stop can't be confused with an unreadable meter.
+    The ceiling script only checked `fraction is None` and then discarded `fraction`
+    entirely, recomputing purely from the hourly fields -- which are populated independently
+    of verdict and can look like real headroom even while verdict=="over". That let a real
+    hard-stop reading still yield a positive, spendable ceiling.
+
+    Failing scenario this reproduces: maxx returns verdict="over" (session/week over) but
+    with healthy-looking hourly numbers (sustainable=0.35, used=0.10) -- plausible in
+    practice, since those are independent signals.
+    """
+    import maxx_share_ceiling
+
+    over_but_hourly_looks_fine = {
+        "verdict": "over",
+        "sustainable_pct_per_hour": 0.35,
+        "per_diem_hourly_pct": 0.10,
+        "reserved_pct": 0,
+    }
+    orig = maxx_share_ceiling.get_headroom
+    try:
+        # get_headroom() itself returns (0.0, "over", ...) for this verdict -- match that
+        # real contract exactly (maxx_reader.py:147-151), not an arbitrary fraction.
+        maxx_share_ceiling.get_headroom = lambda: (0.0, "over", over_but_hourly_looks_fine)
+
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = maxx_share_ceiling.main(["prog", "1.0"])
+        assert rc == 0
+        assert float(buf.getvalue().strip()) == 0.0, (
+            f"verdict=='over' must yield a zero ceiling regardless of hourly fields, got: {buf.getvalue()!r}"
+        )
+    finally:
+        maxx_share_ceiling.get_headroom = orig
+
+
 def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
     """Arming auto-merge must not pass --squash/--merge/--rebase, and must not eat the error.
 
@@ -477,6 +813,36 @@ def _score_reasoning_is_not_guillotined_mid_word():
     # And a cut must land on a word boundary and admit itself, never stop mid-token.
     assert "rsplit(' ', 1)" in src, "a truncated reasoning still cuts mid-word"
     assert "[truncated]" in src, "a truncated reasoning does not say it was truncated"
+
+
+def _self_evo_evidence_covers_both_repos():
+    """The Magikarp score's self-evolution evidence must not be single-repo-scoped again.
+
+    #176: `self_improve_score.sh`'s `gh pr list` calls ran from `cd "$FLEET_REPO"` with no
+    `--repo` flag, so on any box where $FLEET_REPO points somewhere other than fleet-kit's own
+    checkout (this container: FLEET_REPO=/repo=nonprofit-atlas), the query only ever saw
+    nonprofit-atlas PRs -- but since 2026-08-21 the fleet's actual jefe/dumbledore charter
+    fixes land almost entirely in fleet-kit's own repo. The score read flat/low for four days,
+    blind to the exact compounding activity it exists to detect. This regression check is the
+    static half of the fix (acceptance criterion 5 of #176); the live half was a manual re-run
+    confirming a fleet-kit PR became citable in the next self_improve_score.jsonl entry.
+    """
+    src = (ROOT / "scripts/self_improve_score.sh").read_text()
+    # Both sources must be present: $FLEET_REPO-relative (the product repo) AND a
+    # KIT_DIR-relative source (fleet-kit's own repo, wherever this script's checkout lives).
+    assert "FLEET_REPO_SLUG" in src, "no repo slug derived from $FLEET_REPO for the evidence query"
+    assert "KIT_REPO_SLUG" in src, "no repo slug derived from KIT_DIR -- fleet-kit's own PRs are unreachable again"
+    assert 'git -C "$1" remote get-url origin' in src or "remote get-url origin" in src, \
+        "repo slug is no longer derived from an existing checkout's git remote"
+    # Must not query the same repo twice when $FLEET_REPO already IS fleet-kit's own repo.
+    assert '"$KIT_REPO_SLUG" != "$FLEET_REPO_SLUG"' in src, \
+        "no guard against querying fleet-kit's repo twice when it's already $FLEET_REPO"
+    # Each merged PR entry must be tagged with its source repo -- PR numbers can collide
+    # across two repos, and the prompt's 'name the specific PR' instruction needs a handle
+    # that's unambiguous across both.
+    assert "x['repo'] = repo" in src, "merged evidence entries are not tagged with their source repo"
+    # Fail-open: a failed/empty gh call on either side must not hard-exit the script.
+    assert "except Exception" in src, "evidence merge has no fail-open path for a bad/empty gh response"
 
 
 def _adhoc_task_adds_to_the_charter_never_replaces_it():
@@ -724,6 +1090,76 @@ def _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure():
             "a git-status failure did not reach the shared alerts file"
 
 
+def _run_member_logs_critical_when_postflight_dirty_check_fails_to_source():
+    """gh#183: /fleet-kit is a vendored copy that only refreshes via auto_deploy.sh (#140, no
+    scheduler entry). A merged fix to postflight_dirty_check.sh can be absent there even though
+    `main` already has it -- and under `set -uo pipefail` (no -e), a plain `.` on a missing file
+    used to no-op silently: check_repo_clean_postflight was simply never defined, and the
+    worktree-leak safety net (#78) vanished with no trace. Checked at BOTH isolated-worktree
+    call sites (run_member.sh's generic member path, worktree_builder.sh's dedicated builder
+    path -- same pairing _run_member_and_builder_check_repo_before_removing_the_worktree already
+    checks for the postflight CALL, this checks the postflight SOURCE). Extracts the REAL guard
+    block out of each script (not a reimplementation) and proves both failure shapes -- the
+    source itself failing, and it "succeeding" while the function still ends up undefined --
+    log a line containing CRITICAL, and that a healthy source stays silent.
+    """
+    import subprocess
+
+    start_marker = 'if ! { . "$KIT_DIR/scripts/postflight_dirty_check.sh"; }'
+
+    def extract_guard(script_name):
+        src = (ROOT / "scripts" / script_name).read_text()
+        assert start_marker in src, \
+            f"{script_name} no longer guards its postflight_dirty_check.sh source -- did the gh#183 fix regress?"
+        i = src.index(start_marker)
+        j = src.index("\nfi\n", i) + len("\nfi")
+        snippet = src[i:j]
+        assert "CRITICAL" in snippet, \
+            f"{script_name}'s postflight-source guard no longer logs CRITICAL on failure"
+        return snippet
+
+    def run_guard(guard_snippet, kit_dir, tmp):
+        log_file = Path(tmp) / "member.log"
+        repo_dir = Path(tmp) / "repo"
+        repo_dir.mkdir(exist_ok=True)
+        script = (
+            f'KIT_DIR="{kit_dir}"\n'
+            f'LOG="{log_file}"\n'
+            f'LOG_DIR="{tmp}"\n'
+            f'REPO="{repo_dir}"\n'
+            f'log() {{ echo "$*" >> "{log_file}"; }}\n'
+            f"{guard_snippet}\n"
+            'check_repo_clean_postflight "test-run"\n'
+        )
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, f"guard snippet itself failed: {proc.stderr.strip()[:300]}"
+        return log_file.read_text() if log_file.exists() else ""
+
+    for script_name in ("run_member.sh", "worktree_builder.sh"):
+        guard_snippet = extract_guard(script_name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Stale vendored copy: the file plain doesn't exist at $KIT_DIR/scripts/.
+            missing_dir = Path(tmp) / "missing"
+            (missing_dir / "scripts").mkdir(parents=True)
+            text = run_guard(guard_snippet, missing_dir, tmp)
+            assert "CRITICAL" in text, \
+                f"{script_name}: a missing postflight_dirty_check.sh produced no CRITICAL log line"
+            assert "DISABLED" in text or "SKIPPED" in text, \
+                f"{script_name}: the CRITICAL line doesn't say what it costs"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Healthy vendored copy: the real file is present and defines the function -- must
+            # stay quiet, this guard exists for the ABSENCE case only (gh#183's own non-goal).
+            healthy_dir = Path(tmp) / "healthy"
+            (healthy_dir / "scripts").mkdir(parents=True)
+            real = (ROOT / "scripts" / "postflight_dirty_check.sh").read_text()
+            (healthy_dir / "scripts" / "postflight_dirty_check.sh").write_text(real)
+            text = run_guard(guard_snippet, healthy_dir, tmp)
+            assert "CRITICAL" not in text, \
+                f"{script_name}: a present, working postflight_dirty_check.sh still logged CRITICAL -- false alarm"
+
+
 def _run_member_rejects_a_non_numeric_item():
     """--item flows unsanitized into RUN_ID, the worktree branch name, and (fleet-kit#78) the
     postflight dirty-check's alert log -- validated as a plain issue number so a stray
@@ -872,6 +1308,114 @@ def _one_deploy_at_a_time_and_a_countable_drain():
     assert "tr -cd '0-9'" in line, "in-flight count is not sanitised to digits"
 
 
+def _judge_judy_ticks_dont_overlap():
+    """A judge-judy cron tick that overlaps a still-running prior tick must not review.
+
+    fleet-kit#194: PR #182 turned judge-judy.sh from a single-PR-per-tick script into a loop
+    that drains the whole PR queue up to FLEET_TICK_BUDGET_USD, so a busy tick can legitimately
+    run past the 15-minute cron interval -- long enough for the next cron fire to start a
+    second, fully concurrent process. Two processes racing pick_pr's read-then-post_status can
+    both pick the same head and both post a status; whichever POST lands last wins, silently
+    flipping a fresher verdict back to a stale one -- live-confirmed on PR #175 (approve ->
+    block from race ordering alone). Same flock-over-a-pidfile pattern as
+    auto_deploy.sh/deploy.sh (see _one_deploy_at_a_time_and_a_countable_drain above).
+    """
+    src = (Path(__file__).parent.parent / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    assert "flock" in src, "judge-judy has no lock -- overlapping ticks can double-review a head"
+    assert "exec 9>" in src, "flock needs a held fd or the lock is released immediately"
+    assert "flock -n 9" in src, "lock must be non-blocking -- a queued tick is a slow duplicate"
+
+    # The lock must be acquired before pick_pr is ever CALLED (not just before it's defined --
+    # the function definition itself always precedes its first call site in this file).
+    lock_i = src.find('exec 9>"$LOCKFILE"')
+    call_j = src.find('pick_pr "$EXPLICIT_PR" "$SKIPPED_THIS_TICK"')
+    assert lock_i != -1 and call_j != -1 and lock_i < call_j, \
+        "lock must be acquired before pick_pr's first call site in the tick loop"
+
+    # On lock contention the script must exit clean without picking, reviewing, or posting --
+    # a non-zero exit here would make a routine overlap look like a cron failure.
+    contention_i = src.find("! flock -n 9")
+    assert contention_i != -1, "no lock-contention branch"
+    tail = src[contention_i:contention_i + 200]
+    assert "exit 0" in tail, "lock-held branch must exit 0 -- overlap is expected, not an error"
+    assert call_j > contention_i, "pick_pr must not be reachable before the lock check"
+
+
+def _judge_judy_lock_lives_somewhere_persistent():
+    """fleet-kit#207: the single-tick mutex above only mutexes anything if concurrent ticks can
+    actually see each other's lockfile.
+
+    $HOME is the per-pass ephemeral container/worktree, so a lockfile under $HOME/.cache can
+    only ever contend against itself inside that same container -- it can never block a
+    concurrent tick running in a different container/worktree, which is exactly how cron ticks
+    and the blue/green deploy cutover both spawn processes here. Live-confirmed: a fresh 3-way
+    pass-start collision reproduced on PR #175 even after the flock fix (#200) was deployed, and
+    "another judge-judy tick still holds" never once fired across 106 pass-start events (~25h)
+    of log history. Same failure class as gh#215's check.sh fix (PR #216): default state onto
+    $FLEET_LOG_DIR, the confirmed cross-pass-persistent path.
+    """
+    src = (Path(__file__).parent.parent / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    lock_line = next(line for line in src.splitlines() if line.strip().startswith("LOCKFILE="))
+    assert "$HOME" not in lock_line, \
+        f"LOCKFILE must not default onto ephemeral $HOME: {lock_line!r}"
+    assert "LOG_DIR" in lock_line, \
+        f"LOCKFILE should live under the persistent LOG_DIR, not a fresh ad-hoc path: {lock_line!r}"
+
+
+def _judge_judy_strikes_are_scoped_by_head_and_leave_diagnosable_evidence():
+    """gh#221: a parse-strike used to vanish with no evidence, and the strike count itself was
+    never proven to be scoped to the head it fired at.
+
+    Three PRs (fleet-kit#182, #184, #219) hit consecutive unparseable/empty reviewer output and
+    got a hard, merge-blocking `state=error` -- #182 and #184 later merged (most likely via a
+    follow-up push producing a new head), #219 sat live-blocked with no follow-up commit and no
+    way to inspect what the model had actually returned, since `$OUT_FILE` is a `mktemp` file
+    judge-judy.sh's own `cleanup_pass` deletes every iteration.
+
+    This asserts, statically, the two properties #221's PRD makes acceptance criteria on:
+    1. `STRIKE_FILE`'s key already includes `$HEAD_SHA` -- so a genuinely new head (a follow-up
+       push) can never inherit a stale strike count from an old sha. This is the assertion
+       AC3 asks for explicitly: it was implied by the existing code path but never checked by a
+       test.
+    2. Every strike (not only the one that trips `state=error`) copies the raw model output to
+       a durable, non-tmp location UNDER `$STRIKE_DIR` -- and does so BEFORE `cleanup_pass` (the
+       function that deletes `$OUT_FILE`) is ever called on that same iteration -- so a
+       live-blocked PR like #219 always leaves something to diagnose.
+    """
+    src = (Path(__file__).parent.parent / "members" / "judge-judy" / "judge-judy.sh").read_text()
+
+    # AC3: the strike file is scoped by BOTH pr and head sha, so a new push (new $HEAD_SHA)
+    # starts its own key and cannot inherit an old head's strike count.
+    assert 'STRIKE_FILE="$STRIKE_DIR/pr-${PR}-${HEAD_SHA}.strikes"' in src, \
+        "STRIKE_FILE is no longer keyed by pr-<PR>-<HEAD_SHA> -- a new head could inherit a stale strike count"
+
+    # AC1: on every strike, the raw output is captured to a durable path under STRIKE_DIR
+    # (never under the tmp dir cleanup_pass empties), keyed by pr+head so it doesn't collide
+    # across PRs or heads.
+    assert 'RAW_CAPTURE="$STRIKE_DIR/pr-${PR}-${HEAD_SHA}' in src, \
+        "no durable, pr+head-keyed raw-output capture path on a parse strike"
+    assert 'cp "$OUT_FILE" "$RAW_CAPTURE"' in src, \
+        "a strike no longer copies the raw $OUT_FILE content anywhere durable"
+
+    # The capture must happen INSIDE the unparseable-verdict branch, strictly before
+    # cleanup_pass is invoked for that same iteration -- capturing after cleanup would copy a
+    # file that's already gone.
+    strike_branch = src.index('if [ -z "$VERDICT" ]; then')
+    capture_i = src.index('cp "$OUT_FILE" "$RAW_CAPTURE"', strike_branch)
+    cleanup_i = src.index("cleanup_pass", capture_i)
+    assert strike_branch < capture_i < cleanup_i, \
+        "raw-output capture does not run, inside the strike branch, before cleanup_pass deletes $OUT_FILE"
+
+    # AC2: the human-facing side (state=error) must point at where the capture lives, not just
+    # log it -- a PR comment has no length limit, unlike post_status's 139-char description.
+    error_branch = src.index('post_status "$HEAD_SHA" "error"', strike_branch)
+    error_window = src[error_branch:error_branch + 900]
+    assert "RAW_CAPTURE" in error_window, \
+        "state=error path does not reference the raw-output capture path at all"
+    assert "gh pr comment" in error_window, \
+        "state=error has no PR comment pointing a human at the captured raw output"
+
+
 def _marie_sweeps_the_whole_backlog_not_just_the_new():
     """marie must re-judge the OLD backlog, not only what changed since last pass.
 
@@ -909,6 +1453,70 @@ def _marie_sweeps_the_whole_backlog_not_just_the_new():
     stated = int(m.group(1))
     numbered = len(re.findall(r"^\d+\. Part |^\d+\. Write the report", todo, re.M))
     assert stated == numbered, f"checklist says {stated} items but lists {numbered}"
+
+
+def _deploy_sh_host_log_dir_survives_sourcing_the_instances_container_scoped_fleet_env():
+    """Real production incident, 2026-08-29: deploy.sh sources the instance's fleet.env
+    (needed for FLEET_ACCOUNTS/FLEET_REPO_URL), but that file's FLEET_LOG_DIR is meant for
+    the CONTAINER (/var/log/fleet-kit -- what run_member.sh and every member see once
+    running inside), while deploy.sh itself runs on the HOST. Sourcing it unguarded let
+    fleet.env's container-scoped value silently overwrite whatever the caller (auto_deploy.sh,
+    a human, cron) had already exported, so `mkdir -p "$LOG_DIR"` tried to create
+    /var/log/fleet-kit ON THE HOST -- root:syslog-owned, not writable by the operator account.
+    Both fleet instances' auto_deploy.sh failed at deploy.sh's very first real line, every
+    5-minute tick, the moment main actually moved for the first time in a while (104
+    consecutive failures observed before this was caught and fixed).
+
+    Proves the actual save/restore lines from deploy.sh (extracted by content, not
+    hand-copied) leave a caller-provided FLEET_LOG_DIR untouched by the instance's fleet.env.
+    """
+    import tempfile
+    from pathlib import Path
+
+    src = (HERE / "deploy.sh").read_text()
+    marker_save = 'CALLER_LOG_ENV="${FLEET_LOG_DIR:-}"'
+    marker_source = '[ -f "$INSTANCE_DIR/fleet.env" ] && { set -a; . "$INSTANCE_DIR/fleet.env"; set +a; } || true'
+    marker_restore = 'FLEET_LOG_DIR="$CALLER_LOG_ENV"'
+    for m in (marker_save, marker_source, marker_restore):
+        assert m in src, f"deploy.sh's save/source/restore sequence changed -- expected to find: {m!r}"
+    # The three lines must appear in THIS order (save, then source, then restore) -- any other
+    # order reintroduces the clobber.
+    i1, i2, i3 = src.index(marker_save), src.index(marker_source), src.index(marker_restore)
+    assert i1 < i2 < i3, "save/source/restore lines are out of order in deploy.sh"
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "fleet.env").write_text(
+            "FLEET_REPO_URL=https://example.invalid/repo.git\n"
+            "FLEET_LOG_DIR=/var/log/fleet-kit\n"  # the real, always-present container path
+        )
+        harness = f"""#!/bin/bash
+set -euo pipefail
+INSTANCE_DIR="{d}"
+{marker_save}
+{marker_source}
+{marker_restore}
+LOG_DIR="${{FLEET_LOG_DIR:-$HOME/fallback-logs}}"
+echo "$LOG_DIR"
+"""
+        harness_path = d / "harness.sh"
+        harness_path.write_text(harness)
+
+        import subprocess
+        # Case 1: caller already exported a real host path -- must survive the source untouched.
+        out = subprocess.run(["bash", str(harness_path)], capture_output=True, text=True,
+                              env={"HOME": "/tmp", "FLEET_LOG_DIR": "/home/ubuntu/real-host-logs"})
+        assert out.stdout.strip() == "/home/ubuntu/real-host-logs", (
+            f"caller's FLEET_LOG_DIR was clobbered by fleet.env's container-scoped value: {out.stdout!r}"
+        )
+
+        # Case 2: caller set nothing -- must fall through to the script's own host default,
+        # never to fleet.env's /var/log/fleet-kit (which mkdir -p cannot create on the host).
+        out = subprocess.run(["bash", str(harness_path)], capture_output=True, text=True,
+                              env={"HOME": "/tmp"})
+        assert out.stdout.strip() == "/tmp/fallback-logs", (
+            f"no caller override still resolved to the container path: {out.stdout!r}"
+        )
 
 
 def _deploy_cordons_then_drains_and_always_uncordons():
@@ -962,9 +1570,14 @@ def _deploy_log_is_durable_regardless_of_caller():
     src = (ROOT / "scripts" / "deploy.sh").read_text()
     assert "DEPLOY_LOG" in src and ">> \"$DEPLOY_LOG\"" in src, \
         "log() does not append to a durable file -- stdout only, same gap as gh#196"
-    i = src.find("LOG_DIR=")
+    # Newline-anchored: a bare `\nLOG_DIR=` search would also match `FLEET_LOG_DIR=` (the
+    # save/restore lines added around the fleet.env source, see the ceiling test above) --
+    # this must find the LOCAL LOG_DIR assignment specifically, not any line ending in that
+    # substring.
+    i = src.find("\nLOG_DIR=")
     j = src.find("\nlog() {")
     assert i != -1 and j != -1 and i < j, "log destination must be set up before log() is defined"
+    i += 1  # drop the leading newline so `setup` starts at "LOG_DIR=", not mid-blank-line
     setup = src[i:j]
     assert '${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}' in setup, \
         "deploy.sh does not reuse auto_deploy.sh's own FLEET_LOG_DIR convention"
@@ -1330,6 +1943,73 @@ def _self_improve_score_is_actually_scheduled():
         "so self_improve_score.jsonl never gets written and dumbledore/jefe read nothing.")
 
 
+def _deploy_staleness_check_is_actually_scheduled():
+    """Same failure class as _self_improve_score_is_actually_scheduled, one script over.
+
+    gh#201: deploy_staleness_check.sh is the independent gate that catches a deploy that never
+    ran at all -- it is worthless if nothing puts it on cron, exactly the "spec/reality exists,
+    but nothing scheduled it" gap that bit datta (nonprofit-atlas#3321) and self_improve_score.sh
+    (gh#196-adjacent) before it.
+    """
+    entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
+    assert "deploy_staleness_check.sh" in entry, (
+        "deploy_staleness_check.sh has no line in entrypoint.sh's crontab -- it will never run, "
+        "so a dark deploy pipeline goes back to being invisible until a human stumbles onto it.")
+
+
+def _account_and_tunnel_health_checks_are_actually_scheduled():
+    """Same failure class as _self_improve_score_is_actually_scheduled, two scripts over.
+
+    gh#171: account_health_check.sh and tunnel_health_check.sh are the fleet's only outage
+    pagers (README step 6 names them explicitly). PR#169 wired both into schedulers/systemd
+    and schedulers/launchd -- the bare-host path -- but entrypoint.sh's own crontab, the
+    container-native path every container deployment actually uses, had zero lines for
+    either. #154 (which asked for these to be scheduled) closed with the container path still
+    unfixed -- a closed issue naming a live gap is worse than an open one.
+    """
+    # Match the actual cron invocation, not just the bare filename -- both scripts are also
+    # named in surrounding comment prose (this very check's own docstring included), so a
+    # bare `"account_health_check.sh" in entry` would still pass with the cron line deleted.
+    entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
+    missing = [
+        s for s in ("bash /fleet-kit/scripts/account_health_check.sh", "bash /fleet-kit/scripts/tunnel_health_check.sh")
+        if s not in entry
+    ]
+    assert not missing, (
+        f"{missing} have no cron line in entrypoint.sh -- the fleet's only outage pagers "
+        "will never run on a container deployment, so an all-accounts-exhausted event or a "
+        "502'd tunnel pages nobody."
+    )
+
+
+def _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget():
+    """The check must compare something REAL (a SHA baked at build time), and must only write
+    a durable record when actually past budget -- not on every tick, or the STALE line this
+    issue exists to produce drowns in routine noise the same way auto_deploy.sh's own comment
+    warns against for its lock-contention branch.
+
+    gh#201: /fleet-kit is never a real git checkout in production (Dockerfile's own
+    `COPY . /fleet-kit` with .dockerignore excluding .git/), so the check can't `git log` the
+    live tree -- it has to read back a SHA deploy.sh baked in at build time and compare it to
+    main's current HEAD over the GitHub API.
+    """
+    src = (ROOT / "scripts" / "deploy_staleness_check.sh").read_text()
+    assert ".deploy_sha" in src, "does not read the SHA deploy.sh bakes into the image at build time"
+    assert "STALENESS_BUDGET_S" in src, "no staleness budget -- would alert on every normal deploy lag"
+    assert 'log "STALE' in src, "no distinguishable STALE record -- same gap gh#196 fixed for a normal deploy line"
+    # The in-sync path must not itself write the durable STALE line.
+    quiet_branch = src[src.find('if [ "$DEPLOYED_SHA" = "$MAIN_SHA" ]'):src.find("# Diverged.")]
+    assert "log " not in quiet_branch, "logs even when in sync -- would bury the STALE line in noise"
+
+    deploy_src = (ROOT / "scripts" / "deploy.sh").read_text()
+    assert "DEPLOY_SHA=" in deploy_src and "--build-arg DEPLOY_SHA=" in deploy_src, \
+        "deploy.sh does not bake the built SHA into the image -- the staleness check has nothing to read"
+
+    docker_src = (ROOT / "Dockerfile").read_text()
+    assert "ARG DEPLOY_SHA" in docker_src and ".deploy_sha" in docker_src, \
+        "Dockerfile does not accept/write DEPLOY_SHA -- deploy.sh's build-arg has nowhere to land"
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -1534,9 +2214,21 @@ def _unparseable_exhaustion_gates_briefly_not_for_an_hour():
 
 
 def _a_real_reset_time_is_still_honored():
-    """A stated reset must win over the short fallback, so we don't hammer a genuine limit."""
+    """A stated reset must win over the short fallback, so we don't hammer a genuine limit.
+
+    The reset hour must be derived from `now`, not hardcoded: a fixed "1pm" sits under 600s
+    from rolling to tomorrow in the ~10 minutes before 13:00 UTC, which turned this into a
+    false CI failure independent of any code change (#210 -- confirmed live on PR#209's
+    2026-08-29T12:53:12Z run). Picking an hour a few hours ahead of `now` keeps the asserted
+    gap (a real reset, not the 300s no-reset-time fallback) comfortably over 600s regardless
+    of wall-clock time, including across a midnight rollover.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    target_hour = (now.hour + 3) % 24
+    ampm = "am" if target_hour < 12 else "pm"
+    h12 = target_hour % 12 or 12
     out = _bash_eval(
-        "", '_account_pool_mark_exhausted acct "hit your weekly limit, resets 1pm (UTC)" >/dev/null; '
+        "", f'_account_pool_mark_exhausted acct "hit your weekly limit, resets {h12}{ampm} (UTC)" >/dev/null; '
             'now=$(date +%s); epoch=$(awk \'{print $2}\' "$ACCOUNT_POOL_STATE_FILE"); '
             'echo $(( epoch - now ))'
     )
@@ -1595,13 +2287,19 @@ if __name__ == "__main__":
     check("member_spec's OWN default MEMBERS_DIR resolves (not just an explicit path)", _members_dir_default_is_right)
     check("report contract: ok + silence is recorded", _report_contract)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
+    check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
+    check("fleet.db composite-PK migration is lock-serialized", _fleet_db_composite_pk_migration_is_lock_serialized)
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
     check("maxx lease reserves, releases, and self-expires", _maxx_lease_reserves_releases_and_self_expires)
     check("maxx lease concurrent reserves don't clobber each other", _maxx_lease_concurrent_reserves_dont_clobber_each_other)
+    check("maxx share ceiling uses hourly headroom, not the week bank", _maxx_share_ceiling_uses_hourly_headroom_not_the_week_bank)
+    check("maxx share ceiling subtracts local leases, not just the remote's reserved_pct", _maxx_share_ceiling_subtracts_local_leases_not_just_the_remotes_reserved_pct)
+    check("maxx share ceiling respects a real over verdict, not just unreadable meters", _maxx_share_ceiling_respects_a_real_over_verdict_not_just_unreadable_meters)
     check("no member ships a turn or budget cap", _no_member_ships_a_cap)
     check("minion knows the browser in its own image exists", _minion_knows_the_browser_exists)
     check("score reasoning is not guillotined mid-word", _score_reasoning_is_not_guillotined_mid_word)
+    check("self-evolution evidence covers fleet-kit's own repo, not just $FLEET_REPO", _self_evo_evidence_covers_both_repos)
     check("jefe can unstick a PR that is merely behind its base", _jefe_can_unstick_a_pr_that_is_merely_behind)
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
@@ -1609,10 +2307,14 @@ if __name__ == "__main__":
     check("signal_rate/dormant exclude killed+timed_out, not just budget_declined", _signal_rate_excludes_all_never_executed_statuses)
     check("a leaked absolute-path write into $REPO is caught and alerted", _postflight_dirty_check_catches_a_leaked_absolute_path_write)
     check("a git-status failure alerts rather than reading as clean", _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure)
+    check("run_member.sh logs CRITICAL when postflight_dirty_check.sh fails to source", _run_member_logs_critical_when_postflight_dirty_check_fails_to_source)
     check("run_member.sh rejects a non-numeric --item", _run_member_rejects_a_non_numeric_item)
     check("both worktree callers check $REPO before tearing the worktree down", _run_member_and_builder_check_repo_before_removing_the_worktree)
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
+    check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
+    check("judge-judy lock lives somewhere persistent", _judge_judy_lock_lives_somewhere_persistent)
+    check("judge-judy strikes are head-scoped and leave diagnosable evidence", _judge_judy_strikes_are_scoped_by_head_and_leave_diagnosable_evidence)
     check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
@@ -1621,6 +2323,10 @@ if __name__ == "__main__":
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
     check("self_improve_score.sh is actually scheduled", _self_improve_score_is_actually_scheduled)
+    check("deploy staleness check is actually scheduled", _deploy_staleness_check_is_actually_scheduled)
+    check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
+    check("deploy staleness check reads a baked SHA and only alerts past budget", _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget)
+    check("deploy.sh's host log dir survives sourcing the instance's container-scoped fleet.env", _deploy_sh_host_log_dir_survives_sourcing_the_instances_container_scoped_fleet_env)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("deploy.sh's log is durable regardless of caller", _deploy_log_is_durable_regardless_of_caller)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
