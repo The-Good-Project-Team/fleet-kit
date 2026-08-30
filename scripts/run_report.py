@@ -124,6 +124,19 @@ STATUS_NO_VISION = "no_vision_link"
 STATUS_BUDGET_DECLINED = "budget_declined"
 STATUS_TIMED_OUT = "timed_out"
 STATUS_KILLED = "killed"
+STATUS_INCOMPLETE_FANOUT = "incomplete_fanout"
+
+# gh#252: a fan-out parent (the-fixer, or any member that spawns one `--item` sub-pass per
+# unit of work, per docs/gru-minions.md's own reasoning) that dispatches background sub-passes
+# and then ends its turn without ever writing Outcome:/Evidence: reads identically to a pass
+# that ran to completion and genuinely found nothing -- but it isn't: real money was spent, and
+# the dispatched items were silently orphaned when their sub-passes got killed with no record
+# tying them back to a parent. Matching the dispatch invocation verbatim (`run_member.sh
+# <member> --item <N>`, the exact form run_member.sh itself validates as numeric-only) is
+# marie's flagged candidate for detecting this in the PRD (gh#252) -- the precise pattern is
+# called out there as an open question unresolved from the repo alone, so this is the most
+# literal reading of that candidate, not a final answer a human has signed off on.
+_DISPATCH_RE = re.compile(r"run_member\.sh\s+\S+\s+--item\s+(\d+)")
 
 # account_pool.sh's account_pool_run returns 3 for ALL_ACCOUNTS_EXHAUSTED: every account was
 # gated before a single `claude` call was made, so this pass spent ZERO tokens.
@@ -164,6 +177,11 @@ def parse_report(text: str) -> dict:
     # Reuse board_rice's guardrail rather than a second regex: one definition of what counts
     # as a named coordination link, shared by the board and by every run.
     out["vision_link"] = _vision_claim(text)
+    # gh#252: item IDs this pass named in a `run_member.sh <member> --item <N>` dispatch line,
+    # in the order they appear. Only meaningful when `outcome` is empty (see classify()) --
+    # a pass that dispatched AND reported normally may still mention the same line in its
+    # prose, which is fine, since that path never reaches STATUS_INCOMPLETE_FANOUT.
+    out["dispatched_items"] = _DISPATCH_RE.findall(text)
     return out
 
 
@@ -174,7 +192,15 @@ def classify(report: dict, *, vision_required: bool, exit_code: int | None = Non
         # A budget decline or a timeout never gets the chance to write a FLEET-REPORT block --
         # that empty outcome must not read the same as a pass that ran to completion and
         # genuinely filed nothing (#3015).
-        return _EXIT_CODE_STATUS.get(exit_code, STATUS_NOTHING)
+        if exit_code in _EXIT_CODE_STATUS:
+            return _EXIT_CODE_STATUS[exit_code]
+        # gh#252: exit_code 0 (or unknown) with an empty outcome AND evidence the pass
+        # dispatched a background sub-pass it never waited on is a live real-work loss, not a
+        # genuine "ran to completion and found nothing" -- distinguish it so the orphaned items
+        # don't vanish into reported_nothing with no trace back to what was dispatched.
+        if report.get("dispatched_items"):
+            return STATUS_INCOMPLETE_FANOUT
+        return STATUS_NOTHING
     if outcome.upper().startswith("QUIET"):
         # A quiet pass is legitimate, but only with evidence -- otherwise it is the
         # "looked at the same dashboards and gave up" pass that rotted the board for 20 days.
@@ -191,6 +217,7 @@ def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
                  item_id: str | None = None, pr: str | None = None) -> dict:
     """One run = one record. `usage` is pass_accounting's parsed JSON, or None (mechanical)."""
     report = parse_report(pass_text)
+    status = classify(report, vision_required=vision_required, exit_code=exit_code)
     rec = {
         "member": member,
         "run_id": run_id,
@@ -202,7 +229,7 @@ def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
         # no timezone handling on the reading side.
         "ts": time.time(),
         "exit_code": exit_code,
-        "status": classify(report, vision_required=vision_required, exit_code=exit_code),
+        "status": status,
         "outcome": report["outcome"],
         "evidence": report["evidence"],
         "vision_link": report["vision_link"],
@@ -220,6 +247,11 @@ def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
         # Optional: a mechanical member or an early-exit ("no unclaimed items") has neither.
         "item_id": item_id,
         "pr": pr,
+        # gh#252: which item IDs this pass named in a dispatch line, when the pass never
+        # reported and that's why -- null unless status is actually incomplete_fanout, so a
+        # normal ok/quiet run (which may also mention a dispatch line in its prose) doesn't
+        # carry a misleading orphaned_items list.
+        "orphaned_items": report["dispatched_items"] if status == STATUS_INCOMPLETE_FANOUT else None,
     }
     u = usage or {}
     # Field names here match pass_accounting.py's split() output verbatim -- that module is the

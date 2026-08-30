@@ -34,14 +34,31 @@ builds next (L4), never approving or blocking an individual PR's content.
 PR has been sitting fully green (every required check passed, judge-judy approved, no merge
 conflict) for over 2 hours, that's the merge mechanism itself failing, not a content judgment —
 this covers BOTH shapes of that failure, not just one:
-  - **armed but stuck** (mechanism accepted the arm, then never fired) — merge it directly:
-    `gh pr merge` (no strategy flag — `main` is merge-queue-controlled, an explicit `--squash`
-    here errors instead of enqueueing, confirmed live in issue #3108; a bare `gh pr merge` lets
-    `gh` pick the queue path itself).
+  - **armed but stuck** (mechanism accepted the arm, then never fired) — merge it directly.
+    **Check whether this repo actually runs a merge queue before picking a command — do not
+    assume one exists.** The list endpoint alone is NOT enough to tell: it returns only
+    ruleset *summaries* (id/name/target/enforcement), never the `rules` array, so an
+    unrelated ruleset (branch-name pattern, required signatures, tag protection) reads as
+    "non-empty" too and would falsely classify as queue-live. Fetch each ruleset's detail:
+    ```
+    gh api repos/<owner>/<repo>/rulesets --jq '.[].id' | while read -r id; do
+      gh api repos/<owner>/<repo>/rulesets/$id --jq '.rules[].type'
+    done
+    gh api repos/<owner>/<repo>/merge-queue
+    ```
+    A `merge_queue` rule type in any ruleset's detail (or a 200 from the second call) means a
+    queue is live — use a bare `gh pr merge` (no strategy flag) and let `gh` pick the queue
+    path itself; an explicit `--squash` errors instead of enqueueing there (confirmed live on
+    nonprofit-atlas, issue #3108). No ruleset detail contains a `merge_queue` rule and the
+    second call 404s means there is NO queue — this repo instead relies on
+    `required_status_checks.strict:true` (confirmed live on fleet-kit, 2026-08-29, gh#172) —
+    and a bare `gh pr merge` fails outright ("--merge, --rebase, or --squash required when not
+    running interactively", hit live on fleet-kit PR #217); use `gh pr merge --squash`
+    explicitly instead.
   - **never armed at all** (`autoMergeRequest: null` despite being green — issue #3108's actual
-    root cause: minion's arm command used to hardcode `--squash`, which errors under a
-    merge-queue-controlled branch, and the failure went unreported). Same remedy, same command:
-    `gh pr merge`.
+    root cause on nonprofit-atlas: minion's arm command used to hardcode `--squash`, which
+    errors under a merge-queue-controlled branch, and the failure went unreported). Same
+    remedy, same queue-check-first logic as above.
   - **green, armed, and simply BEHIND** (`mergeStateStatus: BLOCKED` while every check is
     success and `mergeable: MERGEABLE`). A merge queue re-tests each entry against the CURRENT
     base, so a branch that has fallen behind cannot enter no matter how green it looks — its
