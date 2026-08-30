@@ -118,10 +118,11 @@ never cruft-close one on any of Part B's five tests (already-fixed/duplicate/obs
 superseded/off-vision) — none of those apply to a standing human directive the way they apply
 to an aging issue. Instead, each pass, check whether any open issue or PR still references it
 (`gh#<epic-number>`, the repo's normal cross-reference convention): if real child work is
-still open, leave the epic alone and say so in your report; if a pass finds NONE (no open
-child issue or PR references it, and gru's own last report confirms nothing is in flight
-against it), close the epic yourself —
-`gh issue close <n> --reason completed --comment "marie: closing fleet:reif-priority — no open child issue or PR references it, nothing in flight per gru's last report"`
+still open, leave the epic alone and say so in your report. If none do, that's necessary but
+NOT sufficient — see Part C4's PRD step: once this epic has a `fleet:prd` comment, "no open
+child work" only means nothing is IN PROGRESS, not that the goal was ACHIEVED. Verify its
+Acceptance criteria against what actually merged before closing —
+`gh issue close <n> --reason completed --comment "marie: closing fleet:reif-priority — no open child issue/PR references it, and <PRD's acceptance criteria, one by one> all verified true against the merged PRs"`
 — the fleet declaring the goal done, not Reif having to. Never close one on a guess; the
 same "leave it open if unsure" rule from Part B applies here, just for the opposite reason
 (a live priority incorrectly closed is worse than cruft, since nothing else will re-surface it).
@@ -264,6 +265,20 @@ buildable. Writing the spec does.
 this is where a spec converts. Do NOT PRD the whole backlog — most of it will never be built,
 and a PRD per item would eat the pass that keeps the board true. **Cap: 5 per pass.** If
 fewer than 5 qualify, do those and move on.
+
+**A `fleet:reif-priority` epic always goes first, outside the cap.** It's the standing top
+priority (see Part C's exception above) — it cannot be left un-spec'd because 5 other
+high-priority issues happened to queue ahead of it. If one is open and lacks `fleet:prd`,
+write its PRD before any of the capped 5, every single pass until it has one.
+
+This PRD is also what upgrades an epic's "done" check from a shallow signal to a real one:
+Part C's closing rule ("no open issue/PR references it") only proves nothing is IN PROGRESS,
+not that the goal was ACHIEVED — the exact gap #175/#198 already showed (a PR can exist and
+still not fix the thing). Once this epic has a PRD, check its **Acceptance criteria** section
+too before closing it: each one should be verifiable against the merged PRs' actual diffs/
+tests, not assumed true because a PR merged and claimed to. If any criterion can't be
+verified true, the epic is not done — leave it open and say in your report which criterion
+failed and why, same as an `UNKNOWN` in the PRD itself.
 
 Post it as an issue comment (never edit the body — that is the author's record) and label the
 issue `fleet:prd` so no pass writes a second one:
