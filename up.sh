@@ -144,7 +144,7 @@ fi
 WEBHOOK_PORT=$(( VIEW_PORT + 1 ))
 
 echo "[up] starting fleet '$NAME' as container '$CONTAINER_NAME' -> $REPO_URL (image $IMAGE_TAG, accounts [${ACCOUNT_LIST[*]}], view port $VIEW_PORT, webhook port $WEBHOOK_PORT)"
-exec podman run -d \
+podman run -d \
   --name "$CONTAINER_NAME" \
   --replace \
   -e "FLEET_REPO=/repo" \
@@ -161,3 +161,49 @@ exec podman run -d \
   -p "$VIEW_PORT:$VIEW_PORT" \
   -p "$WEBHOOK_PORT:$WEBHOOK_PORT" \
   "$IMAGE_TAG"
+
+# 6. Wire this instance into cron: auto-deploy (picks up future merges without a manual
+#    deploy.sh run) and account health-check (pages when the credential pool goes bad).
+#    Idempotent -- grep before appending, so a re-run of up.sh for an existing instance never
+#    duplicates a crontab line. Both scripts are keyed by FLEET_CONTAINER_NAME (see
+#    auto_deploy.sh's STATE/LOCKFILE and account_health_check.sh's own state file), which is
+#    why this step must pass it explicitly rather than relying on any default.
+#
+#    WHY THIS EXISTS: found live on dino, 2026-08-29 -- fleet-kit-server-fleet was stood up by
+#    hand (a raw `podman run`, bypassing up.sh entirely) specifically because up.sh never did
+#    this wiring, so nobody thought to do it after either. Result: an instance 6 commits/13h
+#    behind main with no auto-deploy, no health-check, silently. up.sh is the one place that
+#    runs for every instance -- closing the gap here means the next instance can't skip it.
+KIT_DIR="$(pwd)"
+CRON_LOG_DIR="$INSTANCE_DIR/logs"
+AUTO_DEPLOY_LINE="*/5 * * * * cd $KIT_DIR && FLEET_INSTANCE_DIR=$INSTANCE_DIR FLEET_CONTAINER_NAME=$CONTAINER_NAME FLEET_LOG_DIR=$CRON_LOG_DIR bash scripts/auto_deploy.sh >> $CRON_LOG_DIR/auto_deploy.cron.log 2>&1"
+# NTFY_TOPIC is baked in from up.sh's OWN environment at run time, not left as a cron-time
+# expansion -- cron jobs run in a minimal environment that does not inherit the interactive
+# shell's exported vars, so `${NTFY_TOPIC:-}` would evaluate empty on every tick and
+# account_health_check.sh's `:?` guard would then fail unconditionally, forever. Export
+# NTFY_TOPIC before running up.sh (as the printed hint says) for this to take effect.
+HEALTH_CHECK_LINE="*/5 * * * * FLEET_LOG_DIR=$CRON_LOG_DIR NTFY_TOPIC=${NTFY_TOPIC:-} FLEET_CONTAINER_NAME=$CONTAINER_NAME bash $KIT_DIR/scripts/account_health_check.sh >> $CRON_LOG_DIR/account_health_check.cron.log 2>&1"
+CURRENT_CRON="$(crontab -l 2>/dev/null || true)"
+NEW_CRON="$CURRENT_CRON"
+# Anchored on a token boundary (end-of-line or whitespace after the value) -- a plain
+# substring match (grep -F) would treat FLEET_CONTAINER_NAME=fleet-kit-atlas as already
+# present just because FLEET_CONTAINER_NAME=fleet-kit-atlas-staging is, silently skipping
+# cron installation for any instance whose name is a prefix of another's.
+if ! echo "$CURRENT_CRON" | grep -qF "auto_deploy.sh" || ! echo "$CURRENT_CRON" | grep -F "auto_deploy.sh" | grep -qE "FLEET_CONTAINER_NAME=${CONTAINER_NAME}([[:space:]]|\$)"; then
+  NEW_CRON="$NEW_CRON
+$AUTO_DEPLOY_LINE"
+  echo "[up] added auto-deploy cron for '$CONTAINER_NAME' (every 5 min)"
+fi
+if ! echo "$CURRENT_CRON" | grep -qF "account_health_check.sh" || ! echo "$CURRENT_CRON" | grep -F "account_health_check.sh" | grep -qE "FLEET_CONTAINER_NAME=${CONTAINER_NAME}([[:space:]]|\$)"; then
+  NEW_CRON="$NEW_CRON
+$HEALTH_CHECK_LINE"
+  echo "[up] added account health-check cron for '$CONTAINER_NAME' (every 5 min, set NTFY_TOPIC in your shell env before running up.sh to page on failure)"
+fi
+if [ "$NEW_CRON" != "$CURRENT_CRON" ]; then
+  echo "$NEW_CRON" | crontab -
+fi
+
+echo "[up] NOT automated -- do this yourself: public exposure (Cloudflare tunnel ingress or"
+echo "[up]   a Caddy path rule -> localhost:$VIEW_PORT) and its own path_health_check.sh cron"
+echo "[up]   line once the URL exists. Topology (one hostname per instance vs. one shared"
+echo "[up]   host with Caddy path-routing) is a per-box call up.sh can't safely guess."
