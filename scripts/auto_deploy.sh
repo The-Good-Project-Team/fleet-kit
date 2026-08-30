@@ -27,7 +27,15 @@ set -euo pipefail
 KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}"
 LOG="$LOG_DIR/auto_deploy.log"
-STATE="$HOME/.cache/fleet-kit/auto_deploy.last_sha"
+# Keyed by container name: STATE/LOCKFILE were a single global path shared by every instance
+# on the box, so instance A's successful tick wrote LAST_DEPLOYED and instance B's next tick
+# read it back and saw "already deployed" even if B's own container was still stale on an
+# older SHA (or, worse via the shared LOCKFILE below, one instance's deploy would flock out
+# every other instance's tick entirely). Harmless while every instance tracked the same
+# fleet-kit main, but that was luck, not a guarantee -- confirmed live 2026-08-29 setting up
+# fleet-kit-server-fleet as a second instance alongside nonprofit-atlas/philanthropy.
+INSTANCE_KEY="${FLEET_CONTAINER_NAME:-default}"
+STATE="$HOME/.cache/fleet-kit/auto_deploy.last_sha.${INSTANCE_KEY}"
 mkdir -p "$LOG_DIR" "$(dirname "$STATE")"
 log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" >> "$LOG"; }
 
@@ -47,7 +55,7 @@ cd "$KIT_DIR"
 # crashed deploy cannot wedge every future tick behind a stale lock. -n = fail immediately
 # rather than queueing, because a queued deploy is just a slower duplicate of the one already
 # running -- the next 5-minute tick is the retry.
-LOCKFILE="$HOME/.cache/fleet-kit/auto_deploy.lock"
+LOCKFILE="$HOME/.cache/fleet-kit/auto_deploy.lock.${INSTANCE_KEY}"
 mkdir -p "$(dirname "$LOCKFILE")"
 exec 9>"$LOCKFILE"
 if command -v flock >/dev/null 2>&1; then
