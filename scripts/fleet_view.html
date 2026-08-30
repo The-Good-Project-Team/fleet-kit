@@ -39,6 +39,16 @@
   .btn.primary { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
   .btn.primary:hover { filter: brightness(1.1); }
 
+  /* ---------- boot-error banner: gh#262 -- boot()/loadMembers() used to fail silently on any
+     API hiccup, rendering a blank dashboard pixel-identical to a genuinely idle fleet. This is
+     a fixed overlay (not a grid row) so it never reflows the shell's two-row layout above. ---- */
+  .boot-error-banner { position: fixed; top: 40px; left: 0; right: 0; z-index: 50;
+    display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+    background: var(--bad); color: #fff; font-size: 12px; box-shadow: 0 2px 6px rgba(0,0,0,.25); }
+  .boot-error-banner .msg { flex: 1; }
+  .boot-error-banner .btn { background: rgba(255,255,255,.15); color: #fff; border-color: rgba(255,255,255,.4); }
+  .boot-error-banner .btn:hover { border-color: #fff; }
+
   .body { display: grid; grid-template-columns: 220px 1fr; min-height: 0; }
 
   /* ---------- sidebar: the agent roster, always visible, one click to switch ---------- */
@@ -230,6 +240,11 @@
     <span class="stat" id="repo"></span>
     <span class="spacer"></span>
     <span class="stat" id="globalSpend"></span>
+  </div>
+  <div class="boot-error-banner" id="bootError" style="display:none;">
+    <span class="msg" id="bootErrorMsg"></span>
+    <button class="btn small" id="bootErrorRetry">retry</button>
+    <button class="btn small" id="bootErrorDismiss">dismiss</button>
   </div>
   <div class="body">
     <div class="sidebar">
@@ -1371,10 +1386,34 @@ document.body.addEventListener('click', async (e) => {
 });
 
 // ---------------------------------------------------------------------------------------------
+// gh#262 -- boot()'s and loadMembers()'s Promise.all chains used to let any single failed fetch
+// (server restart mid-deploy, a GH API rate-limit, a DB lock) reject silently: .json() throws on
+// a non-JSON error body, the outer Promise.all rejects, boot() aborts, and the page is left
+// blank -- pixel-identical to a genuinely idle fleet. fetchJSON() labels the failure with the
+// endpoint that caused it so the banner below can name it.
+// ---------------------------------------------------------------------------------------------
+function fetchJSON(url) {
+  return fetch(url).then(r => {
+    if (!r.ok) throw new Error(`${url} returned ${r.status}`);
+    return r.json();
+  });
+}
+
+const bootErrorEl = document.getElementById('bootError');
+const bootErrorMsgEl = document.getElementById('bootErrorMsg');
+function showBootError(detail) {
+  bootErrorMsgEl.textContent = `dashboard failed to load — ${detail}`;
+  bootErrorEl.style.display = '';
+}
+function clearBootError() { bootErrorEl.style.display = 'none'; }
+document.getElementById('bootErrorRetry').onclick = () => boot();
+document.getElementById('bootErrorDismiss').onclick = clearBootError;
+
+// ---------------------------------------------------------------------------------------------
 // Fleet state (master toggle) + members (spec/effective/overrides/spend) + queue (next fires)
 // ---------------------------------------------------------------------------------------------
 async function renderFleetState() {
-  const state = await (await fetch('/api/fleet_state')).json();
+  const state = await fetchJSON('/api/fleet_state');
   FLEET_STATE = state;
   REPO_URL = state.REPO_URL || '';
   document.getElementById('repo').textContent = REPO_URL ? REPO_URL.replace(/^https?:\/\//, '') : '';
@@ -1397,9 +1436,9 @@ function renderSiblingSwitch(siblings) {
 
 async function loadMembers() {
   const [{ members }, { spend }, { kpi }] = await Promise.all([
-    fetch('/api/members').then(r => r.json()),
-    fetch('/api/spend?hours=24').then(r => r.json()),
-    fetch('/api/kpi?hours=24').then(r => r.json()),
+    fetchJSON('/api/members'),
+    fetchJSON('/api/spend?hours=24'),
+    fetchJSON('/api/kpi?hours=24'),
   ]);
   const spendByMember = Object.fromEntries((spend || []).map(s => [s.member, s]));
   members.forEach(m => { m._spend = spendByMember[m.spec.name]; });
@@ -1441,11 +1480,18 @@ function appendLiveLine(rec) {
 }
 
 async function boot() {
-  const [snap] = await Promise.all([
-    fetch('/api/snapshot').then(r => r.json()),
-    renderFleetState(),
-    loadMembers(),
-  ]);
+  let snap;
+  try {
+    [snap] = await Promise.all([
+      fetchJSON('/api/snapshot'),
+      renderFleetState(),
+      loadMembers(),
+    ]);
+  } catch (err) {
+    showBootError(err.message || String(err));
+    return;
+  }
+  clearBootError();
   ALL_RUNS = snap.runs || [];
   GH = snap.gh || { prs: [], issues: [], merged: [], self_evolution: [] };
   resortSidebar();
@@ -1453,8 +1499,13 @@ async function boot() {
   await renderQueue();
   selectAgent(SELECTED);
   // Same PAGE guard as renderQueue() above -- loadMembers() itself is page-agnostic (spend/KPI
-  // data every page's sidebar KPI line needs), but renderDetailHead() is agent-page-only.
-  setInterval(async () => { await loadMembers(); renderSidebar(); if (PAGE === 'agent') renderDetailHead(); }, 30000);
+  // data every page's sidebar KPI line needs), but renderDetailHead() is agent-page-only. A
+  // failure here (gh#262) is a background poll, not the initial boot -- the page already has
+  // data on screen, so just log it rather than interrupting with the boot banner.
+  setInterval(async () => {
+    try { await loadMembers(); renderSidebar(); if (PAGE === 'agent') renderDetailHead(); }
+    catch (err) { console.error('periodic loadMembers() failed:', err); }
+  }, 30000);
   setInterval(renderQueue, 15000);
 
   const es = new EventSource('/api/stream');
