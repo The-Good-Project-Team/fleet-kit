@@ -77,24 +77,41 @@ your head — read the allowance, subtract what is reserved, and say what you co
 
 ## 3. Spawn one nerd per qualifying lane
 
+Use the `Bash` tool with `run_in_background: true`, one call per nerd — **not** a shell `&`:
+
 ```
 FLEET_RUN_NOW=1 bash /fleet-kit/scripts/run_member.sh nerd --task "lane=<lane> — <the one
   sentence of why THIS lane, this hour: which of stale/breached/unexamined fired, and the KPI
-  value + delta you read>" &
+  value + delta you read>"
 ```
 
 `FLEET_RUN_NOW=1` is required — nerd ships `enabled:false` because it never self-fires on cron,
-the same escape hatch minion uses. Record each backgrounded PID.
+the same escape hatch minion uses. Record each call's returned `task_id`.
 
 The `lane=` prefix is load-bearing: it is how the nerd knows which lane it owns. Include the
 KPI reading you already did so the nerd does not re-derive it and disagree with you.
 
 ## 4. Wait for every nerd, then read its REAL result
 
-Poll (`wait` on each PID) rather than assuming a fixed sleep — a nerd can legitimately take
-many minutes. **Do not end your turn to "wait for the notification" instead**: you are a
+Call `TaskOutput(task_id, block: true, timeout: 600000)` for each `task_id` from step 3 — a
+nerd can legitimately take many minutes. **Never use a raw shell `&` + `wait $PID`**: gh#152
+recorded 7+ passes (~$6-8, ~300 turns) where `wait` on a manually-backgrounded PID silently lost
+the child the moment this turn's shell state didn't persist across the call, landing
+`reported_nothing` with `[exited with code 0]` and every field null. `Bash(run_in_background)` +
+`TaskOutput(block: true)` is the confirmed-working replacement (two independent clean passes,
+datta 16:12 and 19:12-19:29 UTC on 2026-08-29) — it does not rely on this turn's shell PID
+surviving. **Do not end your turn to "wait for the notification" instead**: you are a
 one-shot `claude -p` pass (persona_law.md §12); nothing resumes you once your turn ends.
-`wait` blocks inside THIS turn; a notification you hope arrives later never will.
+`TaskOutput(block: true)` blocks inside THIS turn; a notification you hope arrives later never
+will.
+
+`timeout: 600000` is `TaskOutput`'s hard ceiling, not a tunable margin — its own schema caps
+`timeout` at that value, and a nerd is allowed to run past it. If a call returns with the task
+still running (not a terminal finished/errored state), that is **not** a failure — call
+`TaskOutput(task_id, block: true, timeout: 600000)` again on the same `task_id`, and keep
+re-calling until you get a terminal status or you exhaust your own pass's turn/time budget.
+Only a terminal status — or genuinely running out of your own budget while still polling, which
+you say explicitly in your report — lets you conclude anything about that nerd.
 
 Read each nerd's own run record — never assume a spawn succeeded. A nerd that never reported
 back (crashed, hung, killed) is a **FAILURE you name explicitly**, not a silent gap in your
