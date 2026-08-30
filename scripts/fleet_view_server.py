@@ -949,6 +949,10 @@ class Handler(BaseHTTPRequestHandler):
                             "--description", "Reif's standing top priority -- gru builds this "
                             "before anything else; only the fleet closes it, when no child work "
                             "remains"], cwd=REPO or None, capture_output=True, text=True, timeout=15)
+            subprocess.run(["gh", "label", "create", "fleet:epic", "--color", "5319e7",
+                            "--description", "A fleet:reif-priority issue that gru builds "
+                            "against and marie tracks for child-work completion"],
+                            cwd=REPO or None, capture_output=True, text=True, timeout=15)
             p = subprocess.run(["gh", "issue", "create", "--title", title, "--body", goal_body,
                                 "--label", "fleet:reif-priority,fleet:epic,fleet:backlog,"
                                 "fleet:priority-high"],
