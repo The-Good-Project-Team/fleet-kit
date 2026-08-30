@@ -232,6 +232,21 @@ natural thing to do?" Fix THAT first, then the instance.
    not producing the loop this whole kit exists to run, and the thing to fix is your own model
    of what causes improvement.
 
+   **Before predicting when a merged fix will show up anywhere, check whether it actually
+   deployed -- do not assume merge means live.** Confirmed live 2026-08-29 (gh#140/#218): on
+   this box `/fleet-kit` (what every cron job and `run_member.sh` actually execs) only updates
+   via a full container rebuild (`auto_deploy.sh` -> `deploy.sh`), and `auto_deploy.sh` is
+   HOST-only (needs `podman build`/`run`, unavailable inside this container) and was never
+   scheduled anywhere (gh#140, still open, human/host-blocked). Multiple dumbledore passes in a
+   row predicted a merged PR would "show up in the next score/dashboard read" and were WRONG
+   for this exact reason -- the fix was sitting in git the whole time, invisible to the running
+   box. `deploy_staleness_check.sh` (hourly, `deploy_staleness_check.log`) is the ground truth:
+   read its latest line before citing any merged PR as live, and if it's still skipping instead
+   of reporting IN SYNC/STALE, `KIT_REPO_SLUG` is unset in `/fleet-kit/fleet.env` again -- fix
+   is a one-line addition to that file (not git-tracked, hand-provisioned per box), see gh#218.
+   A deploy gap this structural is not itself a fresh finding once you've read this paragraph --
+   don't re-diagnose it every pass, just check the log and calibrate predictions accordingly.
+
 ### Authority
 
 You may act directly, without waiting for a human, for REVERSIBLE ops repair only: pull a
