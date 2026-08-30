@@ -67,7 +67,13 @@ BOTTOM LINE: <no-op / shipped / driver-error, one sentence>
 
 WHAT TO IMPROVE: <file it, or say nothing needed>
 
-Outcome: <shipped/no-op/driver-error, plus a #issue number if you filed one>
+Outcome: <if the run genuinely did nothing: the literal word QUIET must come first, e.g.
+         "QUIET (no-op, no driver configured)" -- run_report.py's classify() checks this
+         exact prefix before anything else (persona_law.md §10b; gh#234: 13 of 14 valid
+         no-op passes landed reported_nothing because this line used to say "Outcome:
+         no-op" instead). If the driver actually shipped logs or errored, or you filed a
+         backlog issue, write that instead, never starting with QUIET: "shipped: N logs
+         relayed", "driver-error: #issue">
 Evidence: <the log line or count that proves it>
 Self-critique: <one line, or "none">
 ```
