@@ -1450,7 +1450,7 @@ async function loadMembers() {
 }
 
 async function renderQueue() {
-  const { next_fires } = await (await fetch('/api/next_fires')).json();
+  const { next_fires } = await fetchJSON('/api/next_fires');
   NEXT_FIRES = next_fires || [];
   // Bug (Reif, 2026-08-25 screenshot): this 15s-interval call rendered the agent detail head
   // over whatever page the user had actually navigated to (Self-Evolution's PR rows showing
@@ -1479,41 +1479,57 @@ function appendLiveLine(rec) {
   box.insertAdjacentHTML('beforeend', renderTline(rec.line, 'live'));
 }
 
-async function boot() {
-  let snap;
-  try {
-    [snap] = await Promise.all([
-      fetchJSON('/api/snapshot'),
-      renderFleetState(),
-      loadMembers(),
-    ]);
-  } catch (err) {
-    showBootError(err.message || String(err));
-    return;
-  }
-  clearBootError();
-  ALL_RUNS = snap.runs || [];
-  GH = snap.gh || { prs: [], issues: [], merged: [], self_evolution: [] };
-  resortSidebar();
-  renderSidebar();
-  await renderQueue();
-  selectAgent(SELECTED);
-  // Same PAGE guard as renderQueue() above -- loadMembers() itself is page-agnostic (spend/KPI
-  // data every page's sidebar KPI line needs), but renderDetailHead() is agent-page-only. A
-  // failure here (gh#262) is a background poll, not the initial boot -- the page already has
-  // data on screen, so just log it rather than interrupting with the boot banner.
-  setInterval(async () => {
-    try { await loadMembers(); renderSidebar(); if (PAGE === 'agent') renderDetailHead(); }
-    catch (err) { console.error('periodic loadMembers() failed:', err); }
-  }, 30000);
-  setInterval(renderQueue, 15000);
+// Re-entrancy guard: the retry button calls boot() directly, and a double-click (or any
+// duplicate click event) while an earlier call is still in flight would otherwise let two
+// successful boots both reach the tail below and register duplicate setIntervals + a
+// duplicate EventSource/listener set.
+let BOOTING = false;
 
-  const es = new EventSource('/api/stream');
-  es.onopen = () => dot.classList.add('live');
-  es.onerror = () => dot.classList.remove('live');
-  es.addEventListener('run', e => { onRunEvent(JSON.parse(e.data)); renderQueue(); });
-  es.addEventListener('gh', e => { GH = JSON.parse(e.data); renderSidebar(); renderQueuePage(); renderMergedPage(); renderEvolutionPage(); });
-  es.addEventListener('logline', e => appendLiveLine(JSON.parse(e.data)));
+async function boot() {
+  if (BOOTING) return;
+  BOOTING = true;
+  try {
+    let snap;
+    try {
+      // renderQueue() is folded into this same try -- it's still part of boot()'s own
+      // startup sequence (populates NEXT_FIRES before selectAgent() runs), so a failure here
+      // must abort the same way the outer Promise.all's failures do, not silently skip
+      // straight past selectAgent()/setInterval()/EventSource without ever showing a banner.
+      [snap] = await Promise.all([
+        fetchJSON('/api/snapshot'),
+        renderFleetState(),
+        loadMembers(),
+      ]);
+      ALL_RUNS = snap.runs || [];
+      GH = snap.gh || { prs: [], issues: [], merged: [], self_evolution: [] };
+      resortSidebar();
+      renderSidebar();
+      await renderQueue();
+    } catch (err) {
+      showBootError(err.message || String(err));
+      return;
+    }
+    clearBootError();
+    selectAgent(SELECTED);
+    // Same PAGE guard as renderQueue() above -- loadMembers() itself is page-agnostic (spend/KPI
+    // data every page's sidebar KPI line needs), but renderDetailHead() is agent-page-only. A
+    // failure here (gh#262) is a background poll, not the initial boot -- the page already has
+    // data on screen, so just log it rather than interrupting with the boot banner.
+    setInterval(async () => {
+      try { await loadMembers(); renderSidebar(); if (PAGE === 'agent') renderDetailHead(); }
+      catch (err) { console.error('periodic loadMembers() failed:', err); }
+    }, 30000);
+    setInterval(renderQueue, 15000);
+
+    const es = new EventSource('/api/stream');
+    es.onopen = () => dot.classList.add('live');
+    es.onerror = () => dot.classList.remove('live');
+    es.addEventListener('run', e => { onRunEvent(JSON.parse(e.data)); renderQueue(); });
+    es.addEventListener('gh', e => { GH = JSON.parse(e.data); renderSidebar(); renderQueuePage(); renderMergedPage(); renderEvolutionPage(); });
+    es.addEventListener('logline', e => appendLiveLine(JSON.parse(e.data)));
+  } finally {
+    BOOTING = false;
+  }
 }
 boot();
 </script>
