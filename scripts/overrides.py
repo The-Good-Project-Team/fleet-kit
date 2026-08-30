@@ -37,8 +37,32 @@ from pathlib import Path
 TUNABLE = ("max_turns", "model", "enabled", "schedule")
 
 DEFAULT_TTL_HOURS = 24
-STORE = Path(os.environ.get("FLEET_OVERRIDES_PATH",
-                            Path.home() / ".claude" / "fleet-overrides.jsonl"))
+
+# gh#51: this used to default under $HOME/.claude/ -- Claude Code's own managed config
+# directory -- where something (never confirmed what) swept the file within hours, silently
+# reverting every live throttle. FLEET_LOG_DIR is the same fleet-owned, container-mounted,
+# already-persistent directory runs.jsonl lives in (see deploy.sh's logs bind-mount), so this
+# survives the same way that does. FLEET_OVERRIDES_PATH still wins outright if set.
+_LOG_DIR = Path(os.environ.get("FLEET_LOG_DIR", Path.home() / "Library" / "Logs" / "fleet-kit"))
+STORE = Path(os.environ.get("FLEET_OVERRIDES_PATH", _LOG_DIR / "fleet-overrides.jsonl")).expanduser()
+
+# The pre-gh#51 location. Never write here again, but a throttle set before this fix shipped
+# is still live until its own TTL -- silently abandoning it would drop an in-force override
+# with no warning, which is exactly the failure this issue is about. Copy it forward once.
+_LEGACY_STORE = Path.home() / ".claude" / "fleet-overrides.jsonl"
+
+
+def _migrate_legacy_store(old: Path, new: Path) -> None:
+    try:
+        if old == new or not old.exists() or new.exists():
+            return
+        new.parent.mkdir(parents=True, exist_ok=True)
+        new.write_text(old.read_text())
+    except OSError:
+        pass  # importing this module must never crash a member's run over a migration copy
+
+
+_migrate_legacy_store(_LEGACY_STORE, STORE)
 
 
 class OverrideError(ValueError):

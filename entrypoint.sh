@@ -200,6 +200,20 @@ case "${1:-cron-foreground}" in
       # and logs why until an operator sets one, rather than silently doing nothing.
       echo "27 * * * * root export FLEET_LOG_DIR=$LOG_DIR NTFY_TOPIC=${NTFY_TOPIC:-} && bash /fleet-kit/scripts/account_health_check.sh >> $LOG_DIR/account_health_check.log 2>&1"
       echo "37 * * * * root export PUBLIC_URL=${PUBLIC_URL:-} FLEET_VIEW_PORT=${FLEET_VIEW_PORT:-8420} NTFY_TOPIC=${NTFY_TOPIC:-} && bash /fleet-kit/scripts/tunnel_health_check.sh >> $LOG_DIR/tunnel_health_check.log 2>&1"
+      # path_health_check.sh (gh#249): the fleet's THIRD outage pager -- tunnel-health above
+      # only checks the tunnel's ROOT hostname, which falls through Caddy's default route and
+      # never touches either instance's real path-routed dashboard (/fleet/<name>). Same
+      # failure class as account/tunnel-health (gh#171) and self_improve_score.sh/
+      # deploy_staleness_check.sh above: PR#238 shipped the script and it worked when invoked
+      # by hand, but nothing here scheduled it, so it never survived a redeploy.
+      #
+      # PUBLIC_PATH_URL is per-instance (each box's own /fleet/<name> path, e.g.
+      # https://dino.luckymachines.co/fleet/fleet-kit) -- unlike PUBLIC_URL/NTFY_TOPIC above,
+      # there is no fleet-wide value, so it must be set in THIS box's own fleet.env for the
+      # page to fire at all. Like NTFY_TOPIC, it is deliberately left unset by default: the
+      # script's own `:?` guard fails loudly and logs why until an operator sets one, rather
+      # than silently checking nothing.
+      echo "24 * * * * root export PUBLIC_PATH_URL=${PUBLIC_PATH_URL:-} NTFY_TOPIC=${NTFY_TOPIC:-} STATE_FILE=$LOG_DIR/.path_health_paged.state && bash /fleet-kit/scripts/path_health_check.sh >> $LOG_DIR/path_health_check.log 2>&1"
     } > "$CRONTAB"
     chmod 0644 "$CRONTAB"
     echo "[entrypoint] installed crontab (token redacted, stored separately at $TOKEN_FILE, mode 600):"
