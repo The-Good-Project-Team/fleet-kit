@@ -1982,6 +1982,43 @@ def _account_and_tunnel_health_checks_are_actually_scheduled():
     )
 
 
+def _required_health_check_scripts_in_readme_are_scheduled():
+    """Closes the FAILURE CLASS, not just one instance of it (gh#249).
+
+    _account_and_tunnel_health_checks_are_actually_scheduled above hard-codes two script
+    names -- it would not have caught path_health_check.sh (PR#238) shipping with zero cron
+    line, the third recurrence of the exact same gap (gh#154, gh#171, gh#249). This check
+    instead walks schedulers/README.md's own required-jobs table: any row marked
+    **required** whose Script column is a `scripts/*_check.sh` pager must have a matching
+    `bash /fleet-kit/scripts/<name>_check.sh` invocation in entrypoint.sh's crontab heredoc.
+    A future pager only has to earn a required row in that table and this check covers it --
+    no new selftest function needed.
+
+    Scoped to the `*_check.sh` naming convention (the pager family: account/tunnel/path
+    health) rather than every required row, because build/review are wired through
+    run_member.sh/worktree_builder.sh, not a bare script invocation -- a blanket check would
+    false-positive on those.
+    """
+    import re
+    root = Path(__file__).parent.parent
+    readme = (root / "schedulers" / "README.md").read_text()
+    entry = (root / "entrypoint.sh").read_text()
+    missing = []
+    for line in readme.splitlines():
+        if "**required**" not in line:
+            continue
+        m = re.search(r"`(scripts/(\w+_check\.sh))`", line)
+        if not m:
+            continue
+        script_path, script_name = m.group(1), m.group(2)
+        if f"bash /fleet-kit/{script_path}" not in entry:
+            missing.append(script_name)
+    assert not missing, (
+        f"{missing} are marked required in schedulers/README.md but have no cron line in "
+        "entrypoint.sh -- a required outage pager that looks shipped (merged PR, a README "
+        "row) but never actually fires is worse than one never attempted.")
+
+
 def _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget():
     """The check must compare something REAL (a SHA baked at build time), and must only write
     a durable record when actually past budget -- not on every tick, or the STALE line this
@@ -2056,6 +2093,33 @@ def _overrides_are_narrow():
         except overrides.OverrideError:
             return
         raise AssertionError("tools must NOT be live-tunable")
+
+
+def _overrides_store_is_not_under_home_dot_claude():
+    """gh#51: the live-override store used to default under $HOME/.claude/ -- Claude Code's own
+    managed config directory -- where something in there swept the file within hours, silently
+    reverting every throttle an operator believed was still in force. A static guard so the
+    default can't drift back there unnoticed the way it did before anyone caught it.
+    """
+    import os
+    import subprocess
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("FLEET_OVERRIDES_PATH", "FLEET_LOG_DIR")}
+    proc = subprocess.run(
+        [sys.executable, "-c", "import overrides; print(overrides.STORE)"],
+        cwd=str(HERE), env=env, capture_output=True, text=True, timeout=30, check=True)
+    resolved = proc.stdout.strip()
+    home_dot_claude = str(Path.home() / ".claude")
+    assert home_dot_claude not in resolved, \
+        f"STORE still resolves under $HOME/.claude with no env overrides set: {resolved}"
+    # FLEET_OVERRIDES_PATH must still win outright -- no behavior change for anyone using it.
+    with tempfile.TemporaryDirectory() as d:
+        explicit = str(Path(d) / "explicit-overrides.jsonl")
+        proc = subprocess.run(
+            [sys.executable, "-c", "import overrides; print(overrides.STORE)"],
+            cwd=str(HERE), env=dict(env, FLEET_OVERRIDES_PATH=explicit),
+            capture_output=True, text=True, timeout=30, check=True)
+        assert proc.stdout.strip() == explicit, "FLEET_OVERRIDES_PATH no longer takes precedence"
 
 
 def _env_example_exists():
@@ -2350,11 +2414,13 @@ if __name__ == "__main__":
     check("self_improve_score.sh is actually scheduled", _self_improve_score_is_actually_scheduled)
     check("deploy staleness check is actually scheduled", _deploy_staleness_check_is_actually_scheduled)
     check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
+    check("every required health-check script in README is actually scheduled", _required_health_check_scripts_in_readme_are_scheduled)
     check("deploy staleness check reads a baked SHA and only alerts past budget", _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget)
     check("deploy.sh's host log dir survives sourcing the instance's container-scoped fleet.env", _deploy_sh_host_log_dir_survives_sourcing_the_instances_container_scoped_fleet_env)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("deploy.sh's log is durable regardless of caller", _deploy_log_is_durable_regardless_of_caller)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
+    check("overrides store never resolves under $HOME/.claude", _overrides_store_is_not_under_home_dot_claude)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)
     check("fleet-view write routes are authenticated and fail closed", _write_routes_are_authenticated)

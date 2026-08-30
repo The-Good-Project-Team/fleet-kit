@@ -18,6 +18,7 @@ tunnel-health checks, e.g. `https://your-fleet.example.com/`), and `{{VIEW_PORT}
 | architect | daily | your `agents/architect.md`-driven pass | optional; without it the fleet only ever ships PR-sized increments, never features |
 | account-health | 5 min | `scripts/account_health_check.sh` | **required** — pages when every fleet account has failed for a sustained stretch; the only thing watching for a fully-dead account pool |
 | tunnel-health | 5 min | `scripts/tunnel_health_check.sh` | **required** if you expose the fleet through a public tunnel — self-heals ingress drift, pages when the public URL is not serving |
+| path-health | hourly | `scripts/path_health_check.sh` | **required** if you route instances by path behind a reverse proxy (e.g. Caddy `/fleet/<name>`) — pages when an instance's own dashboard path stops returning 200, the one thing tunnel-health's root-hostname check can't see |
 | view | always-on (not interval-scheduled) | `scripts/fleet_view_server.py` | optional — a live window onto `runs.jsonl` + `gh` state; kill it and the loop above is untouched. See `fleetkit-view.service` / `com.fleetkit.view.plist` (a long-running service, not a timer/interval job like the rest of this table). |
 
 launchd: `cp <file> ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/<file>`
