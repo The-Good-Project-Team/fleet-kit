@@ -2058,6 +2058,33 @@ def _overrides_are_narrow():
         raise AssertionError("tools must NOT be live-tunable")
 
 
+def _overrides_store_is_not_under_home_dot_claude():
+    """gh#51: the live-override store used to default under $HOME/.claude/ -- Claude Code's own
+    managed config directory -- where something in there swept the file within hours, silently
+    reverting every throttle an operator believed was still in force. A static guard so the
+    default can't drift back there unnoticed the way it did before anyone caught it.
+    """
+    import os
+    import subprocess
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("FLEET_OVERRIDES_PATH", "FLEET_LOG_DIR")}
+    proc = subprocess.run(
+        [sys.executable, "-c", "import overrides; print(overrides.STORE)"],
+        cwd=str(HERE), env=env, capture_output=True, text=True, timeout=30, check=True)
+    resolved = proc.stdout.strip()
+    home_dot_claude = str(Path.home() / ".claude")
+    assert home_dot_claude not in resolved, \
+        f"STORE still resolves under $HOME/.claude with no env overrides set: {resolved}"
+    # FLEET_OVERRIDES_PATH must still win outright -- no behavior change for anyone using it.
+    with tempfile.TemporaryDirectory() as d:
+        explicit = str(Path(d) / "explicit-overrides.jsonl")
+        proc = subprocess.run(
+            [sys.executable, "-c", "import overrides; print(overrides.STORE)"],
+            cwd=str(HERE), env=dict(env, FLEET_OVERRIDES_PATH=explicit),
+            capture_output=True, text=True, timeout=30, check=True)
+        assert proc.stdout.strip() == explicit, "FLEET_OVERRIDES_PATH no longer takes precedence"
+
+
 def _env_example_exists():
     assert (ROOT / "fleet.env.example").is_file()
     assert not (ROOT / "fleet.env").exists(), "fleet.env is yours to create and must stay untracked"
@@ -2355,6 +2382,7 @@ if __name__ == "__main__":
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("deploy.sh's log is durable regardless of caller", _deploy_log_is_durable_regardless_of_caller)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
+    check("overrides store never resolves under $HOME/.claude", _overrides_store_is_not_under_home_dot_claude)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)
     check("fleet-view write routes are authenticated and fail closed", _write_routes_are_authenticated)
