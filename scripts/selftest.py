@@ -2255,6 +2255,58 @@ def _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror():
     assert not hits, f"hardcoded read of the frozen instances/*/logs mirror: {hits}"
 
 
+def _self_evolution_panel_catches_the_member_dash_branch_shape():
+    """#237: the Self-Evolution panel missed PR #214 (dumbledore, merged) because its branch,
+    `member/dumbledore-186507-1788016382`, is the generic per-item dispatch shape shared with
+    minion/roomba/the-fixer -- not the `dumbledore/...` shape the panel's one `head:` search
+    matched. Confirmed live: the panel read "nothing lately" (30h-98h old PRs only) when the
+    true answer was a ~6h-old dumbledore PR editing the fleet's own conduct rules.
+
+    Also proves the four raw `head:` searches are deduplicated by PR number before being
+    returned -- a fixture where PR #214 appears in two of the four raw lists must still yield
+    it exactly once in self_evolution.
+    """
+    import fleet_view_server as fvs
+
+    member_dumbledore_pr = {
+        "number": 214, "title": "fix(persona_law): ...", "mergedAt": "2026-08-29T17:32:13Z",
+        "url": "https://github.com/x/y/pull/214", "author": {"login": "dumbledore"},
+        "files": [], "headRefName": "member/dumbledore-186507-1788016382",
+    }
+    member_jefe_pr = {
+        "number": 215, "title": "fix(jefe): ...", "mergedAt": "2026-08-29T10:00:00Z",
+        "url": "https://github.com/x/y/pull/215", "author": {"login": "jefe"},
+        "files": [], "headRefName": "member/jefe-999-1788000000",
+    }
+
+    def fake_gh(*args, timeout=15):
+        if "--search" in args:
+            search = args[args.index("--search") + 1]
+            if search == "head:dumbledore/":
+                # Same PR also (implausibly) matches this search, to prove dedup.
+                return json.dumps([member_dumbledore_pr])
+            if search == "head:member/dumbledore-":
+                return json.dumps([member_dumbledore_pr])
+            if search == "head:member/jefe-":
+                return json.dumps([member_jefe_pr])
+            return "[]"
+        return "[]"
+
+    orig_gh = fvs._gh
+    fvs._gh = fake_gh
+    try:
+        state = fvs.poll_gh_state()
+    finally:
+        fvs._gh = orig_gh
+
+    numbers = [pr["number"] for pr in state["self_evolution"]]
+    assert 214 in numbers, f"PR #214 (member/dumbledore-... branch) missing from self_evolution: {numbers}"
+    assert numbers.count(214) == 1, f"PR #214 appears more than once, dedup failed: {numbers}"
+    assert 215 in numbers, f"PR #215 (member/jefe-... branch) missing from self_evolution: {numbers}"
+    mergedats = [pr["mergedAt"] for pr in state["self_evolution"]]
+    assert mergedats == sorted(mergedats, reverse=True), "self_evolution not sorted by mergedAt desc"
+
+
 if __name__ == "__main__":
     check("member specs load and validate", _member_specs_validate)
     check("member_spec's OWN default MEMBERS_DIR resolves (not just an explicit path)", _members_dir_default_is_right)
@@ -2313,6 +2365,7 @@ if __name__ == "__main__":
     check("a stated reset time is honored over the fallback", _a_real_reset_time_is_still_honored)
     check("pool logs successes so outage length is measurable", _pool_logs_successes_so_downtime_is_measurable)
     check("nothing hardcodes a read of the frozen instances/*/logs mirror", _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror)
+    check("self-evolution panel catches the member/<name>-<id> branch shape", _self_evolution_panel_catches_the_member_dash_branch_shape)
 
     for n in ok:
         print(f"  ok    {n}")
