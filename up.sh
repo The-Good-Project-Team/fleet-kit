@@ -177,18 +177,27 @@ podman run -d \
 KIT_DIR="$(pwd)"
 CRON_LOG_DIR="$INSTANCE_DIR/logs"
 AUTO_DEPLOY_LINE="*/5 * * * * cd $KIT_DIR && FLEET_INSTANCE_DIR=$INSTANCE_DIR FLEET_CONTAINER_NAME=$CONTAINER_NAME FLEET_LOG_DIR=$CRON_LOG_DIR bash scripts/auto_deploy.sh >> $CRON_LOG_DIR/auto_deploy.cron.log 2>&1"
-HEALTH_CHECK_LINE="*/5 * * * * FLEET_LOG_DIR=$CRON_LOG_DIR NTFY_TOPIC=\${NTFY_TOPIC:-} FLEET_CONTAINER_NAME=$CONTAINER_NAME bash $KIT_DIR/scripts/account_health_check.sh >> $CRON_LOG_DIR/account_health_check.cron.log 2>&1"
+# NTFY_TOPIC is baked in from up.sh's OWN environment at run time, not left as a cron-time
+# expansion -- cron jobs run in a minimal environment that does not inherit the interactive
+# shell's exported vars, so `${NTFY_TOPIC:-}` would evaluate empty on every tick and
+# account_health_check.sh's `:?` guard would then fail unconditionally, forever. Export
+# NTFY_TOPIC before running up.sh (as the printed hint says) for this to take effect.
+HEALTH_CHECK_LINE="*/5 * * * * FLEET_LOG_DIR=$CRON_LOG_DIR NTFY_TOPIC=${NTFY_TOPIC:-} FLEET_CONTAINER_NAME=$CONTAINER_NAME bash $KIT_DIR/scripts/account_health_check.sh >> $CRON_LOG_DIR/account_health_check.cron.log 2>&1"
 CURRENT_CRON="$(crontab -l 2>/dev/null || true)"
 NEW_CRON="$CURRENT_CRON"
-if ! echo "$CURRENT_CRON" | grep -qF "auto_deploy.sh" || ! echo "$CURRENT_CRON" | grep -F "auto_deploy.sh" | grep -qF "FLEET_CONTAINER_NAME=$CONTAINER_NAME"; then
+# Anchored on a token boundary (end-of-line or whitespace after the value) -- a plain
+# substring match (grep -F) would treat FLEET_CONTAINER_NAME=fleet-kit-atlas as already
+# present just because FLEET_CONTAINER_NAME=fleet-kit-atlas-staging is, silently skipping
+# cron installation for any instance whose name is a prefix of another's.
+if ! echo "$CURRENT_CRON" | grep -qF "auto_deploy.sh" || ! echo "$CURRENT_CRON" | grep -F "auto_deploy.sh" | grep -qE "FLEET_CONTAINER_NAME=${CONTAINER_NAME}([[:space:]]|\$)"; then
   NEW_CRON="$NEW_CRON
 $AUTO_DEPLOY_LINE"
   echo "[up] added auto-deploy cron for '$CONTAINER_NAME' (every 5 min)"
 fi
-if ! echo "$CURRENT_CRON" | grep -qF "account_health_check.sh" || ! echo "$CURRENT_CRON" | grep -F "account_health_check.sh" | grep -qF "FLEET_CONTAINER_NAME=$CONTAINER_NAME"; then
+if ! echo "$CURRENT_CRON" | grep -qF "account_health_check.sh" || ! echo "$CURRENT_CRON" | grep -F "account_health_check.sh" | grep -qE "FLEET_CONTAINER_NAME=${CONTAINER_NAME}([[:space:]]|\$)"; then
   NEW_CRON="$NEW_CRON
 $HEALTH_CHECK_LINE"
-  echo "[up] added account health-check cron for '$CONTAINER_NAME' (every 5 min, set NTFY_TOPIC in your shell env or edit crontab -e to page on failure)"
+  echo "[up] added account health-check cron for '$CONTAINER_NAME' (every 5 min, set NTFY_TOPIC in your shell env before running up.sh to page on failure)"
 fi
 if [ "$NEW_CRON" != "$CURRENT_CRON" ]; then
   echo "$NEW_CRON" | crontab -
