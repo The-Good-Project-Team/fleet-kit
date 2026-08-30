@@ -352,12 +352,23 @@ def poll_gh_state() -> dict:
                       "number,title,mergedAt,url,author,files,headRefName", "--limit", "30")
     # Self-evolution: server-side head: search per persona (see the "Self-evolution means
     # jefe or dumbledore" comment above for why) rather than filtering a recent-N window
-    # client-side.
+    # client-side. Two searches per persona: their own `<name>/...` branch convention AND the
+    # generic per-item dispatch shape (`member/<name>-<itemid>-<ts>`) that minion/roomba/the-fixer
+    # also use -- #237, confirmed live miss: PR #214 (dumbledore, `member/dumbledore-186507-...`)
+    # was silently absent from this panel because only `head:dumbledore/` was searched. A third
+    # shape -- an owner-prefix-less hyphenated slug (e.g. #181, `jefe-judgejudy-fairness`) -- is
+    # NOT caught here; that needs content-based inference, not a branch-name search qualifier,
+    # and is an explicit, known residual gap (#237's PRD non-goal).
+    self_evolution_fields = "number,title,mergedAt,url,author,files,headRefName"
     jefe_raw = _gh("pr", "list", "--state", "merged", "--search", "head:jefe/", "--json",
-                    "number,title,mergedAt,url,author,files,headRefName", "--limit", "20")
+                    self_evolution_fields, "--limit", "20")
     dumbledore_raw = _gh("pr", "list", "--state", "merged", "--search", "head:dumbledore/",
-                          "--json", "number,title,mergedAt,url,author,files,headRefName",
-                          "--limit", "20")
+                          "--json", self_evolution_fields, "--limit", "20")
+    jefe_member_raw = _gh("pr", "list", "--state", "merged", "--search", "head:member/jefe-",
+                           "--json", self_evolution_fields, "--limit", "20")
+    dumbledore_member_raw = _gh("pr", "list", "--state", "merged", "--search",
+                                 "head:member/dumbledore-", "--json", self_evolution_fields,
+                                 "--limit", "20")
     try:
         prs = json.loads(prs_raw) if prs_raw else []
     except json.JSONDecodeError:
@@ -371,10 +382,21 @@ def poll_gh_state() -> dict:
     except json.JSONDecodeError:
         merged = []
     try:
-        self_evolution = (json.loads(jefe_raw) if jefe_raw else []) + \
-                          (json.loads(dumbledore_raw) if dumbledore_raw else [])
+        self_evolution_raw = (
+            (json.loads(jefe_raw) if jefe_raw else []) +
+            (json.loads(dumbledore_raw) if dumbledore_raw else []) +
+            (json.loads(jefe_member_raw) if jefe_member_raw else []) +
+            (json.loads(dumbledore_member_raw) if dumbledore_member_raw else [])
+        )
     except json.JSONDecodeError:
-        self_evolution = []
+        self_evolution_raw = []
+    # A PR could match more than one of the four searches (unlikely given the branch-name
+    # prefixes are disjoint, but not impossible if a title/description also matched somehow) --
+    # dedup by PR number so it doesn't double-count in the panel.
+    self_evolution_by_number = {}
+    for pr in self_evolution_raw:
+        self_evolution_by_number[pr["number"]] = pr
+    self_evolution = list(self_evolution_by_number.values())
     for pr in prs:
         checks = pr.get("statusCheckRollup") or []
         states = {c.get("state") or c.get("conclusion") for c in checks}
