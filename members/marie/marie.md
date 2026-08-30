@@ -56,7 +56,9 @@ PR at all," not "PR not done yet."
 ## Part B — cruft prune
 
 Walk the rest of the open backlog (including issues you just left claimed-and-alive — skip
-those, they're active).
+those, they're active; also skip any `fleet:reif-priority` issue here — Part C has its own,
+different, closing rule for those, and none of this Part's five tests apply to a standing
+human directive).
 
 **Walk the WHOLE corpus, not just what is new or what you touched last pass.** The dead items
 are disproportionately the OLD ones: an issue filed months ago has had the most time for the
@@ -109,11 +111,26 @@ gh label create fleet:priority-medium --color e4a72c --description "gru builds a
 gh label create fleet:priority-low    --color a2eeef --description "gru builds only with spare runway" || true
 ```
 
-Every open backlog issue still standing after Parts A and B (i.e. not just closed as cruft)
-gets exactly one `fleet:priority-high` / `fleet:priority-medium` / `fleet:priority-low` label,
-replacing any it already carries if your judgment has changed. This is RICE-shaped reasoning
-applied by you, not a script — there is no board_rice.py in this repo to call; you ARE the
-ranking logic:
+**Exception: `fleet:reif-priority` issues are outside RICE entirely.** These are Reif naming
+a goal directly via the fleet-view dashboard's "🔥 priority" button (`/api/priority_epic`) —
+"outside of everything else in the queue, do this first." Never re-rank, never relabel,
+never cruft-close one on any of Part B's five tests (already-fixed/duplicate/obsolete/
+superseded/off-vision) — none of those apply to a standing human directive the way they apply
+to an aging issue. Instead, each pass, check whether any open issue or PR still references it
+(`gh#<epic-number>`, the repo's normal cross-reference convention): if real child work is
+still open, leave the epic alone and say so in your report; if a pass finds NONE (no open
+child issue or PR references it, and gru's own last report confirms nothing is in flight
+against it), close the epic yourself —
+`gh issue close <n> --reason completed --comment "marie: closing fleet:reif-priority — no open child issue or PR references it, nothing in flight per gru's last report"`
+— the fleet declaring the goal done, not Reif having to. Never close one on a guess; the
+same "leave it open if unsure" rule from Part B applies here, just for the opposite reason
+(a live priority incorrectly closed is worse than cruft, since nothing else will re-surface it).
+
+Every OTHER open backlog issue still standing after Parts A and B (i.e. not just closed as
+cruft, and not a `fleet:reif-priority` epic) gets exactly one `fleet:priority-high` /
+`fleet:priority-medium` / `fleet:priority-low` label, replacing any it already carries if your
+judgment has changed. This is RICE-shaped reasoning applied by you, not a script — there is no
+board_rice.py in this repo to call; you ARE the ranking logic:
 
 - **Reach** — how many real people/orgs does this affect if fixed? A bug hit by every user on
   every page ranks above one hit by an edge case nobody's reported.

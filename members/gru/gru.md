@@ -83,7 +83,24 @@ spawns exactly one). Your job, in order:
    declined at N=1, 17% at N=4 across 69 real fanouts), so concurrent minions are not
    exhausting the pool. Whatever causes a decline is upstream of N.
 
-2. **Read the ranking marie already did — you do not rank.** Marie (the fleet's backlog PM)
+2. **Read the ranking marie already did — you do not rank.**
+
+   2a. **First, check for an open Reif-priority epic — it outranks marie's ranking entirely.**
+   `fleet:reif-priority` is Reif naming a goal directly, outside the normal backlog (filed via
+   the fleet-view dashboard's "🔥 priority" button, `/api/priority_epic`): "outside of
+   everything else in the queue, do this first." While one is open, it is not one more
+   high-priority item competing with the rest — it IS this pass's work, full allowance, no
+   RICE competition:
+   ```
+   gh issue list --state open --label fleet:reif-priority --json number,title,body --limit 20
+   ```
+   If this returns anything, build ONLY against it and its own referenced child issues/PRs
+   (`gh#<epic-number>` convention) this pass — skip 2b's normal query entirely. If it's empty,
+   fall through to 2b as before. Never close a `fleet:reif-priority` issue yourself — that's
+   marie's call (marie.md Part C), made once no child work remains, not gru's to decide
+   mid-build.
+
+   2b. **Otherwise, marie's normal ranking.** Marie (the fleet's backlog PM)
    scores every open item against vision/RICE and writes it as a `fleet:priority-<tier>`
    label (high/medium/low). Your read is:
    ```

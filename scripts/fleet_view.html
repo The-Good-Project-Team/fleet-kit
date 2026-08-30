@@ -791,7 +791,16 @@ function renderQueuePage() {
     </div>`;
   }).join('') || '<div class="run-empty">no open PRs</div>';
 
-  const issuesHtml = issues.map(i => {
+  // Reif-priority epics sort to the top, own section: "outside of everything else in the
+  // queue, do this first." gru builds only these while one is open (gru.md step 2); marie
+  // never re-ranks or cruft-closes them, and closes one itself once no child work remains
+  // (marie.md Part C) -- so this list should normally be empty or short-lived, not a second
+  // permanent backlog.
+  const isEpic = i => (i.labels || []).some(l => l.name === 'fleet:reif-priority');
+  const epics = issues.filter(isEpic);
+  const rest = issues.filter(i => !isEpic(i));
+
+  const renderIssueRow = i => {
     const labels = (i.labels || []).map(l =>
       `<span class="tag" style="--tag-color:#${esc(l.color || '888')}">${esc(l.name)}</span>`).join('');
     return `<div class="rail-row">
@@ -805,16 +814,24 @@ function renderQueuePage() {
         <button class="btn small" data-act="close_issue" data-issue="${i.number}">close</button>
       </div>
     </div>`;
-  }).join('') || '<div class="run-empty">backlog empty</div>';
+  };
+  const epicsHtml = epics.map(renderIssueRow).join('');
+  const issuesHtml = rest.map(renderIssueRow).join('') || '<div class="run-empty">backlog empty</div>';
 
   runListEl.innerHTML = `
     <div class="rail-section">
       <div class="rail-head">Open PRs <span class="count-badge">${prs.length}</span></div>
       ${prsHtml}
     </div>
+    ${epics.length ? `
+    <div class="rail-section" style="border-color:#b60205">
+      <div class="rail-head">🔥 Priority <span class="count-badge">${epics.length}</span></div>
+      ${epicsHtml}
+    </div>` : ''}
     <div class="rail-section">
       <div class="rail-head">Backlog <span class="count-badge">${issues.length}</span>
-        <button class="btn small" id="newIssue" style="margin-left:auto">+ new</button></div>
+        <button class="btn small" id="newPriority" style="margin-left:auto">🔥 priority</button>
+        <button class="btn small" id="newIssue">+ new</button></div>
       ${issuesHtml}
     </div>`;
   document.getElementById('newIssue')?.addEventListener('click', async () => {
@@ -824,6 +841,15 @@ function renderQueuePage() {
     const body = prompt('body — optional:', '');
     const r = await fetch('/api/create_issue', { method: 'POST', body: JSON.stringify({ title, lane, body }) });
     alert((await r.json()).ok ? 'filed' : 'failed — see server log');
+  });
+  document.getElementById('newPriority')?.addEventListener('click', async () => {
+    const title = prompt('what do you want the fleet to build first, above everything else?');
+    if (!title) return;
+    const body = prompt('any detail/acceptance criteria — optional:', '');
+    const r = await fetch('/api/priority_epic', { method: 'POST', body: JSON.stringify({ title, body }) });
+    alert((await r.json()).ok
+      ? 'filed as top priority — gru builds this before the rest of the backlog until it\'s done'
+      : 'failed — see server log');
   });
 }
 

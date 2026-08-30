@@ -927,6 +927,35 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": p.returncode == 0, "out": p.stdout, "err": p.stderr})
             return
 
+        # --- Reif-priority epic: "outside of everything else in the queue, do this first."
+        # Creates one issue labeled fleet:reif-priority,fleet:epic,fleet:backlog,
+        # fleet:priority-high. gru (gru.md step 2) checks for an open fleet:reif-priority
+        # issue BEFORE reading marie's normal ranking and builds only work under it while one
+        # is open, full allowance, no RICE competition. marie (marie.md Part C) never re-ranks
+        # or cruft-closes a fleet:reif-priority issue -- it closes the epic itself once a pass
+        # finds no more actionable child issues/PRs referencing it (gh#<epic> convention,
+        # same as every other cross-reference in this repo), and says why in its report.
+        # Confirmed live 2026-08-30 (Reif): "I want it as a priority, and then a few branching
+        # PRs, and then they consider it done" -- fleet self-closes, human doesn't have to.
+        # Label creation is idempotent (gh label create errors harmlessly if present already),
+        # same pattern marie.md's own priority labels use.
+        if path == "/api/priority_epic":
+            title = (body.get("title") or "").strip()
+            goal_body = body.get("body", "")
+            if not title:
+                self._json({"ok": False, "error": "title required"}, 400)
+                return
+            subprocess.run(["gh", "label", "create", "fleet:reif-priority", "--color", "b60205",
+                            "--description", "Reif's standing top priority -- gru builds this "
+                            "before anything else; only the fleet closes it, when no child work "
+                            "remains"], cwd=REPO or None, capture_output=True, text=True, timeout=15)
+            p = subprocess.run(["gh", "issue", "create", "--title", title, "--body", goal_body,
+                                "--label", "fleet:reif-priority,fleet:epic,fleet:backlog,"
+                                "fleet:priority-high"],
+                                cwd=REPO or None, capture_output=True, text=True, timeout=15)
+            self._json({"ok": p.returncode == 0, "out": p.stdout, "err": p.stderr})
+            return
+
         if path == "/api/comment_issue":
             number = body.get("issue")
             text = (body.get("body") or "").strip()
