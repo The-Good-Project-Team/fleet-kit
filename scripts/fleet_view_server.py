@@ -70,6 +70,29 @@ def _resolve_repo_url() -> str:
 
 
 REPO_URL = _resolve_repo_url()
+
+
+def _resolve_siblings() -> list[dict]:
+    """Other fleet-kit instances this one's Settings page can link out to -- e.g. two
+    instances sharing a box, each its own container/port. Optional: FLEET_SIBLINGS is
+    "name=url,name=url" in fleet.env; absent or empty means single-instance (the common
+    case for a template deployment) and the dropdown simply doesn't render. This process
+    never talks to a sibling -- it's a plain link, same "no new authority" spirit as every
+    other button on this page."""
+    raw = os.environ.get("FLEET_SIBLINGS", "")
+    out = []
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair or "=" not in pair:
+            continue
+        name, _, url = pair.partition("=")
+        name, url = name.strip(), url.strip()
+        if name and url:
+            out.append({"name": name, "url": url})
+    return out
+
+
+SIBLINGS = _resolve_siblings()
 RUNS_FILE = LOG_DIR / "runs.jsonl"
 PORT = int(os.environ.get("FLEET_VIEW_PORT", "8420"))
 GH_POLL_S = int(os.environ.get("FLEET_VIEW_GH_POLL_S", "20"))
@@ -206,12 +229,25 @@ def _cached(key: str, ttl_s: float, produce):
         return value
 
 
+# Settings page dial fields -- non-secret tuning knobs a human may want to see/edit from the
+# browser instead of ssh+vim. Allow-listed the same way dino-dashboard.py's READABLE_FIELDS
+# is: this is the ONLY set of keys /api/fleet_settings may write. Never widen to "any key".
+DIAL_FIELDS = [
+    "FLEET_SHARE_FRACTION", "FLEET_GRU_ALLOWANCE_FRACTION", "FLEET_GRU_CADENCE",
+    "FLEET_CADENCE_BUILD", "FLEET_CADENCE_REVIEW", "FLEET_CADENCE_GITPULL",
+    "FLEET_BUILDER_MODEL", "FLEET_CODE_REVIEW_MODEL",
+    "FLEET_QUEUE_CAP", "FLEET_MAX_BUDGET_USD",
+]
+
+
 def read_env_flags() -> dict:
     """FLEET_ENABLED from fleet.env text (not this process's environment, which was only a
     snapshot taken at start -- a toggle must be visible on the very next page load, not after
     a restart) + every member's REAL enabled state, which lives in its own spec.enabled field
     (post-overrides), not an env var -- see fleet_toggle's own comment for why there is no
-    such env var for a run_member.sh member."""
+    such env var for a run_member.sh member. Also carries the DIAL_FIELDS tuning values (raw
+    strings, blank if unset) and SIBLINGS for the Settings page -- same file, same request,
+    one round trip."""
     text = ENV_FILE.read_text(errors="ignore") if ENV_FILE.exists() else ""
     values = {}
     for line in text.splitlines():
@@ -220,7 +256,10 @@ def read_env_flags() -> dict:
             continue
         k, _, v = line.partition("=")
         values[k.strip()] = v.strip()
-    out = {"FLEET_ENABLED": values.get("FLEET_ENABLED", "true") == "true", "REPO_URL": REPO_URL}
+    out = {"FLEET_ENABLED": values.get("FLEET_ENABLED", "true") == "true", "REPO_URL": REPO_URL,
+           "SIBLINGS": SIBLINGS}
+    for key in DIAL_FIELDS:
+        out[key] = values.get(key, "")
     try:
         for spec in member_spec.load_all():
             eff, _ = ov.apply(spec)
@@ -234,18 +273,24 @@ def write_env_flag(key: str, value: bool) -> None:
     """Set KEY=true|false in fleet.env, preserving every other line. Appends the key if it
     isn't present yet (a fresh fleet.env copied from fleet.env.example already has it, but
     don't assume)."""
-    line_val = "true" if value else "false"
+    write_env_field(key, "true" if value else "false")
+
+
+def write_env_field(key: str, value: str) -> None:
+    """Set KEY=value (any string) in fleet.env, preserving every other line. Appends the key
+    if it isn't present yet. write_env_flag's bool-only twin, factored out so DIAL_FIELDS
+    (strings/numbers) and the true/false flags share one file-rewrite path."""
     text = ENV_FILE.read_text(errors="ignore") if ENV_FILE.exists() else ""
     lines = text.splitlines()
     found = False
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped.startswith(f"{key}=") or stripped.startswith(f"{key} ="):
-            lines[i] = f"{key}={line_val}"
+            lines[i] = f"{key}={value}"
             found = True
             break
     if not found:
-        lines.append(f"{key}={line_val}")
+        lines.append(f"{key}={value}")
     ENV_FILE.write_text("\n".join(lines) + "\n")
 
 
@@ -889,6 +934,18 @@ class Handler(BaseHTTPRequestHandler):
         # by run_member.sh -- there is no per-member env var; fleet_enabled_or_exit only ever
         # checks the global one). Two different mechanisms because they gate two different
         # things: the whole fleet vs one member's own schedule. ------------------------------
+        if path == "/api/fleet_settings":
+            # DIAL_FIELDS only -- server-side allow-list, same spirit as fleet_toggle's
+            # MEMBERS check. Silently ignores any key not on the list rather than writing
+            # it; never trust client-submitted field names.
+            written = []
+            for key, value in body.items():
+                if key in DIAL_FIELDS:
+                    write_env_field(key, str(value))
+                    written.append(key)
+            self._json({"ok": True, "written": written, "state": read_env_flags()})
+            return
+
         if path == "/api/fleet_toggle":
             target = body.get("target", "")  # "fleet" or a name from MEMBERS
             value = bool(body.get("value"))

@@ -43,7 +43,20 @@ INSTANCE_DIR="${FLEET_INSTANCE_DIR:?set FLEET_INSTANCE_DIR -- e.g. /home/ubuntu/
 # `|| true` for the same set -e reason as the drain guard below: this is at TOP LEVEL, so a
 # false test (no fleet.env yet -- a first deploy, or an instance that keeps config elsewhere)
 # returns non-zero and aborts the whole script before it has logged a single line.
+#
+# FLEET_LOG_DIR is saved/restored around this source on purpose: every instance's fleet.env
+# sets it to a CONTAINER-internal path (/var/log/fleet-kit -- what run_member.sh and every
+# member script see once they're running inside), but this script runs on the HOST and needs
+# its own, different, host-filesystem log dir (see LOG_DIR below). Sourcing fleet.env
+# unguarded overwrites whatever the caller (auto_deploy.sh, a human, cron) already exported
+# with that container path -- confirmed live 2026-08-29: `mkdir -p "$LOG_DIR"` then tries to
+# create /var/log/fleet-kit ON THE HOST, which is root:syslog-owned and not writable by the
+# operator account, so deploy.sh (and every downstream auto_deploy.sh tick) failed at its very
+# first line for both instances simultaneously the moment fleet.env's own FLEET_LOG_DIR value
+# was ever allowed to reach here.
+CALLER_LOG_ENV="${FLEET_LOG_DIR:-}"
 [ -f "$INSTANCE_DIR/fleet.env" ] && { set -a; . "$INSTANCE_DIR/fleet.env"; set +a; } || true
+FLEET_LOG_DIR="$CALLER_LOG_ENV"
 
 # The target repo this instance's agents work. Baked in as a literal until 2026-08-26, which
 # made deploy.sh the one file that could not serve a second instance: up.sh correctly passes
@@ -314,7 +327,14 @@ drain_inflight_passes() {
 drain_inflight_passes
 
 log "building $IMAGE from $KIT_DIR"
-podman build -t "$IMAGE" "$KIT_DIR"
+# Baked into the image as --build-arg, not written into KIT_DIR itself: KIT_DIR is a live git
+# checkout (the build context), and dropping a file into it would leave an untracked artifact
+# in the working tree on every deploy. gh#201: the running container's /fleet-kit is `COPY .
+# /fleet-kit` with .git excluded (.dockerignore) -- never a real checkout on any instance built
+# from this Dockerfile -- so this SHA baked at build time is the only way a later staleness
+# check can know what was actually shipped, without needing podman/host access itself.
+DEPLOY_SHA="$(git -C "$KIT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+podman build --build-arg DEPLOY_SHA="$DEPLOY_SHA" -t "$IMAGE" "$KIT_DIR"
 
 log "starting green candidate (${CONTAINER}-green) on alt ports $GREEN_VIEW_PORT/$GREEN_WEBHOOK_PORT"
 if exists "${CONTAINER}-green"; then

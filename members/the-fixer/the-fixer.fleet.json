@@ -18,7 +18,7 @@
     "escalation": "a fix isn't obvious within the turn budget -- open an explicit REVERT PR instead of guessing at a fix; never push directly to the default branch under any circumstance, even a dark prod. If PROD_DOWN and no FIXER_PROD_DIAG_DRIVER is configured, log the gap loudly and stop -- do not invent ad hoc prod access."
   },
   "schedule": {
-    "interval_s": 120
+    "hourly_at_minute": 47
   },
   "timeout_s": 1800,
   "enabled": true,
