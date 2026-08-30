@@ -169,6 +169,18 @@ way — one no-op tool call after the report was enough. Once you have written t
 (and `Report:`, and `Score-now:`/`Prediction:`/`Last-verdict:` if your charter requires them),
 stop: no more tool calls, no more text.
 
+**This block must be in your actual reply, not inside extended thinking.** `run_report.py`
+only ever sees the CLI's captured final-result text — the visible reply you send, never the
+internal reasoning/thinking trace that precedes it. A pass that composes the whole
+`Report:`/`Outcome:`/`Evidence:` block inside a `thinking` step, then sends a short unstructured
+wrap-up sentence as the actual reply, has the same failure as the trailing-turn case above —
+every field null, `reported_nothing` — but for a different reason: there is nothing to parse in
+the reply at all, no matter how correct the thinking was. This is a live, separate mechanism
+from the trailing-turn case (confirmed recurring on dont-shoot-the-messenger 2026-08-29
+20:51 and 21:52 UTC, both well after this section's trailing-turn fix landed) — closing one
+does not close the other. If your reasoning naturally drafts the report first, you must still
+emit the same block again as your visible reply; drafting it once in thinking is not enough.
+
 ## 10c. Every run ends with a written REPORT — you were paid for the pass, file the memo
 
 Reif, 2026-08-26: *"I want a report after each run, I paid for it after all."* A pass costs
