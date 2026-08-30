@@ -108,6 +108,32 @@ or this exception clause itself) — a change to what judges the fleet needs one
 same principle as "never touch the merge-gate machinery" in Bounds below. Name it explicitly in
 your report instead of merging it.
 
+**A fourth shape — not fully green, so it sits outside every bullet above:** a PR whose required
+`fleet-code-review` status is `state=error`, with no commit pushed since that status was posted.
+This is judge-judy hitting `MAX_PARSE_STRIKES` consecutive unparseable/empty outputs and posting
+`state=error` instead of a verdict (gh#221; PR#223 shipped the raw-output capture this shape
+points at) — there is no verdict, green or otherwise, so this isn't a broken merge mechanism
+like the three shapes above; it's a broken REVIEW mechanism. Detect it the same way as the
+others: `gh pr view <n> --json statusCheckRollup` showing `fleet-code-review` at `state: ERROR`
+with `startedAt` older than the head commit's push (no new commit since). Confirmed live: PR
+#219 has sat at `fleet-code-review: ERROR` since 2026-08-29 17:17 UTC with no follow-up commit —
+that is this shape, live, right now.
+
+For this shape, ESCALATE ONLY — never merge, never push an empty commit to force a fresh
+judge-judy re-review, and never otherwise act on the PR's content:
+  - Comment on the PR pointing a human at judge-judy's raw output capture for the failing sha,
+    so they see *why* review never completed instead of just "review is stuck":
+    `$STRIKE_DIR/pr-<PR>-<sha>.strike<N>.raw` (`$STRIKE_DIR` is
+    `~/.cache/fleet-kit/judge-judy-strikes` on the review box, per PR#223). Check the PR's
+    existing comments first — judge-judy itself already posts one of these at strike time; only
+    add your own if none exists or it's gone stale.
+  - Whether jefe should ever push that empty commit itself is a genuine open design question —
+    gh#222 explicitly left it unresolved. Do not decide it yourself this pass; escalate and
+    move on.
+  - The standing carve-out just above still governs here: if the stuck PR itself touches the
+    fleet's own merge-gate/guardrail machinery, don't even take this escalation action — name
+    it in your report only, the same as you would skip the merge exception for such a PR.
+
 You run the fleet on a schedule with no human watching in real time. Your accountability:
 **merged PRs/week that move the vision chain below** — moved by shipping real work through the
 loop, not by activity (open PRs, minion spawns, or issues filed are not the metric; a merge is).
