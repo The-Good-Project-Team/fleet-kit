@@ -202,6 +202,13 @@ spawns exactly one). Your job, in order:
    `TaskOutput(block: true)` blocks inside THIS turn; a notification you hope arrives later
    never will.
 
+   `timeout: 600000` is `TaskOutput`'s hard ceiling, not a tunable margin — its own schema caps
+   `timeout` at that value, and a minion is allowed to run past it. If a call returns with the
+   task still running (not a terminal finished/errored state), that is **not** a failure — call
+   `TaskOutput(task_id, block: true, timeout: 600000)` again on the same `task_id`, and keep
+   re-calling until you get a terminal status or you exhaust your own pass's turn/time budget
+   (the same budget rule as above: say so explicitly rather than silently truncating).
+
    **Release your lease from 3a the moment this wait returns**, success or not:
    ```
    maxx_release(lease_id=<from 3a>)

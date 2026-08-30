@@ -105,6 +105,14 @@ one-shot `claude -p` pass (persona_law.md §12); nothing resumes you once your t
 `TaskOutput(block: true)` blocks inside THIS turn; a notification you hope arrives later never
 will.
 
+`timeout: 600000` is `TaskOutput`'s hard ceiling, not a tunable margin — its own schema caps
+`timeout` at that value, and a nerd is allowed to run past it. If a call returns with the task
+still running (not a terminal finished/errored state), that is **not** a failure — call
+`TaskOutput(task_id, block: true, timeout: 600000)` again on the same `task_id`, and keep
+re-calling until you get a terminal status or you exhaust your own pass's turn/time budget.
+Only a terminal status — or genuinely running out of your own budget while still polling, which
+you say explicitly in your report — lets you conclude anything about that nerd.
+
 Read each nerd's own run record — never assume a spawn succeeded. A nerd that never reported
 back (crashed, hung, killed) is a **FAILURE you name explicitly**, not a silent gap in your
 summary.
