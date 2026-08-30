@@ -178,22 +178,36 @@ spawns exactly one). Your job, in order:
    claim-race entirely (two minions can never be assigned the same item, because you already
    decided the whole set before either one exists).
 
-5. **Spawn one minion per claimed item**, in the background, each told its EXACT issue
-   number in the prompt (minions never pick or claim their own item):
+5. **Spawn one minion per claimed item** using the `Bash` tool with `run_in_background: true`
+   — **not** a shell `&` — each told its EXACT issue number in the prompt (minions never pick
+   or claim their own item):
    ```
-   FLEET_RUN_NOW=1 bash /fleet-kit/scripts/run_member.sh minion --item <n> &
+   FLEET_RUN_NOW=1 bash /fleet-kit/scripts/run_member.sh minion --item <n>
    ```
    (`FLEET_RUN_NOW=1` is required — minion ships with `enabled:false` in its own spec since
    it never self-fires on cron; this is the same escape hatch the dashboard's "run now"
-   button already uses for exactly this reason.) Record each backgrounded PID.
+   button already uses for exactly this reason.) Record each call's returned `task_id`.
 
-6. **Wait for every minion to finish** before you report. Poll (`wait` on each PID, or check
-   `jobs`) rather than assuming a fixed sleep — a minion can legitimately take many minutes.
-   Respect your OWN timeout budget: if you are running out of time waiting, say so explicitly
-   in your report rather than silently truncating your wait. **Do not end your turn to "wait
-   for the notification" instead** — you are a one-shot `claude -p` pass (persona_law.md §12);
-   nothing will ever resume you once your turn ends, background or not. `wait` blocks inside
-   THIS turn; a notification you hope arrives later never will.
+6. **Wait for every minion to finish** before you report: call `TaskOutput(task_id, block:
+   true, timeout: 600000)` for each `task_id` from step 5 — a minion can legitimately take
+   many minutes. **Never use a raw shell `&` + `wait $PID`**: gh#152 recorded 7+ passes on
+   datta's identical pattern (~$6-8, ~300 turns) where `wait` on a manually-backgrounded PID
+   silently lost the child, landing `reported_nothing` with every field null.
+   `Bash(run_in_background)` + `TaskOutput(block: true)` is the confirmed-working replacement
+   (two independent clean passes, 2026-08-29) — it does not rely on this turn's shell PID
+   surviving. Respect your OWN timeout budget: if you are running out of time waiting, say so
+   explicitly in your report rather than silently truncating your wait. **Do not end your turn
+   to "wait for the notification" instead** — you are a one-shot `claude -p` pass
+   (persona_law.md §12); nothing will ever resume you once your turn ends, background or not.
+   `TaskOutput(block: true)` blocks inside THIS turn; a notification you hope arrives later
+   never will.
+
+   `timeout: 600000` is `TaskOutput`'s hard ceiling, not a tunable margin — its own schema caps
+   `timeout` at that value, and a minion is allowed to run past it. If a call returns with the
+   task still running (not a terminal finished/errored state), that is **not** a failure — call
+   `TaskOutput(task_id, block: true, timeout: 600000)` again on the same `task_id`, and keep
+   re-calling until you get a terminal status or you exhaust your own pass's turn/time budget
+   (the same budget rule as above: say so explicitly rather than silently truncating).
 
    **Release your lease from 3a the moment this wait returns**, success or not:
    ```
