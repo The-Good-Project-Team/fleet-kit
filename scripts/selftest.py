@@ -82,6 +82,47 @@ def _report_contract():
     assert timed_out["status"] == "timed_out", timed_out["status"]
 
 
+def _incomplete_fanout_is_not_reported_nothing():
+    """gh#252: the-fixer's own live break, 2026-08-30 04:49 UTC -- it correctly diagnosed 4
+    stuck PRs, dispatched one `run_member.sh the-fixer --item <PR>` sub-pass per PR in the
+    background, then ended its turn on "I'll wait for all 4 sub-passes..." without ever
+    writing Outcome:/Evidence:. exit_code was 0 (a normal end_turn, not a kill/timeout/decline),
+    so classify() fell through to `reported_nothing` -- identical to a pass that genuinely did
+    nothing, even though $0.52 of real diagnosis work happened and 4 sub-passes were then
+    orphan-killed with no link back to this parent.
+    """
+    import run_report
+    text = ("I found 4 stuck PRs and dispatched sub-passes:\n"
+            "bash scripts/run_member.sh the-fixer --item 224\n"
+            "bash scripts/run_member.sh the-fixer --item 229\n"
+            "bash scripts/run_member.sh the-fixer --item 239\n"
+            "bash scripts/run_member.sh the-fixer --item 247\n"
+            "I'll wait for all 4 sub-passes to finish before filing the final report.\n")
+    rec = run_report.build_record(member="the-fixer", run_id="r", kind="llm", exit_code=0,
+                                  pass_text=text, usage=None, vision_required=False)
+    assert rec["status"] == "incomplete_fanout", rec["status"]
+    assert rec["orphaned_items"] == ["224", "229", "239", "247"], rec["orphaned_items"]
+
+    # AC4: a fan-out parent that DOES wait and report normally is unaffected -- same dispatch
+    # lines in the prose, but a real Outcome:/Evidence: means this was never an orphan.
+    reported = run_report.build_record(
+        member="the-fixer", run_id="r2", kind="llm", exit_code=0,
+        pass_text=text + "Outcome: fixed and merged all 4 (#224 #229 #239 #247)\n"
+                          "Evidence: gh pr list --state merged\n",
+        usage=None, vision_required=False)
+    assert reported["status"] == "ok", reported["status"]
+    assert reported["orphaned_items"] is None, reported["orphaned_items"]
+
+    # A genuinely empty pass (no dispatch evidence at all) must still read as reported_nothing,
+    # not incomplete_fanout -- the new branch only fires on the specific empty-outcome-plus-
+    # dispatch-evidence combination.
+    plain_quiet = run_report.build_record(member="t", run_id="r3", kind="llm", exit_code=0,
+                                          pass_text="had a look around", usage=None,
+                                          vision_required=False)
+    assert plain_quiet["status"] == "reported_nothing", plain_quiet["status"]
+    assert plain_quiet["orphaned_items"] is None, plain_quiet["orphaned_items"]
+
+
 def _rsi_lines_survive_to_the_next_pass():
     """#83: the compounding chain needs a data plane, not a log grep.
 
@@ -2375,6 +2416,7 @@ if __name__ == "__main__":
     check("member specs load and validate", _member_specs_validate)
     check("member_spec's OWN default MEMBERS_DIR resolves (not just an explicit path)", _members_dir_default_is_right)
     check("report contract: ok + silence is recorded", _report_contract)
+    check("a fan-out parent that never reports is incomplete_fanout, not reported_nothing", _incomplete_fanout_is_not_reported_nothing)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
     check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
     check("fleet.db composite-PK migration is lock-serialized", _fleet_db_composite_pk_migration_is_lock_serialized)
