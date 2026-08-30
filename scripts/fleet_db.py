@@ -20,6 +20,8 @@ to run on must already have it, no `pip install` step to silently fail on a fres
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import sqlite3
@@ -32,7 +34,7 @@ DB_FILE = Path(os.environ.get("FLEET_DB_PATH", LOG_DIR / "fleet.db")).expanduser
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
-  run_id              TEXT PRIMARY KEY,
+  run_id              TEXT NOT NULL,
   member               TEXT NOT NULL,
   kind                  TEXT,
   item_id                TEXT,
@@ -55,7 +57,15 @@ CREATE TABLE IF NOT EXISTS runs (
   cache_creation_tokens               INTEGER,
   duration_ms                          INTEGER,
   stop_reason                           TEXT,
-  recorded_at                            REAL NOT NULL
+  recorded_at                            REAL NOT NULL,
+  -- Composite, not bare run_id (fleet-kit#212): judge-judy's run_id is `review-<pr>-<sha>`,
+  -- not per-invocation, so two genuinely different concurrent reviews of the same PR head
+  -- share a run_id. Under a bare PRIMARY KEY, INSERT OR REPLACE silently kept only one
+  -- verdict per sync() -- runs.jsonl still had both, fleet.db quietly lost one. Widening the
+  -- key to (run_id, recorded_at) lets two distinct runs coexist while a literal re-sync of
+  -- the same jsonl line (same run_id AND same recorded_at, sync()'s own idempotency case)
+  -- still replaces in place rather than duplicating.
+  PRIMARY KEY (run_id, recorded_at)
 );
 CREATE INDEX IF NOT EXISTS idx_runs_member_time ON runs(member, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
@@ -83,7 +93,64 @@ _ADD_COLUMNS = (
 )
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
+@contextlib.contextmanager
+def _migration_lock(db_path: Path):
+    """`connect()` is called from multiple threads (fleet_view_server's background tail
+    thread and per-request handlers all call `fleet_db.connect()` independently), and
+    `_migrate_composite_pk` below is a rename/rebuild/drop of `runs`, not an idempotent
+    ADD COLUMN -- two threads both seeing the pre-migration schema at once would both try to
+    rename the same table and one gets a raw `sqlite3.OperationalError`. Same flock-over-a-
+    sidecar-file pattern maxx_lease.py already uses for its own read-modify-write race:
+    serialize the whole migration so only one thread is ever inside it, and every later
+    thread's own PRAGMA table_info check (taken after acquiring the lock) then sees the
+    already-migrated schema and returns immediately."""
+    lock_path = db_path.with_suffix(db_path.suffix + ".migrate.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _migrate_composite_pk(conn: sqlite3.Connection) -> None:
+    """fleet-kit#212: a live fleet.db predating the composite key still has run_id as a bare
+    PRIMARY KEY -- CREATE TABLE IF NOT EXISTS is a no-op against it, same reason _ADD_COLUMNS
+    exists above, so without this the fix reaches only a freshly rebuilt db and NOBODY else.
+    SQLite can't ALTER a PRIMARY KEY in place, so rebuild: rename the old table aside, let
+    SCHEMA create the new-shaped one, copy every row across by its old column list (so a
+    legacy table still missing an _ADD_COLUMNS column just copies what it has), then drop the
+    old table. The already-collided historical rows (fewer rows in fleet.db than distinct
+    run_ids in runs.jsonl) are NOT recovered by this -- that backfill is explicitly out of
+    scope (issue body's Non-goals); this only stops NEW collisions going forward.
+    """
+    pk_cols = [name for _, name in sorted(
+        (r[5], r[1]) for r in conn.execute("PRAGMA table_info(runs)") if r[5]
+    )]
+    if pk_cols != ["run_id"]:
+        return  # already migrated (or a fresh db that never had the old schema)
+    # `ALTER TABLE ... RENAME TO` carries every index over onto the renamed table (SQLite
+    # keeps indexes attached by table, not by name), so idx_runs_member_time/_status/_item
+    # would still exist afterward -- just pointing at runs_legacy_pk. SCHEMA's `CREATE INDEX
+    # IF NOT EXISTS` then no-ops on those exact names (the check is name-only, not
+    # name+table), and DROP TABLE below cascades and deletes them for good. Drop them by name
+    # first so the names are free for SCHEMA to reattach to the new `runs` table.
+    conn.execute("DROP INDEX IF EXISTS idx_runs_member_time")
+    conn.execute("DROP INDEX IF EXISTS idx_runs_status")
+    conn.execute("DROP INDEX IF EXISTS idx_runs_item")
+    conn.execute("ALTER TABLE runs RENAME TO runs_legacy_pk")
+    conn.executescript(SCHEMA)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(runs_legacy_pk)")]
+    col_list = ", ".join(cols)
+    conn.execute(f"INSERT INTO runs ({col_list}) SELECT {col_list} FROM runs_legacy_pk")
+    conn.execute("DROP TABLE runs_legacy_pk")
+    conn.commit()
+
+
+def _migrate(conn: sqlite3.Connection, db_path: Path) -> None:
+    with _migration_lock(db_path):
+        _migrate_composite_pk(conn)
     have = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
     for name, decl in _ADD_COLUMNS:
         if name not in have:
@@ -95,10 +162,20 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(p))
     conn.executescript(SCHEMA)
-    _migrate(conn)
+    _migrate(conn, p)
     conn.execute("INSERT OR IGNORE INTO sync_state (id, offset) VALUES (0, 0)")
     conn.commit()
     return conn
+
+
+# Single source of truth for the INSERT's column list AND the collision check's SELECT below
+# -- keeping these as one tuple means the two can never silently drift out of order.
+RUN_COLUMNS = (
+    "run_id", "member", "kind", "item_id", "pr", "status", "exit_code", "outcome", "evidence",
+    "vision_link", "self_critique", "report", "prediction", "score_now", "last_verdict",
+    "cost_usd", "num_turns", "input_tokens", "output_tokens",
+    "cache_read_tokens", "cache_creation_tokens", "duration_ms", "stop_reason", "recorded_at",
+)
 
 
 def _row_from_record(rec: dict) -> tuple:
@@ -152,14 +229,29 @@ def sync(conn: sqlite3.Connection, runs_file: Path | None = None) -> int:
             # §11 and fleet_view's trailing-spend charts). `_recorded_at` stays as an explicit
             # override hook for callers that want ingestion-time instead (e.g. tests).
             rec.setdefault("_recorded_at", rec.get("ts") or time.time())
+            row = _row_from_record(rec)
+            run_id, recorded_at = row[0], row[-1]
+            # fleet-kit#212 AC3: the composite key above stops two DISTINCT runs from
+            # colliding (they get different recorded_at), but a genuine collision -- two
+            # different records that somehow land on the identical (run_id, recorded_at) pair
+            # -- would still silently overwrite under INSERT OR REPLACE. Detect and log it
+            # loudly rather than let it stay invisible; a real re-sync of the same jsonl line
+            # (AC2) produces an identical row here and stays silent, by design.
+            existing = conn.execute(
+                f"SELECT {', '.join(RUN_COLUMNS)} FROM runs WHERE run_id = ? AND recorded_at = ?",
+                (run_id, recorded_at),
+            ).fetchone()
+            if existing is not None and tuple(existing) != row:
+                print(
+                    f"fleet_db: COLLISION run_id={run_id!r} recorded_at={recorded_at!r} "
+                    "already has a DIFFERENT row in fleet.db -- one record is about to be "
+                    "silently overwritten (both are still in runs.jsonl)",
+                    file=sys.stderr,
+                )
             conn.execute(
-                """INSERT OR REPLACE INTO runs
-                   (run_id, member, kind, item_id, pr, status, exit_code, outcome, evidence,
-                    vision_link, self_critique, report, prediction, score_now, last_verdict,
-                    cost_usd, num_turns, input_tokens, output_tokens,
-                    cache_read_tokens, cache_creation_tokens, duration_ms, stop_reason, recorded_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                _row_from_record(rec),
+                f"""INSERT OR REPLACE INTO runs ({', '.join(RUN_COLUMNS)})
+                    VALUES ({', '.join('?' * len(RUN_COLUMNS))})""",
+                row,
             )
             n += 1
         new_offset = fh.tell()
