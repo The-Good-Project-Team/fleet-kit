@@ -1131,6 +1131,120 @@ def _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure():
             "a git-status failure did not reach the shared alerts file"
 
 
+def _auto_deploy_race_check_detects_the_unrecognized_git_failure():
+    """gh#255: on 2026-08-30 05:40 UTC, auto_deploy.cron.log recorded a raw, uncaught git
+    failure -- `cannot lock ref`, `Cannot fast-forward to multiple branches`, a merge-conflict
+    abort on members/jefe/jefe.md -- that structurally cannot come from auto_deploy.sh's own
+    code path (its git fetch/pull are both scoped to exactly one ref). That means some other,
+    unidentified process is racing the same checkout, and today it is silent: it exists only
+    as raw stderr in a cron-captured log file nobody tails proactively.
+
+    Reproduces this issue's exact log shape fed into the detector and asserts a dedicated
+    alert file is written naming the matched text -- and that a clean/normal tick (only
+    auto_deploy.sh's own sanctioned lines) produces no alert at all.
+    """
+    import subprocess
+    script_path = ROOT / "scripts" / "auto_deploy_race_check.sh"
+
+    def run(log_dir):
+        proc = subprocess.run(
+            ["bash", str(script_path)],
+            capture_output=True, text=True, timeout=30,
+            env={"FLEET_LOG_DIR": str(log_dir), "FLEET_ENV_FILE": "/nonexistent", "PATH": "/usr/bin:/bin"},
+        )
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+
+    # A clean/normal tick -- only auto_deploy.sh's own sanctioned lines -- must stay silent.
+    # Own tempdir: the cron log is append-only in production, and the cursor-based dedup below
+    # is exercised by its own dedicated test -- this one only needs to isolate "clean in, no
+    # alert out" from "gh#255's shape in, alert out".
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        (log_dir / "auto_deploy.cron.log").write_text("some harmless git fetch chatter\n")
+        run(log_dir)
+        assert not (log_dir / "auto_deploy_race_alerts.log").exists(), \
+            "a clean auto_deploy.cron.log tick produced an alert anyway"
+
+    # gh#255's own reproduced evidence, verbatim in shape.
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        alerts_file = log_dir / "auto_deploy_race_alerts.log"
+        (log_dir / "auto_deploy.cron.log").write_text(
+            "error: cannot lock ref 'refs/remotes/origin/main': is at abc123 but expected def456\n"
+            "fatal: Cannot fast-forward to multiple branches\n"
+            "error: Your local changes to the following files would be overwritten by merge:\n"
+            "\tmembers/jefe/jefe.md\n"
+        )
+        (log_dir / "auto_deploy.log").write_text(
+            "[2026-08-30 05:49:51 UTC] deploy OK at def456\n"
+        )
+        run(log_dir)
+        assert alerts_file.exists(), "gh#255's own reproduced log shape produced no alert file at all"
+        alerts = alerts_file.read_text()
+        assert "cannot lock ref" in alerts, "alert does not name the ref-lock race"
+        assert "Cannot fast-forward to multiple branches" in alerts, \
+            "alert does not name the multi-branch fast-forward failure"
+        assert "would be overwritten by merge" in alerts, "alert does not name the merge-conflict abort"
+        assert "deploy OK" in alerts, "alert does not cross-reference the next tick's deploy outcome"
+
+
+def _auto_deploy_race_check_dedups_an_already_recorded_line():
+    """AC3/AC5: running the detector twice against a log that already contains one
+    previously-recorded matching line must not duplicate the alert -- else every hourly tick
+    would re-alert on the SAME race forever, burying the signal a human actually needs (a NEW
+    occurrence) in noise from an old, already-seen one.
+    """
+    import subprocess
+    script_path = ROOT / "scripts" / "auto_deploy_race_check.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        alerts_file = log_dir / "auto_deploy_race_alerts.log"
+        (log_dir / "auto_deploy.cron.log").write_text("fatal: cannot lock ref 'refs/remotes/origin/main'\n")
+
+        def run():
+            proc = subprocess.run(
+                ["bash", str(script_path)],
+                capture_output=True, text=True, timeout=30,
+                env={"FLEET_LOG_DIR": str(log_dir), "FLEET_ENV_FILE": "/nonexistent", "PATH": "/usr/bin:/bin"},
+            )
+            assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+
+        run()
+        assert alerts_file.exists(), "first run against a matching log produced no alert"
+        first_run_alerts = alerts_file.read_text()
+        assert first_run_alerts.count("cannot lock ref") == 1, "first run itself double-alerted"
+
+        run()  # same file, no new content appended
+        second_run_alerts = alerts_file.read_text()
+        assert second_run_alerts == first_run_alerts, \
+            "re-running against unchanged log content duplicated the alert"
+
+        # A genuinely NEW occurrence appended afterward must still alert -- dedup keys off the
+        # actual dirt, not just "have we ever seen dirt before" (scripts/selftest.py:1049's
+        # rule, same shape as postflight_dirty_check.sh's own dedup).
+        with (log_dir / "auto_deploy.cron.log").open("a") as f:
+            f.write("fatal: Cannot fast-forward to multiple branches\n")
+        run()
+        third_run_alerts = alerts_file.read_text()
+        assert third_run_alerts.count("Cannot fast-forward to multiple branches") == 1, \
+            "a genuinely new race after the cursor was not alerted"
+        assert third_run_alerts.startswith(first_run_alerts), \
+            "the earlier, already-recorded alert was rewritten instead of appended to"
+
+
+def _auto_deploy_race_check_is_actually_scheduled():
+    """Same failure class as _deploy_staleness_check_is_actually_scheduled, one script over
+    (gh#255): a detector that exists but that nothing puts on cron never runs, and the race it
+    is meant to surface goes back to being invisible until a human stumbles onto it.
+    """
+    entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
+    assert "bash /fleet-kit/scripts/auto_deploy_race_check.sh" in entry, (
+        "auto_deploy_race_check.sh has no line in entrypoint.sh's crontab -- it will never run.")
+
+
 def _run_member_logs_critical_when_postflight_dirty_check_fails_to_source():
     """gh#183: /fleet-kit is a vendored copy that only refreshes via auto_deploy.sh (#140, no
     scheduler entry). A merged fix to postflight_dirty_check.sh can be absent there even though
@@ -2438,6 +2552,9 @@ if __name__ == "__main__":
     check("signal_rate/dormant exclude killed+timed_out, not just budget_declined", _signal_rate_excludes_all_never_executed_statuses)
     check("a leaked absolute-path write into $REPO is caught and alerted", _postflight_dirty_check_catches_a_leaked_absolute_path_write)
     check("a git-status failure alerts rather than reading as clean", _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure)
+    check("auto-deploy race check detects an unrecognized git failure outside auto_deploy.sh's own path", _auto_deploy_race_check_detects_the_unrecognized_git_failure)
+    check("auto-deploy race check dedups an already-recorded line", _auto_deploy_race_check_dedups_an_already_recorded_line)
+    check("auto-deploy race check is actually scheduled", _auto_deploy_race_check_is_actually_scheduled)
     check("run_member.sh logs CRITICAL when postflight_dirty_check.sh fails to source", _run_member_logs_critical_when_postflight_dirty_check_fails_to_source)
     check("run_member.sh rejects a non-numeric --item", _run_member_rejects_a_non_numeric_item)
     check("both worktree callers check $REPO before tearing the worktree down", _run_member_and_builder_check_repo_before_removing_the_worktree)
