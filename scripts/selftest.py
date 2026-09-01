@@ -2451,6 +2451,59 @@ def _a_real_reset_time_is_still_honored():
     assert int(out) > 600, "a stated reset time collapsed to the short fallback"
 
 
+def _weekly_reset_date_and_hour_is_parsed_not_just_the_hour():
+    """46586b3 added a date+hour weekly-reset form ("resets Sep 4, 12am (UTC)") that
+    _account_pool_parse_reset must try BEFORE the hour-only form above, or a weekly reset days
+    away silently falls through to the ~300s no-reset-time fallback and the account gets
+    re-tried (and re-gated) every tick until the real reset (confirmed live on dino
+    2026-09-01: gmail's real "resets Sep 4, 12am (UTC)" wasn't recognized by either branch).
+
+    Asserts the exact parsed epoch, not just "> 600s" -- an epoch that merely clears 600s could
+    still mean the date got dropped and only the hour-only branch fired.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    target_date = (now + datetime.timedelta(days=3)).date()
+    mon = target_date.strftime("%b")
+    day = target_date.day
+    expected_epoch = int(
+        datetime.datetime(
+            target_date.year, target_date.month, target_date.day, 0, 0, 0,
+            tzinfo=datetime.timezone.utc,
+        ).timestamp()
+    )
+    out = _bash_eval(
+        "",
+        f'_account_pool_mark_exhausted acct "hit your weekly limit, resets {mon} {day}, 12am (UTC)" >/dev/null; '
+        'awk \'{print $2}\' "$ACCOUNT_POOL_STATE_FILE"',
+    )
+    got_epoch = int(out)
+    assert got_epoch == expected_epoch, (
+        f"date+hour reset parsed to epoch {got_epoch}, expected {expected_epoch} "
+        f"({mon} {day} 00:00 UTC) -- date branch not honored, likely fell through to the "
+        f"hour-only branch or the 300s no-reset-time fallback"
+    )
+
+
+def _non_primary_account_without_override_does_not_inherit_the_ambient_token():
+    """992ebfe: only the literal "primary" account may inherit the ambient
+    CLAUDE_CODE_OAUTH_TOKEN. Any other account with no CLAUDE_CODE_OAUTH_TOKEN_<NAME> override
+    must run with that var UNSET, not silently authenticated as whichever account the ambient
+    token actually belongs to.
+
+    Live incident, 2026-09-01: "gmail" (no CLAUDE_CODE_OAUTH_TOKEN_GMAIL configured) silently
+    inherited the ambient token belonging to "tgp", hit tgp's real weekly cap, and reported the
+    failure under gmail's name -- failover was theater, gmail's own credentials.json was never
+    tried.
+    """
+    out = _bash_eval(
+        'export FLEET_ACCOUNTS="gmail"\nexport CLAUDE_CODE_OAUTH_TOKEN="ambient-primary-token"',
+        "account_pool_run bash -c 'echo TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-UNSET}'",
+    )
+    assert "TOKEN=UNSET" in out, (
+        f"non-primary account with no override still saw CLAUDE_CODE_OAUTH_TOKEN set -- {out!r}"
+    )
+
+
 def _pool_logs_successes_so_downtime_is_measurable():
     """account_health_check.sh measures outage age from the last SUCCESS line.
 
@@ -2697,6 +2750,8 @@ if __name__ == "__main__":
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)
     check("exhaustion with no stated reset backs off minutes, not an hour", _unparseable_exhaustion_gates_briefly_not_for_an_hour)
     check("a stated reset time is honored over the fallback", _a_real_reset_time_is_still_honored)
+    check("a date+hour weekly reset is parsed, not just the hour-only form", _weekly_reset_date_and_hour_is_parsed_not_just_the_hour)
+    check("a non-primary account with no override does not inherit the ambient oauth token", _non_primary_account_without_override_does_not_inherit_the_ambient_token)
     check("pool logs successes so outage length is measurable", _pool_logs_successes_so_downtime_is_measurable)
     check("account health check actually pages when configured (and never claims to when it isn't)", _account_health_check_actually_pages_when_configured)
     check("nothing hardcodes a read of the frozen instances/*/logs mirror", _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror)
