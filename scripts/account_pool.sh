@@ -45,7 +45,27 @@ _account_pool_log() {
 # BSD) -- try GNU first, fall back to BSD (this kit runs in a Linux container, but keep the
 # fallback so account_pool.sh stays portable to a Mac host running it directly).
 _account_pool_parse_reset() {
-  local out="$1" hh ampm epoch now
+  local out="$1" hh ampm epoch now mon day
+  now=$(date +%s)
+  # Weekly-limit form first: "resets Sep 4, 12am (UTC)" -- has a month/day the hour-only form
+  # below doesn't, and must be tried first or a weekly cap falls through to the 5-minute
+  # fallback and hammers a still-exhausted account every tick until the real reset (confirmed
+  # live on dino 2026-09-01: gmail's real "resets Sep 4, 12am (UTC)" wasn't recognized by
+  # either branch, gated 5min, re-failed, re-gated, forever -- until the true Sep4 reset).
+  read -r mon day hh ampm < <(grep -ioE "resets [A-Za-z]{3} [0-9]{1,2}, [0-9]{1,2}(am|pm) \(UTC\)" <<<"$out" \
+    | head -1 | grep -ioE "[A-Za-z]{3} [0-9]{1,2}, [0-9]{1,2}(am|pm)" \
+    | sed -E 's/^([A-Za-z]{3}) ([0-9]{1,2}), ([0-9]{1,2})(am|pm)$/\1 \2 \3 \4/')
+  if [ -n "$mon" ]; then
+    [ "$ampm" = "pm" ] && [ "$hh" -ne 12 ] && hh=$((hh + 12))
+    [ "$ampm" = "am" ] && [ "$hh" -eq 12 ] && hh=0
+    epoch=$(TZ=UTC date -u -d "$mon $day $(TZ=UTC date -u +%Y) $hh:00:00" +%s 2>/dev/null) \
+      || epoch=$(TZ=UTC date -j -u -f "%b %d %Y %H:%M:%S" "$mon $day $(TZ=UTC date -u +%Y) $(printf '%02d' "$hh"):00:00" +%s 2>/dev/null)
+    if [[ "$epoch" =~ ^[0-9]+$ ]]; then
+      # a date already past this year means next year, not last year.
+      [ "$epoch" -le "$now" ] && epoch=$(TZ=UTC date -u -d "$mon $day $(($(TZ=UTC date -u +%Y) + 1)) $hh:00:00" +%s 2>/dev/null)
+      [[ "$epoch" =~ ^[0-9]+$ ]] && { echo "$epoch"; return; }
+    fi
+  fi
   read -r hh ampm < <(grep -ioE "resets [0-9]{1,2}(am|pm) \(UTC\)" <<<"$out" \
     | head -1 | grep -ioE "[0-9]{1,2}(am|pm)" | sed -E 's/^([0-9]{1,2})(am|pm)$/\1 \2/')
   [ -z "$hh" ] && return 1
@@ -55,7 +75,6 @@ _account_pool_parse_reset() {
   # The BSD form needs the DATE spelled out -- `date -j -f "%H:%M" "13:00"` does not mean
   # "13:00 today" and quietly returns something else, which then fed the "+86400" branch below
   # and produced a bogus gate (caught by selftest on macOS, 2026-08-25).
-  now=$(date +%s)
   local today
   today=$(TZ=UTC date -u +%Y-%m-%d)
   epoch=$(TZ=UTC date -u -d "$today $hh:00:00" +%s 2>/dev/null) \
