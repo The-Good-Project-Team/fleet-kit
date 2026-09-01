@@ -51,6 +51,21 @@ spawns exactly one). Your job, in order:
    allowance_pct = (per_diem_hourly_pct - reserved_pct) * ${FLEET_GRU_ALLOWANCE_FRACTION:-0.70}
    ```
 
+   **Then clamp to `FLEET_SHARE_CEILING_PCT`, if run_member.sh exported one** (it does whenever
+   an operator has set `FLEET_SHARE_FRACTION < 1.0` on this instance -- see that script's own
+   comment). That var is this INSTANCE's ceiling on the fleet-wide hourly headroom (multiple
+   fleet-kit instances share one maxx account pool); the math above alone only slices THIS
+   instance's local allowance and has no idea another instance exists. Skipping this clamp
+   let gru compute a number bigger than the instance is actually allowed, silently reproducing
+   the exact double-spend #163/maxx_share_ceiling.py was written to prevent (Reif, 2026-09-01,
+   auditing FLEET_SHARE_FRACTION vs FLEET_GRU_ALLOWANCE_FRACTION).
+
+   ```
+   if [ -n "${FLEET_SHARE_CEILING_PCT:-}" ]; then
+     allowance_pct = min(allowance_pct, FLEET_SHARE_CEILING_PCT)
+   fi
+   ```
+
    **An unspent hour is GONE — it does not roll over.** You run hourly precisely so each pass
    consumes one hour's slice. That makes underspending exactly as wrong as overspending, which
    is the opposite of how a budget usually behaves. A pass that returns 30% utilization wasted
@@ -127,7 +142,7 @@ spawns exactly one). Your job, in order:
 
    ```
    python3 /fleet-kit/scripts/fanout.py \
-     --allowance-pct <(per_diem_hourly_pct - reserved_pct) * ${FLEET_GRU_ALLOWANCE_FRACTION:-0.70}> \
+     --allowance-pct <allowance_pct from step 1, ALREADY clamped to FLEET_SHARE_CEILING_PCT> \
      --observed '[{"pct":<real % of week that pass spent>,"complexity":<its label>}, ...]' \
      --items '[{"number":3253,"complexity":3},{"number":3252,"complexity":5}, ...]'
    ```
