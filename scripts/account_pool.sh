@@ -193,14 +193,28 @@ account_pool_run() {
     # e.g. account "claude-reif" -> CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_REIF) and use IT for this
     # account's own CLAUDE_CONFIG_DIR if set; otherwise fall through to whatever
     # CLAUDE_CODE_OAUTH_TOKEN already is (the single-account "primary" case, unchanged).
+    #
+    # BUG (found live on dino 2026-09-01): the "fall through" above silently left the ambient
+    # CLAUDE_CODE_OAUTH_TOKEN set for every account that has no override -- and the CLI
+    # prioritizes that env var over credentials.json in CLAUDE_CONFIG_DIR. So "gmail" (no
+    # CLAUDE_CODE_OAUTH_TOKEN_GMAIL configured) was silently authenticating as whichever
+    # account's token fleet.env's bare CLAUDE_CODE_OAUTH_TOKEN belongs to (tgp) -- hit tgp's
+    # real weekly cap, reported the failure under gmail's name. Failover was theater: it never
+    # actually tried gmail's own login. Only the literal "primary" account (the
+    # FLEET_ACCOUNTS-unset default, single-account case the comment above describes) may
+    # legitimately inherit the ambient token; every other named account must use ITS OWN
+    # credentials.json or none at all -- clear the var rather than let it leak.
     local var_name token_override
     var_name="CLAUDE_CODE_OAUTH_TOKEN_$(echo "$account" | tr '[:lower:]-' '[:upper:]_')"
     token_override="${!var_name:-}"
     if [ -n "$token_override" ]; then
       CLAUDE_CONFIG_DIR="$HOME/.claude-$account" CLAUDE_CODE_OAUTH_TOKEN="$token_override" \
         "$@" 2>&1 | tee "$capture"
-    else
+    elif [ "$account" = "primary" ]; then
       CLAUDE_CONFIG_DIR="$HOME/.claude-$account" "$@" 2>&1 | tee "$capture"
+    else
+      CLAUDE_CONFIG_DIR="$HOME/.claude-$account" env -u CLAUDE_CODE_OAUTH_TOKEN \
+        "$@" 2>&1 | tee "$capture"
     fi
     rc=${PIPESTATUS[0]}
     if [ "$rc" -eq 0 ]; then
