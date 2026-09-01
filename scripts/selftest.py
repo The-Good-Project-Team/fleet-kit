@@ -2466,6 +2466,91 @@ def _pool_logs_successes_so_downtime_is_measurable():
     assert 'last_line=$(tail -1 "$POOL_LOG")\nage' not in check_src
 
 
+def _account_health_check_actually_pages_when_configured():
+    """gh#269: the fleet ran a real ~25h all-accounts-exhausted incident and its only outage
+    pager never printed the literal string PAGED, even once, across 69 hourly ticks -- and the
+    age/threshold logic this file already unit-tests above (_pool_logs_successes_so_downtime_
+    is_measurable) read correct on inspection. Root cause found live, not by re-reading the
+    script: entrypoint.sh bakes NTFY_TOPIC into the generated crontab from fleet.env at boot
+    (entrypoint.sh:205-211), this box's fleet.env has never had it set, and every tick the
+    script's own `${NTFY_TOPIC:?...}` guard fires FIRST and exits before the age/threshold
+    logic ever runs -- so a correct-looking check never actually executed its paging branch on
+    this box, ever. That guard failing loudly on an unset credential is intentional (a silent
+    no-op pager is worse), so this is not "fix the guard" -- it is proving the code the guard
+    protects actually pages once someone DOES configure it, which nothing had ever verified by
+    running it, only by reading it.
+
+    Exercises the real script end-to-end: a stale success line plus a fresh all-accounts-failed
+    line (the real incident's shape), NTFY_TOPIC set, podman stubbed to report DNS healthy (the
+    auth-flap/exhaustion class this incident actually was, not the dead-network class), curl
+    stubbed to record instead of hitting the real network. Asserts PAGED is printed, the state
+    file lands (so a 5-minute cron doesn't re-page every tick), and the ntfy call itself fires
+    with the right message -- then asserts the mirror-image case: NTFY_TOPIC left unset must
+    still fail loudly and never claim PAGED, so a future refactor can't silently paper over the
+    exact guard that made this incident's cause diagnosable at all.
+    """
+    import subprocess
+    script_path = ROOT / "scripts" / "account_health_check.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        log_dir = tmp / "logs"
+        log_dir.mkdir()
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        ntfy_calls = tmp / "ntfy_calls.log"
+
+        # Stub curl: record the call instead of reaching the real network (this file's own
+        # header promises "no network" for a fresh-clone check).
+        (bin_dir / "curl").write_text('#!/bin/bash\necho "$@" >> "$NTFY_CALLS_FILE"\nexit 0\n')
+        (bin_dir / "curl").chmod(0o755)
+        # Stub podman: DNS resolves fine inside the container, regardless of subcommand -- this
+        # incident was the auth-flap/exhaustion class, so the script must go straight to paging
+        # rather than detouring into the dead-network auto-recovery branch.
+        (bin_dir / "podman").write_text("#!/bin/bash\nexit 0\n")
+        (bin_dir / "podman").chmod(0o755)
+
+        pool_log = log_dir / "account-pool.log"
+        pool_log.write_text(
+            "[2020-01-01 00:00:00 UTC] account_pool: account=tgp call succeeded\n"
+            "[2020-01-01 00:05:00 UTC] account_pool: ALL accounts in 'tgp gmail' failed this call\n"
+        )
+
+        base_env = {
+            "FLEET_LOG_DIR": str(log_dir),
+            "ACCOUNT_HEALTH_THRESHOLD_MINUTES": "30",
+            "NTFY_CALLS_FILE": str(ntfy_calls),
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+        }
+
+        # Configured: must actually page.
+        proc = subprocess.run(
+            ["bash", str(script_path)], capture_output=True, text=True, timeout=30,
+            env={**base_env, "NTFY_TOPIC": "selftest-fake-topic"},
+        )
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        assert "PAGED" in proc.stdout, (
+            "a real outage-shaped pool log with NTFY_TOPIC configured never printed PAGED -- "
+            f"stdout: {proc.stdout[:500]!r} stderr: {proc.stderr[:500]!r}"
+        )
+        assert (log_dir / ".account_health_paged.state").exists(), \
+            "PAGED but no state file written -- a 5-minute cron would re-page every tick"
+        assert ntfy_calls.exists() and "ALL accounts exhausted" in ntfy_calls.read_text(), \
+            "PAGED but the ntfy call itself never fired (or fired with the wrong message)"
+
+        # Unconfigured (this box's actual state during the incident): must fail loudly and
+        # never claim PAGED -- this is the guard that made gh#269's root cause diagnosable.
+        (log_dir / ".account_health_paged.state").unlink()
+        ntfy_calls.unlink()
+        proc = subprocess.run(
+            ["bash", str(script_path)], capture_output=True, text=True, timeout=30,
+            env={**base_env, "NTFY_TOPIC": ""},
+        )
+        assert proc.returncode != 0, "an unset NTFY_TOPIC must fail loudly, not exit clean"
+        assert "PAGED" not in proc.stdout, "an unset NTFY_TOPIC must never claim it paged"
+        assert not ntfy_calls.exists(), "an unset NTFY_TOPIC must never reach the ntfy call"
+
+
 def _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror():
     """No script or charter may read instances/<name>/logs/*.jsonl as a live data source.
 
@@ -2613,6 +2698,7 @@ if __name__ == "__main__":
     check("exhaustion with no stated reset backs off minutes, not an hour", _unparseable_exhaustion_gates_briefly_not_for_an_hour)
     check("a stated reset time is honored over the fallback", _a_real_reset_time_is_still_honored)
     check("pool logs successes so outage length is measurable", _pool_logs_successes_so_downtime_is_measurable)
+    check("account health check actually pages when configured (and never claims to when it isn't)", _account_health_check_actually_pages_when_configured)
     check("nothing hardcodes a read of the frozen instances/*/logs mirror", _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror)
     check("self-evolution panel catches the member/<name>-<id> branch shape", _self_evolution_panel_catches_the_member_dash_branch_shape)
     check("gru.md clamps allowance_pct to FLEET_SHARE_CEILING_PCT", _gru_md_clamps_allowance_to_share_ceiling)
