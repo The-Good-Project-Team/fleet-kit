@@ -479,6 +479,30 @@ def _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing():
     assert "per_diem_hourly_pct" in payload and "headroom_fraction" in payload, payload
 
 
+def _gru_md_clamps_allowance_to_share_ceiling():
+    """2026-09-01 audit (Reif): FLEET_SHARE_FRACTION (this instance's slice of fleet-wide
+    hourly headroom, run_member.sh -> maxx_share_ceiling.py -> FLEET_SHARE_CEILING_PCT) and
+    FLEET_GRU_ALLOWANCE_FRACTION (gru's own slice of ITS instance's allowance, gru.md step 1)
+    are two INDEPENDENT fractions -- gru.md computed allowance_pct straight off raw hourly
+    headroom and never looked at FLEET_SHARE_CEILING_PCT, so on a multi-instance box (e.g.
+    philanthropy + fleet-kit-server-fleet sharing one maxx account pool) gru could reserve
+    more than its own instance's ceiling, double-spending headroom another instance already
+    counted on. This proves the clamp text is actually in gru.md, not just fixed once and
+    silently droppable on a future edit -- a doc-consistency check, same shape as the other
+    gru.md-derived checks in this file (grep for `per_diem_hourly_pct` above)."""
+    text = (HERE.parent / "members" / "gru" / "gru.md").read_text()
+    assert "FLEET_SHARE_CEILING_PCT" in text, \
+        "gru.md lost its FLEET_SHARE_CEILING_PCT reference -- gru can double-spend headroom " \
+        "another fleet-kit instance already reserved"
+    assert "min(allowance_pct, FLEET_SHARE_CEILING_PCT)" in text, \
+        "gru.md's clamp line changed shape or was removed -- allowance_pct must be clamped, " \
+        "not merely mentioned alongside FLEET_SHARE_CEILING_PCT"
+    # The fanout.py call site must hand it the ALREADY-clamped value, not re-derive the raw
+    # unclamped formula a second time (that would silently bypass the clamp above it).
+    assert "${FLEET_GRU_ALLOWANCE_FRACTION:-0.70}>" not in text, \
+        "fanout.py --allowance-pct call site still inlines the raw unclamped formula"
+
+
 def _maxx_lease_reserves_releases_and_self_expires():
     """gh#161 part 2: reserve/release were documented in gru.md since forever but never
     implemented -- reserved_pct stayed permanently 0 no matter how many leases should
@@ -2591,6 +2615,7 @@ if __name__ == "__main__":
     check("pool logs successes so outage length is measurable", _pool_logs_successes_so_downtime_is_measurable)
     check("nothing hardcodes a read of the frozen instances/*/logs mirror", _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror)
     check("self-evolution panel catches the member/<name>-<id> branch shape", _self_evolution_panel_catches_the_member_dash_branch_shape)
+    check("gru.md clamps allowance_pct to FLEET_SHARE_CEILING_PCT", _gru_md_clamps_allowance_to_share_ceiling)
 
     for n in ok:
         print(f"  ok    {n}")
