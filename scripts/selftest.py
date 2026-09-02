@@ -2163,6 +2163,69 @@ def _judge_judy_strikes_are_scoped_by_head_and_leave_diagnosable_evidence():
         "state=error has no PR comment pointing a human at the captured raw output"
 
 
+def _board_github_file_item_can_add_a_priority_label():
+    """gh#5: judge-judy's own fix-item filing needs the filed issue to carry
+    fleet:priority-high, not just fleet:backlog -- build_file_cmd's pure-builder contract
+    (unit-tested, never executed) is the right place to pin that, same pattern as the
+    existing lane-label test would be if one existed.
+    """
+    import board_github
+
+    cmd = board_github.build_file_cmd("fix: PR #9 failed code review", "the findings text",
+                                       priority="high")
+    assert cmd[:2] == ["gh", "issue"], f"not a gh issue create command: {cmd}"
+    label_arg = cmd[cmd.index("--label") + 1]
+    labels = label_arg.split(",")
+    assert "fleet:backlog" in labels, f"fleet:backlog missing from filed labels: {labels}"
+    assert "fleet:priority-high" in labels, f"fleet:priority-high missing from filed labels: {labels}"
+    body_arg = cmd[cmd.index("--body") + 1]
+    assert body_arg == "the findings text", "findings text did not make it into the issue body"
+
+    # No priority requested -> no priority label, and lane still composes independently.
+    no_priority = board_github.build_file_cmd("t", "b")
+    assert "fleet:priority-high" not in no_priority[no_priority.index("--label") + 1]
+    with_lane = board_github.build_file_cmd("t", "b", lane="frontend", priority="high")
+    lane_labels = with_lane[with_lane.index("--label") + 1].split(",")
+    assert "fleet:lane:frontend" in lane_labels and "fleet:priority-high" in lane_labels, \
+        f"lane and priority labels must compose, not clobber each other: {lane_labels}"
+
+
+def _judge_judy_files_a_fix_item_on_block():
+    """gh#5: "nothing repairs a PR after judge-judy fails it" -- a VERDICT: block used to end
+    at a commit status + PR comment, with no code path ever consuming that verdict again.
+    Reif's decision (quoted on gh#5): don't build a dedicated fix persona, file a P1 backlog
+    item off the block path instead so gru's normal build lane picks it up.
+
+    Static assertions, same style as the other judge-judy checks above: the filing call must
+    (1) exist inside the block branch, after the failure status is posted (findings-and-status
+    land before the fix item, matching this script's own comment-first ordering discipline),
+    (2) pass $FINDINGS through to the filed issue's body, (3) request the priority-high label,
+    and (4) never be allowed to fail the tick -- board_github.py is a best-effort `||` step,
+    not a `set -e` hard dependency.
+    """
+    src = (Path(__file__).parent.parent / "members" / "judge-judy" / "judge-judy.sh").read_text()
+
+    block_branch = src.index('if [ "$VERDICT" = "VERDICT: approve" ]')
+    status_i = src.index('post_status "$HEAD_SHA" "failure"', block_branch)
+    file_i = src.index("board_github.py", status_i)
+    report_i = src.index('report_run "$PR" "$HEAD_SHA"', status_i)
+    assert status_i < file_i < report_i, \
+        "fix-item filing must run in the block branch, after the failure status, before report_run"
+
+    window = src[file_i - 400:file_i + 400]
+    assert '"$FIX_BODY"' in window or "FINDINGS" in window, \
+        "filed issue body has no path back to $FINDINGS"
+    assert "--priority high" in window or "--priority" in window, \
+        "fix item is filed with no --priority flag -- gh#5 AC2 needs fleet:priority-high, not just backlog"
+    assert "priority high" in src, "no 'high' priority requested anywhere for the filed fix item"
+
+    # Best-effort: a filing failure must warn and move on, never take the tick down with it.
+    file_line = next(line for line in src.splitlines() if "board_github.py" in line and "file " in line)
+    tail = src[src.index(file_line):src.index(file_line) + 400]
+    assert "||" in tail and "WARN" in tail, \
+        "fix-item filing has no || WARN fallback -- a filing failure would crash the tick instead of logging"
+
+
 def _marie_sweeps_the_whole_backlog_not_just_the_new():
     """marie must re-judge the OLD backlog, not only what changed since last pass.
 
@@ -3831,6 +3894,8 @@ if __name__ == "__main__":
     check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
     check("judge-judy lock lives somewhere persistent", _judge_judy_lock_lives_somewhere_persistent)
     check("judge-judy strikes are head-scoped and leave diagnosable evidence", _judge_judy_strikes_are_scoped_by_head_and_leave_diagnosable_evidence)
+    check("board_github file_item can add a priority label alongside backlog/lane", _board_github_file_item_can_add_a_priority_label)
+    check("judge-judy files a priority-high fix item when it blocks a PR", _judge_judy_files_a_fix_item_on_block)
     check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)

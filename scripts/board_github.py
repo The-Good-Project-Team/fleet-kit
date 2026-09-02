@@ -8,8 +8,9 @@ precisely when it was needed). Issues invert that: fleet state survives any box,
 already authenticated everywhere the fleet runs, and any repo gets a working board for free.
 
 CONTRACT:
-  file  -> `gh issue create` with labels <prefix>backlog [+ <prefix>lane:<lane>]; evidence
-           lives in the body (labels enumerate, bodies explain).
+  file  -> `gh issue create` with labels <prefix>backlog [+ <prefix>lane:<lane>]
+           [+ <prefix>priority-<priority>]; evidence lives in the body (labels enumerate,
+           bodies explain).
   claim -> add label <prefix>claimed + a "claimed-by: <worker>" comment. NOT atomic — GitHub
            has no test-and-set; single-claimer discipline comes from the caller running ONE
            sequential claim loop (see `worktree_builder.sh`'s claim step), not from this file.
@@ -39,8 +40,12 @@ LABEL_CLAIMED = f"{PREFIX}claimed"
 
 # --- pure command builders (unit-tested; never executed by tests) -----------------------------
 
-def build_file_cmd(title: str, body: str, lane: str = "") -> list[str]:
-    labels = LABEL_BACKLOG + (f",{PREFIX}lane:{lane}" if lane else "")
+def build_file_cmd(title: str, body: str, lane: str = "", priority: str = "") -> list[str]:
+    labels = LABEL_BACKLOG
+    if lane:
+        labels += f",{PREFIX}lane:{lane}"
+    if priority:
+        labels += f",{PREFIX}priority-{priority}"
     return ["gh", "issue", "create", "--title", title, "--body", body, "--label", labels]
 
 
@@ -99,20 +104,34 @@ def _run(cmd: list[str]) -> tuple[int, str]:
         return 1, str(e)
 
 
-def ensure_labels() -> None:
-    """Idempotent: create the two fleet labels if absent (gh errors on duplicates; a failed
-    create against an existing label is fine and ignored)."""
-    for name, color, desc in (
+# Same colors/description text as marie.md's own `gh label create` lines for these three, so
+# a label created here (e.g. by a filing path that runs before marie's next pass) never drifts
+# from what marie would have created.
+_PRIORITY_LABEL_META = {
+    "high": ("d73a4a", "gru builds this first"),
+    "medium": ("e4a72c", "gru builds after high is claimed"),
+    "low": ("a2eeef", "gru builds only with spare runway"),
+}
+
+
+def ensure_labels(priority: str = "") -> None:
+    """Idempotent: create the fleet labels this call needs if absent (gh errors on duplicates;
+    a failed create against an existing label is fine and ignored)."""
+    labels = [
         (LABEL_BACKLOG, "3e694a", "fleet work queue item"),
         (LABEL_CLAIMED, "d4a72c", "claimed by a fleet worker"),
-    ):
+    ]
+    if priority:
+        color, desc = _PRIORITY_LABEL_META.get(priority, ("ededed", f"priority: {priority}"))
+        labels.append((f"{PREFIX}priority-{priority}", color, desc))
+    for name, color, desc in labels:
         _run(["gh", "label", "create", name, "--color", color, "--description", desc])
 
 
-def file_item(title: str, body: str, lane: str = "") -> int:
+def file_item(title: str, body: str, lane: str = "", priority: str = "") -> int:
     """Returns the new issue NUMBER (>0) on success, 0 on failure."""
-    ensure_labels()
-    rc, out = _run(build_file_cmd(title, body, lane))
+    ensure_labels(priority)
+    rc, out = _run(build_file_cmd(title, body, lane, priority))
     if rc != 0:
         print(f"board_github: file FAILED: {out[:300]}", file=sys.stderr)
         return 0
@@ -166,7 +185,8 @@ def claim_next_n(worker: str, n: int) -> list[dict]:
 def main() -> int:
     args = sys.argv[1:]
     if not args:
-        print("usage: board_github.py file <title> [--context <body>] [--lane <lane>] | "
+        print("usage: board_github.py file <title> [--context <body>] [--lane <lane>] "
+              "[--priority <high|medium|low>] | "
               "claim <worker> <n> | list | done <number> [note] | release <number> [note]",
               file=sys.stderr)
         return 2
@@ -176,7 +196,7 @@ def main() -> int:
             print("file needs a title", file=sys.stderr)
             return 2
         title = args[1]
-        body, lane = "", ""
+        body, lane, priority = "", "", ""
         rest = args[2:]
         i = 0
         while i < len(rest):
@@ -184,9 +204,11 @@ def main() -> int:
                 body = rest[i + 1]; i += 2
             elif rest[i] == "--lane" and i + 1 < len(rest):
                 lane = rest[i + 1]; i += 2
+            elif rest[i] == "--priority" and i + 1 < len(rest):
+                priority = rest[i + 1]; i += 2
             else:
                 i += 1
-        return 0 if file_item(title, body, lane) else 1
+        return 0 if file_item(title, body, lane, priority) else 1
     if cmd == "claim":
         if len(args) != 3:
             print("claim needs <worker> <n>", file=sys.stderr)
