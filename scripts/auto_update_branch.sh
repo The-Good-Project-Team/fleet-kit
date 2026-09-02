@@ -65,4 +65,40 @@ for pr in $(gh pr list --state open --json number,isDraft,mergeable,mergeStateSt
     log "PR #$pr: update-branch call failed"
   fi
 done
-log "tick done: checked $CHECKED PR(s), updated $UPDATED"
+
+# --- arm auto-merge on any green-able PR that lacks it --------------------------------------
+# The loop above keeps branches current; judge-judy re-reviews them and turns fleet-code-review
+# green. Nothing then MERGES the result, because auto-merge is armed in exactly one place in
+# this repo -- worktree_builder.sh, at PR-creation time (`gh pr merge --auto`). A PR opened by
+# anything else (a human, an external agent, a hand-pushed branch) is never armed, so it can
+# go fully green and sit open forever: no error, no alarm, nothing red for the-fixer to find.
+#
+# Live case that motivated this (fleet-kit#291, 2026-09-02): judge-judy BLOCKed it at 15:30,
+# this script's update-branch loop rebased it, judge-judy re-reviewed at 15:47 and posted
+# fleet-code-review=SUCCESS. selftest green, mergeStateStatus CLEAN, automerge=none -- the
+# self-heal loop ran end to end and still stopped one step short of done, permanently.
+# the-fixer cannot see it either: its sweep hunts red and "no answer", and this PR is green.
+#
+# Arming is NOT merging, so this keeps the file header's promise that this script never merges
+# a PR itself and needs no content judgment: GitHub merges an armed PR only once every REQUIRED
+# check passes, so judge-judy's fleet-code-review gate still decides. Arming a PR that is red
+# or unreviewed simply parks it -- it waits, exactly as an armed member-opened PR does.
+#
+# Draft PRs are excluded (a draft is explicitly "not ready"), and so is anything already armed
+# -- re-arming is a no-op API call, but skipping it keeps the log honest about what changed.
+ARMED=0
+for pr in $(gh pr list --state open --json number,isDraft,autoMergeRequest \
+              -q '.[] | select(.isDraft|not) | select(.autoMergeRequest==null) | .number' 2>/dev/null); do
+  if arm_err="$(gh pr merge "$pr" --auto --squash 2>&1 >/dev/null)"; then
+    log "PR #$pr: auto-merge armed (was unarmed -- it could have sat green forever)"
+    ARMED=$((ARMED+1))
+  else
+    # Never fatal: a PR can be unarmable for legitimate reasons (auto-merge disabled on the
+    # repo, insufficient permissions, already merged between the list and this call). Log the
+    # real reason rather than a silent skip -- worktree_builder.sh#231 learned that one the
+    # hard way, logging "armed" unconditionally while the arm had actually failed.
+    log "PR #$pr: could not arm auto-merge: ${arm_err:-unknown error}"
+  fi
+done
+
+log "tick done: checked $CHECKED PR(s), updated $UPDATED, armed $ARMED"
