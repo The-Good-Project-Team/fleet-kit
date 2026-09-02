@@ -69,9 +69,15 @@ own history instead of re-deriving it:
 ```
 sqlite3 "$FLEET_LOG_DIR/fleet.db" \
   "SELECT recorded_at, outcome, self_critique FROM runs
-    WHERE member='nerd' AND outcome IS NOT NULL AND outcome LIKE '%<your lane>%'
+    WHERE member='nerd' AND outcome IS NOT NULL AND lane='<your lane>'
     ORDER BY recorded_at DESC LIMIT 5"
 ```
+
+(`lane` is a structured column now, not a keyword match against free-text `outcome` -- datta was
+independently re-deriving lane attribution by regex against outcome/evidence prose on several
+consecutive passes, self-reported as fragile and the cause of at least one real mis-attribution.
+Your own `--task "lane=<name> — ..."` prefix is captured verbatim into this column by
+`run_member.sh`/`run_report.py`, so query it directly instead.)
 
 `outcome IS NOT NULL` matters: a killed or budget-declined pass has no outcome to learn from,
 and reading those as "I did nothing last time" is wrong. (The `sqlite3` CLI was missing from
