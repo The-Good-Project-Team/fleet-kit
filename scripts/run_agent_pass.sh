@@ -67,10 +67,20 @@ log "pass start (charter=$CHARTER_NAME model=$MODEL max_turns=$MAX_TURNS)"
 # own persona/orchestrator convention via CLAUDE.md/hooks will hijack this pass's identity
 # and ignore $CHARTER_NAME's instructions entirely, with no error. `user` scope drops
 # project-level CLAUDE.md/hooks so this kit's own charter actually governs the session.
+# `OUT=$(...)` is a command substitution, i.e. a SUBSHELL -- the same trap run_member.sh hit:
+# account_pool.sh's `export ACCOUNT_POOL_SELECTED` dies with it, so the `pass end` lines below
+# logged `account=unknown` and an empty `reason=` on every pass. Hand the pool files to write
+# into and read them back afterwards.
+ACCOUNT_POOL_SELECTED_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_acct.XXXXXX")
+ACCOUNT_POOL_REASON_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_reason.XXXXXX")
+export ACCOUNT_POOL_SELECTED_FILE ACCOUNT_POOL_REASON_FILE
 OUT=$(account_pool_run timeout "$((MAX_TURNS * 60))" claude -p "$PROMPT" \
   --model "$MODEL" --dangerously-skip-permissions --setting-sources user \
   --max-turns "$MAX_TURNS" 2>>"$LOG")
 RC=$?
+[ -s "$ACCOUNT_POOL_SELECTED_FILE" ] && ACCOUNT_POOL_SELECTED=$(cat "$ACCOUNT_POOL_SELECTED_FILE")
+[ -s "$ACCOUNT_POOL_REASON_FILE" ] && ACCOUNT_POOL_LAST_REASON=$(cat "$ACCOUNT_POOL_REASON_FILE")
+rm -f "$ACCOUNT_POOL_SELECTED_FILE" "$ACCOUNT_POOL_REASON_FILE"
 SUMMARY=$(tail -c 400 <<<"$OUT" | tr '\n' ' ' | tail -c 300)
 if [ "$RC" -eq 0 ]; then
   log "pass end rc=0 (account=${ACCOUNT_POOL_SELECTED:-unknown}) :: $SUMMARY"

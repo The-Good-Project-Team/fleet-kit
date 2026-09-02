@@ -288,6 +288,26 @@ def api_key() -> str:
     return (read_env_values().get("FLEET_API_KEY") or os.environ.get("FLEET_API_KEY") or "").strip()
 
 
+def subprocess_env() -> dict:
+    """os.environ overlaid with fleet.env's values, for any child process this server spawns.
+
+    Same root cause as FLEET_API_KEY in #295, one layer out: the container is handed
+    FLEET_ENV_FILE (a PATH) and never the file's VALUES, so this long-lived process has no
+    FLEET_MAXX_URL/_HANDLE/_KEY in os.environ no matter what fleet.env holds. Cron jobs
+    re-source fleet.env per run and were fine; a child inheriting THIS process's environment
+    is not. maxx_share_ceiling.py therefore read an unconfigured meter, printed its
+    fail-open empty string, and the Settings page told the operator "maxx meter unreadable
+    right now" while the meter was healthy -- measured live 2026-09-02: the same script with
+    fleet.env sourced returns label="ok".
+
+    File values win over os.environ: fleet.env is what an operator edits at runtime, and a
+    stale snapshot taken at process start must never shadow it.
+    """
+    env = dict(os.environ)
+    env.update({k: v for k, v in read_env_values().items() if v})
+    return env
+
+
 def write_env_flag(key: str, value: bool) -> None:
     """Set KEY=true|false in fleet.env, preserving every other line. Appends the key if it
     isn't present yet (a fresh fleet.env copied from fleet.env.example already has it, but
@@ -474,14 +494,26 @@ def _budget_preview() -> dict:
     try:
         proc = subprocess.run(
             [sys.executable, str(KIT_DIR / "scripts" / "maxx_share_ceiling.py"), share],
-            capture_output=True, text=True, timeout=20)
+            capture_output=True, text=True, timeout=20, env=subprocess_env())
         ceiling = (proc.stdout or "").strip()
     except Exception as exc:  # noqa: BLE001 -- display route, never 500 on a meter hiccup
         out["note"] = f"could not read the maxx meter: {exc}"
         return out
     if not ceiling:
-        out["note"] = ("maxx meter unreadable right now -- no ceiling. gru fails OPEN to its "
-                       "own conservative default; nothing is over-spent.")
+        # Distinguish the two causes that both print an empty ceiling. "Unreadable" was
+        # reported for months when the real answer was "this server cannot see the maxx
+        # credentials", which is an operator-fixable configuration fault, not a meter outage.
+        missing = [k for k in ("FLEET_MAXX_URL", "FLEET_MAXX_HANDLE", "FLEET_MAXX_KEY")
+                   if not (subprocess_env().get(k) or "").strip()]
+        if missing:
+            out["note"] = ("maxx is not configured for this instance -- " + ", ".join(missing)
+                           + " missing from fleet.env. gru fails OPEN to its own conservative "
+                             "default; nothing is over-spent.")
+        else:
+            out["note"] = ("maxx meter unreadable right now -- no ceiling. gru fails OPEN to "
+                           "its own conservative default; nothing is over-spent.")
+        if (proc.stderr or "").strip():
+            out["meter_stderr"] = (proc.stderr or "").strip()[:300]
         return out
 
     out["ceiling_pct"] = ceiling
