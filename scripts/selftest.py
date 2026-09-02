@@ -2322,6 +2322,39 @@ def _required_health_check_scripts_in_readme_are_scheduled():
         "row) but never actually fires is worse than one never attempted.")
 
 
+def _ntfy_topic_is_deferred_to_tick_time_not_baked_in_at_boot():
+    """gh#279: entrypoint.sh's cron lines for the three health-check pagers used to interpolate
+    `NTFY_TOPIC=${NTFY_TOPIC:-}` at boot time -- a literal value (or empty string) frozen into
+    the generated crontab the moment the container started. A human editing fleet.env's
+    NTFY_TOPIC= afterward (the exact recovery step gh#269's outage needed) had no effect until a
+    full container restart re-ran entrypoint.sh from scratch.
+
+    This guards the fix: the crontab text for each of the three pagers must re-source fleet.env
+    (via FLEET_ENV_FILE, tick-time) rather than embed a literal `NTFY_TOPIC=<boot-time-value>`
+    on the cron line itself. Scoped narrowly to `NTFY_TOPIC=` immediately after `export` on those
+    three lines -- PUBLIC_URL/FLEET_VIEW_PORT/PUBLIC_PATH_URL staying boot-time-interpolated is
+    explicitly out of scope (gh#279's own non-goals).
+    """
+    entry = (ROOT / "entrypoint.sh").read_text()
+    pagers = ("account_health_check.sh", "tunnel_health_check.sh", "path_health_check.sh")
+    baked = []
+    resourced = []
+    for line in entry.splitlines():
+        if not any(f"bash /fleet-kit/scripts/{p}" in line for p in pagers):
+            continue
+        if re.search(r"\bNTFY_TOPIC=", line):
+            baked.append(line.strip())
+        if "FLEET_ENV_FILE" in line and "set -a" in line:
+            resourced.append(line.strip())
+    assert not baked, (
+        f"{baked!r} still bakes a boot-time NTFY_TOPIC= value into the cron line -- a fleet.env "
+        "edit after container boot will never reach the pager until a full restart (gh#279).")
+    assert len(resourced) == len(pagers), (
+        f"expected all {len(pagers)} pager cron lines to re-source fleet.env via FLEET_ENV_FILE "
+        f"before exec'ing the script, found {len(resourced)} -- NTFY_TOPIC would not be read "
+        "fresh at tick-time.")
+
+
 def _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget():
     """The check must compare something REAL (a SHA baked at build time), and must only write
     a durable record when actually past budget -- not on every tick, or the STALE line this
@@ -2862,6 +2895,7 @@ if __name__ == "__main__":
     check("deploy staleness check is actually scheduled", _deploy_staleness_check_is_actually_scheduled)
     check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
     check("every required health-check script in README is actually scheduled", _required_health_check_scripts_in_readme_are_scheduled)
+    check("NTFY_TOPIC is deferred to tick-time, not baked in at boot", _ntfy_topic_is_deferred_to_tick_time_not_baked_in_at_boot)
     check("deploy staleness check reads a baked SHA and only alerts past budget", _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget)
     check("deploy.sh's host log dir survives sourcing the instance's container-scoped fleet.env", _deploy_sh_host_log_dir_survives_sourcing_the_instances_container_scoped_fleet_env)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
