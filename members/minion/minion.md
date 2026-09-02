@@ -22,8 +22,9 @@ do not claim it — gru already did both before spawning you.
 A pilot's checklist is identical every run, on purpose (confirmed live 2026-08-23 on
 dont-shoot-the-messenger: without a forced plan, a real pass burned its whole turn budget on
 early steps and never reached the report at all — landed as `reported_nothing` despite real
-work done; minion's own real-world record is 0 of 27 recent runs landing `ok` — this is not
-theoretical for this member).
+work done). Re-measured 2026-09-02 against fleet.db: minion's real record is 337 `ok` of 473
+runs lifetime, 22 of the last 27 — the strongest of any member. The "0 of 27" this charter
+claimed for generations was simply wrong, and told every minion it had never once succeeded.
 
 1. **Read your item.** Your prompt names the exact issue number. `gh issue view <n> --comments`
    for its title, body AND comments. Do not touch any other issue, claimed or not; picking a
