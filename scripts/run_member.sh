@@ -515,6 +515,15 @@ CAP_ARGS=()
 # budget_declined (3) and timed_out (124) classifications that already depend on it, trading
 # one fixed status for two broken ones. Verified: a subshell wrapping `(exit 42) | cat` returns
 # 42 through `wait`, while the bare pipeline returns 0.
+#
+# That subshell also means account_pool.sh's `export ACCOUNT_POOL_SELECTED` cannot reach the
+# `pass end` log lines below: every pass recorded `account=unknown` and every failure an empty
+# `reason=`, which made per-account attribution impossible exactly when two accounts are in
+# play. Hand the pool files to write into and read them back after `wait`.
+ACCOUNT_POOL_SELECTED_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_acct.XXXXXX")
+ACCOUNT_POOL_REASON_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_reason.XXXXXX")
+export ACCOUNT_POOL_SELECTED_FILE ACCOUNT_POOL_REASON_FILE
+
 ( account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" \
     --model "$MODEL" --dangerously-skip-permissions --setting-sources user \
     --output-format stream-json --verbose \
@@ -525,6 +534,12 @@ CAP_ARGS=()
 PASS_PID=$!
 wait "$PASS_PID"
 RC=$?
+
+# Recover what the subshell selected. Fall back to the (empty) exported vars if the pool
+# never wrote -- e.g. the account_pool_run shim on line 235 when the pool is absent.
+[ -s "$ACCOUNT_POOL_SELECTED_FILE" ] && ACCOUNT_POOL_SELECTED=$(cat "$ACCOUNT_POOL_SELECTED_FILE")
+[ -s "$ACCOUNT_POOL_REASON_FILE" ] && ACCOUNT_POOL_LAST_REASON=$(cat "$ACCOUNT_POOL_REASON_FILE")
+rm -f "$ACCOUNT_POOL_SELECTED_FILE" "$ACCOUNT_POOL_REASON_FILE"
 
 RAW=$(cat "$RESULT_FILE" 2>/dev/null)
 rm -f "$RESULT_FILE"
