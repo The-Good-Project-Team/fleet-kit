@@ -2961,6 +2961,10 @@ def _green_pr_with_no_auto_merge_gets_armed():
 
         # #291 unarmed, #292 armed, #293 draft+unarmed. The -q expression is evaluated by gh
         # itself in the real thing, so the stub returns what that filter WOULD select.
+        #
+        # The merge stub rejects a bare `--auto` exactly as the real `gh` CLI does on this
+        # repo (no merge queue -- an explicit strategy flag is required non-interactively).
+        # A regression back to the bare form fails this assertion instead of passing silently.
         (bin_dir / "gh").write_text(
             "#!/bin/bash\n"
             "if [ \"$1\" = \"repo\" ]; then echo 'The-Good-Project-Team/fleet-kit'; exit 0; fi\n"
@@ -2969,6 +2973,11 @@ def _green_pr_with_no_auto_merge_gets_armed():
             "  exit 0\n"
             "fi\n"
             "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"merge\" ]; then\n"
+            "  case \"$*\" in\n"
+            "    *--squash*|*--merge*|*--rebase*) : ;;\n"
+            "    *) echo '--merge, --rebase, or --squash required when not running "
+            "interactively' >&2; exit 1 ;;\n"
+            "  esac\n"
             f"  echo \"$3\" >> {calls}\n"
             "  exit 0\n"
             "fi\n"

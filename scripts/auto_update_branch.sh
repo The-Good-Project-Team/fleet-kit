@@ -89,7 +89,7 @@ done
 ARMED=0
 for pr in $(gh pr list --state open --json number,isDraft,autoMergeRequest \
               -q '.[] | select(.isDraft|not) | select(.autoMergeRequest==null) | .number' 2>/dev/null); do
-  if arm_err="$(gh pr merge "$pr" --auto 2>&1 >/dev/null)"; then
+  if arm_err="$(gh pr merge "$pr" --auto --squash 2>&1 >/dev/null)"; then
     log "PR #$pr: auto-merge armed (was unarmed -- it could have sat green forever)"
     ARMED=$((ARMED+1))
   else

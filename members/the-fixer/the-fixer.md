@@ -94,7 +94,7 @@ state file so the same failing SHA never fires twice. It prints one line:
     one place (worktree_builder.sh, at PR-creation time), so a PR opened by a human, an external
     agent, or a hand-pushed branch is never armed at all. Live case #291 (2026-09-02) went green
     at 15:47 and sat parked with nothing red anywhere to alarm on.
-    FIX: arm it -- `gh pr merge <n> --auto`. That is the whole repair, and it is NOT a merge:
+    FIX: arm it -- `gh pr merge <n> --auto --squash`. That is the whole repair, and it is NOT a merge:
     GitHub merges an armed PR only once every required check passes, so judge-judy's
     fleet-code-review gate still decides. auto_update_branch.sh arms these every 15 minutes, so
     seeing this reason at all means that sweep did not do its job -- check its log
