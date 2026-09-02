@@ -2974,6 +2974,28 @@ def _oversubscribed_shares_are_caught():
         assert "OVERSUBSCRIBED" in bad.stdout
 
 
+def _jefe_owns_the_fleet_wide_token_budget():
+    """jefe is the always-on health pass, so cross-instance spend is its layer.
+
+    Reif, 2026-09-02: jefe "is supposed to help with management of token budget across the
+    fleet." It already read per-member cost (fleet_db.py spend) but had nothing about the
+    account-pool slices every instance shares -- which is exactly where the two live bugs
+    hid (a dial combined with min() so every value gave the same number, and per-instance
+    lease ledgers that made reserved_pct meaningless across instances).
+
+    Pins that the charter names the tools AND that every tool it names actually exists -- a
+    charter citing a missing script sends a pass hunting instead of executing (the same
+    failure the-fixer hit with a relative check.sh path).
+    """
+    charter = (ROOT / "members" / "jefe" / "jefe.md").read_text()
+    for dial in ("FLEET_SHARE_FRACTION", "FLEET_GRU_ALLOWANCE_FRACTION"):
+        assert dial in charter, f"jefe.md never mentions {dial} -- it cannot manage what it cannot name"
+    for tool in ("check_share_sum.sh", "gru_allowance.py", "maxx_share_ceiling.py", "maxx_lease.py"):
+        assert tool in charter, f"jefe.md does not tell jefe to check {tool}"
+        assert (ROOT / "scripts" / tool).exists(), \
+            f"jefe.md cites scripts/{tool} but it does not exist -- the pass will hunt for it"
+
+
 def _bash_eval(setup: str, expr: str) -> str:
     """Source account_pool.sh in a scratch HOME and echo one expression's result."""
     import subprocess
@@ -3361,6 +3383,7 @@ if __name__ == "__main__":
     check("an instance cannot spend past its own slice", _an_instance_cannot_spend_past_its_own_slice)
     check("share ceiling is a slice of the hour, not the leftovers", _share_ceiling_is_a_slice_of_the_hour_not_the_leftovers)
     check("oversubscribed instance shares are caught", _oversubscribed_shares_are_caught)
+    check("jefe owns the fleet-wide token budget", _jefe_owns_the_fleet_wide_token_budget)
     check("FLEET_API_KEY never reaches an LLM pass", _api_key_never_reaches_an_llm)
     check("incidental 'rate limit' text does not gate an account", _classifier_ignores_incidental_rate_limit_text)
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)
