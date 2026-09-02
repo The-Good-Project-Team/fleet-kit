@@ -100,15 +100,29 @@ except Exception:
     # non-"primary" account. Without it this tests the ambient token instead of the
     # account's own credentials -- the "failover is theater" leak the pool already
     # fixed, which would make a dead account look alive here.
+    #
+    # No pipe into `head` here on purpose: that discarded claude's own exit status
+    # (PIPESTATUS[0] doesn't survive a `$(...)` command substitution back to the
+    # caller), leaving "OK" decided purely by matching a five-phrase regex against
+    # text. A hang killed by `timeout` (rc=124), a network blip, or any wording not
+    # in the list fell through to "live auth: OK ()" -- the exact false-healthy
+    # reading this flag exists to catch. rc is now checked directly; the regex is
+    # only used to annotate WHY a failure happened, same division of labor as
+    # account_pool.sh's own rc-first + _account_pool_classify_failure-second split.
     out=$(CLAUDE_CONFIG_DIR="$dir" env -u CLAUDE_CODE_OAUTH_TOKEN \
-            timeout 90 claude -p "say ok" 2>&1 | head -3)
-    if grep -qiE "revoked|unauthorized|401|not logged in|invalid api key|session expired" <<<"$out"; then
-      echo "   live auth:   FAIL -- $(tr '\n' ' ' <<<"$out" | cut -c1-100)"
+            timeout 90 claude -p "say ok" 2>&1)
+    rc=$?
+    out_head=$(head -3 <<<"$out")
+    if [ "$rc" -ne 0 ]; then
+      why=""
+      grep -qiE "revoked|unauthorized|401|not logged in|invalid api key|session expired" <<<"$out" \
+        && why=" (auth)"
+      echo "   live auth:   FAIL (rc=$rc)$why -- $(tr '\n' ' ' <<<"$out_head" | cut -c1-100)"
       echo "   fix:         bash set_account_token.sh $acct"
       echo
       continue
     fi
-    echo "   live auth:   OK ($(tr '\n' ' ' <<<"$out" | cut -c1-60))"
+    echo "   live auth:   OK ($(tr '\n' ' ' <<<"$out_head" | cut -c1-60))"
   fi
 
   case "$verdict" in gated:*) ;; *) usable=$((usable + 1)) ;; esac
