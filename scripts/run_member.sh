@@ -75,6 +75,17 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Structured mirror of a dispatcher's `lane=<name>` --task prefix (nerd.md's contract with
+# datta). Extracted here, once, rather than left for every consumer to re-parse free text --
+# datta's own self-critique flagged repeated turns lost to fragile keyword-matching of
+# outcome/evidence prose for lane attribution, including one real mis-attribution. Only the
+# leading `lane=<word>` token is captured; anything else in --task is untouched.
+LANE=""
+case "$TASK" in
+  lane=*) LANE="${TASK#lane=}"; LANE="${LANE%% *}"; LANE="${LANE%%—*}" ;;
+esac
+LANE_FLAG=""; [ -n "$LANE" ] && LANE_FLAG="--lane $LANE"
+
 LOG="$LOG_DIR/${MEMBER}.log"
 ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
@@ -421,7 +432,7 @@ record_killed_pass() {
   # lives in the CLI's unread stream, and inventing a number here would be worse than null.
   printf '' | python3 "$KIT_DIR/scripts/run_report.py" \
     --member "$MEMBER" --run-id "$RUN_ID" --kind llm --exit-code 143 \
-    --pass-file - ${ITEM:+--item-id "$ITEM"} $VISION_FLAG >> "$LOG_DIR/runs.jsonl" 2>>"$LOG" || true
+    --pass-file - ${ITEM:+--item-id "$ITEM"} $VISION_FLAG $LANE_FLAG >> "$LOG_DIR/runs.jsonl" 2>>"$LOG" || true
   exit 143
 }
 trap record_killed_pass TERM INT
@@ -499,7 +510,7 @@ printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" usage > "$USA
 
 echo "$OUT" | python3 "$KIT_DIR/scripts/run_report.py" \
   --member "$MEMBER" --run-id "$RUN_ID" --kind llm --exit-code "$RC" \
-  --pass-file - --usage-file "$USAGE_FILE" ${ITEM:+--item-id "$ITEM"} $VISION_FLAG >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
+  --pass-file - --usage-file "$USAGE_FILE" ${ITEM:+--item-id "$ITEM"} $VISION_FLAG $LANE_FLAG >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
 rm -f "$USAGE_FILE"
 
 SUMMARY=$(tail -c 400 <<<"$OUT" | tr '\n' ' ' | tail -c 300)
