@@ -59,7 +59,7 @@ BEFORE=""
 [ -f "$CREDS" ] && BEFORE=$(stat -c %Y "$CREDS" 2>/dev/null || stat -f %m "$CREDS")
 
 TOKEN="$TOKEN" CREDS="$CREDS" python3 <<'PY'
-import json, os, sys
+import json, os, sys, time
 
 tok = os.environ["TOKEN"].strip()
 creds = os.environ["CREDS"]
@@ -87,6 +87,14 @@ oauth.setdefault("scopes", [
     "user:profile", "user:sessions:claude_code",
 ])
 oauth.setdefault("subscriptionType", "max")
+# Always overwrite, never setdefault: a freshly pasted token invalidates whatever
+# expiresAt (0, or a stale multi-day-old value) was already on file, and
+# verify_account_login.sh gates on this field *before* the live call -- a stale
+# value here makes verification falsely report the token as already-expired right
+# after a successful write. We don't know the token's real expiry (setup-token
+# only prints the value, not its lifetime), so use a long-lived placeholder; the
+# live call that follows is the actual ground truth, not this timestamp.
+oauth["expiresAt"] = int((time.time() + 365 * 24 * 3600) * 1000)
 
 # Atomic replace: a crash mid-write must not leave a truncated credentials file that
 # authenticates as nobody and takes the whole pool down.
