@@ -82,6 +82,19 @@ state file so the same failing SHA never fires twice. It prints one line:
     reading a log that doesn't exist yet; if it wedges again after one retry, that's the
     systemic-failure rule (persona_law.md §7) -- file it once as an infra issue, stop retrying
     this specific PR against the same hang.
+  - `check-never-ran` / `no-checks-at-all` -- the "no answer" class (check.sh's own header
+    explains why these are invisible to a red/green sweep: the merge gate asks "is the required
+    check green?" and a check that never ran is NEITHER, so the PR can neither merge nor alarm).
+    Nothing is broken in the code; a workflow died before its jobs launched, or never triggered.
+    Re-trigger first (`gh run rerun <run-id>` if a run exists at all, else close+reopen the PR
+    to re-fire `on: pull_request`). If it still posts no check after ONE retry, do NOT keep
+    retrying and do NOT merge around it -- a required check that never ran has produced no
+    verdict, and merging is overriding a review that never happened. Escalate per the
+    systemic-failure rule (persona_law.md §7): file it once as an infra issue and comment on
+    the PR naming the missing check. The one exception is a check whose status is `ERROR` from
+    a fleet member's OWN reviewer (judge-judy's `fleet-code-review` posting an unparseable
+    verdict) -- that is jefe.md's documented "fourth shape", still escalate-only, never a
+    self-merge.
   If a given PR's fix isn't obvious in its sub-pass's budget, comment on it explaining the
   block and move to the next -- never revert someone else's in-flight PR out from under them,
   and a hard one blocking should never stall the easy ones behind it.
