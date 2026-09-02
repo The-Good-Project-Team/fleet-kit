@@ -1214,6 +1214,157 @@ def _auto_deploy_race_check_detects_the_unrecognized_git_failure():
         assert "deploy OK" in alerts, "alert does not cross-reference the next tick's deploy outcome"
 
 
+def _fixer_check_sh(tmp, stale_prs_json, state_contents=None, state_age_hours=None, env_extra=None):
+    """Run the-fixer's check.sh against a stubbed `gh`, return its one stdout line.
+
+    The stub answers the three shapes check.sh asks for: `gh run list` for CI and deploy
+    (always green here -- these tests are about the stale-PR path), and `gh pr list` for the
+    open-PR sweep, which is fed verbatim from stale_prs_json.
+    """
+    import os
+    import subprocess
+    import time
+
+    log_dir = Path(tmp) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    repo = Path(tmp) / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    bin_dir = Path(tmp) / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    # `gh run list` prints "conclusion sha"; `gh pr list` prints the "num:sha:reason" triples
+    # check.sh's own jq expression would have produced. Stubbing at the gh boundary keeps the
+    # real dedup/state logic under test instead of reimplementing it.
+    (bin_dir / "gh").write_text(
+        "#!/bin/bash\n"
+        "if [ \"$1\" = \"run\" ]; then echo 'success abc123'; exit 0; fi\n"
+        "if [ \"$1\" = \"pr\" ]; then printf '%s' " + repr(stale_prs_json).replace("'", '"') + "; exit 0; fi\n"
+        "exit 0\n"
+    )
+    (bin_dir / "gh").chmod(0o755)
+
+    state = log_dir / "the-fixer.state"
+    if state_contents is not None:
+        state.write_text(state_contents)
+        if state_age_hours is not None:
+            old = time.time() - state_age_hours * 3600
+            os.utime(state, (old, old))
+
+    env = {
+        "FLEET_REPO": str(repo),
+        "FLEET_LOG_DIR": str(log_dir),
+        "FIXER_STATE_FILE": str(state),
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+    }
+    env.update(env_extra or {})
+    proc = subprocess.run(
+        ["bash", str(ROOT / "members" / "the-fixer" / "check.sh")],
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+    assert proc.returncode == 0, f"check.sh failed: {proc.stderr.strip()[:300]}"
+    return proc.stdout.strip()
+
+
+def _fixer_dedup_does_not_let_one_stuck_pr_mute_the_batch():
+    """nonprofit-atlas, 2026-09-02: the-fixer went blind for 11 hours and reported green.
+
+    The 02:46 UTC pass fired on a four-PR batch and fixed three; #3853 was a merge conflict
+    nobody resolved, so its head never moved. The state file stored only that oldest sha, so
+    every later pass matched `already-fighting 61a3390` and stopped at Step 1 -- never
+    re-listing open PRs. Ten consecutive hourly passes no-op'd while new PRs went red unseen.
+
+    A batch whose membership CHANGED must re-fire: the stuck PR is still stuck, but a
+    different PR going red is a new fire and the whole point of fanning out over N independent
+    units is that one wedged unit cannot block the others.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        # The original batch fires and is recorded.
+        first = _fixer_check_sh(tmp, "3853:61a3390:check-failed 3860:1cef138:check-failed ")
+        assert first.startswith("FIRE"), f"a fresh stale-PR batch did not fire: {first!r}"
+
+        # #3860 got fixed and dropped out; #3853 is still stuck; #3901 is NEWLY red.
+        # This is the exact shape that was silently suppressed in production.
+        second = _fixer_check_sh(
+            tmp, "3853:61a3390:check-failed 3901:deadbee:check-failed ",
+            state_contents=Path(tmp, "logs", "the-fixer.state").read_text(),
+        )
+        assert second.startswith("FIRE"), (
+            "a batch containing a NEWLY red PR was suppressed because one older PR in the "
+            f"previous batch is still stuck -- got {second!r}"
+        )
+        assert "3901" in second, f"re-fire does not name the newly-red PR: {second!r}"
+
+
+def _fixer_dedup_still_suppresses_an_unchanged_batch():
+    """The counterpart guard: dedup must still WORK.
+
+    A batch that is genuinely unchanged tick-over-tick (same PRs, same heads, someone mid-fix)
+    must not be re-fought every hour -- that is the whole reason the state file exists, and
+    breaking it would make the-fixer re-spend a full fanout's budget on every poll.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        batch = "3853:61a3390:check-failed 3860:1cef138:check-failed "
+        first = _fixer_check_sh(tmp, batch)
+        assert first.startswith("FIRE"), f"fresh batch did not fire: {first!r}"
+        second = _fixer_check_sh(
+            tmp, batch, state_contents=Path(tmp, "logs", "the-fixer.state").read_text()
+        )
+        assert second.startswith("green"), (
+            f"an unchanged batch re-fired instead of deduping -- got {second!r}"
+        )
+        assert "already-fighting" in second, f"unexpected green shape: {second!r}"
+
+
+def _fixer_dedup_expires_so_a_wedge_cannot_last_forever():
+    """A dedup with no expiry is how an 11-hour blind spot lasts 11 hours instead of one.
+
+    Even with batch-keying, a batch that never changes -- one stuck PR, nothing else red --
+    would suppress indefinitely. After FIXER_DEDUP_MAX_HOURS the same fire must resurface:
+    whoever was fixing it finished, gave up, or died, and all three want a fresh look.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        batch = "3853:61a3390:check-failed "
+        first = _fixer_check_sh(tmp, batch)
+        assert first.startswith("FIRE"), f"fresh batch did not fire: {first!r}"
+        state_now = Path(tmp, "logs", "the-fixer.state").read_text()
+
+        # Still inside the window: correctly quiet.
+        fresh = _fixer_check_sh(tmp, batch, state_contents=state_now, state_age_hours=1)
+        assert fresh.startswith("green"), f"deduped fire re-fired only 1h in: {fresh!r}"
+
+        # Past the window: must resurface even though nothing about the batch changed.
+        stale = _fixer_check_sh(tmp, batch, state_contents=state_now, state_age_hours=9)
+        assert stale.startswith("FIRE"), (
+            "an unresolved fire older than FIXER_DEDUP_MAX_HOURS stayed suppressed -- this is "
+            f"the permanent-wedge shape the expiry exists to break: {stale!r}"
+        )
+
+
+def _fixer_charter_handles_every_reason_check_sh_emits():
+    """gh#287: check.sh grew two new stale-PR reasons and the charter never learned them.
+
+    check.sh classifies a stuck PR into one of five reasons, but the-fixer.md only had
+    instructions for three. Live 2026-09-02: PR #3863 came back `no-checks-at-all` in a real
+    FIRE batch and its sub-pass had no rule to apply. A reason the charter cannot name is a
+    reason the-fixer cannot act on, and the pass is paid for either way.
+
+    Parses the reason literals straight out of check.sh's jq expression so adding a sixth
+    reason without a charter rule fails here rather than in production.
+    """
+    check_sh = (ROOT / "members" / "the-fixer" / "check.sh").read_text()
+    charter = (ROOT / "members" / "the-fixer" / "the-fixer.md").read_text()
+
+    reasons = set(re.findall(r'then "([a-z-]+)"|else "([a-z-]+)" end', check_sh))
+    flat = {r for pair in reasons for r in pair if r}
+    assert len(flat) >= 5, f"expected check.sh to classify at least 5 reasons, parsed {flat!r}"
+
+    missing = sorted(r for r in flat if f"`{r}`" not in charter)
+    assert not missing, (
+        f"check.sh can emit {missing} but the-fixer.md has no rule naming them -- a sub-pass "
+        "dispatched for one of these has no instruction to follow"
+    )
+
+
 def _auto_deploy_race_check_dedups_an_already_recorded_line():
     """AC3/AC5: running the detector twice against a log that already contains one
     previously-recorded matching line must not duplicate the alert -- else every hourly tick
@@ -2872,6 +3023,10 @@ if __name__ == "__main__":
     check("a leaked absolute-path write into $REPO is caught and alerted", _postflight_dirty_check_catches_a_leaked_absolute_path_write)
     check("a git-status failure alerts rather than reading as clean", _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure)
     check("auto-deploy race check detects an unrecognized git failure outside auto_deploy.sh's own path", _auto_deploy_race_check_detects_the_unrecognized_git_failure)
+    check("the-fixer dedup does not let one stuck PR mute the batch", _fixer_dedup_does_not_let_one_stuck_pr_mute_the_batch)
+    check("the-fixer dedup still suppresses an unchanged batch", _fixer_dedup_still_suppresses_an_unchanged_batch)
+    check("the-fixer dedup expires so a wedge cannot last forever", _fixer_dedup_expires_so_a_wedge_cannot_last_forever)
+    check("the-fixer charter handles every reason check.sh emits", _fixer_charter_handles_every_reason_check_sh_emits)
     check("auto-deploy race check dedups an already-recorded line", _auto_deploy_race_check_dedups_an_already_recorded_line)
     check("auto-deploy race check escalates after 3 consecutive sanctioned ABORTs", _auto_deploy_race_check_escalates_after_three_consecutive_sanctioned_aborts)
     check("auto-deploy race check does not alert on a self-resolving sanctioned ABORT", _auto_deploy_race_check_does_not_alert_on_a_self_resolving_sanctioned_abort)
