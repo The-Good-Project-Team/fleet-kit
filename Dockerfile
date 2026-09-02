@@ -18,6 +18,15 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# python3.11-minimal/libpython3.11-stdlib: the TARGET repo's own .venv (bind-mounted at /repo,
+# built by uv) symlinks its interpreter at /usr/bin/python3.11. This image ships 22.04's default
+# python3 (3.10) only, so that symlink dangled and EVERY in-container attempt to run the app's
+# test suite died with "No such file or directory" -- which is why the fleet believed for
+# generations that philanthropy had "no importable app runtime on this box". It always had one;
+# the interpreter the venv pointed at was simply never installed. Found 2026-09-02 by the minion
+# on item #3940, which apt-installed it by hand inside the running container -- a fix a rebuild
+# would have silently erased. The venv's site-packages were fine all along (fastapi 0.141.1,
+# jinja2 3.1.6, pytest 9.0.3 all import the moment the interpreter exists).
 # git: worktree builder. python3: board_github.py/run_report.py/maxx_reader.py. curl+ca-certs: gh
 # CLI install + claude CLI install. cron: schedule cadences inside the container without a
 # host-level launchd/systemd dependency (schedulers/ templates remain for host-native installs).
@@ -27,6 +36,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # nothing said so, because a shell command that fails still lets the pass continue.
 RUN apt-get update -qq && apt-get install -y -qq \
       git python3 python3-pip curl ca-certificates cron gnupg jq sqlite3 \
+      python3.11-minimal libpython3.11-stdlib \
     && rm -rf /var/lib/apt/lists/*
 
 # Python libs the ANALYSIS lanes need (datta/nerd). The container shipped with NO third-party
