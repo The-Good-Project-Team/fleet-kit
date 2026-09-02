@@ -146,7 +146,16 @@ check_sanctioned_escalation() {
     local total_size
     total_size="$(wc -c < "$DEPLOY_LOG" | tr -d ' ')"
 
-    [ "$last_offset" -gt "$total_size" ] && last_offset=0
+    # Log rotated/truncated under us -- rescan from the top (same as check_unrecognized_race).
+    # The persisted streak counts below are just as stale as the cursor in that case: they were
+    # counting ticks in a log incarnation that no longer exists, so carrying them into the
+    # rescanned content would understate how NEW a resumed streak actually is. Reset both
+    # together, not just the cursor.
+    local rotated=0
+    if [ "$last_offset" -gt "$total_size" ]; then
+        last_offset=0
+        rotated=1
+    fi
 
     if [ "$last_offset" -ge "$total_size" ]; then
         return 0  # nothing appended since the last tick
@@ -157,7 +166,7 @@ check_sanctioned_escalation() {
     echo "$total_size" > "$DEPLOY_STATE_FILE"
 
     local dirty_count=0 dirty_alerted=0 diverged_count=0 diverged_alerted=0
-    if [ -f "$SANCTIONED_STATE_FILE" ]; then
+    if [ "$rotated" -eq 0 ] && [ -f "$SANCTIONED_STATE_FILE" ]; then
         read -r dirty_count dirty_alerted diverged_count diverged_alerted \
             < "$SANCTIONED_STATE_FILE" 2>/dev/null || true
     fi
