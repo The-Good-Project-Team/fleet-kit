@@ -96,10 +96,13 @@ except Exception:
   esac
 
   if [ "$LIVE" -eq 1 ]; then
-    # env -u CLAUDE_CODE_OAUTH_TOKEN mirrors what account_pool.sh does for every
-    # non-"primary" account. Without it this tests the ambient token instead of the
-    # account's own credentials -- the "failover is theater" leak the pool already
-    # fixed, which would make a dead account look alive here.
+    # Reproduce account_pool_run's own three-way auth resolution (account_pool.sh
+    # ~line 207-218) instead of unconditionally stripping CLAUDE_CODE_OAUTH_TOKEN:
+    # an override var takes it, "primary" legitimately inherits the ambient token
+    # unchanged, and only every other named account has it cleared. Testing the
+    # wrong path here reports a healthy primary/overridden account as FAIL, or
+    # (the leak account_pool.sh's own header documents) a dead named account as
+    # OK by silently authenticating as whoever the ambient token belongs to.
     #
     # No pipe into `head` here on purpose: that discarded claude's own exit status
     # (PIPESTATUS[0] doesn't survive a `$(...)` command substitution back to the
@@ -109,8 +112,17 @@ except Exception:
     # reading this flag exists to catch. rc is now checked directly; the regex is
     # only used to annotate WHY a failure happened, same division of labor as
     # account_pool.sh's own rc-first + _account_pool_classify_failure-second split.
-    out=$(CLAUDE_CONFIG_DIR="$dir" env -u CLAUDE_CODE_OAUTH_TOKEN \
-            timeout 90 claude -p "say ok" 2>&1)
+    var_name="CLAUDE_CODE_OAUTH_TOKEN_$(echo "$acct" | tr '[:lower:]-' '[:upper:]_')"
+    token_override="${!var_name:-}"
+    if [ -n "$token_override" ]; then
+      out=$(CLAUDE_CONFIG_DIR="$dir" CLAUDE_CODE_OAUTH_TOKEN="$token_override" \
+              timeout 90 claude -p "say ok" 2>&1)
+    elif [ "$acct" = "primary" ]; then
+      out=$(CLAUDE_CONFIG_DIR="$dir" timeout 90 claude -p "say ok" 2>&1)
+    else
+      out=$(CLAUDE_CONFIG_DIR="$dir" env -u CLAUDE_CODE_OAUTH_TOKEN \
+              timeout 90 claude -p "say ok" 2>&1)
+    fi
     rc=$?
     out_head=$(head -3 <<<"$out")
     if [ "$rc" -ne 0 ]; then
