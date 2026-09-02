@@ -21,7 +21,7 @@ permissions:
 jobs:
   selftest:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,3 +29,9 @@ jobs:
           python-version: "3.11"
       - name: run selftest.py
         run: python3 scripts/selftest.py
+      - name: install playwright chromium
+        run: |
+          pip install --no-cache-dir playwright
+          playwright install --with-deps chromium
+      - name: run test_settings_wiring.py
+        run: python3 scripts/test_settings_wiring.py
