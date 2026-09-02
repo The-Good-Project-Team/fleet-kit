@@ -412,6 +412,79 @@ def poll_gh_state() -> dict:
             "self_evolution": self_evolution, "polled_at": time.time()}
 
 
+
+def _session_token(key: str) -> str:
+    """The cookie value that proves possession of FLEET_API_KEY.
+
+    A DERIVED value, never the key itself: the cookie is sent on every same-origin request
+    and lands in browser storage, so putting the real key there would spread it far wider
+    than the one Authorization-style header it replaces. HMAC over a fixed label means the
+    token is stable across restarts (an operator is not logged out by a redeploy) while
+    still being useless for deriving the key back out.
+    """
+    return hmac.new(key.encode(), b"fleet-view-session-v1", "sha256").hexdigest()
+
+
+
+def _budget_preview() -> dict:
+    """Live derivation of gru's hourly allowance, for display on the Settings page.
+
+    Returns every intermediate value, not just the answer, so an operator can SEE which dial
+    moved what -- and so a nonsense result (empty ceiling, zero headroom, a fraction that
+    changes nothing) is visible instead of silently swallowed. Never raises: this is a
+    read-only display route and a broken meter must degrade to an explanation, not a 500.
+    """
+    flags = read_env_flags()
+    share = (flags.get("FLEET_SHARE_FRACTION") or "").strip()
+    gru_frac = (flags.get("FLEET_GRU_ALLOWANCE_FRACTION") or "").strip()
+
+    out: dict = {
+        "share_fraction": share or None,
+        "gru_fraction": gru_frac or None,
+        "ceiling_pct": None,
+        "gru_allowance_pct": None,
+        "others_pct": None,
+        "formula": "instance_ceiling = account_hourly_headroom x share_fraction ; "
+                   "gru_allowance = instance_ceiling x gru_fraction",
+        "note": None,
+    }
+    if not share or share == "1.0":
+        out["note"] = ("FLEET_SHARE_FRACTION is unset or 1.0, so no ceiling is exported and "
+                       "gru falls back to its own default -- set it below to cap this instance.")
+        return out
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(KIT_DIR / "scripts" / "maxx_share_ceiling.py"), share],
+            capture_output=True, text=True, timeout=20)
+        ceiling = (proc.stdout or "").strip()
+    except Exception as exc:  # noqa: BLE001 -- display route, never 500 on a meter hiccup
+        out["note"] = f"could not read the maxx meter: {exc}"
+        return out
+    if not ceiling:
+        out["note"] = ("maxx meter unreadable right now -- no ceiling. gru fails OPEN to its "
+                       "own conservative default; nothing is over-spent.")
+        return out
+
+    out["ceiling_pct"] = ceiling
+    try:
+        sys.path.insert(0, str(KIT_DIR / "scripts"))
+        import gru_allowance
+        allowance = gru_allowance.compute(ceiling, gru_frac or None)
+    except Exception as exc:  # noqa: BLE001
+        out["note"] = f"could not compute allowance: {exc}"
+        return out
+    if allowance:
+        out["gru_allowance_pct"] = allowance
+        try:
+            out["others_pct"] = f"{float(ceiling) - float(allowance):.4f}"
+        except ValueError:
+            pass
+        if float(ceiling) == 0.0:
+            out["note"] = ("ceiling is a real 0.0 -- this hour is already at or past "
+                           "sustainable pace once other instances' reservations are counted.")
+    return out
+
+
 class State:
     """In-memory snapshot, refreshed by two background loops. Reads never block on either."""
     def __init__(self):
@@ -633,7 +706,70 @@ class Handler(BaseHTTPRequestHandler):
         if not key:
             return False   # fail closed: no key configured => no remote writes, ever
         sent = (self.headers.get("X-Fleet-Key") or "").strip()
-        return bool(sent) and hmac.compare_digest(sent, key)
+        if sent and hmac.compare_digest(sent, key):
+            return True
+        # Same-origin session cookie -- the ONLY credential a browser can actually present.
+        # _cors deliberately keeps X-Fleet-Key out of Allow-Headers so a page cannot send the
+        # write key; without this branch that made every POST route unreachable from the very
+        # UI they were built for (live 2026-09-02: Settings dials showed "save failed", server
+        # logged DENIED, and all 11 write buttons were dead for any remote operator).
+        # Safe against a cross-site caller for the same reasons the header path is: Allow-Origin
+        # `*` forbids credentials, only GET is advertised in Allow-Methods, and the cookie is
+        # SameSite=Strict so a third-party page's POST never carries it.
+        return hmac.compare_digest(self._session_cookie(), _session_token(key))
+
+    def _handle_login(self, body: dict) -> None:
+        """Exchange FLEET_API_KEY for a same-origin session cookie.
+
+        This is the one POST that runs BEFORE _authorized(), so it carries the whole
+        fail-closed burden itself: with no key configured it refuses outright rather than
+        treating "unset" as "no authentication needed" -- the exact state that left run_now
+        world-callable before the gate existed (2026-08-25 incident).
+
+        Cookie flags are load-bearing, not decoration:
+          HttpOnly     -- page scripts cannot read it, so an XSS on this dashboard cannot
+                          lift the session and replay it elsewhere.
+          SameSite=Strict -- it never rides a cross-site request, which is what keeps a
+                          third-party page from POSTing to /api/run_now on the operator's
+                          behalf. This is the CSRF defense; do not relax it to Lax.
+          Path=/       -- every write route is under the same origin.
+        Secure is set only when the request arrived over TLS: the tunnel terminates HTTPS,
+        but an operator on the box hits plain http://localhost and a Secure cookie would be
+        silently dropped there.
+        """
+        key = (os.environ.get("FLEET_API_KEY") or "").strip()
+        if not key:
+            # Fail closed, and say why -- an operator staring at a dead Save button deserves
+            # the actual reason rather than a generic 401.
+            self._json({"ok": False,
+                        "error": "no FLEET_API_KEY configured on this instance -- set it in "
+                                 "fleet.env and restart the container to enable writes"}, 503)
+            return
+        sent = str(body.get("key", "")).strip()
+        if not sent or not hmac.compare_digest(sent, key):
+            client = self.client_address[0] if self.client_address else "?"
+            print(f"[fleet-view] LOGIN FAILED from {client}", flush=True)
+            self._json({"ok": False, "error": "wrong key"}, 401)
+            return
+        secure = "; Secure" if (self.headers.get("X-Forwarded-Proto") or "").lower() == "https" else ""
+        body_bytes = json.dumps({"ok": True}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body_bytes)))
+        self.send_header("Set-Cookie",
+                         f"fleet_session={_session_token(key)}; HttpOnly; SameSite=Strict; "
+                         f"Path=/; Max-Age=31536000{secure}")
+        self.end_headers()
+        self.wfile.write(body_bytes)
+
+    def _session_cookie(self) -> str:
+        """This request's fleet_session cookie value, or "" -- never raises on junk input."""
+        raw = self.headers.get("Cookie") or ""
+        for part in raw.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == "fleet_session":
+                return value.strip()
+        return ""
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -775,6 +911,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/fleet_state":
             self._json(read_env_flags())
             return
+        if path == "/api/budget_preview":
+            # Show the operator the ACTUAL arithmetic behind the two dials, with live numbers.
+            # Reif, 2026-09-02: "we can easily mess this up and it be way wrong" -- and it had
+            # been, silently, for weeks (see gru_allowance.py's header). Two nested percentages
+            # that LOOK independent are exactly the shape a human mis-tunes, so the page shows
+            # the derivation and the resulting number rather than two bare inputs.
+            self._json(_budget_preview())
+            return
         if path == "/api/members":
             # Every member's reviewed spec + whatever's currently overridden on top of it --
             # the same effective config a running pass would get (member_spec.load + overrides.apply,
@@ -858,11 +1002,18 @@ class Handler(BaseHTTPRequestHandler):
         # Compared with hmac.compare_digest, not `==`: a plain string compare returns early on
         # the first differing byte, which leaks key material to a patient attacker timing
         # responses. Constant-time comparison is the standard fix and costs nothing here.
+        # /api/login is the ONE route ahead of the gate -- it exists to satisfy the gate, so
+        # sitting behind it would make it unreachable by the only client that needs it. It
+        # carries its own fail-closed check instead (see _handle_login).
+        if path == "/api/login":
+            self._handle_login(body)
+            return
+
         if not self._authorized():
             client = self.client_address[0] if self.client_address else "?"
             print(f"[fleet-view] DENIED {path} from {client} (bad or missing X-Fleet-Key)",
                   flush=True)
-            self._json({"ok": False, "error": "unauthorized -- set X-Fleet-Key"}, 401)
+            self._json({"ok": False, "error": "unauthorized -- sign in on the Settings page"}, 401)
             return
 
         # --- steer: throttle/disable/re-tune a member, via overrides.py (dials only, by design

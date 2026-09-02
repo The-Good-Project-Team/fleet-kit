@@ -91,6 +91,15 @@ GH_TOKEN="${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}"
 # Same FLEET_LOG_DIR convention auto_deploy.sh already uses (auto_deploy.sh:28), own filename
 # so a direct run doesn't interleave with auto_deploy's own poll-tick log.
 LOG_DIR="${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}"
+
+# ONE lease ledger for every instance on this box. Each instance keeps its own $INSTANCE_DIR
+# for logs/repo/env, but they all draw from a SINGLE maxx account pool, so a reservation
+# ledger only one instance can see coordinates nothing (live 2026-09-02: philanthropy and
+# fleet-kit-server-fleet each kept a private maxx-leases.json, both sat at `[]` while both
+# fleets ran, and maxx_share_ceiling.py's "already-coordinated" reserved_pct never contained
+# the other instance's spend). Deliberately OUTSIDE $INSTANCE_DIR -- that is the whole point.
+SHARED_LEASE_DIR="${FLEET_LEASE_DIR:-$HOME/.cache/fleet-kit/leases}"
+mkdir -p "$SHARED_LEASE_DIR"
 mkdir -p "$LOG_DIR"
 DEPLOY_LOG="$LOG_DIR/deploy.log"
 
@@ -136,6 +145,9 @@ run_args() {
         -e FLEET_ENV_FILE=/fleet-kit/fleet.env \
         -e FLEET_WEBHOOK_PORT="$webhook_port" \
         -e FLEET_REPO=/repo \
+        -e FLEET_LEASE_DIR=/fleet-kit/leases \
+        -e FLEET_INSTANCE_NAME="$name" \
+        -v "$SHARED_LEASE_DIR:/fleet-kit/leases" \
         -v "$INSTANCE_DIR/repo:/repo" \
         -v "$INSTANCE_DIR/logs:/var/log/fleet-kit" \
         -v "$INSTANCE_DIR/fleet.env:/fleet-kit/fleet.env" \

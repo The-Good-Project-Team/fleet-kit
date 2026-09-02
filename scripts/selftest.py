@@ -494,9 +494,16 @@ def _gru_md_clamps_allowance_to_share_ceiling():
     assert "FLEET_SHARE_CEILING_PCT" in text, \
         "gru.md lost its FLEET_SHARE_CEILING_PCT reference -- gru can double-spend headroom " \
         "another fleet-kit instance already reserved"
-    assert "min(allowance_pct, FLEET_SHARE_CEILING_PCT)" in text, \
-        "gru.md's clamp line changed shape or was removed -- allowance_pct must be clamped, " \
-        "not merely mentioned alongside FLEET_SHARE_CEILING_PCT"
+    # The clamp became a MULTIPLY (2026-09-02): allowance = CEILING * GRU_ALLOWANCE_FRACTION.
+    # That is strictly stronger than the old min() -- the result is always <= the ceiling for
+    # any fraction in [0,1], AND it stops gru taking 100% of the instance's slice, which min()
+    # allowed (and in practice always produced, making the dial dead config). What this test
+    # guards is the INTENT -- gru's number is derived FROM the instance ceiling, never from raw
+    # local headroom -- so it accepts either composition rather than pinning one spelling.
+    assert ("min(allowance_pct, FLEET_SHARE_CEILING_PCT)" in text
+            or "FLEET_SHARE_CEILING_PCT * FLEET_GRU_ALLOWANCE_FRACTION" in text), \
+        "gru.md no longer derives allowance_pct from FLEET_SHARE_CEILING_PCT -- gru can " \
+        "double-spend headroom another fleet-kit instance already reserved"
     # The fanout.py call site must hand it the ALREADY-clamped value, not re-derive the raw
     # unclamped formula a second time (that would silently bypass the clamp above it).
     assert "${FLEET_GRU_ALLOWANCE_FRACTION:-0.70}>" not in text, \
@@ -2672,14 +2679,321 @@ def _write_routes_are_authenticated():
     assert len(post) == 2, "do_POST not found"
     body = post[1]
     gate = body.find("_authorized()")
-    first_route = body.find('if path == "/api/')
     assert gate != -1, "do_POST has no _authorized() gate -- write routes are unauthenticated"
-    assert gate < first_route, "auth gate sits AFTER a route -- that route is unprotected"
+
+    # /api/login is deliberately ahead of the gate -- it exists to SATISFY the gate, so
+    # sitting behind it would make it unreachable (it carries its own fail-closed check,
+    # pinned by _fleet_view_login_is_still_fail_closed). Every OTHER route must follow the
+    # gate: the point of this assertion is that a new write route inherits auth by default.
+    import re as _re
+    routes = [(m.start(), m.group(1)) for m in
+              _re.finditer(r'if path == "(/api/[a-z_]+)"', body)]
+    early = [name for at, name in routes if at < gate and name != "/api/login"]
+    assert not early, f"write route(s) dispatched before the auth gate: {early}"
+    assert any(name != "/api/login" for _at, name in routes), \
+        "no write routes found after the gate -- the scan is not matching real dispatch"
 
     # Fail closed: no key configured must mean no remote writes, never "auth disabled".
     auth = src.split("def _authorized", 1)[1].split("\n    def ", 1)[0]
     assert "return False" in auth, "_authorized never denies -- cannot be failing closed"
     assert "compare_digest" in auth, "key compared without hmac.compare_digest (timing leak)"
+
+
+def _fleet_view_ui_can_actually_authenticate_a_write():
+    """The Settings dials (and every other write button) could never save from a browser.
+
+    Live 2026-09-02, Reif editing Gru allowance through the tunnel: the page showed
+    "save failed" and the server logged `DENIED /api/fleet_settings ... (bad or missing
+    X-Fleet-Key)`. Root cause is a contradiction between two deliberate decisions:
+
+      * do_POST requires X-Fleet-Key for any non-localhost client (_authorized), and
+      * _cors deliberately omits X-Fleet-Key from Allow-Headers, precisely so a browser
+        CANNOT send the write key.
+
+    So every one of the 11 POST routes was unreachable from the UI it was built for -- the
+    dashboard was read-only for any remote operator, and nobody noticed because the tests
+    only ever asserted that writes are DENIED, never that a legitimate operator can be
+    ALLOWED. "Fail closed" was pinned; "opens for the right person" was not.
+
+    The fix is a same-origin session cookie: the page is served by this same server, so a
+    cookie rides along on its own fetch() without needing a CORS-exposed header, and it is
+    still unavailable to a cross-site attacker (Allow-Origin `*` forbids credentials, and
+    the cookie is SameSite=Strict).
+
+    This test pins the capability, not the mechanism's spelling: given a configured key,
+    SOME credential a browser can actually present must authorize a write.
+    """
+    src = (ROOT / "scripts" / "fleet_view_server.py").read_text()
+    page = (ROOT / "scripts" / "fleet_view.html").read_text()
+
+    auth = src.split("def _authorized", 1)[1].split("\n    def ", 1)[0]
+    assert "Cookie" in auth or "cookie" in auth, (
+        "_authorized accepts only X-Fleet-Key, but _cors deliberately keeps that header "
+        "out of Allow-Headers -- no browser can ever authorize a write. The UI's own "
+        "buttons are dead against a remote server."
+    )
+
+    # There must be a way for the operator to establish that credential from the page.
+    assert "/api/login" in src, "no login route -- nothing can ever set the session cookie"
+    assert "/api/login" in page, "the page never offers a way to authenticate"
+
+    # And the login route itself must be reachable before the write gate rejects it,
+    # otherwise it can never be called by the very client that needs it.
+    post = src.split("def do_POST", 1)[1]
+    login_at = post.find('"/api/login"')
+    gate_at = post.find("_authorized()")
+    assert login_at != -1 and login_at < gate_at, (
+        "/api/login sits behind the auth gate it exists to satisfy -- unreachable by design"
+    )
+
+
+def _fleet_view_login_is_still_fail_closed():
+    """The login route must not become a hole in the gate it feeds.
+
+    It is the ONE route ahead of _authorized(), so it carries the whole burden itself: with
+    no FLEET_API_KEY configured it must refuse (never "no key means anything works"), and it
+    must compare in constant time like the header path already does.
+    """
+    src = (ROOT / "scripts" / "fleet_view_server.py").read_text()
+    assert "def _handle_login" in src, "login logic not isolated -- cannot audit it"
+    login = src.split("def _handle_login", 1)[1].split("\n    def ", 1)[0]
+    assert "compare_digest" in login, "login compares the key without constant-time compare"
+    assert "return" in login and "False" in login or "401" in login, \
+        "login never refuses -- it cannot be failing closed"
+    assert "HttpOnly" in login, "session cookie is readable by page scripts (XSS lifts it)"
+    assert "SameSite=Strict" in login, "cookie rides cross-site requests -- CSRF on every write"
+
+
+def _gru_allowance_dial_actually_changes_the_number():
+    """FLEET_GRU_ALLOWANCE_FRACTION was dead config: every value gave the same allowance.
+
+    Live 2026-09-02 on fleet-kit-server-fleet: per_diem_hourly_pct=0.349, ceiling at
+    FLEET_SHARE_FRACTION=0.20 was 0.0142. gru.md said
+
+        allowance = (per_diem_hourly_pct - reserved_pct) * FLEET_GRU_ALLOWANCE_FRACTION
+        allowance = min(allowance, FLEET_SHARE_CEILING_PCT)
+
+    so min(0.349*F, 0.0142) == 0.0142 for ANY F above ~0.04. Reif set the dial 0.25 -> 0.75
+    and nothing changed, because the clamp always won. Worse, the number it always produced
+    was the instance's ENTIRE slice -- gru took 100%, leaving nothing for the other eight
+    members the fraction exists to reserve for.
+
+    The two vars answer nested questions ("what share of the account is ours?" then "what
+    share of ours is gru's?") so they MULTIPLY. This pins that a change to the dial actually
+    moves the output, which is the property min() destroyed.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    from gru_allowance import compute
+
+    ceiling = "0.0142"   # the real measured ceiling from the incident
+    quarter = float(compute(ceiling, "0.25"))
+    three_q = float(compute(ceiling, "0.75"))
+    assert quarter != three_q, (
+        f"dial is dead: 0.25 and 0.75 both yield {quarter} -- this is the min() bug"
+    )
+    # Compare against the true product, not 3*quarter -- the output is rounded to 4 decimals,
+    # so scaling a rounded value re-rounds and drifts (3*0.0036 = 0.0108, not 0.0106).
+    assert abs(three_q - float(ceiling) * 0.75) < 5e-5, "fraction does not scale the ceiling"
+    assert abs(quarter - float(ceiling) * 0.25) < 5e-5, "fraction does not scale the ceiling"
+    assert three_q > quarter, "a larger fraction did not yield a larger allowance"
+
+    # gru must never take the whole instance slice: 1-F is what the other eight members get.
+    assert three_q < float(ceiling), (
+        "gru's allowance equals the entire instance ceiling -- nothing left for marie, jefe, "
+        "judge-judy, the-fixer, roomba, dumbledore, messenger"
+    )
+    assert abs(three_q - 0.0106) < 0.0001, f"expected 0.0142*0.75=0.0106, got {three_q}"
+
+
+def _gru_allowance_fails_open_and_clamps_typos():
+    """No trustworthy ceiling must CONSERVE, never silently mean "unlimited".
+
+    Same law as maxx_reader.py / maxx_share_ceiling.py: an unreadable meter may only ever
+    narrow ambition. An empty ceiling prints nothing so gru falls back to its own documented
+    default; a real 0.0 is an honest answer and IS printed.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    from gru_allowance import compute
+
+    assert compute("", "0.75") == "", "missing ceiling did not fail open"
+    assert compute(None, "0.75") == "", "absent ceiling did not fail open"
+    assert compute("garbage", "0.75") == "", "unparseable ceiling did not fail open"
+    assert compute("0.0", "0.75") == "0.0000", "a real zero ceiling must be reported, not hidden"
+
+    # An operator typo must never raise gru above the instance's own slice.
+    assert float(compute("0.0142", "1.5")) <= 0.0142, "fraction >1.0 exceeded the ceiling"
+    assert float(compute("0.0142", "-1")) >= 0.0, "negative fraction produced a negative allowance"
+    # An unset fraction falls back to the documented default, not to 1.0 (the whole slice).
+    assert float(compute("0.0142", "")) < 0.0142, "unset fraction defaulted to the entire ceiling"
+
+
+def _gru_charter_does_not_reinstate_the_broken_math():
+    """gru.md must point at the script, not re-derive the number in prose.
+
+    The charter's own rule is "do not do this arithmetic in your head -- you are provably bad
+    at it," and then it asked gru to do exactly that. A prose formula is what let the wrong
+    base (per_diem_hourly_pct is the hour's BURN, not its headroom) go unnoticed.
+    """
+    charter = (ROOT / "members" / "gru" / "gru.md").read_text()
+    assert "gru_allowance.py" in charter, "charter does not point at the deterministic script"
+    assert "min(allowance_pct, FLEET_SHARE_CEILING_PCT)" not in charter, \
+        "charter still tells gru to min() the two fractions -- the dead-dial bug"
+
+
+def _lease_ledger_is_shared_across_instances():
+    """Two instances on one box share ONE maxx account pool -- and had two private ledgers.
+
+    Live 2026-09-02: philanthropy kept maxx-leases.json under instances/nonprofit-atlas/logs
+    and fleet-kit-server-fleet kept its own under fleet-kit-server-fleet/logs. Neither could
+    see the other's in-flight spend, so `reserved_pct` -- the number maxx_share_ceiling.py
+    subtracts specifically to prevent double-spend, and whose result its own comment calls
+    "already-coordinated" -- was never coordinated across instances at all.
+    """
+    import importlib, os, sys as _sys
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    with tempfile.TemporaryDirectory() as tmp:
+        shared = Path(tmp) / "shared"
+        os.environ["FLEET_LEASE_DIR"] = str(shared)
+        os.environ["FLEET_LOG_DIR"] = str(Path(tmp) / "per-instance")
+        import maxx_lease
+        importlib.reload(maxx_lease)
+        try:
+            assert str(shared) in str(maxx_lease.STATE_FILE), (
+                f"FLEET_LEASE_DIR ignored -- ledger still at {maxx_lease.STATE_FILE}, so each "
+                "instance keeps a private ledger and cannot coordinate"
+            )
+            # A lease taken by one instance must be visible in the other's global total.
+            maxx_lease.maxx_reserve(0.05, "a", 3600, instance="philanthropy")
+            total = maxx_lease.total_reserved_pct()
+            assert abs(total - 0.05) < 1e-9, f"lease invisible in shared total: {total}"
+            mine = maxx_lease.reserved_pct_for(instance="server-fleet")
+            assert mine == 0.0, "another instance's lease counted against this one's slice"
+        finally:
+            os.environ.pop("FLEET_LEASE_DIR", None)
+            os.environ.pop("FLEET_LOG_DIR", None)
+            importlib.reload(maxx_lease)
+
+
+def _an_instance_cannot_spend_past_its_own_slice():
+    """A share must be a RESERVATION, not a rate limit on a race.
+
+    Reif, 2026-09-02: "we could reserve a slice of the hourly for a certain instance, say 30%
+    -- and then before gru gets there, it could be all gone." That was literally true: the
+    ceiling was computed from whatever remained at the moment of asking, so the first caller
+    took the pot and a later caller's 30% was 30% of the leftovers.
+
+    Enforcement means a caller is REFUSED once its own live leases fill its budget, and that
+    the refusal protects the neighbour's slice rather than the global pot.
+    """
+    import importlib, os, sys as _sys
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["FLEET_LEASE_DIR"] = tmp
+        import maxx_lease
+        importlib.reload(maxx_lease)
+        try:
+            budget = 0.30
+            maxx_lease.maxx_reserve(0.20, "gru", 3600, instance="A", budget_pct=budget)
+            maxx_lease.maxx_reserve(0.09, "judge", 3600, instance="A", budget_pct=budget)
+            try:
+                maxx_lease.maxx_reserve(0.05, "greedy", 3600, instance="A", budget_pct=budget)
+            except maxx_lease.LeaseDenied:
+                pass
+            else:
+                raise AssertionError(
+                    "instance A reserved past its own 0.30 slice -- the share is unenforced"
+                )
+            # B's slice is untouched by A having exhausted its own.
+            b = maxx_lease.maxx_reserve(0.30, "b-gru", 3600, instance="B", budget_pct=budget)
+            assert b, "instance B was blocked by A's spend -- slices are not independent"
+            assert abs(maxx_lease.reserved_pct_for(instance="A") - 0.29) < 1e-9
+            assert abs(maxx_lease.reserved_pct_for(instance="B") - 0.30) < 1e-9
+        finally:
+            os.environ.pop("FLEET_LEASE_DIR", None)
+            importlib.reload(maxx_lease)
+
+
+def _share_ceiling_is_a_slice_of_the_hour_not_the_leftovers():
+    """The ceiling must not shrink just because a NEIGHBOUR spent first.
+
+    Old formula: (sustainable - used - reserved) * share -- an instance arriving after a
+    greedy neighbour got `share` of the remainder. New: sustainable * share, minus only what
+    this instance itself already holds, then clamped to what genuinely remains globally.
+    """
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        stub = Path(tmp) / "stubs"; stub.mkdir()
+        # A neighbour has burned a big chunk of the hour; this instance has spent nothing.
+        (stub / "maxx_reader.py").write_text(
+            "def get_headroom():\n"
+            "    return (1.0, 'ok', {'sustainable_pct_per_hour': 1.0,\n"
+            "                        'per_diem_hourly_pct': 0.50, 'reserved_pct': 0})\n")
+        (stub / "maxx_lease.py").write_text(
+            "def total_reserved_pct():\n    return 0.0\n"
+            "def reserved_pct_for(*a, **k):\n    return 0.0\n")
+        kit = Path(tmp) / "scripts"; kit.mkdir()
+        import shutil
+        shutil.copy(ROOT / "scripts" / "maxx_share_ceiling.py", kit / "maxx_share_ceiling.py")
+        for f in stub.glob("*.py"):
+            shutil.copy(f, kit / f.name)
+        out = subprocess.run([sys.executable, str(kit / "maxx_share_ceiling.py"), "0.30"],
+                             capture_output=True, text=True, timeout=20).stdout.strip()
+        assert out, "ceiling produced no reading"
+        got = float(out)
+        # Slice of the HOUR: 1.0 * 0.30 = 0.30, and 0.50 remains globally so it is not clamped.
+        assert abs(got - 0.30) < 1e-4, (
+            f"expected a 0.30 slice of the hour, got {got} -- this is the old "
+            "share-of-the-leftovers behaviour (0.5*0.3=0.15) the fix removes"
+        )
+
+
+def _oversubscribed_shares_are_caught():
+    """Strict slices only hold if the slices FIT.
+
+    Two instances at 0.60 each reserve 120% of the hour: both stay inside their "own" share,
+    every local check passes, and the account is oversubscribed -- the exact race the slices
+    remove, restored silently by a config typo. Nothing checked this, so the guard is a script
+    a human or cron can run.
+    """
+    import os, subprocess
+    script = ROOT / "scripts" / "check_share_sum.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for name, frac in (("a", "0.60"), ("b", "0.20")):
+            (root / name).mkdir()
+            (root / name / "fleet.env").write_text(f"FLEET_SHARE_FRACTION={frac}\n")
+        env = {**os.environ, "FLEET_INSTANCES_ROOT": str(root)}
+        ok = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env)
+        assert ok.returncode == 0, f"0.60+0.20 wrongly flagged: {ok.stdout}"
+
+        (root / "b" / "fleet.env").write_text("FLEET_SHARE_FRACTION=0.60\n")
+        bad = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env)
+        assert bad.returncode == 1, "0.60+0.60 = 1.2 was not flagged as oversubscribed"
+        assert "OVERSUBSCRIBED" in bad.stdout
+
+
+def _jefe_owns_the_fleet_wide_token_budget():
+    """jefe is the always-on health pass, so cross-instance spend is its layer.
+
+    Reif, 2026-09-02: jefe "is supposed to help with management of token budget across the
+    fleet." It already read per-member cost (fleet_db.py spend) but had nothing about the
+    account-pool slices every instance shares -- which is exactly where the two live bugs
+    hid (a dial combined with min() so every value gave the same number, and per-instance
+    lease ledgers that made reserved_pct meaningless across instances).
+
+    Pins that the charter names the tools AND that every tool it names actually exists -- a
+    charter citing a missing script sends a pass hunting instead of executing (the same
+    failure the-fixer hit with a relative check.sh path).
+    """
+    charter = (ROOT / "members" / "jefe" / "jefe.md").read_text()
+    for dial in ("FLEET_SHARE_FRACTION", "FLEET_GRU_ALLOWANCE_FRACTION"):
+        assert dial in charter, f"jefe.md never mentions {dial} -- it cannot manage what it cannot name"
+    for tool in ("check_share_sum.sh", "gru_allowance.py", "maxx_share_ceiling.py", "maxx_lease.py"):
+        assert tool in charter, f"jefe.md does not tell jefe to check {tool}"
+        assert (ROOT / "scripts" / tool).exists(), \
+            f"jefe.md cites scripts/{tool} but it does not exist -- the pass will hunt for it"
 
 
 def _bash_eval(setup: str, expr: str) -> str:
@@ -3060,6 +3374,16 @@ if __name__ == "__main__":
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)
     check("fleet-view write routes are authenticated and fail closed", _write_routes_are_authenticated)
+    check("fleet-view UI can actually authenticate a write", _fleet_view_ui_can_actually_authenticate_a_write)
+    check("fleet-view login is still fail-closed", _fleet_view_login_is_still_fail_closed)
+    check("gru allowance dial actually changes the number", _gru_allowance_dial_actually_changes_the_number)
+    check("gru allowance fails open and clamps typos", _gru_allowance_fails_open_and_clamps_typos)
+    check("gru charter does not reinstate the broken math", _gru_charter_does_not_reinstate_the_broken_math)
+    check("lease ledger is shared across instances", _lease_ledger_is_shared_across_instances)
+    check("an instance cannot spend past its own slice", _an_instance_cannot_spend_past_its_own_slice)
+    check("share ceiling is a slice of the hour, not the leftovers", _share_ceiling_is_a_slice_of_the_hour_not_the_leftovers)
+    check("oversubscribed instance shares are caught", _oversubscribed_shares_are_caught)
+    check("jefe owns the fleet-wide token budget", _jefe_owns_the_fleet_wide_token_budget)
     check("FLEET_API_KEY never reaches an LLM pass", _api_key_never_reaches_an_llm)
     check("incidental 'rate limit' text does not gate an account", _classifier_ignores_incidental_rate_limit_text)
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)

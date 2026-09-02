@@ -1300,11 +1300,59 @@ function renderSettingsPage() {
       <button class="btn ${on ? 'danger' : 'go'}" id="masterToggle">${on ? '■ stop fleet' : '● start fleet'}</button>
     </div>
     <div class="settings-block">
+      <h3>Access</h3>
+      <div class="rmeta" style="margin-bottom:8px">Writes from off-box need the instance's
+        FLEET_API_KEY once per browser. Localhost never needs it.</div>
+      <input type="password" id="apiKeyInput" placeholder="FLEET_API_KEY" style="width:280px">
+      <button class="btn go" id="signIn">Sign in</button>
+      <span id="signInMsg" class="rmeta" style="margin-left:10px"></span>
+    </div>
+    <div class="settings-block">
       <h3>Dials</h3>
       ${dialRows}
       <button class="btn go" id="saveDials" style="margin-top:12px">Save</button>
       <span id="dialsMsg" class="rmeta" style="margin-left:10px"></span>
+      <div id="budgetPreview" class="rmeta" style="margin-top:14px; padding:10px 12px;
+           border-left:3px solid #888; background:rgba(128,128,128,.08); line-height:1.7;
+           font-variant-numeric:tabular-nums">reading meter…</div>
     </div>`;
+  renderBudgetPreview();
+  window.renderBudgetPreview = async () => {
+    const el = document.getElementById('budgetPreview');
+    if (!el) return;
+    let p;
+    try { p = await (await fetch('/api/budget_preview')).json(); }
+    catch (e) { el.textContent = 'budget preview unavailable'; return; }
+    const esc = t => String(t).replace(/[<&]/g, c => (c === '<' ? '&lt;' : '&amp;'));
+    // Show the DERIVATION, not just the answer -- two nested percentages that look
+    // independent are exactly what a human mis-tunes, and this dial was silently dead
+    // for weeks because the page only ever showed the two raw inputs.
+    if (!p.ceiling_pct) {
+      el.innerHTML = `<b>Budget</b><br><span style="opacity:.8">${esc(p.note || 'no reading')}</span>`;
+      return;
+    }
+    const pct = v => (v === null || v === undefined) ? '—' : esc(v);
+    el.innerHTML =
+      `<b>What these dials actually produce</b> <span style="opacity:.7">(percent-of-week units, live)</span><br>` +
+      `account hourly headroom &times; <b>${pct(p.share_fraction)}</b> (share) ` +
+      `= <b>${pct(p.ceiling_pct)}</b> &larr; this instance's ceiling<br>` +
+      `${pct(p.ceiling_pct)} &times; <b>${pct(p.gru_fraction)}</b> (gru) ` +
+      `= <b>${pct(p.gru_allowance_pct)}</b> &larr; gru gets this<br>` +
+      `<span style="opacity:.8">remaining <b>${pct(p.others_pct)}</b> for the other eight members ` +
+      `(marie, jefe, judge-judy, the-fixer, roomba, dumbledore, messenger)</span>` +
+      (p.note ? `<br><span style="opacity:.8">${esc(p.note)}</span>` : '');
+  };
+
+  document.getElementById('signIn').onclick = async () => {
+    const el = document.getElementById('apiKeyInput');
+    const msg = document.getElementById('signInMsg');
+    const r = await fetch('/api/login', { method: 'POST', body: JSON.stringify({ key: el.value }) });
+    const j = await r.json().catch(() => ({}));
+    // The key itself is never kept in the page -- the server hands back an HttpOnly cookie
+    // and this input is cleared, so a later XSS has nothing to lift.
+    el.value = '';
+    msg.textContent = j.ok ? 'signed in -- writes enabled' : (j.error || 'sign-in failed');
+  };
   document.getElementById('masterToggle').onclick = async () => {
     if (on && !confirm('stop the WHOLE fleet? every member exits on its next tick.')) return;
     await fetch('/api/fleet_toggle', { method: 'POST', body: JSON.stringify({ target: 'fleet', value: !on }) });
@@ -1314,9 +1362,17 @@ function renderSettingsPage() {
   document.getElementById('saveDials').onclick = async () => {
     const body = {};
     runListEl.querySelectorAll('.dial-input').forEach(i => { body[i.dataset.key] = i.value; });
-    const resp = await (await fetch('/api/fleet_settings', { method: 'POST', body: JSON.stringify(body) })).json();
+    const r = await fetch('/api/fleet_settings', { method: 'POST', body: JSON.stringify(body) });
+    const resp = await r.json().catch(() => ({}));
     await renderFleetState();
-    document.getElementById('dialsMsg').textContent = resp.ok ? `saved ${resp.written.length} field(s)` : 'save failed';
+    // A bare "save failed" is what hid this bug for weeks: the server was answering 401
+    // "unauthorized" the whole time and the page threw that away. Say which it is.
+    document.getElementById('dialsMsg').textContent = resp.ok
+      ? `saved ${resp.written.length} field(s)`
+      : (r.status === 401 ? 'not signed in -- enter FLEET_API_KEY above' : (resp.error || 'save failed'));
+    // Re-derive immediately: the whole point is that the operator SEES what the new dial did,
+    // rather than trusting that a number they typed had the effect they intended.
+    if (resp.ok) await renderBudgetPreview();
   };
 }
 
