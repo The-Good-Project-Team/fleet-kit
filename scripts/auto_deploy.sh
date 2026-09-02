@@ -102,8 +102,27 @@ log "main moved: local=$LOCAL_SHA remote=$REMOTE_SHA -- pulling + deploying"
 # not something to auto-merge/rebase past. Same "loud stop over a guess" rule as the dirty-tree
 # check above.
 if ! git merge-base --is-ancestor "$LOCAL_SHA" "$REMOTE_SHA"; then
-  log "ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged."
-  exit 1
+  # gh#278: 3 confirmed occurrences (gh#245, gh#275, gh#278 itself) where the actual cause was a
+  # squash-merged/rebased branch tip whose TREE already matched origin/main byte-for-byte -- not
+  # a real divergence, just a stale ref (this repo squash-merges every PR, so a stranded branch
+  # tip can never become an ancestor of main through any future merge; see README's "Why the box
+  # silently falls behind"). The manual recovery for exactly this case is already documented
+  # there: confirm content-identical, `git checkout main`, pull.
+  #
+  # Self-heal is opt-in and OFF by default: gh#278's own PRD flagged "is an automated
+  # `git reset --hard` on the deploy host acceptable at all" as an explicit UNKNOWN needing a
+  # human sign-off this script can't give itself -- flipping FLEET_AUTO_DEPLOY_SELF_HEAL on in
+  # fleet.env IS that sign-off, not a default this pass should guess at. When on, it still only
+  # fires if the working tree is content-identical to origin/main; a genuine divergence always
+  # falls through to the unchanged ABORT below, byte-for-byte.
+  if [ "${FLEET_AUTO_DEPLOY_SELF_HEAL:-false}" = "true" ] && git diff --quiet origin/main; then
+    log "SELF-HEAL: local HEAD diverged but tree matches origin/main -- resetting and proceeding"
+    git checkout main -q
+    git reset --hard origin/main -q
+  else
+    log "ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged."
+    exit 1
+  fi
 fi
 git pull --ff-only origin main -q
 

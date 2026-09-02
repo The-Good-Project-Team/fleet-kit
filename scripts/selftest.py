@@ -1769,6 +1769,149 @@ def _one_deploy_at_a_time_and_a_countable_drain():
     assert "tr -cd '0-9'" in line, "in-flight count is not sanitised to digits"
 
 
+def _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in():
+    """gh#278: 3 confirmed occurrences (gh#245, gh#275, gh#278 itself) of the diverged-HEAD ABORT
+    were all a squash-merged/rebased branch tip whose TREE already matched origin/main byte-for-
+    byte -- not a real divergence, just a stale ref (this repo squash-merges every PR, so a
+    stranded branch tip can never become an ancestor of main through any future merge; see
+    README's "Why the box silently falls behind"). Every occurrence needed a human SSH session
+    running the exact recovery the README already documents as safe by hand.
+
+    Runs the REAL auto_deploy.sh (not a hand-copied snippet) against a real git fixture that
+    reproduces the actual root cause, with a stubbed deploy.sh standing in for the host-only
+    build/podman steps. Self-heal is opt-in (FLEET_AUTO_DEPLOY_SELF_HEAL) -- gh#278's own PRD
+    flagged whether an automated `git reset --hard` on the deploy host is acceptable at all as an
+    explicit UNKNOWN needing a human sign-off a build pass can't give itself, so the flag defaults
+    OFF and this proves the default-off path is byte-for-byte the old ABORT before proving the
+    opted-in self-heal path.
+    """
+    import os
+    import subprocess
+
+    def git(repo, *args, check=True):
+        return subprocess.run(["git", *args], cwd=repo, check=check, capture_output=True, text=True)
+
+    def make_checkout(tmp, name, origin):
+        checkout = tmp / name
+        git(tmp, "clone", "-q", str(origin), str(checkout))
+        for cmd in (("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(checkout, *cmd)
+        deploy_marker = tmp / f"{name}.deploy_stub_ran"
+        return checkout, deploy_marker
+
+    def run_auto_deploy(checkout, tmp, name, self_heal, deploy_marker):
+        env = dict(os.environ)
+        env["HOME"] = str(tmp / f"{name}.home")
+        env["FLEET_LOG_DIR"] = str(tmp / f"{name}.logs")
+        env["FLEET_CONTAINER_NAME"] = "test"
+        env["FLEET_INSTANCE_DIR"] = str(tmp / f"{name}.instance")
+        env["DEPLOY_STUB_MARKER"] = str(deploy_marker)
+        if self_heal:
+            env["FLEET_AUTO_DEPLOY_SELF_HEAL"] = "true"
+        else:
+            env.pop("FLEET_AUTO_DEPLOY_SELF_HEAL", None)
+        proc = subprocess.run(["bash", str(checkout / "scripts" / "auto_deploy.sh")], cwd=checkout,
+                               env=env, capture_output=True, text=True, timeout=30)
+        log_file = tmp / f"{name}.logs" / "auto_deploy.log"
+        log_text = log_file.read_text() if log_file.exists() else ""
+        return proc, log_text
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        origin = tmp / "origin.git"
+        git(tmp, "init", "-q", "--bare", "-b", "main", str(origin))
+
+        seed = tmp / "seed"
+        seed.mkdir()
+        for cmd in (("init", "-q", "-b", "main"), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(seed, *cmd)
+        git(seed, "remote", "add", "origin", str(origin))
+        (seed / "foo.txt").write_text("v1\n")
+        scripts_dir = seed / "scripts"
+        scripts_dir.mkdir()
+        auto_deploy = scripts_dir / "auto_deploy.sh"
+        auto_deploy.write_text((ROOT / "scripts" / "auto_deploy.sh").read_text())
+        auto_deploy.chmod(0o755)
+        deploy_stub = scripts_dir / "deploy.sh"
+        deploy_stub.write_text('#!/bin/bash\necho "DEPLOY STUB OK"\ntouch "${DEPLOY_STUB_MARKER:?}"\n')
+        deploy_stub.chmod(0o755)
+        git(seed, "add", "-A")
+        git(seed, "commit", "-q", "-m", "init")
+        git(seed, "push", "-q", "origin", "main")
+
+        # --- Scenario A: content-identical divergence (the real gh#278 root cause) ---
+        checkout_a, marker_a = make_checkout(tmp, "case-content-identical", origin)
+        # Local "feature branch" commit, never merged as-is -- this is the pre-squash tip.
+        (checkout_a / "foo.txt").write_text("v2\n")
+        git(checkout_a, "commit", "-aq", "-m", "feat: update foo")
+        feature_sha = git(checkout_a, "rev-parse", "HEAD").stdout.strip()
+        # The "squash merge" landing on origin/main: same tree, brand new commit/SHA.
+        git(seed, "fetch", "-q", "origin", "main")
+        git(seed, "reset", "-q", "--hard", "origin/main")
+        (seed / "foo.txt").write_text("v2\n")
+        git(seed, "commit", "-aq", "-m", "Squash merge feat/thing (#1)")
+        git(seed, "push", "-q", "origin", "main")
+        origin_main_sha = git(seed, "rev-parse", "HEAD").stdout.strip()
+        assert feature_sha != origin_main_sha
+        git(checkout_a, "checkout", "-q", "-B", "main", feature_sha)
+        git(checkout_a, "fetch", "-q", "origin", "main")
+
+        assert git(checkout_a, "merge-base", "--is-ancestor", "HEAD", "origin/main", check=False).returncode != 0, \
+            "fixture is wrong: local HEAD must NOT be an ancestor of origin/main"
+        assert git(checkout_a, "diff", "--quiet", "origin/main", check=False).returncode == 0, \
+            "fixture is wrong: working tree must be content-identical to origin/main"
+
+        # Default (no opt-in): byte-for-byte the old ABORT, nothing self-heals silently.
+        proc, log_text = run_auto_deploy(checkout_a, tmp, "case-content-identical-default", self_heal=False, deploy_marker=marker_a)
+        assert proc.returncode == 1, f"default behavior must still exit 1: {proc.stderr[:300]}"
+        assert "ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged." in log_text, \
+            f"ABORT line changed or missing with self-heal opted out: {log_text!r}"
+        assert "SELF-HEAL" not in log_text, "self-heal fired while FLEET_AUTO_DEPLOY_SELF_HEAL was unset"
+        assert not marker_a.exists(), "deploy.sh ran even though the guard should have ABORTed"
+        assert git(checkout_a, "rev-parse", "HEAD").stdout.strip() == feature_sha, \
+            "checkout was mutated even though self-heal was opted out"
+
+        # Opted in: self-heals and proceeds into the same-tick deploy.
+        proc, log_text = run_auto_deploy(checkout_a, tmp, "case-content-identical-optedin", self_heal=True, deploy_marker=marker_a)
+        assert proc.returncode == 0, f"opted-in self-heal must succeed: {proc.stderr[:300]} / log={log_text!r}"
+        assert "SELF-HEAL: local HEAD diverged but tree matches origin/main -- resetting and proceeding" in log_text, \
+            f"no self-heal log line: {log_text!r}"
+        assert git(checkout_a, "rev-parse", "HEAD").stdout.strip() == origin_main_sha, \
+            "self-heal did not land the checkout on origin/main"
+        assert marker_a.exists(), "self-heal did not proceed into deploy.sh"
+        assert "deploy OK" in log_text, "self-heal did not complete the normal deploy path"
+        state_file = tmp / "case-content-identical-optedin.home" / ".cache" / "fleet-kit" / "auto_deploy.last_sha.test"
+        assert state_file.exists() and state_file.read_text().strip() == origin_main_sha, \
+            "successful self-heal deploy did not record the new SHA as last-deployed"
+
+        # --- Scenario B: genuine divergence (real content difference) must still ABORT, even
+        # opted in -- self-heal is gated strictly on content-identity, never a relaxation.
+        checkout_b, marker_b = make_checkout(tmp, "case-genuine-divergence", origin)
+        (checkout_b / "foo.txt").write_text("v2-local-only\n")
+        git(checkout_b, "commit", "-aq", "-m", "feat: unrelated local-only change")
+        local_only_sha = git(checkout_b, "rev-parse", "HEAD").stdout.strip()
+        # origin/main moves again, with genuinely different content.
+        (seed / "foo.txt").write_text("v3-on-main\n")
+        git(seed, "commit", "-aq", "-m", "unrelated main-only change")
+        git(seed, "push", "-q", "origin", "main")
+        git(checkout_b, "checkout", "-q", "-B", "main", local_only_sha)
+        git(checkout_b, "fetch", "-q", "origin", "main")
+
+        assert git(checkout_b, "merge-base", "--is-ancestor", "HEAD", "origin/main", check=False).returncode != 0, \
+            "fixture is wrong: local HEAD must NOT be an ancestor of origin/main"
+        assert git(checkout_b, "diff", "--quiet", "origin/main", check=False).returncode != 0, \
+            "fixture is wrong: tree must genuinely differ from origin/main"
+
+        proc, log_text = run_auto_deploy(checkout_b, tmp, "case-genuine-divergence", self_heal=True, deploy_marker=marker_b)
+        assert proc.returncode == 1, f"genuine divergence must still exit 1 even opted in: {proc.stderr[:300]}"
+        assert "ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged." in log_text, \
+            f"ABORT line changed for a genuine divergence: {log_text!r}"
+        assert "SELF-HEAL" not in log_text, "self-heal fired on a genuinely diverged tree -- not gated on content-identity"
+        assert not marker_b.exists(), "deploy.sh ran despite a genuine, unresolved divergence"
+        assert git(checkout_b, "rev-parse", "HEAD").stdout.strip() == local_only_sha, \
+            "checkout was mutated despite a genuine, unresolved divergence"
+
+
 def _judge_judy_ticks_dont_overlap():
     """A judge-judy cron tick that overlaps a still-running prior tick must not review.
 
@@ -3396,6 +3539,7 @@ if __name__ == "__main__":
     check("both worktree callers check $REPO before tearing the worktree down", _run_member_and_builder_check_repo_before_removing_the_worktree)
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
+    check("auto_deploy.sh self-heals a content-identical diverged HEAD only when opted in", _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in)
     check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
     check("judge-judy lock lives somewhere persistent", _judge_judy_lock_lives_somewhere_persistent)
     check("judge-judy strikes are head-scoped and leave diagnosable evidence", _judge_judy_strikes_are_scoped_by_head_and_leave_diagnosable_evidence)
