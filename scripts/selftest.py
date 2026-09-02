@@ -1788,6 +1788,15 @@ def _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in()
     import os
     import subprocess
 
+    src = (ROOT / "scripts" / "auto_deploy.sh").read_text()
+    marker_save = 'CALLER_LOG_ENV="${FLEET_LOG_DIR:-}"'
+    marker_source = '[ -n "${FLEET_INSTANCE_DIR:-}" ] && [ -f "$FLEET_INSTANCE_DIR/fleet.env" ] && { set -a; . "$FLEET_INSTANCE_DIR/fleet.env"; set +a; } || true'
+    marker_restore = 'FLEET_LOG_DIR="$CALLER_LOG_ENV"'
+    for m in (marker_save, marker_source, marker_restore):
+        assert m in src, f"auto_deploy.sh's fleet.env save/source/restore sequence changed -- expected: {m!r}"
+    i1, i2, i3 = src.index(marker_save), src.index(marker_source), src.index(marker_restore)
+    assert i1 < i2 < i3, "auto_deploy.sh's save/source/restore lines are out of order -- reintroduces gh#196"
+
     def git(repo, *args, check=True):
         return subprocess.run(["git", *args], cwd=repo, check=check, capture_output=True, text=True)
 
@@ -1800,16 +1809,29 @@ def _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in()
         return checkout, deploy_marker
 
     def run_auto_deploy(checkout, tmp, name, self_heal, deploy_marker):
+        # The real activation path is the instance's fleet.env, NOT an ambient env var --
+        # auto_deploy.sh runs from a crontab line that only ever exports FLEET_INSTANCE_DIR/
+        # FLEET_CONTAINER_NAME/FLEET_LOG_DIR (up.sh's AUTO_DEPLOY_LINE); anything else must reach
+        # the script through the fleet.env it sources. Also plants fleet.env's own container-
+        # scoped FLEET_LOG_DIR (/var/log/fleet-kit) to prove the source doesn't clobber the
+        # caller's host-scoped value (same gh#196 class deploy.sh already guards against).
+        instance_dir = tmp / f"{name}.instance"
+        instance_dir.mkdir(exist_ok=True)
+        env_lines = ["FLEET_LOG_DIR=/var/log/fleet-kit\n"]
+        if self_heal:
+            env_lines.append("FLEET_AUTO_DEPLOY_SELF_HEAL=true\n")
+        (instance_dir / "fleet.env").write_text("".join(env_lines))
+
         env = dict(os.environ)
+        # Ambient contamination guard: sourcing fleet.env only ever SETS variables present in
+        # the file, it never unsets ones already in the parent shell -- so the self_heal=False
+        # case must not rely on the caller's own environment happening to be free of this var.
+        env.pop("FLEET_AUTO_DEPLOY_SELF_HEAL", None)
         env["HOME"] = str(tmp / f"{name}.home")
         env["FLEET_LOG_DIR"] = str(tmp / f"{name}.logs")
         env["FLEET_CONTAINER_NAME"] = "test"
-        env["FLEET_INSTANCE_DIR"] = str(tmp / f"{name}.instance")
+        env["FLEET_INSTANCE_DIR"] = str(instance_dir)
         env["DEPLOY_STUB_MARKER"] = str(deploy_marker)
-        if self_heal:
-            env["FLEET_AUTO_DEPLOY_SELF_HEAL"] = "true"
-        else:
-            env.pop("FLEET_AUTO_DEPLOY_SELF_HEAL", None)
         proc = subprocess.run(["bash", str(checkout / "scripts" / "auto_deploy.sh")], cwd=checkout,
                                env=env, capture_output=True, text=True, timeout=30)
         log_file = tmp / f"{name}.logs" / "auto_deploy.log"
@@ -1833,7 +1855,10 @@ def _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in()
         auto_deploy.write_text((ROOT / "scripts" / "auto_deploy.sh").read_text())
         auto_deploy.chmod(0o755)
         deploy_stub = scripts_dir / "deploy.sh"
-        deploy_stub.write_text('#!/bin/bash\necho "DEPLOY STUB OK"\ntouch "${DEPLOY_STUB_MARKER:?}"\n')
+        # Records the FLEET_LOG_DIR it actually received -- proves auto_deploy.sh's own
+        # save/restore around sourcing fleet.env protects what it hands to deploy.sh, not just
+        # its own log() calls (the exact gh#196 clobber class).
+        deploy_stub.write_text('#!/bin/bash\necho "DEPLOY STUB OK"\necho "$FLEET_LOG_DIR" > "${DEPLOY_STUB_MARKER:?}"\n')
         deploy_stub.chmod(0o755)
         git(seed, "add", "-A")
         git(seed, "commit", "-q", "-m", "init")
@@ -1874,12 +1899,18 @@ def _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in()
         # Opted in: self-heals and proceeds into the same-tick deploy.
         proc, log_text = run_auto_deploy(checkout_a, tmp, "case-content-identical-optedin", self_heal=True, deploy_marker=marker_a)
         assert proc.returncode == 0, f"opted-in self-heal must succeed: {proc.stderr[:300]} / log={log_text!r}"
-        assert "SELF-HEAL: local HEAD diverged but tree matches origin/main -- resetting and proceeding" in log_text, \
-            f"no self-heal log line: {log_text!r}"
+        assert "SELF-HEAL: local HEAD diverged but tree matches origin/main -- resetting onto origin/main" in log_text, \
+            f"no self-heal start log line: {log_text!r}"
+        assert "SELF-HEAL: reset complete, proceeding into normal deploy" in log_text, \
+            f"no self-heal completion log line: {log_text!r}"
         assert git(checkout_a, "rev-parse", "HEAD").stdout.strip() == origin_main_sha, \
             "self-heal did not land the checkout on origin/main"
         assert marker_a.exists(), "self-heal did not proceed into deploy.sh"
         assert "deploy OK" in log_text, "self-heal did not complete the normal deploy path"
+        assert marker_a.read_text().strip() == str(tmp / "case-content-identical-optedin.logs"), (
+            "fleet.env's container-scoped FLEET_LOG_DIR clobbered the caller's host-scoped value "
+            "on its way to deploy.sh -- the exact gh#196 clobber class"
+        )
         state_file = tmp / "case-content-identical-optedin.home" / ".cache" / "fleet-kit" / "auto_deploy.last_sha.test"
         assert state_file.exists() and state_file.read_text().strip() == origin_main_sha, \
             "successful self-heal deploy did not record the new SHA as last-deployed"

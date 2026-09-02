@@ -41,6 +41,18 @@ log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" >> "$LOG"; }
 
 cd "$KIT_DIR"
 
+# gh#278: source the instance's fleet.env so host-side dials (FLEET_AUTO_DEPLOY_SELF_HEAL below)
+# can be tuned there like every other instance-scoped setting, instead of needing a crontab-line
+# edit. Same save/source/restore discipline deploy.sh already uses (scripts/deploy.sh:58) for the
+# identical reason: fleet.env's own FLEET_LOG_DIR is CONTAINER-scoped (/var/log/fleet-kit) and
+# would silently clobber the HOST-scoped value the cron caller already exported -- the exact
+# gh#196 incident deploy.sh's own header documents. $LOG/$LOG_DIR above are already resolved
+# from the caller's value, so this can't affect where THIS script's own log() writes; it only
+# protects what auto_deploy.sh hands to deploy.sh as a child process below.
+CALLER_LOG_ENV="${FLEET_LOG_DIR:-}"
+[ -n "${FLEET_INSTANCE_DIR:-}" ] && [ -f "$FLEET_INSTANCE_DIR/fleet.env" ] && { set -a; . "$FLEET_INSTANCE_DIR/fleet.env"; set +a; } || true
+FLEET_LOG_DIR="$CALLER_LOG_ENV"
+
 # ONE deploy at a time. This poll fires every 5 minutes, and since the drain gate landed
 # (deploy.sh, 2026-08-26) a single deploy can legitimately hold for up to FLEET_DRAIN_MAX_S
 # (default 1800s) waiting for in-flight agent passes to finish. The early-exit below cannot
@@ -116,9 +128,10 @@ if ! git merge-base --is-ancestor "$LOCAL_SHA" "$REMOTE_SHA"; then
   # fires if the working tree is content-identical to origin/main; a genuine divergence always
   # falls through to the unchanged ABORT below, byte-for-byte.
   if [ "${FLEET_AUTO_DEPLOY_SELF_HEAL:-false}" = "true" ] && git diff --quiet origin/main; then
-    log "SELF-HEAL: local HEAD diverged but tree matches origin/main -- resetting and proceeding"
+    log "SELF-HEAL: local HEAD diverged but tree matches origin/main -- resetting onto origin/main"
     git checkout main -q
     git reset --hard origin/main -q
+    log "SELF-HEAL: reset complete, proceeding into normal deploy"
   else
     log "ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged."
     exit 1
