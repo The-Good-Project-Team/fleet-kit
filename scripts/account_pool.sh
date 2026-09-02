@@ -220,6 +220,11 @@ account_pool_run() {
     if [ "$rc" -eq 0 ]; then
       export ACCOUNT_POOL_SELECTED="$account"
       export ACCOUNT_POOL_LAST_REASON=""
+      # The caller runs this pool inside a SUBSHELL (run_member.sh wraps the pipeline in
+      # `( ... ) &` to re-raise PIPESTATUS[0] through `wait`), so the exports above die with
+      # that subshell and the parent logged `account=unknown` on every pass. Write the
+      # selection where the parent can read it back.
+      [ -n "${ACCOUNT_POOL_SELECTED_FILE:-}" ] && printf '%s\n' "$account" > "$ACCOUNT_POOL_SELECTED_FILE" 2>/dev/null
       # Log the success. account_health_check.sh measures outage length as "time since the last
       # success" -- without this line the log holds only failures, so there is nothing to
       # measure from and the pager cannot tell a 5-minute blip from a 5-hour outage.
@@ -235,6 +240,7 @@ account_pool_run() {
     reason=$(_account_pool_classify_failure "$(cat "$capture")")
     _account_pool_log "account=$account command failed rc=$rc reason=$reason"
     export ACCOUNT_POOL_LAST_REASON="$reason"
+    [ -n "${ACCOUNT_POOL_REASON_FILE:-}" ] && printf '%s\n' "$reason" > "$ACCOUNT_POOL_REASON_FILE" 2>/dev/null
     case "$reason" in
       exhausted) _account_pool_mark_exhausted "$account" "$(cat "$capture")"; continue ;;
       unauthenticated) continue ;;
