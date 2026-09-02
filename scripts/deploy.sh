@@ -221,6 +221,31 @@ if [ "${1:-}" = "--rollback" ]; then
     do_rollback
 fi
 
+# --- pre-build freshness guard ----------------------------------------------------------
+# gh#248: this is the manual/direct invocation path (auto_deploy.sh's poll already pulls
+# before calling this script -- see its own guard, auto_deploy.sh:100-106). A human running
+# `bash scripts/deploy.sh` directly builds whatever KIT_DIR's working tree happens to hold,
+# with no pull and no staleness check -- confirmed live 2026-08-30: a merged the-fixer fix
+# sat invisible for 3+ hours because the host checkout was never pulled before a manual
+# deploy, and the-fixer kept firing on a 9-hour-old ghost failure the whole time. Same "loud
+# stop, not a guess" rule as auto_deploy.sh's dirty-check: never silently ship stale code,
+# never silently blow away an uncommitted local edit either.
+if [ -n "$(git -C "$KIT_DIR" status --porcelain)" ]; then
+    log "ABORT: $KIT_DIR is dirty -- refusing to pull over local changes. Resolve by hand, or invoke without a pull-guard bypass."
+    exit 1
+fi
+git -C "$KIT_DIR" fetch origin main -q
+REMOTE_SHA="$(git -C "$KIT_DIR" rev-parse origin/main)"
+LOCAL_SHA="$(git -C "$KIT_DIR" rev-parse HEAD)"
+if [ "$REMOTE_SHA" != "$LOCAL_SHA" ]; then
+    if ! git -C "$KIT_DIR" merge-base --is-ancestor "$LOCAL_SHA" "$REMOTE_SHA"; then
+        log "ABORT: $KIT_DIR has diverged from origin/main (local=$LOCAL_SHA remote=$REMOTE_SHA) -- not a simple behind-by-N, resolve by hand."
+        exit 1
+    fi
+    log "$KIT_DIR was behind origin/main (local=$LOCAL_SHA remote=$REMOTE_SHA) -- pulling before build"
+    git -C "$KIT_DIR" merge --ff-only origin/main
+fi
+
 # --- drain gate -------------------------------------------------------------------------
 # Blue-green protects SERVING (no request hits a half-started container). It does nothing for
 # WORK: agent passes run as children of the blue container's cron, so the `podman stop -t 10`
