@@ -88,6 +88,21 @@ state file so the same failing SHA never fires twice. It prints one line:
     reading a log that doesn't exist yet; if it wedges again after one retry, that's the
     systemic-failure rule (persona_law.md §7) -- file it once as an infra issue, stop retrying
     this specific PR against the same hang.
+  - `green-but-parked` -- the "done but not delivered" class. Every check PASSED, the branch is
+    mergeable, and the PR is still open because nothing ever armed auto-merge on it. Nothing is
+    broken; the work is FINISHED and simply never shipped. fleet-kit arms auto-merge in exactly
+    one place (worktree_builder.sh, at PR-creation time), so a PR opened by a human, an external
+    agent, or a hand-pushed branch is never armed at all. Live case #291 (2026-09-02) went green
+    at 15:47 and sat parked with nothing red anywhere to alarm on.
+    FIX: arm it -- `gh pr merge <n> --auto --squash`. That is the whole repair, and it is NOT a merge:
+    GitHub merges an armed PR only once every required check passes, so judge-judy's
+    fleet-code-review gate still decides. auto_update_branch.sh arms these every 15 minutes, so
+    seeing this reason at all means that sweep did not do its job -- check its log
+    (`auto_update_branch.log`) for the arm failure and its reason before re-arming by hand. If
+    the arm fails again with the same error, that is the systemic-failure rule
+    (persona_law.md §7): file it once as an infra issue naming the arm error, and do NOT merge
+    the PR by hand to "unstick" it -- a parked PR is waiting on delivery, not on judgment, and
+    merging around the gate is the one thing this charter never sanctions.
   - `check-never-ran` / `no-checks-at-all` -- the "no answer" class (check.sh's own header
     explains why these are invisible to a red/green sweep: the merge gate asks "is the required
     check green?" and a check that never ran is NEITHER, so the PR can neither merge nor alarm).

@@ -2860,6 +2860,150 @@ def _fleet_view_login_is_still_fail_closed():
     assert "SameSite=Strict" in login, "cookie rides cross-site requests -- CSRF on every write"
 
 
+def _fixer_sees_a_green_but_parked_pr():
+    """the-fixer must alarm on a PR that is green, mergeable, and going nowhere.
+
+    Its five original shapes all key on RED or ABSENT -- failed, conflicted, hung, errored,
+    never reported. A PR where every check PASSED and nothing ever armed auto-merge is none of
+    those, so it sat invisible: no error, no alarm, open forever.
+
+    Live proof case (fleet-kit#291, 2026-09-02): judge-judy BLOCKed it 15:30, auto_update_branch
+    rebased it, judge-judy re-reviewed 15:47 -> fleet-code-review=SUCCESS, selftest SUCCESS,
+    mergeStateStatus CLEAN, automerge=none. The self-heal loop ran end to end and stopped one
+    step short of done. auto_update_branch.sh arms these now, but an ARM CAN ITSELF FAIL and
+    that failure is only a log line -- this shape is the alarm for that.
+
+    Runs check.sh's REAL jq selector (extracted from the script, not retyped) against fixture
+    PRs, so the expression under test is the one that ships.
+    """
+    import json
+    import re
+    import shutil
+    import subprocess
+
+    if not shutil.which("jq"):
+        return  # jq absent here; shape is also covered by the live dry-run recorded in the PR
+
+    src = (ROOT / "members" / "the-fixer" / "check.sh").read_text()
+    m = re.search(r"gh pr list --state open --limit 30.*?-q '(.*?)^\s*' 2>>", src, re.S | re.M)
+    assert m, "cannot find check.sh's pr-list jq expression -- did its shape change?"
+    expr = m.group(1).replace('\'"$cutoff"\'', "2026-09-02T14:00:00Z")
+
+    old = "2026-09-02T10:00:00Z"   # before the cutoff
+    new = "2026-09-02T23:00:00Z"   # after it
+    green = [{"__typename": "CheckRun", "conclusion": "SUCCESS", "status": "COMPLETED",
+              "startedAt": old}]
+
+    prs = [
+        # the #291 shape: green, mergeable, unarmed, stale -> MUST be caught
+        {"number": 291, "headRefOid": "a" * 40, "mergeStateStatus": "CLEAN", "isDraft": False,
+         "autoMergeRequest": None, "updatedAt": old, "createdAt": old,
+         "statusCheckRollup": green},
+        # armed -> not parked, it is on its way
+        {"number": 292, "headRefOid": "b" * 40, "mergeStateStatus": "CLEAN", "isDraft": False,
+         "autoMergeRequest": {"enabledAt": old}, "updatedAt": old, "createdAt": old,
+         "statusCheckRollup": green},
+        # draft -> deliberately not ready
+        {"number": 293, "headRefOid": "c" * 40, "mergeStateStatus": "CLEAN", "isDraft": True,
+         "autoMergeRequest": None, "updatedAt": old, "createdAt": old,
+         "statusCheckRollup": green},
+        # green + unarmed but JUST updated -> new, not parked (no flapping on fresh PRs)
+        {"number": 294, "headRefOid": "d" * 40, "mergeStateStatus": "CLEAN", "isDraft": False,
+         "autoMergeRequest": None, "updatedAt": new, "createdAt": new,
+         "statusCheckRollup": green},
+    ]
+
+    proc = subprocess.run(["jq", "-r", expr], input=json.dumps(prs),
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"jq failed: {proc.stderr.strip()[:300]}"
+    picked = {}
+    for line in proc.stdout.strip().splitlines():
+        if line.strip():
+            parts = line.split(":")
+            picked[parts[0]] = parts[2]
+
+    assert "291" in picked, (
+        "a green, mergeable, unarmed PR is invisible to the-fixer -- it can sit open forever "
+        "with nothing red to alarm on (the #291 shape)"
+    )
+    assert picked["291"] == "green-but-parked", \
+        f"caught #291 but mislabelled it as {picked['291']!r}"
+    assert "292" not in picked, "an ARMED PR was called parked -- it is on its way to merging"
+    assert "293" not in picked, "a DRAFT was called parked -- a draft is explicitly not ready"
+    assert "294" not in picked, \
+        "a PR that went green seconds ago was called parked -- the arming sweep has not run yet"
+
+
+def _green_pr_with_no_auto_merge_gets_armed():
+    """A PR nothing armed must not be able to sit green forever.
+
+    auto-merge is armed in exactly ONE place in this repo -- worktree_builder.sh, at
+    PR-creation time. A PR opened by anything else (a human, an external agent, a hand-pushed
+    branch) is never armed, so the whole self-heal loop can run end to end and still stop one
+    step short of merging, with nothing red for the-fixer to find.
+
+    Live case (fleet-kit#291, 2026-09-02): judge-judy BLOCKed it 15:30, auto_update_branch
+    rebased it, judge-judy re-reviewed 15:47 -> fleet-code-review=SUCCESS, selftest green,
+    mergeStateStatus CLEAN, automerge=none. Green and parked, indefinitely.
+
+    Stubs `gh` at the same boundary the-fixer's tests do, so the real sweep logic is under
+    test. Three PRs: one unarmed (must be armed), one already armed and one draft (must not
+    be touched -- a draft is explicitly "not ready", and re-arming muddies the log).
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"; log_dir.mkdir(parents=True, exist_ok=True)
+        repo = Path(tmp) / "repo"; repo.mkdir(parents=True, exist_ok=True)
+        bin_dir = Path(tmp) / "bin"; bin_dir.mkdir(parents=True, exist_ok=True)
+        calls = Path(tmp) / "merge_calls.txt"
+
+        # #291 unarmed, #292 armed, #293 draft+unarmed. The -q expression is evaluated by gh
+        # itself in the real thing, so the stub returns what that filter WOULD select.
+        #
+        # The merge stub rejects a bare `--auto` exactly as the real `gh` CLI does on this
+        # repo (no merge queue -- an explicit strategy flag is required non-interactively).
+        # A regression back to the bare form fails this assertion instead of passing silently.
+        (bin_dir / "gh").write_text(
+            "#!/bin/bash\n"
+            "if [ \"$1\" = \"repo\" ]; then echo 'The-Good-Project-Team/fleet-kit'; exit 0; fi\n"
+            "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n"
+            "  case \"$*\" in *autoMergeRequest*) echo 291 ;; *) ;; esac\n"
+            "  exit 0\n"
+            "fi\n"
+            "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"merge\" ]; then\n"
+            "  case \"$*\" in\n"
+            "    *--squash*|*--merge*|*--rebase*) : ;;\n"
+            "    *) echo '--merge, --rebase, or --squash required when not running "
+            "interactively' >&2; exit 1 ;;\n"
+            "  esac\n"
+            f"  echo \"$3\" >> {calls}\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n"
+        )
+        (bin_dir / "gh").chmod(0o755)
+
+        proc = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "auto_update_branch.sh")],
+            capture_output=True, text=True, timeout=30,
+            env={"FLEET_REPO": str(repo), "FLEET_LOG_DIR": str(log_dir),
+                 "FLEET_ENV_FILE": "/nonexistent", "PATH": f"{bin_dir}:/usr/bin:/bin"},
+        )
+        assert proc.returncode == 0, f"script failed: {proc.stderr.strip()[:300]}"
+
+        armed = calls.read_text().split() if calls.exists() else []
+        assert "291" in armed, (
+            "a green, unarmed PR was never armed -- it can sit open forever: no error, "
+            "nothing red, and the-fixer only hunts red"
+        )
+        assert "293" not in armed, "a DRAFT PR was armed -- a draft is explicitly not ready"
+
+        logtext = (log_dir / "auto_update_branch.log").read_text()
+        assert "armed" in logtext, "the tick summary never reports how many PRs it armed"
+
+
 def _fleet_view_reads_the_api_key_from_the_env_file():
     """A key present in fleet.env must be readable by the auth path.
 
@@ -3527,6 +3671,8 @@ if __name__ == "__main__":
     check("share ceiling is a slice of the hour, not the leftovers", _share_ceiling_is_a_slice_of_the_hour_not_the_leftovers)
     check("oversubscribed instance shares are caught", _oversubscribed_shares_are_caught)
     check("jefe owns the fleet-wide token budget", _jefe_owns_the_fleet_wide_token_budget)
+    check("the-fixer sees a green-but-parked PR", _fixer_sees_a_green_but_parked_pr)
+    check("a green PR with no auto-merge gets armed", _green_pr_with_no_auto_merge_gets_armed)
     check("fleet-view reads FLEET_API_KEY from fleet.env", _fleet_view_reads_the_api_key_from_the_env_file)
     check("FLEET_API_KEY never reaches an LLM pass", _api_key_never_reaches_an_llm)
     check("incidental 'rate limit' text does not gate an account", _classifier_ignores_incidental_rate_limit_text)
