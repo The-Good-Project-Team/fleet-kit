@@ -145,6 +145,30 @@ RUN_ID="${MEMBER}${ITEM:+-item$ITEM}${TASK:+-adhoc}-$$-$(date +%s)"
 
 MAX_BUDGET=$(jget "['mandate']['limits'].get('max_budget_usd') or ''")
 
+# FLEET_MAXX_HANDLE -- resolve it to the account this pass will actually spend
+# from, BEFORE any budget read below uses it. A pool of N accounts read through one
+# hardcoded handle means every account but that one spends unmetered: confirmed live
+# on dino 2026-09-02, philanthropy ran FLEET_ACCOUNTS="gmail tgp" against
+# FLEET_MAXX_HANDLE=reif_tgp, pacing on a gated account whose anchor had been frozen
+# since Aug 30 while gmail did all the real spending. Prints nothing unless a
+# per-account FLEET_MAXX_HANDLE_<ACCOUNT> mapping exists, so an instance that never
+# sets one keeps exactly its current behaviour.
+if [ "$DRY_RUN" -ne 1 ]; then
+  read -r RESOLVED_HANDLE RESOLVED_KEY < <(bash "$KIT_DIR/scripts/resolve_maxx_handle.sh" 2>>"$LOG")
+  if [ -n "${RESOLVED_HANDLE:-}" ] && [ "$RESOLVED_HANDLE" != "${FLEET_MAXX_HANDLE:-}" ]; then
+    log "$MEMBER: FLEET_MAXX_HANDLE ${FLEET_MAXX_HANDLE:-unset} -> $RESOLVED_HANDLE (account this pass will spend from)"
+    export FLEET_MAXX_HANDLE="$RESOLVED_HANDLE"
+    # The key must follow the handle or the read 401s -- see resolve_maxx_handle.sh's
+    # header. An empty key here means the operator mapped a handle without its key;
+    # leave the existing one rather than blanking auth outright, and say so.
+    if [ -n "${RESOLVED_KEY:-}" ]; then
+      export FLEET_MAXX_KEY="$RESOLVED_KEY"
+    else
+      log "$MEMBER: WARNING no FLEET_MAXX_KEY_* mapped for this account -- budget read may be unauthorized"
+    fi
+  fi
+fi
+
 # FLEET_SHARE_FRACTION -- this instance's slice of the fleet's CURRENT hourly headroom,
 # exported as FLEET_SHARE_CEILING_PCT (percent-of-week units, maxx's own scale -- same units
 # maxx_lease.py's --pct takes). This is a CEILING, not a reservation: the member decides for
