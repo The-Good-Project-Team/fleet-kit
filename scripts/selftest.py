@@ -917,6 +917,102 @@ def _self_evo_evidence_covers_both_repos():
     assert "except Exception" in src, "evidence merge has no fail-open path for a bad/empty gh response"
 
 
+def _self_improve_score_evidence_covers_member_branch_shape():
+    """#292: same `head:jefe/`/`head:dumbledore/` branch-search miss #237 already fixed in
+    fleet_view_server.py's Self-Evolution panel, never ported to this script -- the actual
+    Magikarp grader. Most real self-evolution PRs ship on the generic per-item dispatch shape
+    `member/dumbledore-<id>-<ts>` / `member/jefe-<id>-<ts>`, invisible to the literal-prefix
+    search alone, so the grader's evidence was structurally missing the newest fixes needed to
+    show the compounding-loop chain it scores for.
+
+    Runs the real script end-to-end against a stubbed `gh` (answering all four search terms)
+    and a stubbed `claude` (capturing the prompt it was handed) -- proves the actual bash +
+    embedded python merge/dedup logic, not just that the right strings appear in the source.
+    """
+    import os
+    import subprocess
+
+    tmp = tempfile.mkdtemp()
+    log_dir = Path(tmp) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    fleet_repo = Path(tmp) / "fleet_repo"
+    fleet_repo.mkdir(parents=True, exist_ok=True)
+    bin_dir = Path(tmp) / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    home_dir = Path(tmp) / "home"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    capture_file = Path(tmp) / "prompt.txt"
+
+    # Same repo slug as fleet-kit's own real checkout (KIT_DIR), so the kit-side queries are
+    # skipped as a duplicate of the primary ones -- keeps the fixture to one repo tag.
+    kit_slug = subprocess.run(
+        ["git", "-C", str(ROOT), "remote", "get-url", "origin"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "-C", str(fleet_repo), "init", "-q"], check=True)
+    if kit_slug:
+        subprocess.run(["git", "-C", str(fleet_repo), "remote", "add", "origin", kit_slug], check=True)
+
+    # PR #214 matches BOTH `head:dumbledore/` and `head:member/dumbledore-` here (implausible
+    # in real branch-naming, done deliberately to prove dedup survives the new search term).
+    # PR #215 only matches the new `head:member/jefe-` term -- the exact shape #292 says was
+    # invisible before this fix. PR #100/#101 keep the old literal-prefix shape working.
+    old_dumbledore_pr = {"number": 100, "title": "old dumbledore fix", "mergedAt": "2026-08-01T00:00:00Z"}
+    old_jefe_pr = {"number": 101, "title": "old jefe fix", "mergedAt": "2026-08-02T00:00:00Z"}
+    member_dumbledore_pr = {"number": 214, "title": "fix(persona_law): ...", "mergedAt": "2026-08-29T17:32:13Z"}
+    member_jefe_pr = {"number": 215, "title": "fix(jefe): ...", "mergedAt": "2026-08-29T10:00:00Z"}
+
+    gh_stub = (bin_dir / "gh")
+    gh_stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, json\n"
+        "args = sys.argv[1:]\n"
+        "search = args[args.index('--search') + 1] if '--search' in args else ''\n"
+        "table = {\n"
+        f"  'head:dumbledore/': {json.dumps([old_dumbledore_pr, member_dumbledore_pr])},\n"
+        f"  'head:jefe/': {json.dumps([old_jefe_pr])},\n"
+        f"  'head:member/dumbledore-': {json.dumps([member_dumbledore_pr])},\n"
+        f"  'head:member/jefe-': {json.dumps([member_jefe_pr])},\n"
+        "}\n"
+        "print(json.dumps(table.get(search, [])))\n"
+    )
+    gh_stub.chmod(0o755)
+
+    claude_stub = (bin_dir / "claude")
+    claude_stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, os\n"
+        "args = sys.argv[1:]\n"
+        "prompt = args[args.index('-p') + 1] if '-p' in args else ''\n"
+        f"open({str(capture_file)!r}, 'w').write(prompt)\n"
+        "print('{\"score\": 42, \"reasoning\": \"test\"}')\n"
+    )
+    claude_stub.chmod(0o755)
+
+    env = dict(os.environ)
+    env.update({
+        "FLEET_REPO": str(fleet_repo),
+        "FLEET_LOG_DIR": str(log_dir),
+        "FLEET_ENV_FILE": str(Path(tmp) / "nonexistent.env"),
+        "HOME": str(home_dir),
+        "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+    })
+    proc = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "self_improve_score.sh")],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert proc.returncode == 0, (
+        f"self_improve_score.sh failed rc={proc.returncode}\nstdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    assert capture_file.exists(), f"claude was never invoked -- stderr={proc.stderr}"
+    prompt = capture_file.read_text()
+
+    for num in (100, 101, 214, 215):
+        assert f'"number": {num}' in prompt, f"PR #{num} missing from evidence fed to the scorer:\n{prompt[:2000]}"
+    assert prompt.count('"number": 214') == 1, \
+        f"PR #214 (matched by two search terms) was not deduped: appears {prompt.count(chr(34) + 'number' + chr(34) + ': 214')}x"
+
+
 def _adhoc_task_adds_to_the_charter_never_replaces_it():
     """`--task` runs a member ad-hoc with one extra instruction, charter still governing.
 
@@ -3549,6 +3645,7 @@ if __name__ == "__main__":
     check("minion knows the browser in its own image exists", _minion_knows_the_browser_exists)
     check("score reasoning is not guillotined mid-word", _score_reasoning_is_not_guillotined_mid_word)
     check("self-evolution evidence covers fleet-kit's own repo, not just $FLEET_REPO", _self_evo_evidence_covers_both_repos)
+    check("self_improve_score.sh's evidence catches the member/<name>-<id> branch shape", _self_improve_score_evidence_covers_member_branch_shape)
     check("jefe can unstick a PR that is merely behind its base", _jefe_can_unstick_a_pr_that_is_merely_behind)
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
