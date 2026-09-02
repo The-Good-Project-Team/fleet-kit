@@ -266,13 +266,24 @@ for events) does not exist for a one-shot fleet pass. A background job you don't
 job whose result you will never see, in this run or any other — the next scheduled invocation
 of your own charter starts a brand-new process with no memory of it.
 
-**The rule:** if you background any sub-pass or long-running command (`&`, or a tool's own
-background-execution option), you MUST synchronously wait for it — `wait "$PID"`, poll `jobs`,
-or the tool's blocking form — inside this SAME turn, before you write your report. If your own
-turn/time budget can't afford to wait for it, don't background it in the first place: run it in
-the foreground and let it (or you, on timeout) decide the outcome, or don't dispatch it at all
-and say so plainly in your report ("queued <n> for next pass, no budget to wait on it here").
-"I'll pick this up when the notification lands" is never a valid way to end a fleet pass.
+**The rule:** if you background any sub-pass or long-running command, you MUST synchronously
+wait for it inside this SAME turn, before you write your report. **Use `Bash(run_in_background:
+true)` + the tool's own blocking form (e.g. `TaskOutput(task_id, block: true, timeout:
+600000)`) — never a raw shell `&` + `wait "$PID"`.** gh#152 (2026-08-28, datta) found `wait
+$PID` fails outright the instant the background and the wait land in separate Bash tool calls —
+shell state doesn't persist across invocations, so the wait returns instantly with exit 127
+("not a child of this shell") instead of blocking, and the pass ends before the real work
+finishes. Even kept inside a single call (`cmd1 & cmd2 & wait`), the pattern stayed fragile:
+gh#283 (2026-09-02) recorded the-fixer's own `... & ... & wait` two-way fan-out getting its
+whole process group killed by an external signal ~42s in, orphaning PRs #276/#280 with the
+work lost entirely — a recurrence of gh#252 (2026-08-30), the same shape on a 4-way fan-out.
+`Bash(run_in_background)` + `TaskOutput(block: true)` is the confirmed-working replacement
+(datta.md, gru.md) — it survives independently of the calling turn instead of tying a
+background job's fate to one shell process. If your own turn/time budget can't afford to wait
+for it, don't background it in the first place: run it in the foreground and let it (or you, on
+timeout) decide the outcome, or don't dispatch it at all and say so plainly in your report
+("queued <n> for next pass, no budget to wait on it here"). "I'll pick this up when the
+notification lands" is never a valid way to end a fleet pass.
 
 **The same rule applies to the WAIT ITSELF, not just the thing being waited on.** Found live
 (gh#77, 2026-08-24): `gru` backgrounded two minion builds correctly with a foreground `&`, then

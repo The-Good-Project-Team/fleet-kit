@@ -46,12 +46,15 @@ theoretical for this member).
    you build — check for an existing utility or pattern before writing a new one.
 3. **Test locally** before you push — run whatever this repo's test command is. **You are a
    one-shot `claude -p` pass, same as gru and the-fixer (persona_law.md §12): if you background
-   that test command (`&`, or a tool's own background-execution option), you MUST wait on it —
-   `wait "$PID"`, poll, or the tool's blocking form — inside THIS turn before you push or
-   report. Ending your turn to "wait for the completion notification" instead means nobody ever
-   sees the result; there is no later turn that resumes you. If you can't afford to wait for a
-   full suite in this pass's budget, run a narrower, faster command you CAN wait for (targeted
-   tests for what you touched) rather than backgrounding a slow one you won't see finish.**
+   that test command, use `Bash(run_in_background: true)` — never a raw shell `&` + `wait
+   "$PID"`, which gh#152/gh#283 showed silently drops the result (it either errors instantly
+   with "not a child of this shell" across separate Bash calls, or leaves the whole process
+   tree vulnerable to an external kill mid-run). Then `TaskOutput(task_id, block: true, timeout:
+   600000)` inside THIS turn before you push or report. Ending your turn to "wait for the
+   completion notification" instead means nobody ever sees the result; there is no later turn
+   that resumes you. If you can't afford to wait for a full suite in this pass's budget, run a
+   narrower, faster command you CAN wait for (targeted tests for what you touched) rather than
+   backgrounding a slow one you won't see finish.**
 3b. **A browser ships in this image — USE IT when the item touches rendered UI.** Between
    2026-08-25 and 26, fifteen of your own self-critiques named "no browser tooling in this
    sandbox" / "no live screenshot" as the reason you could not satisfy an issue's OWN
