@@ -107,25 +107,40 @@ fi
 
 _repo_arg=()
 [ -n "$FLEET_REPO_SLUG" ] && _repo_arg=(--repo "$FLEET_REPO_SLUG")
+# Two search terms per name, not one -- #237 already found (and fixed, in
+# fleet_view_server.py's Self-Evolution panel) that `head:jefe/`/`head:dumbledore/` only
+# matches the old literal-prefix branch shape. Most real self-evolution PRs now ship on the
+# generic per-item dispatch shape `member/jefe-<id>-<ts>` / `member/dumbledore-<id>-<ts>`,
+# invisible to the literal-prefix search alone. Porting #237's fix here verbatim (#292): a
+# bare hyphenated-slug branch with no owner prefix at all is still a known, out-of-scope
+# residual gap, same as #237 itself named.
 SELF_EVO_JEFE=$(gh pr list --state merged --search "head:jefe/" --json number,title,mergedAt --limit 15 "${_repo_arg[@]}" 2>/dev/null)
 SELF_EVO_DUMBLEDORE=$(gh pr list --state merged --search "head:dumbledore/" --json number,title,mergedAt --limit 15 "${_repo_arg[@]}" 2>/dev/null)
+SELF_EVO_JEFE_MEMBER=$(gh pr list --state merged --search "head:member/jefe-" --json number,title,mergedAt --limit 15 "${_repo_arg[@]}" 2>/dev/null)
+SELF_EVO_DUMBLEDORE_MEMBER=$(gh pr list --state merged --search "head:member/dumbledore-" --json number,title,mergedAt --limit 15 "${_repo_arg[@]}" 2>/dev/null)
 
 # Only query fleet-kit's repo a second time if it's actually a different repo -- if
 # $FLEET_REPO already IS fleet-kit (this container's current config), the query above already
 # covered it and a second identical query would just duplicate every PR in the evidence set.
 SELF_EVO_JEFE_KIT=""
 SELF_EVO_DUMBLEDORE_KIT=""
+SELF_EVO_JEFE_MEMBER_KIT=""
+SELF_EVO_DUMBLEDORE_MEMBER_KIT=""
 if [ -n "$KIT_REPO_SLUG" ] && [ "$KIT_REPO_SLUG" != "$FLEET_REPO_SLUG" ]; then
   SELF_EVO_JEFE_KIT=$(gh pr list --repo "$KIT_REPO_SLUG" --state merged --search "head:jefe/" --json number,title,mergedAt --limit 15 2>/dev/null)
   SELF_EVO_DUMBLEDORE_KIT=$(gh pr list --repo "$KIT_REPO_SLUG" --state merged --search "head:dumbledore/" --json number,title,mergedAt --limit 15 2>/dev/null)
+  SELF_EVO_JEFE_MEMBER_KIT=$(gh pr list --repo "$KIT_REPO_SLUG" --state merged --search "head:member/jefe-" --json number,title,mergedAt --limit 15 2>/dev/null)
+  SELF_EVO_DUMBLEDORE_MEMBER_KIT=$(gh pr list --repo "$KIT_REPO_SLUG" --state merged --search "head:member/dumbledore-" --json number,title,mergedAt --limit 15 2>/dev/null)
 fi
 
-# Merge each pair into one evidence set, tagging every entry with which repo it came from --
-# PR numbers can collide across two repos, and the scoring prompt's "name the specific PR"
-# instruction needs an unambiguous handle. Fail-open: a failed/empty gh call on either side
-# (network error, unauth'd for that repo, rate limit) just yields "[]" for that half, same
-# fail-open shape DAILY_OUTCOMES already has below -- never a hard exit.
-export SELF_EVO_JEFE SELF_EVO_JEFE_KIT SELF_EVO_DUMBLEDORE SELF_EVO_DUMBLEDORE_KIT FLEET_REPO_SLUG KIT_REPO_SLUG
+# Merge all four sources per name into one evidence set, tagging every entry with which repo
+# it came from -- PR numbers can collide across two repos, and the scoring prompt's "name the
+# specific PR" instruction needs an unambiguous handle. Fail-open: a failed/empty gh call on
+# any side (network error, unauth'd for that repo, rate limit) just yields "[]" for that part,
+# same fail-open shape DAILY_OUTCOMES already has below -- never a hard exit.
+export SELF_EVO_JEFE SELF_EVO_JEFE_KIT SELF_EVO_JEFE_MEMBER SELF_EVO_JEFE_MEMBER_KIT \
+       SELF_EVO_DUMBLEDORE SELF_EVO_DUMBLEDORE_KIT SELF_EVO_DUMBLEDORE_MEMBER SELF_EVO_DUMBLEDORE_MEMBER_KIT \
+       FLEET_REPO_SLUG KIT_REPO_SLUG
 _merge_evidence() {
   python3 -c "
 import json, os
@@ -138,13 +153,18 @@ def load(var, repo):
     for x in arr:
         x['repo'] = repo
     return arr
-primary = load('$1', os.environ.get('FLEET_REPO_SLUG') or 'unknown')
-kit = load('$2', os.environ.get('KIT_REPO_SLUG') or 'unknown')
-print(json.dumps(primary + kit))
+primary_repo = os.environ.get('FLEET_REPO_SLUG') or 'unknown'
+kit_repo = os.environ.get('KIT_REPO_SLUG') or 'unknown'
+primary = load('$1', primary_repo) + load('$2', primary_repo)
+kit = load('$3', kit_repo) + load('$4', kit_repo)
+by_number = {}
+for x in primary + kit:
+    by_number[(x['repo'], x.get('number'))] = x
+print(json.dumps(list(by_number.values())))
 "
 }
-SELF_EVO_JEFE="$(_merge_evidence SELF_EVO_JEFE SELF_EVO_JEFE_KIT)"
-SELF_EVO_DUMBLEDORE="$(_merge_evidence SELF_EVO_DUMBLEDORE SELF_EVO_DUMBLEDORE_KIT)"
+SELF_EVO_JEFE="$(_merge_evidence SELF_EVO_JEFE SELF_EVO_JEFE_MEMBER SELF_EVO_JEFE_KIT SELF_EVO_JEFE_MEMBER_KIT)"
+SELF_EVO_DUMBLEDORE="$(_merge_evidence SELF_EVO_DUMBLEDORE SELF_EVO_DUMBLEDORE_MEMBER SELF_EVO_DUMBLEDORE_KIT SELF_EVO_DUMBLEDORE_MEMBER_KIT)"
 
 # Per-DAY outcome counts, not one 7-day aggregate -- the score has to be able to see whether
 # signal rate actually moved after a specific jefe/dumbledore PR's merge date, not just that
