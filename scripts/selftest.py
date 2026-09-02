@@ -1259,6 +1259,130 @@ def _auto_deploy_race_check_dedups_an_already_recorded_line():
             "the earlier, already-recorded alert was rewritten instead of appended to"
 
 
+def _auto_deploy_race_check_escalates_after_three_consecutive_sanctioned_aborts():
+    """gh#275 AC2/AC5: auto_deploy.sh's two sanctioned ABORT guards (dirty working tree,
+    diverged HEAD) previously logged one line per tick with no escalation at all -- three real
+    occurrences (gh#245, gh#255, gh#275 itself) all self-resolved silently under
+    deploy_staleness_check.sh's 4h paging budget, found only by after-the-fact log forensics.
+
+    Feeds the detector a synthetic auto_deploy.log with 3 consecutive sanctioned-ABORT lines
+    (one per reason) and no intervening 'deploy OK', and asserts an alert-log line names the
+    stuck reason and its consecutive-tick count.
+    """
+    import subprocess
+    script_path = ROOT / "scripts" / "auto_deploy_race_check.sh"
+
+    def run(log_dir):
+        proc = subprocess.run(
+            ["bash", str(script_path)],
+            capture_output=True, text=True, timeout=30,
+            env={"FLEET_LOG_DIR": str(log_dir), "FLEET_ENV_FILE": "/nonexistent", "PATH": "/usr/bin:/bin"},
+        )
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+
+    # Dirty-tree reason, 3 consecutive ticks, no intervening deploy OK.
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        (log_dir / "auto_deploy.log").write_text(
+            "[2026-09-02 02:00:00 UTC] ABORT: working tree dirty -- refusing to pull over local changes. Resolve by hand.\n"
+            "[2026-09-02 02:05:00 UTC] ABORT: working tree dirty -- refusing to pull over local changes. Resolve by hand.\n"
+            "[2026-09-02 02:10:00 UTC] ABORT: working tree dirty -- refusing to pull over local changes. Resolve by hand.\n"
+        )
+        run(log_dir)
+        alerts_file = log_dir / "auto_deploy_race_alerts.log"
+        assert alerts_file.exists(), "3 consecutive dirty-tree ABORTs produced no escalation alert"
+        alerts = alerts_file.read_text()
+        assert "working tree dirty" in alerts, "alert does not name the stuck reason"
+        assert "3 consecutive ticks" in alerts, "alert does not name the consecutive-tick count"
+
+        # A 4th tick past the threshold, same unresolved streak, must NOT re-alert -- else a
+        # host stuck for hours would repage every 5 minutes instead of once per streak.
+        with (log_dir / "auto_deploy.log").open("a") as f:
+            f.write("[2026-09-02 02:15:00 UTC] ABORT: working tree dirty -- refusing to pull over local changes. Resolve by hand.\n")
+        run(log_dir)
+        assert alerts_file.read_text().count("working tree dirty has recurred") == 1, \
+            "an already-alerted streak re-alerted on a later tick instead of staying quiet until it resolves"
+
+    # Diverged-HEAD reason, independent counter, same threshold.
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        (log_dir / "auto_deploy.log").write_text(
+            "[2026-09-02 02:35:02 UTC] ABORT: working tree dirty -- refusing to pull over local changes. Resolve by hand.\n"
+            "[2026-09-02 02:40:03 UTC] ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged.\n"
+            "[2026-09-02 02:45:03 UTC] ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged.\n"
+            "[2026-09-02 02:50:03 UTC] ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged.\n"
+        )
+        run(log_dir)
+        alerts_file = log_dir / "auto_deploy_race_alerts.log"
+        assert alerts_file.exists(), "3 consecutive diverged-HEAD ABORTs produced no escalation alert"
+        alerts = alerts_file.read_text()
+        assert "local HEAD is not an ancestor" in alerts, "alert does not name the diverged-HEAD reason"
+        # The single leading dirty-tree line must not itself have escalated (only 1 tick, below
+        # threshold) -- independent counters, not a shared one.
+        assert "working tree dirty has recurred" not in alerts, \
+            "the diverged-HEAD counter bled into the dirty-tree counter (or vice versa) -- they must be independent"
+
+
+def _auto_deploy_race_check_does_not_alert_on_a_self_resolving_sanctioned_abort():
+    """gh#275 AC3: a single sanctioned ABORT tick, or a short streak followed by a successful
+    deploy, is the NORMAL, expected transient case the guards were built to tolerate (gh#245's
+    and gh#255's own timelines had this shape at a finer grain) -- it must not fire an alert.
+    """
+    import subprocess
+    script_path = ROOT / "scripts" / "auto_deploy_race_check.sh"
+
+    def run(log_dir):
+        proc = subprocess.run(
+            ["bash", str(script_path)],
+            capture_output=True, text=True, timeout=30,
+            env={"FLEET_LOG_DIR": str(log_dir), "FLEET_ENV_FILE": "/nonexistent", "PATH": "/usr/bin:/bin"},
+        )
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+
+    # A single sanctioned ABORT tick -- well below threshold.
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        (log_dir / "auto_deploy.log").write_text(
+            "[2026-09-02 02:00:00 UTC] ABORT: working tree dirty -- refusing to pull over local changes. Resolve by hand.\n"
+        )
+        run(log_dir)
+        assert not (log_dir / "auto_deploy_race_alerts.log").exists(), \
+            "a single sanctioned ABORT tick fired an alert -- this is the normal transient case"
+
+    # Two consecutive sanctioned ABORTs followed by a successful deploy -- self-resolves inside
+    # the 3-tick threshold, same shape as #245/#255's own finer-grained timelines.
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        (log_dir / "auto_deploy.log").write_text(
+            "[2026-09-02 02:00:00 UTC] ABORT: working tree dirty -- refusing to pull over local changes. Resolve by hand.\n"
+            "[2026-09-02 02:05:00 UTC] ABORT: working tree dirty -- refusing to pull over local changes. Resolve by hand.\n"
+            "[2026-09-02 02:10:00 UTC] deploy OK at abc123\n"
+        )
+        run(log_dir)
+        assert not (log_dir / "auto_deploy_race_alerts.log").exists(), \
+            "a sanctioned-ABORT streak that self-resolved via a successful deploy fired an alert anyway"
+
+    # 3+ consecutive ABORTs followed by a success: the streak crossed threshold but then
+    # resolved before this tick ran -- must not alert on a now-resolved streak.
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        (log_dir / "auto_deploy.log").write_text(
+            "[2026-09-02 02:00:00 UTC] ABORT: working tree dirty -- refusing to pull over local changes. Resolve by hand.\n"
+            "[2026-09-02 02:05:00 UTC] ABORT: working tree dirty -- refusing to pull over local changes. Resolve by hand.\n"
+            "[2026-09-02 02:10:00 UTC] ABORT: working tree dirty -- refusing to pull over local changes. Resolve by hand.\n"
+            "[2026-09-02 02:15:00 UTC] ABORT: working tree dirty -- refusing to pull over local changes. Resolve by hand.\n"
+            "[2026-09-02 02:20:00 UTC] deploy OK at abc123\n"
+        )
+        run(log_dir)
+        assert not (log_dir / "auto_deploy_race_alerts.log").exists(), \
+            "a streak that crossed threshold but resolved before this tick ran still alerted"
+
+
 def _auto_deploy_race_check_is_actually_scheduled():
     """Same failure class as _deploy_staleness_check_is_actually_scheduled, one script over
     (gh#255): a detector that exists but that nothing puts on cron never runs, and the race it
@@ -2716,6 +2840,8 @@ if __name__ == "__main__":
     check("a git-status failure alerts rather than reading as clean", _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure)
     check("auto-deploy race check detects an unrecognized git failure outside auto_deploy.sh's own path", _auto_deploy_race_check_detects_the_unrecognized_git_failure)
     check("auto-deploy race check dedups an already-recorded line", _auto_deploy_race_check_dedups_an_already_recorded_line)
+    check("auto-deploy race check escalates after 3 consecutive sanctioned ABORTs", _auto_deploy_race_check_escalates_after_three_consecutive_sanctioned_aborts)
+    check("auto-deploy race check does not alert on a self-resolving sanctioned ABORT", _auto_deploy_race_check_does_not_alert_on_a_self_resolving_sanctioned_abort)
     check("auto-deploy race check is actually scheduled", _auto_deploy_race_check_is_actually_scheduled)
     check("run_member.sh logs CRITICAL when postflight_dirty_check.sh fails to source", _run_member_logs_critical_when_postflight_dirty_check_fails_to_source)
     check("run_member.sh rejects a non-numeric --item", _run_member_rejects_a_non_numeric_item)
