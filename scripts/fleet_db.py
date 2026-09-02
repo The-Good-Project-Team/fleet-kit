@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS runs (
   cache_creation_tokens               INTEGER,
   duration_ms                          INTEGER,
   stop_reason                           TEXT,
+  lane                                   TEXT,
   recorded_at                            REAL NOT NULL,
   -- Composite, not bare run_id (fleet-kit#212): judge-judy's run_id is `review-<pr>-<sha>`,
   -- not per-invocation, so two genuinely different concurrent reviews of the same PR head
@@ -90,6 +91,10 @@ _ADD_COLUMNS = (
     # The written report (persona_law §10c). Added via _ADD_COLUMNS rather than SCHEMA so an
     # existing fleet.db gains it on the next connect() -- no rebuild, no lost history.
     ("report", "TEXT"),
+    # Structured mirror of a dispatcher's `lane=<name>` --task prefix (run_report.py's --lane).
+    # Replaces datta's prior keyword-match of outcome/evidence prose for lane attribution --
+    # only set on lane-dispatched passes (nerd today), NULL everywhere else.
+    ("lane", "TEXT"),
 )
 
 
@@ -174,7 +179,8 @@ RUN_COLUMNS = (
     "run_id", "member", "kind", "item_id", "pr", "status", "exit_code", "outcome", "evidence",
     "vision_link", "self_critique", "report", "prediction", "score_now", "last_verdict",
     "cost_usd", "num_turns", "input_tokens", "output_tokens",
-    "cache_read_tokens", "cache_creation_tokens", "duration_ms", "stop_reason", "recorded_at",
+    "cache_read_tokens", "cache_creation_tokens", "duration_ms", "stop_reason", "lane",
+    "recorded_at",
 )
 
 
@@ -195,6 +201,7 @@ def _row_from_record(rec: dict) -> tuple:
         tokens.get("input_tokens"), tokens.get("output_tokens"),
         tokens.get("cache_read_input_tokens"), tokens.get("cache_creation_input_tokens"),
         tokens.get("duration_ms"), tokens.get("stop_reason"),
+        rec.get("lane"),
         rec.get("_recorded_at") or 0.0,
     )
 
