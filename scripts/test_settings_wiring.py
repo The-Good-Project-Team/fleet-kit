@@ -18,8 +18,6 @@ Run: python3 scripts/test_settings_wiring.py
 from __future__ import annotations
 
 import http.server
-import json
-import sys
 import threading
 from pathlib import Path
 from urllib.parse import urlparse
@@ -110,6 +108,10 @@ def main() -> int:
             page.on("request", lambda r: requests_seen.append((r.method, urlparse(r.url).path)))
 
             page.route("**/api/**", _boot_mocks)
+            # The page pulls chart.js + its date-fns adapter from a CDN (used by the Stats page,
+            # not Settings) -- stub both so this test never depends on live network access in CI.
+            page.route("https://cdn.jsdelivr.net/**", lambda route: route.fulfill(
+                status=200, content_type="application/javascript", body="/* stubbed for test */"))
             page.goto(f"http://127.0.0.1:{port}/", timeout=15000)
 
             page.wait_for_selector('.side-nav-item[data-page="settings"]', timeout=15000)
