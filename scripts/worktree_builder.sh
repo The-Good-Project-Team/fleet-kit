@@ -180,11 +180,18 @@ log "building item #$ITEM_ID in $WT_PATH (model=$MODEL)"
 # --output-format json: the provider's own per-call accounting (cost/tokens/turns), not a
 # hand-rolled estimate -- see pass_accounting.py's header. --max-budget-usd is a CLI-enforced
 # hard backstop per call, independent of anything this kit measures after the fact.
+# `RAW=$(...)` is a command substitution, i.e. a SUBSHELL -- account_pool.sh's
+# `export ACCOUNT_POOL_SELECTED` cannot escape it, so the failure log below recorded
+# `account=none` for every failed build. Hand the pool a file and read it back.
+ACCOUNT_POOL_SELECTED_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_acct.XXXXXX")
+export ACCOUNT_POOL_SELECTED_FILE
 RAW=$(cd "$WT_PATH" && account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" \
   --model "$MODEL" --dangerously-skip-permissions --setting-sources user \
   --max-turns "$MAX_TURNS" --output-format json \
   --max-budget-usd "${FLEET_MAX_BUDGET_USD:-5}" 2>>"$LOG")
 RC=$?
+[ -s "$ACCOUNT_POOL_SELECTED_FILE" ] && ACCOUNT_POOL_SELECTED=$(cat "$ACCOUNT_POOL_SELECTED_FILE")
+rm -f "$ACCOUNT_POOL_SELECTED_FILE"
 OUT=$(printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" text)
 USAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_usage.XXXXXX")
 printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" usage > "$USAGE_FILE" 2>/dev/null
