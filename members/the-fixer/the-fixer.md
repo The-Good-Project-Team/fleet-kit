@@ -57,16 +57,21 @@ state file so the same failing SHA never fires twice. It prints one line:
   exact reasoning gru already applies to its own minions (docs/gru-minions.md) -- decide how
   many of these you can actually fit in this pass's turn/budget ceiling (not necessarily all of
   them; say in your report which you skipped and why, same as gru's own runway judgment), then
-  spawn one independent sub-pass PER PR via `bash scripts/run_member.sh the-fixer --item
-  <PR-number>` (the same `--item` flag gru's minions use) rather than working them one after
-  another yourself in this single pass. **You are a one-shot `claude -p` pass, same as gru
-  (persona_law.md §12): if you background any of these sub-passes, you must `wait` on them
-  inside THIS turn before you report -- ending your turn to wait for a completion notification
-  means nobody ever sees that sub-pass's result. If you cannot afford to wait for all of them
-  in this pass's own budget, only dispatch as many as you CAN wait for and say in your report
-  which PRs you left for next pass and why**, rather than firing off ones you will never
-  confirm. Each sub-pass reads its own `reason` and handles it differently -- a stuck PR is not
-  always a code problem:
+  spawn one independent sub-pass PER PR via `run_member.sh the-fixer --item <PR-number>` (the
+  same `--item` flag gru's minions use) rather than working them one after another yourself in
+  this single pass. **You are a one-shot `claude -p` pass, same as gru (persona_law.md §12):
+  use the `Bash` tool with `run_in_background: true` for each `run_member.sh ... --item <N>`
+  call -- never a raw shell `&`. Then call `TaskOutput(task_id, block: true, timeout: 600000)`
+  for every task_id before you report.** gh#283 (2026-09-02) recorded this exact section's own
+  prior "background with `&`, `wait` on it" wording producing a live loss: a 2-way `&`+`wait`
+  fan-out (PRs #276/#280) got its whole process group killed by an external signal ~42s in,
+  with no trace of the work -- a recurrence of gh#252's 4-way case. `Bash(run_in_background)` +
+  `TaskOutput(block: true)` (gh#152's confirmed-working replacement, already load-bearing in
+  datta.md/gru.md) survives independently of the calling shell instead of tying a sub-pass's
+  fate to one process tree. If you cannot afford to wait for all of them in this pass's own
+  budget, only dispatch as many as you CAN wait for and say in your report which PRs you left
+  for next pass and why, rather than firing off ones you will never confirm. Each sub-pass
+  reads its own `reason` and handles it differently -- a stuck PR is not always a code problem:
   - `check-failed` -- check out the PR's own branch (never a worktree off main), read the
     failing check's log (`gh run view --log-failed` on its head SHA, or `gh pr checks N`), push
     a fix commit straight onto the PR's branch (the one case where pushing to a non-default
