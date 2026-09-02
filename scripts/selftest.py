@@ -2764,6 +2764,67 @@ def _fleet_view_login_is_still_fail_closed():
     assert "SameSite=Strict" in login, "cookie rides cross-site requests -- CSRF on every write"
 
 
+def _green_pr_with_no_auto_merge_gets_armed():
+    """A PR nothing armed must not be able to sit green forever.
+
+    auto-merge is armed in exactly ONE place in this repo -- worktree_builder.sh, at
+    PR-creation time. A PR opened by anything else (a human, an external agent, a hand-pushed
+    branch) is never armed, so the whole self-heal loop can run end to end and still stop one
+    step short of merging, with nothing red for the-fixer to find.
+
+    Live case (fleet-kit#291, 2026-09-02): judge-judy BLOCKed it 15:30, auto_update_branch
+    rebased it, judge-judy re-reviewed 15:47 -> fleet-code-review=SUCCESS, selftest green,
+    mergeStateStatus CLEAN, automerge=none. Green and parked, indefinitely.
+
+    Stubs `gh` at the same boundary the-fixer's tests do, so the real sweep logic is under
+    test. Three PRs: one unarmed (must be armed), one already armed and one draft (must not
+    be touched -- a draft is explicitly "not ready", and re-arming muddies the log).
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"; log_dir.mkdir(parents=True, exist_ok=True)
+        repo = Path(tmp) / "repo"; repo.mkdir(parents=True, exist_ok=True)
+        bin_dir = Path(tmp) / "bin"; bin_dir.mkdir(parents=True, exist_ok=True)
+        calls = Path(tmp) / "merge_calls.txt"
+
+        # #291 unarmed, #292 armed, #293 draft+unarmed. The -q expression is evaluated by gh
+        # itself in the real thing, so the stub returns what that filter WOULD select.
+        (bin_dir / "gh").write_text(
+            "#!/bin/bash\n"
+            "if [ \"$1\" = \"repo\" ]; then echo 'The-Good-Project-Team/fleet-kit'; exit 0; fi\n"
+            "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n"
+            "  case \"$*\" in *autoMergeRequest*) echo 291 ;; *) ;; esac\n"
+            "  exit 0\n"
+            "fi\n"
+            "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"merge\" ]; then\n"
+            f"  echo \"$3\" >> {calls}\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n"
+        )
+        (bin_dir / "gh").chmod(0o755)
+
+        proc = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "auto_update_branch.sh")],
+            capture_output=True, text=True, timeout=30,
+            env={"FLEET_REPO": str(repo), "FLEET_LOG_DIR": str(log_dir),
+                 "FLEET_ENV_FILE": "/nonexistent", "PATH": f"{bin_dir}:/usr/bin:/bin"},
+        )
+        assert proc.returncode == 0, f"script failed: {proc.stderr.strip()[:300]}"
+
+        armed = calls.read_text().split() if calls.exists() else []
+        assert "291" in armed, (
+            "a green, unarmed PR was never armed -- it can sit open forever: no error, "
+            "nothing red, and the-fixer only hunts red"
+        )
+        assert "293" not in armed, "a DRAFT PR was armed -- a draft is explicitly not ready"
+
+        logtext = (log_dir / "auto_update_branch.log").read_text()
+        assert "armed" in logtext, "the tick summary never reports how many PRs it armed"
+
+
 def _fleet_view_reads_the_api_key_from_the_env_file():
     """A key present in fleet.env must be readable by the auth path.
 
@@ -3430,6 +3491,7 @@ if __name__ == "__main__":
     check("share ceiling is a slice of the hour, not the leftovers", _share_ceiling_is_a_slice_of_the_hour_not_the_leftovers)
     check("oversubscribed instance shares are caught", _oversubscribed_shares_are_caught)
     check("jefe owns the fleet-wide token budget", _jefe_owns_the_fleet_wide_token_budget)
+    check("a green PR with no auto-merge gets armed", _green_pr_with_no_auto_merge_gets_armed)
     check("fleet-view reads FLEET_API_KEY from fleet.env", _fleet_view_reads_the_api_key_from_the_env_file)
     check("FLEET_API_KEY never reaches an LLM pass", _api_key_never_reaches_an_llm)
     check("incidental 'rate limit' text does not gate an account", _classifier_ignores_incidental_rate_limit_text)
