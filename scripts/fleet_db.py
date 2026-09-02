@@ -154,7 +154,17 @@ def _migrate_composite_pk(conn: sqlite3.Connection) -> None:
 
 
 def _migrate(conn: sqlite3.Connection, db_path: Path) -> None:
+    # SCHEMA's own CREATE TABLE/INDEX IF NOT EXISTS statements have to live under the SAME
+    # lock as _migrate_composite_pk, not run unlocked ahead of it: a bare
+    # `conn.executescript(SCHEMA)` on one connection can interleave, statement-by-statement,
+    # with another thread's in-progress rename/rebuild -- e.g. run its own
+    # `CREATE INDEX ... ON runs` right after a concurrent thread's `ALTER TABLE runs RENAME TO
+    # runs_legacy_pk` has committed but before that thread's own SCHEMA re-apply has recreated
+    # `runs`, raising a raw `sqlite3.OperationalError: no such table: main.runs`. Applying
+    # SCHEMA here, inside the flock, closes that window the same way _migrate_composite_pk's
+    # own internal window was already closed.
     with _migration_lock(db_path):
+        conn.executescript(SCHEMA)
         _migrate_composite_pk(conn)
     have = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
     for name, decl in _ADD_COLUMNS:
@@ -166,7 +176,6 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     p = db_path or DB_FILE
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(p))
-    conn.executescript(SCHEMA)
     _migrate(conn, p)
     conn.execute("INSERT OR IGNORE INTO sync_state (id, offset) VALUES (0, 0)")
     conn.commit()

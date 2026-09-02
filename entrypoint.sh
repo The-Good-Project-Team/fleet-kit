@@ -202,14 +202,27 @@ case "${1:-cron-foreground}" in
       # Neither script sources fleet.env (see each script's own header -- both must stay plain
       # bash, zero Claude Code dependency, so the watcher never depends on the thing it's
       # watching), so their env vars are exported explicitly on the cron line itself, same shape
-      # as GH_TOKEN above. NTFY_TOPIC/PUBLIC_URL are read from fleet.env here (already sourced
-      # into entrypoint's own shell above) and baked into the generated crontab text at boot --
-      # neither is currently set (confirmed: grep -c NTFY_TOPIC fleet.env = 0 on the box this
-      # issue was filed from), which per gh#171's PRD is a deliberate operator/credential
-      # decision left open, not a bug this pass fixes: each script's own `:?` guard fails loudly
-      # and logs why until an operator sets one, rather than silently doing nothing.
-      echo "27 * * * * root export FLEET_LOG_DIR=$LOG_DIR NTFY_TOPIC=${NTFY_TOPIC:-} && bash /fleet-kit/scripts/account_health_check.sh >> $LOG_DIR/account_health_check.log 2>&1"
-      echo "37 * * * * root export PUBLIC_URL=${PUBLIC_URL:-} FLEET_VIEW_PORT=${FLEET_VIEW_PORT:-8420} NTFY_TOPIC=${NTFY_TOPIC:-} && bash /fleet-kit/scripts/tunnel_health_check.sh >> $LOG_DIR/tunnel_health_check.log 2>&1"
+      # as GH_TOKEN above. PUBLIC_URL is read from fleet.env here (already sourced into
+      # entrypoint's own shell above) and baked into the generated crontab text at boot -- out
+      # of scope for gh#279 below, see that issue's non-goals.
+      #
+      # NTFY_TOPIC is deliberately NOT baked in here (gh#279): entrypoint.sh only runs once, at
+      # container boot, so a value interpolated at generation time is frozen until the next
+      # restart -- a human editing fleet.env's NTFY_TOPIC= later (e.g. during THIS incident,
+      # gh#269) would have no way to make the pager pick it up short of a full container
+      # restart. Instead, each cron LINE re-sources fleet.env itself, immediately before
+      # `exec`ing the script, the same `[ -f ... ] && { set -a; . ...; set +a; }` shape
+      # entrypoint.sh itself uses above (and run_member.sh per-job) -- so the value is re-read
+      # at every tick, not just at boot. FLEET_ENV_FILE is already exported crontab-wide (see
+      # the heredoc's own first line below), so this reuses that instead of hard-coding the
+      # path again. The scripts themselves still never source fleet.env directly (per gh#171's
+      # non-goal, restated in gh#279's) -- this sourcing happens in the cron line, one shell
+      # hop before the script starts, not inside it. If NTFY_TOPIC is still unset in fleet.env,
+      # the freshly-sourced value is still unset/empty and each script's own `:?` guard fires
+      # exactly as before -- this changes when the value is read, not what happens when it's
+      # genuinely absent.
+      echo "27 * * * * root export FLEET_LOG_DIR=$LOG_DIR && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; bash /fleet-kit/scripts/account_health_check.sh >> $LOG_DIR/account_health_check.log 2>&1"
+      echo "37 * * * * root export PUBLIC_URL=${PUBLIC_URL:-} FLEET_VIEW_PORT=${FLEET_VIEW_PORT:-8420} && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; bash /fleet-kit/scripts/tunnel_health_check.sh >> $LOG_DIR/tunnel_health_check.log 2>&1"
       # path_health_check.sh (gh#249): the fleet's THIRD outage pager -- tunnel-health above
       # only checks the tunnel's ROOT hostname, which falls through Caddy's default route and
       # never touches either instance's real path-routed dashboard (/fleet/<name>). Same
@@ -222,8 +235,9 @@ case "${1:-cron-foreground}" in
       # there is no fleet-wide value, so it must be set in THIS box's own fleet.env for the
       # page to fire at all. Like NTFY_TOPIC, it is deliberately left unset by default: the
       # script's own `:?` guard fails loudly and logs why until an operator sets one, rather
-      # than silently checking nothing.
-      echo "24 * * * * root export PUBLIC_PATH_URL=${PUBLIC_PATH_URL:-} NTFY_TOPIC=${NTFY_TOPIC:-} STATE_FILE=$LOG_DIR/.path_health_paged.state && bash /fleet-kit/scripts/path_health_check.sh >> $LOG_DIR/path_health_check.log 2>&1"
+      # than silently checking nothing. NTFY_TOPIC is re-sourced at tick-time here too (gh#279,
+      # see account_health_check.sh's cron line above for the full reasoning).
+      echo "24 * * * * root export PUBLIC_PATH_URL=${PUBLIC_PATH_URL:-} STATE_FILE=$LOG_DIR/.path_health_paged.state && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; bash /fleet-kit/scripts/path_health_check.sh >> $LOG_DIR/path_health_check.log 2>&1"
     } > "$CRONTAB"
     chmod 0644 "$CRONTAB"
     echo "[entrypoint] installed crontab (token redacted, stored separately at $TOKEN_FILE, mode 600):"
