@@ -134,10 +134,14 @@ spawns exactly one). Your job, in order:
    gh issue list --state open --label fleet:backlog --label fleet:priority-high \
      --json number,title,body,labels --limit 200
    ```
-   filtering out anything already `fleet:claimed`, falling back to `fleet:priority-medium`
-   only once high is exhausted, then `-low` only once medium is too. You are choosing FROM
-   marie's ranking, not re-deriving it — an item marie hasn't gotten to yet (no priority
-   label at all) is lowest priority by default, not an oversight you correct yourself.
+   filtering out anything already `fleet:claimed` **or carrying `fleet:needs-human-op`**
+   (that label means a prior pass already confirmed the item is blocked on something no fleet
+   member holds — credentials, a human decision — and re-claiming it only re-confirms the same
+   block; gh#3920 found #2195 re-claimed and re-spawned 15+ times because this filter was
+   missing), falling back to `fleet:priority-medium` only once high is exhausted, then `-low`
+   only once medium is too. You are choosing FROM marie's ranking, not re-deriving it — an item
+   marie hasn't gotten to yet (no priority label at all) is lowest priority by default, not an
+   oversight you correct yourself.
 
    Collect each candidate's `fleet:complexity-<1-10>` label along with its number — that is
    marie's size estimate and it is what makes packing possible. An item with no complexity
