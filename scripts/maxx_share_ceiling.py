@@ -94,9 +94,33 @@ def main(argv: list[str]) -> int:
         local_reserved = maxx_lease.total_reserved_pct()
     except Exception:
         local_reserved = 0.0
+    try:
+        mine_reserved = maxx_lease.reserved_pct_for()
+    except Exception:
+        mine_reserved = 0.0
     reserved = (budget.get("reserved_pct") or 0.0) + local_reserved
-    hourly_headroom_pct = max(0.0, sustainable - hourly_used - reserved)
-    ceiling_pct = hourly_headroom_pct * share
+
+    # THE SLICE IS OF THE HOUR, NOT OF WHAT IS LEFT.
+    #
+    # This used to be `(sustainable - used - reserved) * share`, which reads like a share but
+    # behaves like a race: every caller computes its cut from whatever remains at the moment
+    # it asks, so an instance that spends first takes the pot and a later one's "30%" is 30%
+    # of the leftovers (Reif, 2026-09-02: "before gru gets there, it could be all gone"). The
+    # dial silently meant something different depending on arrival order.
+    #
+    # A share has to be subtracted from the pot BEFORE anyone spends. So: size the slice
+    # against the whole hour's sustainable pace, then deduct only what THIS instance has
+    # already taken out of its own slice. A greedy neighbour now exhausts its own share and
+    # cannot reach into this one.
+    hour_slice_pct = max(0.0, sustainable * share)
+    ceiling_pct = max(0.0, hour_slice_pct - mine_reserved)
+
+    # Still bounded by what genuinely remains globally: a slice is a cap on ambition, never a
+    # licence to overdraw the account. If the hour is actually spent (every instance's real
+    # burn, plus everyone's live leases), the honest answer is a smaller number -- or zero --
+    # regardless of whose slice it nominally is.
+    global_left_pct = max(0.0, sustainable - hourly_used - reserved)
+    ceiling_pct = min(ceiling_pct, global_left_pct)
 
     print(f"{ceiling_pct:.4f}")
     return 0

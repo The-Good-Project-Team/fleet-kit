@@ -32,7 +32,39 @@ import uuid
 from pathlib import Path
 
 LOG_DIR = Path(os.environ.get("FLEET_LOG_DIR", Path.home() / "Library" / "Logs" / "fleet-kit")).expanduser()
-STATE_FILE = LOG_DIR / "maxx-leases.json"
+
+# The ledger is SHARED ACROSS INSTANCES when FLEET_LEASE_DIR is set, and per-instance when it
+# is not. That distinction is the whole point: every instance on this box draws from ONE maxx
+# account pool, so a ledger only this instance can see cannot coordinate anything.
+#
+# Live 2026-09-02 (Reif): philanthropy and fleet-kit-server-fleet each kept their own
+# maxx-leases.json under their own $FLEET_LOG_DIR, so `reserved_pct` never contained the other
+# instance's in-flight spend. maxx_share_ceiling.py subtracts reserved_pct specifically to
+# prevent double-spend and its comment calls the result "already-coordinated" -- across
+# instances it was not. Both files sat at `[]` while both fleets were running.
+#
+# Set FLEET_LEASE_DIR to a path bind-mounted into every instance's container (a sibling of the
+# shared KIT_DIR on the host). The flock in _locked() already serializes concurrent
+# read-modify-write, and it locks the ledger PATH -- so pointing several containers at one
+# bind-mounted file is exactly the case it was written for, no new machinery needed.
+STATE_FILE = Path(
+    os.environ.get("FLEET_LEASE_DIR") or LOG_DIR
+).expanduser() / "maxx-leases.json"
+
+# Who is holding a lease. Leases are tagged so a slice can be enforced PER INSTANCE: an
+# instance's own live leases are what count against its share, while everyone's leases count
+# against the global pot.
+INSTANCE = (os.environ.get("FLEET_INSTANCE_NAME") or os.environ.get("FLEET_CONTAINER_NAME")
+            or "default")
+
+
+class LeaseDenied(RuntimeError):
+    """A reservation was refused because it would exceed the caller's own slice.
+
+    Raised, not returned as a sentinel: a caller that ignores this and spends anyway is
+    exactly the double-spend the slice exists to prevent, so it must be impossible to miss
+    by accident.
+    """
 
 
 @contextlib.contextmanager
@@ -71,15 +103,34 @@ def _unexpired(leases: list[dict], now: float) -> list[dict]:
     return [lease for lease in leases if lease["created_at"] + lease["ttl_sec"] > now]
 
 
-def maxx_reserve(pct: float, label: str, ttl_sec: int, state_file: Path | None = None) -> str:
-    """Record a new lease and return its lease_id. Prunes expired leases while it's at it."""
+def maxx_reserve(pct: float, label: str, ttl_sec: int, state_file: Path | None = None,
+                 instance: str | None = None, budget_pct: float | None = None) -> str:
+    """Record a new lease and return its lease_id. Prunes expired leases while it's at it.
+
+    `budget_pct` turns this into an ENFORCED slice rather than an advisory one. When given,
+    the reservation is refused (LeaseDenied) if this instance's own live leases plus `pct`
+    would exceed it. Without that check a "30% share" is only a rate limit on a race -- every
+    caller computes its slice from whatever is left at the moment it asks, so whoever asks
+    first takes the pot and a later caller's share is 30% of the remainder, not 30% of the
+    hour (Reif, 2026-09-02: "before gru gets there, it could be all gone").
+
+    Note this counts only THIS instance's leases against the budget: the point of a slice is
+    that a greedy neighbour exhausts its own share and physically cannot reach into yours.
+    """
     state_file = state_file or STATE_FILE
+    instance = instance or INSTANCE
     lease_id = f"{label}-{uuid.uuid4().hex[:8]}"
     with _locked(state_file):
         now = time.time()
         leases = _unexpired(_read_leases(state_file), now)
+        if budget_pct is not None:
+            mine = sum(l["pct"] for l in leases if l.get("instance") == instance)
+            if mine + pct > budget_pct + 1e-9:
+                raise LeaseDenied(
+                    f"{instance}: reserving {pct:.4f} would exceed its slice "
+                    f"({mine:.4f} already held of {budget_pct:.4f})")
         leases.append({"lease_id": lease_id, "pct": pct, "label": label,
-                        "created_at": now, "ttl_sec": ttl_sec})
+                        "instance": instance, "created_at": now, "ttl_sec": ttl_sec})
         _write_leases(state_file, leases)
     return lease_id
 
@@ -93,6 +144,20 @@ def maxx_release(lease_id: str, state_file: Path | None = None) -> None:
         leases = [lease for lease in _unexpired(_read_leases(state_file), time.time())
                   if lease["lease_id"] != lease_id]
         _write_leases(state_file, leases)
+
+
+def reserved_pct_for(instance: str | None = None, state_file: Path | None = None) -> float:
+    """Sum of one instance's own currently-unexpired leases -- what counts against its slice.
+
+    Leases written before instance tagging existed carry no "instance" key; they are counted
+    against nobody's slice but still count in total_reserved_pct(), which is the conservative
+    reading (they shrink the global pot, they never license extra local spend).
+    """
+    state_file = state_file or STATE_FILE
+    instance = instance or INSTANCE
+    with _locked(state_file):
+        live = _unexpired(_read_leases(state_file), time.time())
+        return sum(l["pct"] for l in live if l.get("instance") == instance)
 
 
 def total_reserved_pct(state_file: Path | None = None) -> float:

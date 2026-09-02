@@ -161,6 +161,42 @@ is building on sand.
   an estimate. There is no hardcoded threshold that flags a member "over budget" — that
   judgment is yours to make against what you know about what each member is FOR.
 
+  **You also own the FLEET-WIDE token budget, not just per-member cost.** Every instance on
+  the box draws from ONE maxx account pool, sliced by two nested dials (Reif, 2026-09-02):
+
+  ```
+  FLEET_SHARE_FRACTION          this INSTANCE's share of the whole account   (e.g. 0.20)
+  FLEET_GRU_ALLOWANCE_FRACTION  gru's share of OUR slice                     (e.g. 0.75)
+
+  instance_ceiling = sustainable_pct_per_hour * FLEET_SHARE_FRACTION
+  gru_allowance    = instance_ceiling * FLEET_GRU_ALLOWANCE_FRACTION   # scripts/gru_allowance.py
+  ```
+
+  What to check, and what each answer means:
+  ```
+  bash scripts/check_share_sum.sh                  # instances' shares must total <= 1.0
+  python3 scripts/maxx_share_ceiling.py "$FLEET_SHARE_FRACTION"   # this instance's ceiling now
+  python3 scripts/gru_allowance.py                 # gru's cut of it
+  python3 scripts/maxx_lease.py total              # everyone's live reservations, all instances
+  ```
+  - `check_share_sum.sh` exits 1 when instances collectively claim more than the account has.
+    Both stay inside their "own" share and every local check still passes, so nothing else
+    catches it — that is a real incident, file it.
+  - An empty ceiling means the meter is unreadable. Everything FAILS OPEN by design (members
+    keep their own conservative defaults), so this is not an emergency — but a meter that
+    stays unreadable for hours means the fleet is flying blind on spend, and that IS.
+  - A ceiling of exactly `0.0000` is an honest answer: the hour is at or past sustainable
+    pace once other instances' live leases are counted. Expected under load, not a fault.
+
+  **The failure mode to watch for here is a dial that looks set but does nothing.** Both of
+  these were live and invisible until 2026-09-02: `FLEET_GRU_ALLOWANCE_FRACTION` produced an
+  identical number at 0.25, 0.75 and 0.99 because the two dials were combined with `min()`
+  instead of multiplied; and each instance kept a PRIVATE lease ledger, so `reserved_pct` —
+  the number the ceiling subtracts specifically to prevent double-spend — never contained the
+  other instance's spend. Both read as healthy the whole time. When you audit spend, verify a
+  dial CHANGES THE OUTPUT rather than trusting that it is set: run `gru_allowance.py`, change
+  nothing, and reason about whether the number it prints is consistent with the dials on disk.
+
   **`FLEET_ENABLED=false` with no in-container cause means A DEPLOY IS RUNNING — check the
   HOST log, not the container.** Deploys cordon the fleet (`scripts/deploy.sh:258` writes
   `FLEET_ENABLED=false`, `:225` restores it) and log to the host at
