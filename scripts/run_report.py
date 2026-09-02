@@ -214,7 +214,8 @@ def classify(report: dict, *, vision_required: bool, exit_code: int | None = Non
 
 def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
                  pass_text: str, usage: dict | None, vision_required: bool,
-                 item_id: str | None = None, pr: str | None = None) -> dict:
+                 item_id: str | None = None, pr: str | None = None,
+                 lane: str | None = None) -> dict:
     """One run = one record. `usage` is pass_accounting's parsed JSON, or None (mechanical)."""
     report = parse_report(pass_text)
     status = classify(report, vision_required=vision_required, exit_code=exit_code)
@@ -247,6 +248,12 @@ def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
         # Optional: a mechanical member or an early-exit ("no unclaimed items") has neither.
         "item_id": item_id,
         "pr": pr,
+        # Structured mirror of a dispatcher's `lane=<name>` prefix in --task (nerd is spawned
+        # this way by datta). Before this field, datta's own lane-attribution had to
+        # keyword-match free-text outcome/evidence against lane names -- self-reported by datta
+        # as fragile and the cause of at least one real mis-attribution. Optional: only a
+        # lane-dispatched pass sets it.
+        "lane": lane,
         # gh#252: which item IDs this pass named in a dispatch line, when the pass never
         # reported and that's why -- null unless status is actually incomplete_fanout, so a
         # normal ok/quiet run (which may also mention a dispatch line in its prose) doesn't
@@ -283,6 +290,7 @@ def main(argv=None) -> int:
     ap.add_argument("--vision-required", action="store_true")
     ap.add_argument("--item-id", help="board item id this pass worked, if any")
     ap.add_argument("--pr", help="PR number this pass produced, if any")
+    ap.add_argument("--lane", help="lane this pass was dispatched for, if any (e.g. nerd's lane=<name> --task prefix)")
     a = ap.parse_args(argv)
 
     if a.pass_file == "-":
@@ -300,7 +308,7 @@ def main(argv=None) -> int:
 
     rec = build_record(member=a.member, run_id=a.run_id, kind=a.kind, exit_code=a.exit_code,
                        pass_text=text, usage=usage, vision_required=a.vision_required,
-                       item_id=a.item_id, pr=a.pr)
+                       item_id=a.item_id, pr=a.pr, lane=a.lane)
     print(json.dumps(rec))
     return 0
 
