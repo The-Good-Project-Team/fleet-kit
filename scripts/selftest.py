@@ -2764,6 +2764,52 @@ def _fleet_view_login_is_still_fail_closed():
     assert "SameSite=Strict" in login, "cookie rides cross-site requests -- CSRF on every write"
 
 
+def _fleet_view_reads_the_api_key_from_the_env_file():
+    """A key present in fleet.env must be readable by the auth path.
+
+    The container is handed FLEET_ENV_FILE (a PATH) and never the file's values, so the
+    server's os.environ has no FLEET_API_KEY no matter what fleet.env holds. Measured live
+    2026-09-02 on fleet-kit-server-fleet: fleet.env carried a real key, `printenv
+    FLEET_API_KEY` inside the container was empty, and POST /api/login answered
+
+        503 no FLEET_API_KEY configured on this instance
+
+    for the correct key and the wrong one alike -- fail-closed, honest-looking, and a total
+    lockout. read_env_state had always read the FILE for exactly this reason; the auth path
+    read os.environ instead.
+
+    The existing login test greps the SOURCE (compare_digest, HttpOnly), so it stayed green
+    through all of it -- source text cannot show that the key is unreadable. This one runs
+    the accessor against a real file with a cleared environment.
+    """
+    import os as _os
+    import importlib as _il
+    import tempfile as _tf
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    with _tf.TemporaryDirectory() as td:
+        envf = Path(td) / "fleet.env"
+        envf.write_text("# comment\nFLEET_ENABLED=true\nFLEET_API_KEY=secret-from-file\n")
+        old_env, old_key = _os.environ.get("FLEET_ENV_FILE"), _os.environ.get("FLEET_API_KEY")
+        _os.environ["FLEET_ENV_FILE"] = str(envf)
+        _os.environ.pop("FLEET_API_KEY", None)   # the real container state
+        try:
+            fvs = _il.import_module("fleet_view_server")
+            _il.reload(fvs)                      # rebind ENV_FILE to the temp file
+            assert fvs.api_key() == "secret-from-file", (
+                f"key in fleet.env is invisible to the auth path (got {fvs.api_key()!r}) -- "
+                "login answers 503 for every key, correct or not"
+            )
+            assert fvs.read_env_values().get("FLEET_ENABLED") == "true", "env parse broke"
+        finally:
+            for k, v in (("FLEET_ENV_FILE", old_env), ("FLEET_API_KEY", old_key)):
+                if v is None:
+                    _os.environ.pop(k, None)
+                else:
+                    _os.environ[k] = v
+
+
 def _gru_allowance_dial_actually_changes_the_number():
     """FLEET_GRU_ALLOWANCE_FRACTION was dead config: every value gave the same allowance.
 
@@ -3384,6 +3430,7 @@ if __name__ == "__main__":
     check("share ceiling is a slice of the hour, not the leftovers", _share_ceiling_is_a_slice_of_the_hour_not_the_leftovers)
     check("oversubscribed instance shares are caught", _oversubscribed_shares_are_caught)
     check("jefe owns the fleet-wide token budget", _jefe_owns_the_fleet_wide_token_budget)
+    check("fleet-view reads FLEET_API_KEY from fleet.env", _fleet_view_reads_the_api_key_from_the_env_file)
     check("FLEET_API_KEY never reaches an LLM pass", _api_key_never_reaches_an_llm)
     check("incidental 'rate limit' text does not gate an account", _classifier_ignores_incidental_rate_limit_text)
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)
