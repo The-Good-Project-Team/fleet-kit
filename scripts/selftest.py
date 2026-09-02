@@ -1885,13 +1885,17 @@ def _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in()
     import subprocess
 
     src = (ROOT / "scripts" / "auto_deploy.sh").read_text()
-    marker_save = 'CALLER_LOG_ENV="${FLEET_LOG_DIR:-}"'
+    marker_save_log = 'CALLER_LOG_ENV="${FLEET_LOG_DIR:-}"'
+    marker_save_name = 'CALLER_CONTAINER_NAME="${FLEET_CONTAINER_NAME:-}"'
     marker_source = '[ -n "${FLEET_INSTANCE_DIR:-}" ] && [ -f "$FLEET_INSTANCE_DIR/fleet.env" ] && { set -a; . "$FLEET_INSTANCE_DIR/fleet.env"; set +a; } || true'
-    marker_restore = 'FLEET_LOG_DIR="$CALLER_LOG_ENV"'
-    for m in (marker_save, marker_source, marker_restore):
+    marker_restore_log = 'FLEET_LOG_DIR="$CALLER_LOG_ENV"'
+    marker_restore_name = 'FLEET_CONTAINER_NAME="$CALLER_CONTAINER_NAME"'
+    for m in (marker_save_log, marker_save_name, marker_source, marker_restore_log, marker_restore_name):
         assert m in src, f"auto_deploy.sh's fleet.env save/source/restore sequence changed -- expected: {m!r}"
-    i1, i2, i3 = src.index(marker_save), src.index(marker_source), src.index(marker_restore)
-    assert i1 < i2 < i3, "auto_deploy.sh's save/source/restore lines are out of order -- reintroduces gh#196"
+    i1, i2, i3 = src.index(marker_save_log), src.index(marker_source), src.index(marker_restore_log)
+    assert i1 < i2 < i3, "auto_deploy.sh's FLEET_LOG_DIR save/source/restore lines are out of order -- reintroduces gh#196"
+    i1n, i3n = src.index(marker_save_name), src.index(marker_restore_name)
+    assert i1n < i2 < i3n, "auto_deploy.sh's FLEET_CONTAINER_NAME save/source/restore lines are out of order"
 
     def git(repo, *args, check=True):
         return subprocess.run(["git", *args], cwd=repo, check=check, capture_output=True, text=True)
@@ -1909,11 +1913,15 @@ def _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in()
         # auto_deploy.sh runs from a crontab line that only ever exports FLEET_INSTANCE_DIR/
         # FLEET_CONTAINER_NAME/FLEET_LOG_DIR (up.sh's AUTO_DEPLOY_LINE); anything else must reach
         # the script through the fleet.env it sources. Also plants fleet.env's own container-
-        # scoped FLEET_LOG_DIR (/var/log/fleet-kit) to prove the source doesn't clobber the
-        # caller's host-scoped value (same gh#196 class deploy.sh already guards against).
+        # scoped FLEET_LOG_DIR (/var/log/fleet-kit) AND a hand-edited-looking FLEET_CONTAINER_NAME
+        # to prove the source doesn't clobber either caller-provided value (same gh#196 class
+        # deploy.sh already guards against for FLEET_LOG_DIR; FLEET_CONTAINER_NAME matters because
+        # INSTANCE_KEY/STATE/LOCKFILE are computed from the cron-exported value BEFORE this source,
+        # so a fleet.env override reaching deploy.sh unchecked would deploy under a different
+        # container name than the one this tick's own state tracking used).
         instance_dir = tmp / f"{name}.instance"
         instance_dir.mkdir(exist_ok=True)
-        env_lines = ["FLEET_LOG_DIR=/var/log/fleet-kit\n"]
+        env_lines = ["FLEET_LOG_DIR=/var/log/fleet-kit\n", "FLEET_CONTAINER_NAME=hand-edited-other-name\n"]
         if self_heal:
             env_lines.append("FLEET_AUTO_DEPLOY_SELF_HEAL=true\n")
         (instance_dir / "fleet.env").write_text("".join(env_lines))
@@ -1954,7 +1962,10 @@ def _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in()
         # Records the FLEET_LOG_DIR it actually received -- proves auto_deploy.sh's own
         # save/restore around sourcing fleet.env protects what it hands to deploy.sh, not just
         # its own log() calls (the exact gh#196 clobber class).
-        deploy_stub.write_text('#!/bin/bash\necho "DEPLOY STUB OK"\necho "$FLEET_LOG_DIR" > "${DEPLOY_STUB_MARKER:?}"\n')
+        deploy_stub.write_text(
+            '#!/bin/bash\necho "DEPLOY STUB OK"\n'
+            'printf "%s\\n%s\\n" "$FLEET_LOG_DIR" "$FLEET_CONTAINER_NAME" > "${DEPLOY_STUB_MARKER:?}"\n'
+        )
         deploy_stub.chmod(0o755)
         git(seed, "add", "-A")
         git(seed, "commit", "-q", "-m", "init")
@@ -2003,9 +2014,14 @@ def _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in()
             "self-heal did not land the checkout on origin/main"
         assert marker_a.exists(), "self-heal did not proceed into deploy.sh"
         assert "deploy OK" in log_text, "self-heal did not complete the normal deploy path"
-        assert marker_a.read_text().strip() == str(tmp / "case-content-identical-optedin.logs"), (
+        seen_log_dir, seen_container_name = marker_a.read_text().splitlines()
+        assert seen_log_dir == str(tmp / "case-content-identical-optedin.logs"), (
             "fleet.env's container-scoped FLEET_LOG_DIR clobbered the caller's host-scoped value "
             "on its way to deploy.sh -- the exact gh#196 clobber class"
+        )
+        assert seen_container_name == "test", (
+            "fleet.env's FLEET_CONTAINER_NAME reached deploy.sh unrestored -- diverges from the "
+            f"INSTANCE_KEY/STATE/LOCKFILE this tick already computed from it: {seen_container_name!r}"
         )
         state_file = tmp / "case-content-identical-optedin.home" / ".cache" / "fleet-kit" / "auto_deploy.last_sha.test"
         assert state_file.exists() and state_file.read_text().strip() == origin_main_sha, \

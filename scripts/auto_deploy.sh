@@ -46,12 +46,18 @@ cd "$KIT_DIR"
 # edit. Same save/source/restore discipline deploy.sh already uses (scripts/deploy.sh:58) for the
 # identical reason: fleet.env's own FLEET_LOG_DIR is CONTAINER-scoped (/var/log/fleet-kit) and
 # would silently clobber the HOST-scoped value the cron caller already exported -- the exact
-# gh#196 incident deploy.sh's own header documents. $LOG/$LOG_DIR above are already resolved
-# from the caller's value, so this can't affect where THIS script's own log() writes; it only
-# protects what auto_deploy.sh hands to deploy.sh as a child process below.
+# gh#196 incident deploy.sh's own header documents. $LOG/$LOG_DIR/$INSTANCE_KEY/$STATE/$LOCKFILE
+# above are already resolved from the caller's values, so this can't move where THIS tick reads
+# or writes its own state; it only protects what auto_deploy.sh hands to deploy.sh as a child
+# process below. FLEET_CONTAINER_NAME is saved/restored for the same reason as FLEET_LOG_DIR: if
+# it ever diverged from the cron-exported value (e.g. an instance's fleet.env hand-edited without
+# re-running up.sh), the deploy.sh child would target a different container than the one
+# INSTANCE_KEY/STATE/LOCKFILE above were computed against.
 CALLER_LOG_ENV="${FLEET_LOG_DIR:-}"
+CALLER_CONTAINER_NAME="${FLEET_CONTAINER_NAME:-}"
 [ -n "${FLEET_INSTANCE_DIR:-}" ] && [ -f "$FLEET_INSTANCE_DIR/fleet.env" ] && { set -a; . "$FLEET_INSTANCE_DIR/fleet.env"; set +a; } || true
 FLEET_LOG_DIR="$CALLER_LOG_ENV"
+FLEET_CONTAINER_NAME="$CALLER_CONTAINER_NAME"
 
 # ONE deploy at a time. This poll fires every 5 minutes, and since the drain gate landed
 # (deploy.sh, 2026-08-26) a single deploy can legitimately hold for up to FLEET_DRAIN_MAX_S
