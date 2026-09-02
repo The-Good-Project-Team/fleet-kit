@@ -248,14 +248,7 @@ def read_env_flags() -> dict:
     such env var for a run_member.sh member. Also carries the DIAL_FIELDS tuning values (raw
     strings, blank if unset) and SIBLINGS for the Settings page -- same file, same request,
     one round trip."""
-    text = ENV_FILE.read_text(errors="ignore") if ENV_FILE.exists() else ""
-    values = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, _, v = line.partition("=")
-        values[k.strip()] = v.strip()
+    values = read_env_values()
     out = {"FLEET_ENABLED": values.get("FLEET_ENABLED", "true") == "true", "REPO_URL": REPO_URL,
            "SIBLINGS": SIBLINGS}
     for key in DIAL_FIELDS:
@@ -267,6 +260,32 @@ def read_env_flags() -> dict:
     except Exception:
         pass
     return out
+
+
+def read_env_values() -> dict:
+    """Every KEY=value in fleet.env, as text. The file -- not this process's environment --
+    is authoritative for anything an operator can edit at runtime: the container is handed
+    FLEET_ENV_FILE (a path) but never the file's values, so a key added to fleet.env after the
+    server started is invisible to os.environ forever. read_env_state has always read the file
+    for exactly this reason; the auth path did not, which made FLEET_API_KEY unreadable and
+    every login a fail-closed 503 on an instance whose fleet.env held a perfectly good key.
+    """
+    text = ENV_FILE.read_text(errors="ignore") if ENV_FILE.exists() else ""
+    values = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        values[k.strip()] = v.strip()
+    return values
+
+
+def api_key() -> str:
+    """The configured FLEET_API_KEY, file first, process env as fallback. One accessor so the
+    gate (_authorized) and the cookie mint (_handle_login) can never disagree about whether a
+    key exists -- disagreement there means login succeeds and every write still 401s."""
+    return (read_env_values().get("FLEET_API_KEY") or os.environ.get("FLEET_API_KEY") or "").strip()
 
 
 def write_env_flag(key: str, value: bool) -> None:
@@ -702,7 +721,7 @@ class Handler(BaseHTTPRequestHandler):
         client = self.client_address[0] if self.client_address else ""
         if client in ("127.0.0.1", "::1", "localhost"):
             return True
-        key = (os.environ.get("FLEET_API_KEY") or "").strip()
+        key = api_key()
         if not key:
             return False   # fail closed: no key configured => no remote writes, ever
         sent = (self.headers.get("X-Fleet-Key") or "").strip()
@@ -737,7 +756,7 @@ class Handler(BaseHTTPRequestHandler):
         but an operator on the box hits plain http://localhost and a Secure cookie would be
         silently dropped there.
         """
-        key = (os.environ.get("FLEET_API_KEY") or "").strip()
+        key = api_key()
         if not key:
             # Fail closed, and say why -- an operator staring at a dead Save button deserves
             # the actual reason rather than a generic 401.
