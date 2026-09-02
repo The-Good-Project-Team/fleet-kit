@@ -2842,6 +2842,138 @@ def _gru_charter_does_not_reinstate_the_broken_math():
         "charter still tells gru to min() the two fractions -- the dead-dial bug"
 
 
+def _lease_ledger_is_shared_across_instances():
+    """Two instances on one box share ONE maxx account pool -- and had two private ledgers.
+
+    Live 2026-09-02: philanthropy kept maxx-leases.json under instances/nonprofit-atlas/logs
+    and fleet-kit-server-fleet kept its own under fleet-kit-server-fleet/logs. Neither could
+    see the other's in-flight spend, so `reserved_pct` -- the number maxx_share_ceiling.py
+    subtracts specifically to prevent double-spend, and whose result its own comment calls
+    "already-coordinated" -- was never coordinated across instances at all.
+    """
+    import importlib, os, sys as _sys
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    with tempfile.TemporaryDirectory() as tmp:
+        shared = Path(tmp) / "shared"
+        os.environ["FLEET_LEASE_DIR"] = str(shared)
+        os.environ["FLEET_LOG_DIR"] = str(Path(tmp) / "per-instance")
+        import maxx_lease
+        importlib.reload(maxx_lease)
+        try:
+            assert str(shared) in str(maxx_lease.STATE_FILE), (
+                f"FLEET_LEASE_DIR ignored -- ledger still at {maxx_lease.STATE_FILE}, so each "
+                "instance keeps a private ledger and cannot coordinate"
+            )
+            # A lease taken by one instance must be visible in the other's global total.
+            maxx_lease.maxx_reserve(0.05, "a", 3600, instance="philanthropy")
+            total = maxx_lease.total_reserved_pct()
+            assert abs(total - 0.05) < 1e-9, f"lease invisible in shared total: {total}"
+            mine = maxx_lease.reserved_pct_for(instance="server-fleet")
+            assert mine == 0.0, "another instance's lease counted against this one's slice"
+        finally:
+            os.environ.pop("FLEET_LEASE_DIR", None)
+            os.environ.pop("FLEET_LOG_DIR", None)
+            importlib.reload(maxx_lease)
+
+
+def _an_instance_cannot_spend_past_its_own_slice():
+    """A share must be a RESERVATION, not a rate limit on a race.
+
+    Reif, 2026-09-02: "we could reserve a slice of the hourly for a certain instance, say 30%
+    -- and then before gru gets there, it could be all gone." That was literally true: the
+    ceiling was computed from whatever remained at the moment of asking, so the first caller
+    took the pot and a later caller's 30% was 30% of the leftovers.
+
+    Enforcement means a caller is REFUSED once its own live leases fill its budget, and that
+    the refusal protects the neighbour's slice rather than the global pot.
+    """
+    import importlib, os, sys as _sys
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["FLEET_LEASE_DIR"] = tmp
+        import maxx_lease
+        importlib.reload(maxx_lease)
+        try:
+            budget = 0.30
+            maxx_lease.maxx_reserve(0.20, "gru", 3600, instance="A", budget_pct=budget)
+            maxx_lease.maxx_reserve(0.09, "judge", 3600, instance="A", budget_pct=budget)
+            try:
+                maxx_lease.maxx_reserve(0.05, "greedy", 3600, instance="A", budget_pct=budget)
+            except maxx_lease.LeaseDenied:
+                pass
+            else:
+                raise AssertionError(
+                    "instance A reserved past its own 0.30 slice -- the share is unenforced"
+                )
+            # B's slice is untouched by A having exhausted its own.
+            b = maxx_lease.maxx_reserve(0.30, "b-gru", 3600, instance="B", budget_pct=budget)
+            assert b, "instance B was blocked by A's spend -- slices are not independent"
+            assert abs(maxx_lease.reserved_pct_for(instance="A") - 0.29) < 1e-9
+            assert abs(maxx_lease.reserved_pct_for(instance="B") - 0.30) < 1e-9
+        finally:
+            os.environ.pop("FLEET_LEASE_DIR", None)
+            importlib.reload(maxx_lease)
+
+
+def _share_ceiling_is_a_slice_of_the_hour_not_the_leftovers():
+    """The ceiling must not shrink just because a NEIGHBOUR spent first.
+
+    Old formula: (sustainable - used - reserved) * share -- an instance arriving after a
+    greedy neighbour got `share` of the remainder. New: sustainable * share, minus only what
+    this instance itself already holds, then clamped to what genuinely remains globally.
+    """
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        stub = Path(tmp) / "stubs"; stub.mkdir()
+        # A neighbour has burned a big chunk of the hour; this instance has spent nothing.
+        (stub / "maxx_reader.py").write_text(
+            "def get_headroom():\n"
+            "    return (1.0, 'ok', {'sustainable_pct_per_hour': 1.0,\n"
+            "                        'per_diem_hourly_pct': 0.50, 'reserved_pct': 0})\n")
+        (stub / "maxx_lease.py").write_text(
+            "def total_reserved_pct():\n    return 0.0\n"
+            "def reserved_pct_for(*a, **k):\n    return 0.0\n")
+        kit = Path(tmp) / "scripts"; kit.mkdir()
+        import shutil
+        shutil.copy(ROOT / "scripts" / "maxx_share_ceiling.py", kit / "maxx_share_ceiling.py")
+        for f in stub.glob("*.py"):
+            shutil.copy(f, kit / f.name)
+        out = subprocess.run([sys.executable, str(kit / "maxx_share_ceiling.py"), "0.30"],
+                             capture_output=True, text=True, timeout=20).stdout.strip()
+        assert out, "ceiling produced no reading"
+        got = float(out)
+        # Slice of the HOUR: 1.0 * 0.30 = 0.30, and 0.50 remains globally so it is not clamped.
+        assert abs(got - 0.30) < 1e-4, (
+            f"expected a 0.30 slice of the hour, got {got} -- this is the old "
+            "share-of-the-leftovers behaviour (0.5*0.3=0.15) the fix removes"
+        )
+
+
+def _oversubscribed_shares_are_caught():
+    """Strict slices only hold if the slices FIT.
+
+    Two instances at 0.60 each reserve 120% of the hour: both stay inside their "own" share,
+    every local check passes, and the account is oversubscribed -- the exact race the slices
+    remove, restored silently by a config typo. Nothing checked this, so the guard is a script
+    a human or cron can run.
+    """
+    import os, subprocess
+    script = ROOT / "scripts" / "check_share_sum.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for name, frac in (("a", "0.60"), ("b", "0.20")):
+            (root / name).mkdir()
+            (root / name / "fleet.env").write_text(f"FLEET_SHARE_FRACTION={frac}\n")
+        env = {**os.environ, "FLEET_INSTANCES_ROOT": str(root)}
+        ok = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env)
+        assert ok.returncode == 0, f"0.60+0.20 wrongly flagged: {ok.stdout}"
+
+        (root / "b" / "fleet.env").write_text("FLEET_SHARE_FRACTION=0.60\n")
+        bad = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env)
+        assert bad.returncode == 1, "0.60+0.60 = 1.2 was not flagged as oversubscribed"
+        assert "OVERSUBSCRIBED" in bad.stdout
+
+
 def _bash_eval(setup: str, expr: str) -> str:
     """Source account_pool.sh in a scratch HOME and echo one expression's result."""
     import subprocess
@@ -3225,6 +3357,10 @@ if __name__ == "__main__":
     check("gru allowance dial actually changes the number", _gru_allowance_dial_actually_changes_the_number)
     check("gru allowance fails open and clamps typos", _gru_allowance_fails_open_and_clamps_typos)
     check("gru charter does not reinstate the broken math", _gru_charter_does_not_reinstate_the_broken_math)
+    check("lease ledger is shared across instances", _lease_ledger_is_shared_across_instances)
+    check("an instance cannot spend past its own slice", _an_instance_cannot_spend_past_its_own_slice)
+    check("share ceiling is a slice of the hour, not the leftovers", _share_ceiling_is_a_slice_of_the_hour_not_the_leftovers)
+    check("oversubscribed instance shares are caught", _oversubscribed_shares_are_caught)
     check("FLEET_API_KEY never reaches an LLM pass", _api_key_never_reaches_an_llm)
     check("incidental 'rate limit' text does not gate an account", _classifier_ignores_incidental_rate_limit_text)
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)
