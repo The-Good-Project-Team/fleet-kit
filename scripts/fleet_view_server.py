@@ -425,6 +425,66 @@ def _session_token(key: str) -> str:
     return hmac.new(key.encode(), b"fleet-view-session-v1", "sha256").hexdigest()
 
 
+
+def _budget_preview() -> dict:
+    """Live derivation of gru's hourly allowance, for display on the Settings page.
+
+    Returns every intermediate value, not just the answer, so an operator can SEE which dial
+    moved what -- and so a nonsense result (empty ceiling, zero headroom, a fraction that
+    changes nothing) is visible instead of silently swallowed. Never raises: this is a
+    read-only display route and a broken meter must degrade to an explanation, not a 500.
+    """
+    flags = read_env_flags()
+    share = (flags.get("FLEET_SHARE_FRACTION") or "").strip()
+    gru_frac = (flags.get("FLEET_GRU_ALLOWANCE_FRACTION") or "").strip()
+
+    out: dict = {
+        "share_fraction": share or None,
+        "gru_fraction": gru_frac or None,
+        "ceiling_pct": None,
+        "gru_allowance_pct": None,
+        "others_pct": None,
+        "formula": "instance_ceiling = account_hourly_headroom x share_fraction ; "
+                   "gru_allowance = instance_ceiling x gru_fraction",
+        "note": None,
+    }
+    if not share or share == "1.0":
+        out["note"] = ("FLEET_SHARE_FRACTION is unset or 1.0, so no ceiling is exported and "
+                       "gru falls back to its own default -- set it below to cap this instance.")
+        return out
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(KIT_DIR / "scripts" / "maxx_share_ceiling.py"), share],
+            capture_output=True, text=True, timeout=20)
+        ceiling = (proc.stdout or "").strip()
+    except Exception as exc:  # noqa: BLE001 -- display route, never 500 on a meter hiccup
+        out["note"] = f"could not read the maxx meter: {exc}"
+        return out
+    if not ceiling:
+        out["note"] = ("maxx meter unreadable right now -- no ceiling. gru fails OPEN to its "
+                       "own conservative default; nothing is over-spent.")
+        return out
+
+    out["ceiling_pct"] = ceiling
+    try:
+        sys.path.insert(0, str(KIT_DIR / "scripts"))
+        import gru_allowance
+        allowance = gru_allowance.compute(ceiling, gru_frac or None)
+    except Exception as exc:  # noqa: BLE001
+        out["note"] = f"could not compute allowance: {exc}"
+        return out
+    if allowance:
+        out["gru_allowance_pct"] = allowance
+        try:
+            out["others_pct"] = f"{float(ceiling) - float(allowance):.4f}"
+        except ValueError:
+            pass
+        if float(ceiling) == 0.0:
+            out["note"] = ("ceiling is a real 0.0 -- this hour is already at or past "
+                           "sustainable pace once other instances' reservations are counted.")
+    return out
+
+
 class State:
     """In-memory snapshot, refreshed by two background loops. Reads never block on either."""
     def __init__(self):
@@ -850,6 +910,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/fleet_state":
             self._json(read_env_flags())
+            return
+        if path == "/api/budget_preview":
+            # Show the operator the ACTUAL arithmetic behind the two dials, with live numbers.
+            # Reif, 2026-09-02: "we can easily mess this up and it be way wrong" -- and it had
+            # been, silently, for weeks (see gru_allowance.py's header). Two nested percentages
+            # that LOOK independent are exactly the shape a human mis-tunes, so the page shows
+            # the derivation and the resulting number rather than two bare inputs.
+            self._json(_budget_preview())
             return
         if path == "/api/members":
             # Every member's reviewed spec + whatever's currently overridden on top of it --

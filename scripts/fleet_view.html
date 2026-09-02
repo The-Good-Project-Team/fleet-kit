@@ -1312,7 +1312,37 @@ function renderSettingsPage() {
       ${dialRows}
       <button class="btn go" id="saveDials" style="margin-top:12px">Save</button>
       <span id="dialsMsg" class="rmeta" style="margin-left:10px"></span>
+      <div id="budgetPreview" class="rmeta" style="margin-top:14px; padding:10px 12px;
+           border-left:3px solid #888; background:rgba(128,128,128,.08); line-height:1.7;
+           font-variant-numeric:tabular-nums">reading meter…</div>
     </div>`;
+  renderBudgetPreview();
+  window.renderBudgetPreview = async () => {
+    const el = document.getElementById('budgetPreview');
+    if (!el) return;
+    let p;
+    try { p = await (await fetch('/api/budget_preview')).json(); }
+    catch (e) { el.textContent = 'budget preview unavailable'; return; }
+    const esc = t => String(t).replace(/[<&]/g, c => (c === '<' ? '&lt;' : '&amp;'));
+    // Show the DERIVATION, not just the answer -- two nested percentages that look
+    // independent are exactly what a human mis-tunes, and this dial was silently dead
+    // for weeks because the page only ever showed the two raw inputs.
+    if (!p.ceiling_pct) {
+      el.innerHTML = `<b>Budget</b><br><span style="opacity:.8">${esc(p.note || 'no reading')}</span>`;
+      return;
+    }
+    const pct = v => (v === null || v === undefined) ? '—' : esc(v);
+    el.innerHTML =
+      `<b>What these dials actually produce</b> <span style="opacity:.7">(percent-of-week units, live)</span><br>` +
+      `account hourly headroom &times; <b>${pct(p.share_fraction)}</b> (share) ` +
+      `= <b>${pct(p.ceiling_pct)}</b> &larr; this instance's ceiling<br>` +
+      `${pct(p.ceiling_pct)} &times; <b>${pct(p.gru_fraction)}</b> (gru) ` +
+      `= <b>${pct(p.gru_allowance_pct)}</b> &larr; gru gets this<br>` +
+      `<span style="opacity:.8">remaining <b>${pct(p.others_pct)}</b> for the other eight members ` +
+      `(marie, jefe, judge-judy, the-fixer, roomba, dumbledore, messenger)</span>` +
+      (p.note ? `<br><span style="opacity:.8">${esc(p.note)}</span>` : '');
+  };
+
   document.getElementById('signIn').onclick = async () => {
     const el = document.getElementById('apiKeyInput');
     const msg = document.getElementById('signInMsg');
@@ -1340,6 +1370,9 @@ function renderSettingsPage() {
     document.getElementById('dialsMsg').textContent = resp.ok
       ? `saved ${resp.written.length} field(s)`
       : (r.status === 401 ? 'not signed in -- enter FLEET_API_KEY above' : (resp.error || 'save failed'));
+    // Re-derive immediately: the whole point is that the operator SEES what the new dial did,
+    // rather than trusting that a number they typed had the effect they intended.
+    if (resp.ok) await renderBudgetPreview();
   };
 }
 

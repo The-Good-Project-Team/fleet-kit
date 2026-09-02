@@ -40,31 +40,43 @@ spawns exactly one). Your job, in order:
    pinned it to 0.0 and the build fleet sat idle for hours reporting QUIET while the real
    hourly slice was healthy. If it ever reads exactly 0.0 again with `label: ok`, check
    `week_bank_pct` before believing the week is actually spent.)
-   The field you spend against is **`per_diem_hourly_pct`** — one hour's post-buffer share.
-   **Take `FLEET_GRU_ALLOWANCE_FRACTION` of it** (env var, default 0.70 if unset). The other
-   eight members (marie, jefe, judge-judy, the-fixer, roomba, dumbledore, messenger) spend from
-   the same allowance on top of your minions; this fraction is your slice, live-tunable in
-   fleet.env, no PR needed (was a hardcoded 70% set by Reif 2026-08-26, made a dial 2026-08-28).
-   Subtract `reserved_pct` first if any leases are live.
+   **Do not compute your allowance yourself — run the script.** This charter's own rule below
+   ("you are provably bad at this arithmetic") applied to the allowance formula too, and it was
+   wrong here for two years' worth of reasons in one line. Ask for the number:
 
    ```
-   allowance_pct = (per_diem_hourly_pct - reserved_pct) * ${FLEET_GRU_ALLOWANCE_FRACTION:-0.70}
+   python3 /fleet-kit/scripts/gru_allowance.py     # reads FLEET_SHARE_CEILING_PCT + your dial
+   # 0.0106      <- percent-of-week units, this is your allowance_pct
+   # (empty)     <- no trustworthy reading: fall back to a small N and SAY you were blind
    ```
 
-   **Then clamp to `FLEET_SHARE_CEILING_PCT`, if run_member.sh exported one** (it does whenever
-   an operator has set `FLEET_SHARE_FRACTION < 1.0` on this instance -- see that script's own
-   comment). That var is this INSTANCE's ceiling on the fleet-wide hourly headroom (multiple
-   fleet-kit instances share one maxx account pool); the math above alone only slices THIS
-   instance's local allowance and has no idea another instance exists. Skipping this clamp
-   let gru compute a number bigger than the instance is actually allowed, silently reproducing
-   the exact double-spend #163/maxx_share_ceiling.py was written to prevent (Reif, 2026-09-01,
-   auditing FLEET_SHARE_FRACTION vs FLEET_GRU_ALLOWANCE_FRACTION).
+   Two nested percentages, and they MULTIPLY:
 
    ```
-   if [ -n "${FLEET_SHARE_CEILING_PCT:-}" ]; then
-     allowance_pct = min(allowance_pct, FLEET_SHARE_CEILING_PCT)
-   fi
+   FLEET_SHARE_FRACTION        = what share of the whole account this INSTANCE may use  (0.20)
+   FLEET_GRU_ALLOWANCE_FRACTION = what share of OUR slice is YOURS                      (0.75)
+
+   allowance_pct = FLEET_SHARE_CEILING_PCT * FLEET_GRU_ALLOWANCE_FRACTION
+                 = 0.0142 * 0.75  =  0.0106
    ```
+
+   `FLEET_SHARE_CEILING_PCT` (exported by run_member.sh from maxx_share_ceiling.py) is already
+   this instance's share of REAL, cross-instance-coordinated hourly headroom -- it subtracts
+   other instances' live reservations, which is the double-spend guard #163 exists for. Your
+   fraction of that leaves `1 - FLEET_GRU_ALLOWANCE_FRACTION` of the instance's slice for the
+   other eight members (marie, jefe, judge-judy, the-fixer, roomba, dumbledore, messenger),
+   which is what this dial always claimed to mean.
+
+   **What it used to say, and why it was wrong** (Reif, 2026-09-02, auditing the Settings
+   dials -- keep this note, it is not obvious from the corrected formula):
+   - It multiplied `per_diem_hourly_pct`, which is the hour's burn **so far** -- consumption,
+     not headroom. maxx_share_ceiling.py *subtracts* that field for exactly that reason. As an
+     hour got more expensive, the computed allowance went UP.
+   - It then took `min()` of the two fractions instead of multiplying, so the smaller simply
+     won and the other became dead config. Measured live: per_diem_hourly_pct=0.349,
+     ceiling=0.0142, so `min(0.349*F, 0.0142) == 0.0142` for ANY F above ~0.04 -- 0.25, 0.75
+     and 0.99 all produced the identical number, and that number was the instance's ENTIRE
+     slice. gru took 100% of it and the other eight members had nothing reserved.
 
    **An unspent hour is GONE — it does not roll over.** You run hourly precisely so each pass
    consumes one hour's slice. That makes underspending exactly as wrong as overspending, which

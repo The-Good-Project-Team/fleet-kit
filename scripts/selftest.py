@@ -494,9 +494,16 @@ def _gru_md_clamps_allowance_to_share_ceiling():
     assert "FLEET_SHARE_CEILING_PCT" in text, \
         "gru.md lost its FLEET_SHARE_CEILING_PCT reference -- gru can double-spend headroom " \
         "another fleet-kit instance already reserved"
-    assert "min(allowance_pct, FLEET_SHARE_CEILING_PCT)" in text, \
-        "gru.md's clamp line changed shape or was removed -- allowance_pct must be clamped, " \
-        "not merely mentioned alongside FLEET_SHARE_CEILING_PCT"
+    # The clamp became a MULTIPLY (2026-09-02): allowance = CEILING * GRU_ALLOWANCE_FRACTION.
+    # That is strictly stronger than the old min() -- the result is always <= the ceiling for
+    # any fraction in [0,1], AND it stops gru taking 100% of the instance's slice, which min()
+    # allowed (and in practice always produced, making the dial dead config). What this test
+    # guards is the INTENT -- gru's number is derived FROM the instance ceiling, never from raw
+    # local headroom -- so it accepts either composition rather than pinning one spelling.
+    assert ("min(allowance_pct, FLEET_SHARE_CEILING_PCT)" in text
+            or "FLEET_SHARE_CEILING_PCT * FLEET_GRU_ALLOWANCE_FRACTION" in text), \
+        "gru.md no longer derives allowance_pct from FLEET_SHARE_CEILING_PCT -- gru can " \
+        "double-spend headroom another fleet-kit instance already reserved"
     # The fanout.py call site must hand it the ALREADY-clamped value, not re-derive the raw
     # unclamped formula a second time (that would silently bypass the clamp above it).
     assert "${FLEET_GRU_ALLOWANCE_FRACTION:-0.70}>" not in text, \
@@ -2757,6 +2764,84 @@ def _fleet_view_login_is_still_fail_closed():
     assert "SameSite=Strict" in login, "cookie rides cross-site requests -- CSRF on every write"
 
 
+def _gru_allowance_dial_actually_changes_the_number():
+    """FLEET_GRU_ALLOWANCE_FRACTION was dead config: every value gave the same allowance.
+
+    Live 2026-09-02 on fleet-kit-server-fleet: per_diem_hourly_pct=0.349, ceiling at
+    FLEET_SHARE_FRACTION=0.20 was 0.0142. gru.md said
+
+        allowance = (per_diem_hourly_pct - reserved_pct) * FLEET_GRU_ALLOWANCE_FRACTION
+        allowance = min(allowance, FLEET_SHARE_CEILING_PCT)
+
+    so min(0.349*F, 0.0142) == 0.0142 for ANY F above ~0.04. Reif set the dial 0.25 -> 0.75
+    and nothing changed, because the clamp always won. Worse, the number it always produced
+    was the instance's ENTIRE slice -- gru took 100%, leaving nothing for the other eight
+    members the fraction exists to reserve for.
+
+    The two vars answer nested questions ("what share of the account is ours?" then "what
+    share of ours is gru's?") so they MULTIPLY. This pins that a change to the dial actually
+    moves the output, which is the property min() destroyed.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    from gru_allowance import compute
+
+    ceiling = "0.0142"   # the real measured ceiling from the incident
+    quarter = float(compute(ceiling, "0.25"))
+    three_q = float(compute(ceiling, "0.75"))
+    assert quarter != three_q, (
+        f"dial is dead: 0.25 and 0.75 both yield {quarter} -- this is the min() bug"
+    )
+    # Compare against the true product, not 3*quarter -- the output is rounded to 4 decimals,
+    # so scaling a rounded value re-rounds and drifts (3*0.0036 = 0.0108, not 0.0106).
+    assert abs(three_q - float(ceiling) * 0.75) < 5e-5, "fraction does not scale the ceiling"
+    assert abs(quarter - float(ceiling) * 0.25) < 5e-5, "fraction does not scale the ceiling"
+    assert three_q > quarter, "a larger fraction did not yield a larger allowance"
+
+    # gru must never take the whole instance slice: 1-F is what the other eight members get.
+    assert three_q < float(ceiling), (
+        "gru's allowance equals the entire instance ceiling -- nothing left for marie, jefe, "
+        "judge-judy, the-fixer, roomba, dumbledore, messenger"
+    )
+    assert abs(three_q - 0.0106) < 0.0001, f"expected 0.0142*0.75=0.0106, got {three_q}"
+
+
+def _gru_allowance_fails_open_and_clamps_typos():
+    """No trustworthy ceiling must CONSERVE, never silently mean "unlimited".
+
+    Same law as maxx_reader.py / maxx_share_ceiling.py: an unreadable meter may only ever
+    narrow ambition. An empty ceiling prints nothing so gru falls back to its own documented
+    default; a real 0.0 is an honest answer and IS printed.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    from gru_allowance import compute
+
+    assert compute("", "0.75") == "", "missing ceiling did not fail open"
+    assert compute(None, "0.75") == "", "absent ceiling did not fail open"
+    assert compute("garbage", "0.75") == "", "unparseable ceiling did not fail open"
+    assert compute("0.0", "0.75") == "0.0000", "a real zero ceiling must be reported, not hidden"
+
+    # An operator typo must never raise gru above the instance's own slice.
+    assert float(compute("0.0142", "1.5")) <= 0.0142, "fraction >1.0 exceeded the ceiling"
+    assert float(compute("0.0142", "-1")) >= 0.0, "negative fraction produced a negative allowance"
+    # An unset fraction falls back to the documented default, not to 1.0 (the whole slice).
+    assert float(compute("0.0142", "")) < 0.0142, "unset fraction defaulted to the entire ceiling"
+
+
+def _gru_charter_does_not_reinstate_the_broken_math():
+    """gru.md must point at the script, not re-derive the number in prose.
+
+    The charter's own rule is "do not do this arithmetic in your head -- you are provably bad
+    at it," and then it asked gru to do exactly that. A prose formula is what let the wrong
+    base (per_diem_hourly_pct is the hour's BURN, not its headroom) go unnoticed.
+    """
+    charter = (ROOT / "members" / "gru" / "gru.md").read_text()
+    assert "gru_allowance.py" in charter, "charter does not point at the deterministic script"
+    assert "min(allowance_pct, FLEET_SHARE_CEILING_PCT)" not in charter, \
+        "charter still tells gru to min() the two fractions -- the dead-dial bug"
+
+
 def _bash_eval(setup: str, expr: str) -> str:
     """Source account_pool.sh in a scratch HOME and echo one expression's result."""
     import subprocess
@@ -3137,6 +3222,9 @@ if __name__ == "__main__":
     check("fleet-view write routes are authenticated and fail closed", _write_routes_are_authenticated)
     check("fleet-view UI can actually authenticate a write", _fleet_view_ui_can_actually_authenticate_a_write)
     check("fleet-view login is still fail-closed", _fleet_view_login_is_still_fail_closed)
+    check("gru allowance dial actually changes the number", _gru_allowance_dial_actually_changes_the_number)
+    check("gru allowance fails open and clamps typos", _gru_allowance_fails_open_and_clamps_typos)
+    check("gru charter does not reinstate the broken math", _gru_charter_does_not_reinstate_the_broken_math)
     check("FLEET_API_KEY never reaches an LLM pass", _api_key_never_reaches_an_llm)
     check("incidental 'rate limit' text does not gate an account", _classifier_ignores_incidental_rate_limit_text)
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)
