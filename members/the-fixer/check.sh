@@ -131,6 +131,26 @@ DEP_CONC="${DEPLOY_STATE%% *}"; DEP_SHA="${DEPLOY_STATE#* }"
 # unattended -- traced check.sh live, reproduced the miss, confirmed the schema split by
 # diffing gh pr view --json statusCheckRollup for a CheckRun vs a StatusContext entry). Both
 # fields are checked below now, not just one.
+# SHAPE 6 IS THE "DONE BUT NOT DELIVERED" CLASS -- green, mergeable, and going nowhere.
+#
+# Shapes 1-5 all key on RED or ABSENT: something failed, conflicted, hung, errored, or never
+# reported. There is a sixth outcome none of them can see -- every check PASSED, the branch is
+# mergeable, and the PR still sits open forever because nothing ever armed auto-merge on it.
+# fleet-kit arms auto-merge in exactly ONE place (worktree_builder.sh, at PR-creation time), so
+# a PR opened by a human, an external agent, or a hand-pushed branch is never armed at all.
+#
+# Live proof case (fleet-kit#291, 2026-09-02): judge-judy BLOCKed it at 15:30, auto_update_branch
+# rebased it, judge-judy re-reviewed at 15:47 and posted fleet-code-review=SUCCESS. selftest
+# green, mergeStateStatus CLEAN, automerge=none. The whole self-heal loop ran end to end and
+# stopped one step short of done -- silently, with nothing red anywhere for shapes 1-5 to find.
+# auto_update_branch.sh now arms these on a schedule, but an arm can itself fail (auto-merge
+# disabled on the repo, insufficient token scope) and that failure is only a log line. This
+# shape is the alarm for "the fix that was supposed to unstick it did not".
+#
+# Gated on the SAME staleness cutoff as the other quiet shapes: a PR that went green 90 seconds
+# ago is not parked, it is just new, and the arming sweep runs every 15 minutes. UNSTABLE counts
+# alongside CLEAN because a non-required check being red still leaves a PR mergeable -- required
+# checks are what gate the merge, and a genuinely failing required check is already shape 1.
 STALE_PENDING_HOURS="${FIXER_STALE_PENDING_HOURS:-2}"
 read_stale_prs() { # -> space-separated "num:sha:reason" triples, oldest first, or nothing
   # `gh ... -q/--jq` is a plain expression string, NOT the real jq CLI -- it has no --arg flag
@@ -140,7 +160,7 @@ read_stale_prs() { # -> space-separated "num:sha:reason" triples, oldest first, 
   cutoff=$(date -u -d "-${STALE_PENDING_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
            || date -u -v-"${STALE_PENDING_HOURS}"H +%Y-%m-%dT%H:%M:%SZ)
   gh pr list --state open --limit 30 \
-    --json number,headRefOid,mergeStateStatus,statusCheckRollup \
+    --json number,headRefOid,mergeStateStatus,statusCheckRollup,isDraft,autoMergeRequest,updatedAt \
     -q '
       sort_by(.number) | .[] |
       ( [.statusCheckRollup[]? | select(.conclusion == "FAILURE" or .state == "FAILURE")] | length > 0 ) as $failed |
@@ -154,8 +174,13 @@ read_stale_prs() { # -> space-separated "num:sha:reason" triples, oldest first, 
           | select(.conclusion == "STARTUP_FAILURE" or .conclusion == "ACTION_REQUIRED"
                    or .conclusion == "STALE" or .state == "ERROR")
         ] | length > 0 ) as $noran |
-      select($failed or $conflict or $wedged or $noanswer or $noran) |
-      "\(.number):\(.headRefOid):\(if $failed then "check-failed" elif $conflict then "merge-conflict" elif $wedged then "wedged-check" elif $noran then "check-never-ran" else "no-checks-at-all" end)"
+      ( (.isDraft | not) and (.autoMergeRequest == null)
+        and (.mergeStateStatus == "CLEAN" or .mergeStateStatus == "UNSTABLE")
+        and ([.statusCheckRollup[]?] | length > 0)
+        and ([.statusCheckRollup[]? | select(.conclusion == "FAILURE" or .state == "FAILURE")] | length == 0)
+        and .updatedAt < "'"$cutoff"'" ) as $parked |
+      select($failed or $conflict or $wedged or $noanswer or $noran or $parked) |
+      "\(.number):\(.headRefOid):\(if $failed then "check-failed" elif $conflict then "merge-conflict" elif $wedged then "wedged-check" elif $noran then "check-never-ran" elif $parked then "green-but-parked" else "no-checks-at-all" end)"
     ' 2>>"$LOG" | tr '\n' ' '
 }
 STALE_PRS=$(read_stale_prs)
