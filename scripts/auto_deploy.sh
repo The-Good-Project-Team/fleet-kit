@@ -41,6 +41,24 @@ log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" >> "$LOG"; }
 
 cd "$KIT_DIR"
 
+# gh#278: source the instance's fleet.env so host-side dials (FLEET_AUTO_DEPLOY_SELF_HEAL below)
+# can be tuned there like every other instance-scoped setting, instead of needing a crontab-line
+# edit. Same save/source/restore discipline deploy.sh already uses (scripts/deploy.sh:58) for the
+# identical reason: fleet.env's own FLEET_LOG_DIR is CONTAINER-scoped (/var/log/fleet-kit) and
+# would silently clobber the HOST-scoped value the cron caller already exported -- the exact
+# gh#196 incident deploy.sh's own header documents. $LOG/$LOG_DIR/$INSTANCE_KEY/$STATE/$LOCKFILE
+# above are already resolved from the caller's values, so this can't move where THIS tick reads
+# or writes its own state; it only protects what auto_deploy.sh hands to deploy.sh as a child
+# process below. FLEET_CONTAINER_NAME is saved/restored for the same reason as FLEET_LOG_DIR: if
+# it ever diverged from the cron-exported value (e.g. an instance's fleet.env hand-edited without
+# re-running up.sh), the deploy.sh child would target a different container than the one
+# INSTANCE_KEY/STATE/LOCKFILE above were computed against.
+CALLER_LOG_ENV="${FLEET_LOG_DIR:-}"
+CALLER_CONTAINER_NAME="${FLEET_CONTAINER_NAME:-}"
+[ -n "${FLEET_INSTANCE_DIR:-}" ] && [ -f "$FLEET_INSTANCE_DIR/fleet.env" ] && { set -a; . "$FLEET_INSTANCE_DIR/fleet.env"; set +a; } || true
+FLEET_LOG_DIR="$CALLER_LOG_ENV"
+FLEET_CONTAINER_NAME="$CALLER_CONTAINER_NAME"
+
 # ONE deploy at a time. This poll fires every 5 minutes, and since the drain gate landed
 # (deploy.sh, 2026-08-26) a single deploy can legitimately hold for up to FLEET_DRAIN_MAX_S
 # (default 1800s) waiting for in-flight agent passes to finish. The early-exit below cannot
@@ -102,8 +120,28 @@ log "main moved: local=$LOCAL_SHA remote=$REMOTE_SHA -- pulling + deploying"
 # not something to auto-merge/rebase past. Same "loud stop over a guess" rule as the dirty-tree
 # check above.
 if ! git merge-base --is-ancestor "$LOCAL_SHA" "$REMOTE_SHA"; then
-  log "ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged."
-  exit 1
+  # gh#278: 3 confirmed occurrences (gh#245, gh#275, gh#278 itself) where the actual cause was a
+  # squash-merged/rebased branch tip whose TREE already matched origin/main byte-for-byte -- not
+  # a real divergence, just a stale ref (this repo squash-merges every PR, so a stranded branch
+  # tip can never become an ancestor of main through any future merge; see README's "Why the box
+  # silently falls behind"). The manual recovery for exactly this case is already documented
+  # there: confirm content-identical, `git checkout main`, pull.
+  #
+  # Self-heal is opt-in and OFF by default: gh#278's own PRD flagged "is an automated
+  # `git reset --hard` on the deploy host acceptable at all" as an explicit UNKNOWN needing a
+  # human sign-off this script can't give itself -- flipping FLEET_AUTO_DEPLOY_SELF_HEAL on in
+  # fleet.env IS that sign-off, not a default this pass should guess at. When on, it still only
+  # fires if the working tree is content-identical to origin/main; a genuine divergence always
+  # falls through to the unchanged ABORT below, byte-for-byte.
+  if [ "${FLEET_AUTO_DEPLOY_SELF_HEAL:-false}" = "true" ] && git diff --quiet origin/main; then
+    log "SELF-HEAL: local HEAD diverged but tree matches origin/main -- resetting onto origin/main"
+    git checkout main -q
+    git reset --hard origin/main -q
+    log "SELF-HEAL: reset complete, proceeding into normal deploy"
+  else
+    log "ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged."
+    exit 1
+  fi
 fi
 git pull --ff-only origin main -q
 
