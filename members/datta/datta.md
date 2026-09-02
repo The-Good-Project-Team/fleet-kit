@@ -65,7 +65,13 @@ Do not pick lanes by intuition. Score each lane on three signals and rank worst-
 - **BREACHED** — the KPI moved up while its guardrail degraded. That is a failed pass being
   recorded as a win, and it compounds every hour nobody looks.
 - **UNEXAMINED** — hours since a nerd last worked this lane. A lane nobody has looked at in
-  days outranks another incremental check on the lane you looked at an hour ago.
+  days outranks another incremental check on the lane you looked at an hour ago. Read this off
+  the structured `lane` column (`SELECT member, recorded_at, lane FROM runs WHERE
+  member='nerd' AND lane IS NOT NULL ORDER BY recorded_at DESC`), not by keyword-matching lane
+  names against free-text `outcome`/`evidence` — several passes independently rediscovered
+  that inference as fragile (it produced at least one real mis-attribution) before this column
+  existed; it is now populated straight from the `--task "lane=<lane> — ..."` prefix you write
+  in step 3, no regex needed.
 
 **Spawning fewer nerds than lanes is the normal case, not a failure.** A lane whose KPI is
 fresh, whose guardrail holds, and which was examined recently does not need a pass this hour.
