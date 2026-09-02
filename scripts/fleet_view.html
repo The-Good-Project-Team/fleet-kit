@@ -1316,7 +1316,6 @@ function renderSettingsPage() {
            border-left:3px solid #888; background:rgba(128,128,128,.08); line-height:1.7;
            font-variant-numeric:tabular-nums">reading meter…</div>
     </div>`;
-  renderBudgetPreview();
   window.renderBudgetPreview = async () => {
     const el = document.getElementById('budgetPreview');
     if (!el) return;
@@ -1342,6 +1341,7 @@ function renderSettingsPage() {
       `(marie, jefe, judge-judy, the-fixer, roomba, dumbledore, messenger)</span>` +
       (p.note ? `<br><span style="opacity:.8">${esc(p.note)}</span>` : '');
   };
+  renderBudgetPreview();
 
   document.getElementById('signIn').onclick = async () => {
     const el = document.getElementById('apiKeyInput');
