@@ -159,15 +159,31 @@ read_stale_prs() { # -> space-separated "num:sha:reason" triples, oldest first, 
     ' 2>>"$LOG" | tr '\n' ' '
 }
 STALE_PRS=$(read_stale_prs)
-# Kept for the single-value fire-dedup state file below: the OLDEST stale PR's sha is still
-# what "already-fighting" dedupes against, so a run that only ever fixes the oldest one doesn't
-# re-fire every tick on the same head -- but FIRE_WHAT below now names every stale PR (with each
-# one's own reason), not just that one, so the-fixer's own pass sees the whole list to fan out
-# over. Each entry is "num:sha:reason"; only the first entry's num/sha feed the dedup state.
+# The dedup key for a stale-PR fire is the WHOLE batch, not the oldest PR's sha.
+#
+# It used to be the oldest sha alone, and that silently blinded the fleet for 11 hours
+# (nonprofit-atlas, 2026-09-02): the 02:46 UTC pass fired on four PRs
+# (3853:check-failed 3855:check-failed 3860:check-failed 3863:no-checks-at-all), fanned out a
+# sub-pass each, and fixed three of them. #3853 was a merge conflict nobody resolved, so its
+# head stayed 61a3390 forever -- and because the state file only ever held THAT sha, all ten
+# subsequent hourly passes read "already-fighting 61a3390" and stopped at Step 1 without ever
+# re-listing open PRs. Every PR that went red after 02:46 was invisible, and the-fixer reported
+# "green" through all of it. One permanently-stuck PR must never silence the alarm for the
+# others: it is exactly the "N independent units" reasoning the fanout itself is built on
+# (Reif, 2026-08-22) -- serializing dedup behind the oldest unit re-introduces the head-of-line
+# block that fanout exists to remove.
+#
+# Keying on the full "num:sha:reason" set means a batch re-fires whenever ANY member changes:
+# a PR fixed and dropping out, a new PR going red, or a stuck PR's own head moving. A batch
+# genuinely unchanged tick-over-tick still dedupes exactly as before, so a hard PR mid-fix is
+# not re-fought every hour.
 FIRST_PR="${STALE_PRS%% *}"
 PR_NUM="${FIRST_PR%%:*}"
 PR_REST="${FIRST_PR#*:}"; PR_SHA="${PR_REST%%:*}"
 [ -z "$STALE_PRS" ] && PR_NUM="none"
+# Whitespace-normalized so trailing-space noise from read_stale_prs (already sorted by PR
+# number, so ordering is stable) can't spuriously re-fire an identical batch.
+STALE_KEY=$(printf '%s' "$STALE_PRS" | tr -s ' ' ' ' | sed 's/^ *//; s/ *$//')
 
 # Optional: is the deployed product actually serving? Set FIXER_HEALTH_URL/FIXER_PAGE_URL to
 # enable. Both must fail before this counts as a fire -- a single timeout is a blip, not an
@@ -199,7 +215,10 @@ if [ "$PR_NUM" != "none" ] && [ -z "$FIRE_SHA" ]; then
   # main/deploy fires outrank stale PRs -- a red main is the bigger emergency either way.
   # FIRE_WHAT carries every stale PR (num:sha pairs), not just one -- the-fixer's charter fans
   # out a sub-pass per PR named here rather than fighting one and leaving the rest queued.
-  FIRE_SHA="$PR_SHA"; FIRE_WHAT="stale-prs($STALE_PRS)"
+  # Dedup on the whole batch (see STALE_KEY above); $PR_SHA alone let one stuck PR mute the
+  # rest. FIRE_SHA is what the state file stores, so it carries the batch key; the human-facing
+  # log line below still prints the oldest sha's prefix for continuity.
+  FIRE_SHA="batch:$STALE_KEY"; FIRE_WHAT="stale-prs($STALE_PRS)"
 fi
 if [ -n "$PROD_DOWN" ]; then
   # No single commit is necessarily guilty (an outage can be a resource threshold crossed, not
@@ -223,7 +242,22 @@ if [ -z "$FIRE_SHA" ]; then
   exit 0
 fi
 
+# A dedup that can never expire is a dedup that can wedge permanently. The batch key above
+# fixes the common case (any PR entering/leaving the batch re-fires), but a batch that is
+# genuinely unchanged -- one stuck PR, nothing else red -- would still suppress forever, and
+# "forever" is how the 11-hour blind spot lasted 11 hours instead of one. After
+# FIXER_DEDUP_MAX_HOURS (default 6) on the SAME key, fire again regardless: whoever was fixing
+# it either finished, gave up, or died, and all three deserve a fresh look. The state file's
+# mtime is the clock -- it is rewritten on every state change, so it measures "how long has
+# this exact fire been unresolved", which is the question being asked.
+DEDUP_MAX_HOURS="${FIXER_DEDUP_MAX_HOURS:-6}"
 if [ "$LAST" = "red $FIRE_SHA" ]; then
+  if [ -n "$(find "$STATE" -mmin +$(( DEDUP_MAX_HOURS * 60 )) 2>/dev/null)" ]; then
+    log "DEDUP EXPIRED: same fire unresolved >${DEDUP_MAX_HOURS}h ($FIRE_SHA) -- re-firing"
+    touch "$STATE"   # restart the clock so it re-fires every N hours, not every tick after N
+    echo "FIRE $FIRE_WHAT ${FIRE_SHA:0:12}"
+    exit 0
+  fi
   log "still red at $FIRE_SHA -- already fought this head, waiting for the fix PR / a new sha"
   echo "green (already-fighting $FIRE_SHA)"
   exit 0
