@@ -2672,14 +2672,89 @@ def _write_routes_are_authenticated():
     assert len(post) == 2, "do_POST not found"
     body = post[1]
     gate = body.find("_authorized()")
-    first_route = body.find('if path == "/api/')
     assert gate != -1, "do_POST has no _authorized() gate -- write routes are unauthenticated"
-    assert gate < first_route, "auth gate sits AFTER a route -- that route is unprotected"
+
+    # /api/login is deliberately ahead of the gate -- it exists to SATISFY the gate, so
+    # sitting behind it would make it unreachable (it carries its own fail-closed check,
+    # pinned by _fleet_view_login_is_still_fail_closed). Every OTHER route must follow the
+    # gate: the point of this assertion is that a new write route inherits auth by default.
+    import re as _re
+    routes = [(m.start(), m.group(1)) for m in
+              _re.finditer(r'if path == "(/api/[a-z_]+)"', body)]
+    early = [name for at, name in routes if at < gate and name != "/api/login"]
+    assert not early, f"write route(s) dispatched before the auth gate: {early}"
+    assert any(name != "/api/login" for _at, name in routes), \
+        "no write routes found after the gate -- the scan is not matching real dispatch"
 
     # Fail closed: no key configured must mean no remote writes, never "auth disabled".
     auth = src.split("def _authorized", 1)[1].split("\n    def ", 1)[0]
     assert "return False" in auth, "_authorized never denies -- cannot be failing closed"
     assert "compare_digest" in auth, "key compared without hmac.compare_digest (timing leak)"
+
+
+def _fleet_view_ui_can_actually_authenticate_a_write():
+    """The Settings dials (and every other write button) could never save from a browser.
+
+    Live 2026-09-02, Reif editing Gru allowance through the tunnel: the page showed
+    "save failed" and the server logged `DENIED /api/fleet_settings ... (bad or missing
+    X-Fleet-Key)`. Root cause is a contradiction between two deliberate decisions:
+
+      * do_POST requires X-Fleet-Key for any non-localhost client (_authorized), and
+      * _cors deliberately omits X-Fleet-Key from Allow-Headers, precisely so a browser
+        CANNOT send the write key.
+
+    So every one of the 11 POST routes was unreachable from the UI it was built for -- the
+    dashboard was read-only for any remote operator, and nobody noticed because the tests
+    only ever asserted that writes are DENIED, never that a legitimate operator can be
+    ALLOWED. "Fail closed" was pinned; "opens for the right person" was not.
+
+    The fix is a same-origin session cookie: the page is served by this same server, so a
+    cookie rides along on its own fetch() without needing a CORS-exposed header, and it is
+    still unavailable to a cross-site attacker (Allow-Origin `*` forbids credentials, and
+    the cookie is SameSite=Strict).
+
+    This test pins the capability, not the mechanism's spelling: given a configured key,
+    SOME credential a browser can actually present must authorize a write.
+    """
+    src = (ROOT / "scripts" / "fleet_view_server.py").read_text()
+    page = (ROOT / "scripts" / "fleet_view.html").read_text()
+
+    auth = src.split("def _authorized", 1)[1].split("\n    def ", 1)[0]
+    assert "Cookie" in auth or "cookie" in auth, (
+        "_authorized accepts only X-Fleet-Key, but _cors deliberately keeps that header "
+        "out of Allow-Headers -- no browser can ever authorize a write. The UI's own "
+        "buttons are dead against a remote server."
+    )
+
+    # There must be a way for the operator to establish that credential from the page.
+    assert "/api/login" in src, "no login route -- nothing can ever set the session cookie"
+    assert "/api/login" in page, "the page never offers a way to authenticate"
+
+    # And the login route itself must be reachable before the write gate rejects it,
+    # otherwise it can never be called by the very client that needs it.
+    post = src.split("def do_POST", 1)[1]
+    login_at = post.find('"/api/login"')
+    gate_at = post.find("_authorized()")
+    assert login_at != -1 and login_at < gate_at, (
+        "/api/login sits behind the auth gate it exists to satisfy -- unreachable by design"
+    )
+
+
+def _fleet_view_login_is_still_fail_closed():
+    """The login route must not become a hole in the gate it feeds.
+
+    It is the ONE route ahead of _authorized(), so it carries the whole burden itself: with
+    no FLEET_API_KEY configured it must refuse (never "no key means anything works"), and it
+    must compare in constant time like the header path already does.
+    """
+    src = (ROOT / "scripts" / "fleet_view_server.py").read_text()
+    assert "def _handle_login" in src, "login logic not isolated -- cannot audit it"
+    login = src.split("def _handle_login", 1)[1].split("\n    def ", 1)[0]
+    assert "compare_digest" in login, "login compares the key without constant-time compare"
+    assert "return" in login and "False" in login or "401" in login, \
+        "login never refuses -- it cannot be failing closed"
+    assert "HttpOnly" in login, "session cookie is readable by page scripts (XSS lifts it)"
+    assert "SameSite=Strict" in login, "cookie rides cross-site requests -- CSRF on every write"
 
 
 def _bash_eval(setup: str, expr: str) -> str:
@@ -3060,6 +3135,8 @@ if __name__ == "__main__":
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)
     check("fleet-view write routes are authenticated and fail closed", _write_routes_are_authenticated)
+    check("fleet-view UI can actually authenticate a write", _fleet_view_ui_can_actually_authenticate_a_write)
+    check("fleet-view login is still fail-closed", _fleet_view_login_is_still_fail_closed)
     check("FLEET_API_KEY never reaches an LLM pass", _api_key_never_reaches_an_llm)
     check("incidental 'rate limit' text does not gate an account", _classifier_ignores_incidental_rate_limit_text)
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)
