@@ -54,9 +54,25 @@ INSTANCE_DIR="${FLEET_INSTANCE_DIR:?set FLEET_INSTANCE_DIR -- e.g. /home/ubuntu/
 # operator account, so deploy.sh (and every downstream auto_deploy.sh tick) failed at its very
 # first line for both instances simultaneously the moment fleet.env's own FLEET_LOG_DIR value
 # was ever allowed to reach here.
+#
+# FLEET_CONTAINER_NAME is restored the same way, but only when the caller actually had one set
+# (gh#278): auto_deploy.sh, the usual caller, computes its own INSTANCE_KEY/STATE/LOCKFILE from
+# the cron-exported FLEET_CONTAINER_NAME before ever calling this script, and restores that same
+# value around its own fleet.env source for exactly this reason (auto_deploy.sh:52-60). If this
+# script's unguarded source were allowed to overwrite it with fleet.env's own value in that path,
+# an instance whose fleet.env was hand-edited (e.g. container renamed) without re-running up.sh
+# would compute CONTAINER below from the NEW name while auto_deploy.sh's state/lock bookkeeping
+# stayed keyed to the OLD one -- the tick would rename/restart a container under a different name
+# than the one it believed it was managing.
+# Unlike FLEET_LOG_DIR, this restore is conditional: rename_account.sh documents running this
+# script directly with only FLEET_INSTANCE_DIR set (`FLEET_INSTANCE_DIR=... bash scripts/deploy.sh`,
+# rename_account.sh:119), relying on fleet.env to supply FLEET_CONTAINER_NAME. An unconditional
+# restore would blank that out and silently fall back to the "philanthropy" default below.
 CALLER_LOG_ENV="${FLEET_LOG_DIR:-}"
+CALLER_CONTAINER_NAME="${FLEET_CONTAINER_NAME:-}"
 [ -f "$INSTANCE_DIR/fleet.env" ] && { set -a; . "$INSTANCE_DIR/fleet.env"; set +a; } || true
 FLEET_LOG_DIR="$CALLER_LOG_ENV"
+[ -n "$CALLER_CONTAINER_NAME" ] && FLEET_CONTAINER_NAME="$CALLER_CONTAINER_NAME"
 
 # The target repo this instance's agents work. Baked in as a literal until 2026-08-26, which
 # made deploy.sh the one file that could not serve a second instance: up.sh correctly passes
