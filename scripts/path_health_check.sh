@@ -17,6 +17,7 @@
 #     NTFY_TOPIC=<topic> STATE_FILE=/path/.paged.state bash scripts/path_health_check.sh
 set -uo pipefail
 
+KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PUBLIC_PATH_URL="${PUBLIC_PATH_URL:?set PUBLIC_PATH_URL -- e.g. https://dino.luckymachines.co/fleet/fleet-kit}"
 NTFY_TOPIC="${NTFY_TOPIC:-}"   # optional: fleet_alert.sh emails regardless
 STATE_FILE="${STATE_FILE:?set STATE_FILE -- per-instance, e.g. /home/ubuntu/fleet-kit-server-fleet/logs/.path_health_paged.state}"
@@ -25,7 +26,7 @@ already_paged="$(cat "$STATE_FILE" 2>/dev/null || true)"
 
 _ntfy() {
   local title="$1" msg="$2" priority="$3"
-  bash /home/ubuntu/fleet-kit/scripts/fleet_alert.sh "fleet public path unreachable" "$msg" \
+  bash "$KIT_DIR/scripts/fleet_alert.sh" "$title" "$msg" \
     || echo "[alert] fleet_alert.sh failed" >&2
 }
 

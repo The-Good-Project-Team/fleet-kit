@@ -50,6 +50,9 @@ CALLER_CONTAINER="${FLEET_CONTAINER_NAME:-}"
 [ -f "$INSTANCE_DIR/fleet.env" ] && { set -a; . "$INSTANCE_DIR/fleet.env"; set +a; }
 [ -n "$CALLER_LOG_DIR" ] && FLEET_LOG_DIR="$CALLER_LOG_DIR"
 [ -n "$CALLER_CONTAINER" ] && FLEET_CONTAINER_NAME="$CALLER_CONTAINER"
+# Never hand the fleet-view write key to an LLM pass -- it authorizes POST /api/run_now,
+# which spawns agent runs on this box. See run_member.sh's fuller note. Least privilege.
+unset FLEET_API_KEY
 
 LOG_DIR="${FLEET_LOG_DIR:-/home/ubuntu/fleet-kit-logs}"
 mkdir -p "$LOG_DIR"

@@ -3888,9 +3888,14 @@ def _account_health_check_actually_pages_when_configured():
     auth-flap/exhaustion class this incident actually was, not the dead-network class), curl
     stubbed to record instead of hitting the real network. Asserts PAGED is printed, the state
     file lands (so a 5-minute cron doesn't re-page every tick), and the ntfy call itself fires
-    with the right message -- then asserts the mirror-image case: NTFY_TOPIC left unset must
-    still fail loudly and never claim PAGED, so a future refactor can't silently paper over the
-    exact guard that made this incident's cause diagnosable at all.
+    with the right title and message.
+
+    NOTE: gh#338 made NTFY_TOPIC optional (`NTFY_TOPIC="${NTFY_TOPIC:-}"`) -- paging now routes
+    through fleet_alert.sh, which sends BOTH email (durable, no NTFY_TOPIC needed) and ntfy
+    (only if NTFY_TOPIC is set). ntfy-only alerting was the gh#269-era design this test used to
+    pin; the `${NTFY_TOPIC:?...}` guard that made an unset topic fail loudly no longer exists on
+    purpose, so the mirror-image case below now asserts the NEW contract instead: an unset
+    NTFY_TOPIC must NOT block the check from running or from attempting delivery.
     """
     import subprocess
     script_path = ROOT / "scripts" / "account_health_check.sh"
@@ -3941,17 +3946,26 @@ def _account_health_check_actually_pages_when_configured():
         assert ntfy_calls.exists() and "ALL accounts exhausted" in ntfy_calls.read_text(), \
             "PAGED but the ntfy call itself never fired (or fired with the wrong message)"
 
-        # Unconfigured (this box's actual state during the incident): must fail loudly and
-        # never claim PAGED -- this is the guard that made gh#269's root cause diagnosable.
+        # NTFY_TOPIC unset (gh#338): email is the durable channel now, so this must still work
+        # rather than fail closed -- the ntfy leg is simply skipped by fleet_alert.sh itself.
         (log_dir / ".account_health_paged.state").unlink()
-        ntfy_calls.unlink()
+        ntfy_calls.unlink(missing_ok=True)
         proc = subprocess.run(
             ["bash", str(script_path)], capture_output=True, text=True, timeout=30,
             env={**base_env, "NTFY_TOPIC": ""},
         )
-        assert proc.returncode != 0, "an unset NTFY_TOPIC must fail loudly, not exit clean"
-        assert "PAGED" not in proc.stdout, "an unset NTFY_TOPIC must never claim it paged"
-        assert not ntfy_calls.exists(), "an unset NTFY_TOPIC must never reach the ntfy call"
+        assert proc.returncode == 0, (
+            f"an unset NTFY_TOPIC must not block the check from running: {proc.stderr.strip()[:300]}"
+        )
+        assert "PAGED" in proc.stdout, (
+            "an unset NTFY_TOPIC must not stop the check from attempting to page (email still "
+            f"can) -- stdout: {proc.stdout[:500]!r} stderr: {proc.stderr[:500]!r}"
+        )
+        assert (log_dir / ".account_health_paged.state").exists(), \
+            "PAGED but no state file written with NTFY_TOPIC unset"
+        # No ntfy leg fires with NTFY_TOPIC unset -- fleet_alert.sh's ntfy branch is itself
+        # gated on NTFY_TOPIC, confirming the check didn't route around fleet_alert.sh entirely.
+        assert not ntfy_calls.exists(), "an unset NTFY_TOPIC must never reach the ntfy leg"
 
 
 def _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror():

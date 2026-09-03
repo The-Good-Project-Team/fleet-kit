@@ -43,6 +43,7 @@
 #     NTFY_TOPIC=<topic> bash scripts/tunnel_health_check.sh >> .../tunnel_health_check.cron.log 2>&1
 set -uo pipefail
 
+KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PUBLIC_URL="${PUBLIC_URL:?set PUBLIC_URL -- the public URL to check, e.g. https://dino.luckymachines.co/}"
 NTFY_TOPIC="${NTFY_TOPIC:-}"   # optional: fleet_alert.sh emails regardless
 FLEET_VIEW_PORT="${FLEET_VIEW_PORT:-8420}"
@@ -56,7 +57,7 @@ already_paged=""
 
 _ntfy() {
   local title="$1" msg="$2" priority="$3"
-  bash /home/ubuntu/fleet-kit/scripts/fleet_alert.sh "fleet tunnel down" "$msg" \
+  bash "$KIT_DIR/scripts/fleet_alert.sh" "$title" "$msg" \
     || echo "[alert] fleet_alert.sh failed" >&2
 }
 

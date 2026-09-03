@@ -36,6 +36,7 @@
 #     bash scripts/account_health_check.sh >> .../health_check.cron.log 2>&1
 set -uo pipefail
 
+KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="${FLEET_LOG_DIR:?set FLEET_LOG_DIR -- same dir account_pool.sh writes account-pool.log into}"
 POOL_LOG="$LOG_DIR/account-pool.log"
 NTFY_TOPIC="${NTFY_TOPIC:-}"   # optional: fleet_alert.sh emails regardless
@@ -52,7 +53,7 @@ already_paged=""
 
 _ntfy() {
   local title="$1" msg="$2" priority="$3"
-  bash /home/ubuntu/fleet-kit/scripts/fleet_alert.sh "fleet account pool DOWN" "$msg" \
+  bash "$KIT_DIR/scripts/fleet_alert.sh" "$title" "$msg" \
     || echo "[alert] fleet_alert.sh failed" >&2
 }
 
