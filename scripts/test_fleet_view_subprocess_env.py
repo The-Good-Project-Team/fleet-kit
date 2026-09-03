@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -71,31 +72,44 @@ class PruneUsesTheRunningInstancesLabelPrefix(unittest.TestCase):
     needed -- only the *env passed to that call* is under test.
     """
 
+    @staticmethod
+    def _restore_env(key, value):
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile("w", suffix=".env", delete=False)
         self.tmp.write("FLEET_LABEL_PREFIX=custom-test:\n")
         self.tmp.close()
+        self.addCleanup(os.unlink, self.tmp.name)
+
+        # addCleanup (not tearDown) for these: it still runs even if setUp raises partway
+        # through (e.g. the server bind below), so a failed setUp can never leave
+        # FLEET_ENV_FILE/FLEET_LABEL_PREFIX permanently mutated for the rest of the process.
+        self.addCleanup(self._restore_env, "FLEET_ENV_FILE", os.environ.get("FLEET_ENV_FILE"))
+        self.addCleanup(self._restore_env, "FLEET_LABEL_PREFIX", os.environ.get("FLEET_LABEL_PREFIX"))
         os.environ["FLEET_ENV_FILE"] = self.tmp.name
         # The container state this reproduces: the value exists ONLY in the file.
         os.environ.pop("FLEET_LABEL_PREFIX", None)
+
         sys.path.insert(0, str(KIT / "scripts"))
-        for mod in [m for m in list(sys.modules) if m == "fleet_view_server"]:
-            del sys.modules[mod]
+        sys.modules.pop("fleet_view_server", None)
         import fleet_view_server as fvs
         self.fvs = fvs
 
         self.calls = []
-        self._real_run = fvs.subprocess.run  # subprocess is a shared module object -- must
-                                              # restore this in tearDown or every other caller
-                                              # of subprocess.run in this process stays patched
 
         def fake_run(cmd, **kwargs):
             self.calls.append((cmd, kwargs))
-            if cmd[:1] == [sys.executable] and "board_github.py" in cmd[1]:
-                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-            return self._real_run(cmd, **kwargs)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-        fvs.subprocess.run = fake_run
+        # subprocess is a shared module object -- patch.object + addCleanup(patcher.stop)
+        # restores fvs.subprocess.run even if a later setUp step (the server bind) raises.
+        patcher = unittest.mock.patch.object(fvs.subprocess, "run", side_effect=fake_run)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), fvs.Handler)
         self.port = self.server.server_address[1]
@@ -106,8 +120,6 @@ class PruneUsesTheRunningInstancesLabelPrefix(unittest.TestCase):
         self.server.shutdown()
         self.thread.join(timeout=5)
         self.server.server_close()
-        self.fvs.subprocess.run = self._real_run
-        os.unlink(self.tmp.name)
 
     def test_release_subprocess_resolves_the_configured_prefix(self):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
