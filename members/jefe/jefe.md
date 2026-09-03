@@ -41,9 +41,9 @@ DIFFERENT repo's history, not live evidence for whatever repo you're running aga
 Every one of those is deliberately prefixed with its repo name (`nonprofit-atlas`) for exactly
 this reason: a bare `#NNNN` with no repo prefix anywhere else in this file is a citation this
 pass verified itself, never one echoed from precedent. Confirmed live, gh#269, 2026-09-02
-~07:25 UTC: a jefe pass posted PR #3875 / issue #3831 / PR #3853 as "gathered live" evidence on
-fleet-kit's own outage tracker — none of those numbers resolve in fleet-kit; they sit in
-nonprofit-atlas's numbering range, the same range as the precedent citations below (gh#286).
+~07:25 UTC: a jefe pass posted PR #3875 / issue #3831 / PR #3853 — nonprofit-atlas-range numbers,
+not fleet-kit's — as "gathered live" evidence on fleet-kit's own outage tracker; none of those
+numbers resolve in fleet-kit (gh#286).
 
 **Secondary, exception-only path — the chef can wash dishes if the dishwasher is broken:** if a
 PR has been sitting fully green (every required check passed, judge-judy approved, no merge
@@ -91,7 +91,7 @@ this covers BOTH shapes of that failure, not just one:
     **Then CONFIRM the required checks actually attached — `update-branch` alone may not be
     enough.** A PR can be BLOCKED not because a check FAILED but because it is ABSENT: the
     required contexts never attached to the head at all, which reads identically to "still
-    pending" on every surface (that is nonprofit-atlas, issue #3315's whole class). Check by
+    pending" on every surface (that is the whole class of nonprofit-atlas#3315). Check by
     name, not by colour:
     ```
     gh api repos/<owner>/<repo>/commits/<headRefOid>/check-runs --jq '[.check_runs[].name]'
@@ -111,8 +111,8 @@ this covers BOTH shapes of that failure, not just one:
 
     **This is a manual fallback for a mechanism that should not need you.** nonprofit-atlas
     already ships automated recovery for exactly this (`watch-stuck-merges.yml` +
-    `scripts/ci/stuck_pr_watch.py`, gh#3315). If you are doing this by hand, that mechanism is
-    down — check gh#3332 before repeating the fix on a second PR.
+    `scripts/ci/stuck_pr_watch.py`, nonprofit-atlas#3315). If you are doing this by hand, that
+    mechanism is down — check nonprofit-atlas#3332 before repeating the fix on a second PR.
 Either shape is a broken MECHANISM, not a content decision — judge-judy already said yes. This
 never substitutes for judge-judy's review and never overrides a red/pending check; it only
 covers "everything said yes and nothing happened." Log it loudly in your pass report either way
@@ -226,8 +226,8 @@ is building on sand.
   A matching `cordon → uncordon` window is a healthy deploy, not an incident — nonprofit-atlas
   #3346 was filed as "root cause unknown" when every flap matched a cordon exactly. Anchor that
   grep to a timestamp, never a bare keyword: the log is append-only and stale lines will match.
-  (That `nonprofit-atlas#3346` above is precedent, not evidence — same "verify before you cite"
-  discipline as the guard earlier in this file: never post it, or any number, as this pass's own
+  (That nonprofit-atlas citation above is precedent, not evidence — same "verify before you
+  cite" discipline as the guard earlier in this file: never post it, or any number, as this pass's own
   gathered-live finding without re-resolving it in the CURRENT repo first.)
 
   **When a member costs too much, PRUNE ITS CHARTER — do not cap its turns.** As of

@@ -925,14 +925,15 @@ def _jefe_precedent_citations_are_repo_qualified():
     """gh#286: jefe posted PR #3875 / issue #3831 / PR #3853 as "gathered live" evidence on
     gh#269 -- fleet-kit's own outage tracker -- none of which resolve in fleet-kit. They sit in
     nonprofit-atlas's numbering range, the same range jefe.md's own worked examples cite as
-    precedent (`nonprofit-atlas#3108`, `#3307`, etc.), unmarked as "a different repo's history"
-    at the exact spots a pass composing a status comment would be reading. This locks in two
-    things: (1) jefe.md actually carries the verify-before-you-cite guard, and (2) every bare
-    4+-digit `#NNNN` citation in the file -- fleet-kit's own numbering tops out in the low
-    hundreds, so 4+ digits is nonprofit-atlas's range -- sits in a paragraph that names
-    `nonprofit-atlas` somewhere in it, the existing citation style. A NEW bare citation slipped
-    into jefe.md without that qualifier is exactly the unmarked-precedent shape that caused the
-    original fabrication.
+    precedent (`nonprofit-atlas#3108`, etc.), unmarked as "a different repo's history" at the
+    exact spots a pass composing a status comment would be reading. This locks in two things:
+    (1) jefe.md actually carries the verify-before-you-cite guard, and (2) every bare 4+-digit
+    `#NNNN` citation in the file (fleet-kit's own numbering is still 3-digit as of this check --
+    a genuine future ceiling, not enforced here) has `nonprofit-atlas` within a short window of
+    the SAME citation, not merely somewhere in the same paragraph -- an earlier version of this
+    check matched on whole paragraphs (some run 300-1700 chars) and would have waved through a
+    brand-new unrelated bare citation riding along on an unrelated `nonprofit-atlas` mention
+    elsewhere in a long paragraph, exactly the unmarked-precedent shape gh#286 was filed over.
     """
     md = (ROOT / "members/jefe/jefe.md").read_text()
     assert "verify before you cite" in md.lower(), \
@@ -940,19 +941,22 @@ def _jefe_precedent_citations_are_repo_qualified():
     assert "gh pr view" in md and "gh issue view" in md, \
         "jefe.md's citation guard must name the actual verification command"
 
-    # Strip fenced code blocks first -- a shell snippet's `#!/bin/bash` or a placeholder like
-    # `PR #<n>` must never be mistaken for a citation.
+    # Strip fenced code blocks first -- a future code snippet could legitimately embed a
+    # 4+-digit number (a real command's issue-number argument, a URL) that is not a citation
+    # at all and must never be counted against the paragraph it sits in.
     stripped = re.sub(r"```.*?```", "", md, flags=re.DOTALL)
-    # Paragraphs = blank-line-separated blocks, the same unit a reader takes in at once.
-    paragraphs = re.split(r"\n\s*\n", stripped)
     cite = re.compile(r"#\d{4,}")
+    window = 120  # chars either side -- covers "nonprofit-atlas already ships ... gh#3315"
+    #                 style same-sentence references without spanning into unrelated prose.
     bad = []
-    for para in paragraphs:
-        if cite.search(para) and "nonprofit-atlas" not in para:
-            bad.append(para.strip().splitlines()[0][:80])
+    for m in cite.finditer(stripped):
+        lo, hi = max(0, m.start() - window), min(len(stripped), m.end() + window)
+        if "nonprofit-atlas" not in stripped[lo:hi]:
+            line_no = stripped.count("\n", 0, m.start()) + 1
+            bad.append(f"line {line_no}: ...{stripped[lo:hi].strip()[:100]}...")
     assert not bad, (
-        "jefe.md cites a specific numbered PR/issue without marking it as nonprofit-atlas "
-        f"precedent in the same paragraph (gh#286's exact failure shape): {bad}")
+        "jefe.md cites a specific numbered PR/issue with no nonprofit-atlas qualifier nearby "
+        f"(gh#286's exact failure shape): {bad}")
 
 
 def _score_reasoning_is_not_guillotined_mid_word():
