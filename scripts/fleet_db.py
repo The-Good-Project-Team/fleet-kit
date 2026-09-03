@@ -75,6 +75,25 @@ CREATE INDEX IF NOT EXISTS idx_runs_item ON runs(item_id);
 -- Byte offset into runs.jsonl already synced, so sync() only reads what's new. Single row
 -- (id=0). If runs.jsonl shrinks (rotated/truncated) sync() resets this to 0 and re-reads.
 CREATE TABLE IF NOT EXISTS sync_state (id INTEGER PRIMARY KEY CHECK (id = 0), offset INTEGER NOT NULL);
+
+-- gh#324: independent lane KPIs (e.g. devops's deploy_success_rate), computed by a job that
+-- shares no process context with the agent whose lane it grades (kpi-doctrine.md rule 1) --
+-- see scripts/lane_kpi.py, the only writer of this table. Append-only, one row per computed
+-- reading -- never UPDATEd or REPLACEd -- so consecutive denominators both stay on record for
+-- a rule-3 >10%-swing check, and a consumer can tell "just computed" from stale by reading the
+-- newest row's own timestamp (rule 5) instead of trusting a single mutable cell. `value` is
+-- NULLable: a trailing window with zero ticks (denominator=0) has no rate to report and must
+-- read as "no data" -- storing 0.0 there would be indistinguishable from a real 0% success
+-- rate, exactly the conflation rule 5 forbids.
+CREATE TABLE IF NOT EXISTS lane_kpi (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  lane         TEXT NOT NULL,
+  metric       TEXT NOT NULL,
+  value        REAL,
+  denominator  INTEGER NOT NULL,
+  computed_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lane_kpi_lane_metric_time ON lane_kpi(lane, metric, computed_at);
 """
 
 
