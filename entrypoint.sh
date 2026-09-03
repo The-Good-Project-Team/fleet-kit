@@ -205,8 +205,12 @@ case "${1:-cron-foreground}" in
       # source fleet.env itself -- so this cron line sources it inline (same shape
       # account_health_check.sh's line above uses, for the same reason: FLEET_LOG_DIR must
       # resolve to the container-scoped /var/log/fleet-kit fleet.env sets, not lane_kpi.py's
-      # own $HOME-based fallback) before invoking it.
-      echo "14 * * * * root [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; python3 /fleet-kit/scripts/lane_kpi.py record >> $LOG_DIR/lane_kpi.log 2>&1"
+      # own $HOME-based fallback) before invoking it. `export FLEET_LOG_DIR=$LOG_DIR` first,
+      # same as account_health_check.sh's line -- if fleet.env is ever missing/unreadable at
+      # tick time the `[ -f ... ]` guard below short-circuits and never sources it, and without
+      # this export lane_kpi.py would silently fall back to fleet_db.py's own $HOME-based
+      # default and read/write a completely different, wrong fleet.db with no error at all.
+      echo "14 * * * * root export FLEET_LOG_DIR=$LOG_DIR && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; python3 /fleet-kit/scripts/lane_kpi.py record >> $LOG_DIR/lane_kpi.log 2>&1"
       # account_health_check.sh + tunnel_health_check.sh (gh#171): the fleet's only outage
       # pagers per README step 6. PR#169 wired both into schedulers/systemd + schedulers/launchd
       # -- the bare-host path -- but never into THIS heredoc, the container-native path, so
