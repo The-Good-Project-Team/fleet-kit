@@ -43,8 +43,9 @@
 #     NTFY_TOPIC=<topic> bash scripts/tunnel_health_check.sh >> .../tunnel_health_check.cron.log 2>&1
 set -uo pipefail
 
+KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PUBLIC_URL="${PUBLIC_URL:?set PUBLIC_URL -- the public URL to check, e.g. https://dino.luckymachines.co/}"
-NTFY_TOPIC="${NTFY_TOPIC:?set NTFY_TOPIC -- the ntfy.sh topic to page}"
+NTFY_TOPIC="${NTFY_TOPIC:-}"   # optional: fleet_alert.sh emails regardless
 FLEET_VIEW_PORT="${FLEET_VIEW_PORT:-8420}"
 STATE_FILE="${TUNNEL_HEALTH_STATE_FILE:-/home/ubuntu/fleet-kit-logs/.tunnel_health_paged.state}"
 CONNECTOR_TOKEN_FILE="${CONNECTOR_TOKEN_FILE:-/etc/cloudflared/token}"
@@ -56,10 +57,8 @@ already_paged=""
 
 _ntfy() {
   local title="$1" msg="$2" priority="$3"
-  curl -sf -o /dev/null \
-    -H "Title: $title" -H "Priority: $priority" -H "Tags: warning" \
-    -d "$msg" "https://ntfy.sh/$NTFY_TOPIC" \
-    || echo "[tunnel_health_check] WARNING: ntfy POST failed, could not page"
+  bash "$KIT_DIR/scripts/fleet_alert.sh" "$title" "$msg" \
+    || echo "[alert] fleet_alert.sh failed" >&2
 }
 
 _check() {
