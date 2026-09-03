@@ -141,8 +141,95 @@ def snapshot(hours: int = 72) -> dict:
         "overall": worst,
         "components": comps,
         "hours": hours,
+        "members": members(hours),
         "generated_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Fleet members: last runs, from fleet.db rather than the cron logs.
+# ---------------------------------------------------------------------------
+
+DB_PATH = os.environ.get("FLEET_DB", "/var/log/fleet-kit/fleet.db")
+CONTAINER = os.environ.get("FLEET_CONTAINER_NAME", "philanthropy")
+
+# A member's run status is NOT a health verdict and must not be rendered as one.
+# `budget_declined` is the single most common outcome for several members (46 of gru's
+# last 72h) and it means the fleet correctly REFUSED to spend -- pacing working, not
+# breaking. Painting it red would make a healthy, well-behaved fleet look like an
+# outage. `killed` is likewise expected: deploy.sh cuts over mid-pass after its drain
+# bound, and run_member.sh records those as killed, safe to re-run.
+RUN_STATE = {
+    "ok": OK,
+    "quiet": OK,               # ran, correctly found nothing to do
+    "reported_nothing": OK,    # ran, produced no report -- weak, not down
+    "budget_declined": "spare",
+    "killed": "spare",
+    "timed_out": BAD,
+    "error": BAD,
+}
+
+
+def _sqlite(query: str) -> str:
+    """Query fleet.db. Runs through the container because the DB lives inside it."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["podman", "exec", CONTAINER, "sqlite3", DB_PATH, query],
+            capture_output=True, text=True, timeout=20)
+        return r.stdout if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def members(hours: int = 72) -> list[dict]:
+    """One row per member: last run, its age, and the recent status mix."""
+    rows = _sqlite(
+        "SELECT member, status, recorded_at, COALESCE(cost_usd,0) "
+        "FROM runs WHERE recorded_at > strftime('%%s','now','-%d hours') "
+        "ORDER BY recorded_at;" % hours
+    )
+    if not rows.strip():
+        return []
+    now = _dt.datetime.now(_dt.timezone.utc).timestamp()
+    agg: dict[str, dict] = {}
+    for line in rows.strip().splitlines():
+        parts = line.split("|")
+        if len(parts) < 4:
+            continue
+        name, status, ts, cost = parts[0], parts[1], parts[2], parts[3]
+        try:
+            ts = float(ts); cost = float(cost)
+        except ValueError:
+            continue
+        m = agg.setdefault(name, {"name": name, "runs": 0, "ok": 0, "bad": 0,
+                                  "spare": 0, "cost": 0.0, "last": 0.0,
+                                  "last_status": ""})
+        m["runs"] += 1
+        m["cost"] += cost
+        state = RUN_STATE.get(status, UNKNOWN)
+        if state == OK:
+            m["ok"] += 1
+        elif state == BAD:
+            m["bad"] += 1
+        elif state == "spare":
+            m["spare"] += 1
+        if ts > m["last"]:
+            m["last"] = ts
+            m["last_status"] = status
+
+    out = []
+    for m in agg.values():
+        age_min = (now - m["last"]) / 60.0
+        m["ago"] = ("%dm ago" % age_min if age_min < 90
+                    else "%.0fh ago" % (age_min / 60))
+        # Silence is the real failure mode for a scheduled member, and it is the one
+        # the run table cannot show as a row: a member that stopped running writes
+        # nothing at all. Age of the LAST run is what surfaces it.
+        m["state"] = BAD if m["bad"] else (UNKNOWN if age_min > 240 else OK)
+        m["cost_str"] = "$%.2f" % m["cost"]
+        out.append(m)
+    return sorted(out, key=lambda x: (-x["runs"], x["name"]))
 
 
 if __name__ == "__main__":

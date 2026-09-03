@@ -45,6 +45,21 @@ h1{font-size:22px;font-weight:700;margin:0;letter-spacing:-.01em}
 .bars i.ok{background:var(--ok)}
 .bars i.down{background:var(--down)}
 .axis{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;margin-top:7px}
+.mem{display:flex;align-items:center;gap:12px;padding:11px 0;border-top:1px solid var(--line)}
+.mem:first-of-type{border-top:0}
+.mem-name{flex:1;font-weight:500;display:flex;align-items:center;gap:8px}
+.mem-runs{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.mem-bar{display:flex;gap:1px;width:130px;flex:none}
+.mem-bar i{height:16px;border-radius:1px}
+.mem-bar i.ok{background:var(--ok)}
+.mem-bar i.spare{background:#c9d4dd}
+.mem-bar i.down{background:var(--down)}
+.mem-ago{color:var(--muted);font-size:12px;width:74px;text-align:right;
+font-variant-numeric:tabular-nums;white-space:nowrap}
+.mem-cost{color:var(--muted);font-size:12px;width:66px;text-align:right;
+font-variant-numeric:tabular-nums}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]) .mem-bar i.spare{background:#39424b}}
+@media(max-width:640px){.mem-cost,.mem-bar{display:none}}
 footer{color:var(--muted);font-size:12px;text-align:center;margin-top:26px;line-height:1.7}
 """
 
@@ -72,6 +87,38 @@ def render(hours: int = 72) -> str:
             '</div>' % (c["current"], escape(c["label"]), escape(c["description"]), pct, bars)
         )
 
+    mem_rows = []
+    for m in d.get("members", []):
+        total = max(m["runs"], 1)
+        # Proportional strip, not one cell per run: members range from 15 to 301 runs
+        # over the same window, so per-run cells would make a busy member unreadable
+        # and a quiet one invisible.
+        seg = []
+        for key, cls in (("ok", "ok"), ("spare", "spare"), ("bad", "down")):
+            w = m[key] / total * 100.0
+            if w > 0:
+                seg.append('<i class="%s" style="width:%.1f%%"></i>' % (cls, w))
+        mem_rows.append(
+            '<div class="mem">'
+            '<div class="mem-name"><span class="dot %s"></span>%s</div>'
+            '<div class="mem-runs">%d runs</div>'
+            '<div class="mem-bar">%s</div>'
+            '<div class="mem-cost">%s</div>'
+            '<div class="mem-ago">%s</div>'
+            '</div>' % (m["state"], escape(m["name"]), m["runs"],
+                        "".join(seg), m["cost_str"], escape(m["ago"]))
+        )
+    members_card = (
+        '<div class=card style="margin-top:20px"><h2>Fleet members &mdash; last %d hours</h2>%s'
+        '<div class=axis style="margin-top:12px"><span>'
+        '<span style="display:inline-block;width:8px;height:8px;background:var(--ok);'
+        'border-radius:1px;margin-right:5px"></span>worked'
+        '<span style="display:inline-block;width:8px;height:8px;background:#c9d4dd;'
+        'border-radius:1px;margin:0 5px 0 14px"></span>declined to spend / cut short'
+        '</span><span>last run</span></div></div>'
+        % (d["hours"], "".join(mem_rows))
+    ) if mem_rows else ""
+
     headline = ("Some components are degraded" if bad
                 else "All systems operational" if overall == "ok"
                 else "Status partially unknown")
@@ -85,13 +132,13 @@ def render(hours: int = 72) -> str:
         "<div class='banner %s'><div class=banner-head>"
         "<span class='dot %s'></span>%s</div></div>"
         "<div class=card><h2>System status &mdash; last %d hours</h2>%s"
-        "<div class=axis><span>%dh ago</span><span>now</span></div></div>"
+        "<div class=axis><span>%dh ago</span><span>now</span></div></div>%s"
         "<footer>Rolled up from the health checks that run every 5 minutes.<br>"
         "Grey means no check ran in that hour, never &ldquo;healthy&rdquo;. "
         "Generated %s.</footer>"
         "</div></body></html>"
         % (CSS, "bad" if bad else "good", overall, escape(headline),
-           d["hours"], "".join(rows), d["hours"], d["generated_at"])
+           d["hours"], "".join(rows), d["hours"], members_card, d["generated_at"])
     )
 
 
