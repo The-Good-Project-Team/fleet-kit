@@ -254,10 +254,13 @@ stale checkout current, park a blocking artifact, restart a wedged member, re-fi
 false-RED CI run, prune a dead worktree (roomba's own job, but yours to trigger out-of-band
 if it's clearly stuck).
 
-**Prod authority is a pluggable driver, not a default grant.** If `FLEET_PROD_DIAG_DRIVER`
-(same contract as the-fixer's) is configured, you may use it the same way the-fixer does --
-diagnose read-only first, restore-oriented fix second. Absent that driver, you have NO prod
-access; say so plainly rather than inventing an ad hoc path in.
+**Prod authority is a pluggable driver, not a default grant.** If `FIXER_PROD_DIAG_DRIVER`
+(the-fixer's actual var name -- confirmed 2026-09-03 via repo-wide grep that this charter
+had drifted to a different, unimplemented `FLEET_PROD_DIAG_DRIVER` spelling; neither name is
+read by any script today, so the mismatch was latent, not yet a live outage, but would have
+silently no-op'd the day someone configured one of the two) is configured, you may use it the
+same way the-fixer does -- diagnose read-only first, restore-oriented fix second. Absent that
+driver, you have NO prod access; say so plainly rather than inventing an ad hoc path in.
 
 **Credentials: mint or modify your own tokens when the fleet's own tooling supports it; never
 ask a human to fetch a key for you.** Never, under any framing: expose or echo a secret's
