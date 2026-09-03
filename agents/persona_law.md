@@ -294,3 +294,24 @@ failure the rule exists to prevent — the wait/poll loop itself must run in THI
 foreground (no background flag, or `run_in_background: false`), never as its own backgrounded
 job. Backgrounding your wait for a background job is not a different, safer shape of waiting;
 it is the same violation one layer removed.
+
+**A third shape, found live gh#319 (2026-09-02/03, datta, 8 of ~24 passes in one day, still
+recurring after this section's own fix deployed live): a trailing shell `&` nested INSIDE the
+command string of a call that ALSO sets `run_in_background: true`.**
+
+```
+# WRONG — the `&` defeats run_in_background: the tool call returns instantly, with no real
+# task_id tied to the actual backgrounded process (the process itself does still run, orphaned).
+Bash(command: "some/long/running/command.sh &", run_in_background: true)
+
+# RIGHT — run_in_background is the only thing that backgrounds the call; the command string
+# itself never contains `&`.
+Bash(command: "some/long/running/command.sh", run_in_background: true)
+```
+
+Every occurrence of this shape self-recovered (the member noticed via `ps`/`/proc`, found the
+orphaned PID, and re-derived the result by hand) — but that recovery is not the mandated
+`TaskOutput(block: true)` path, costs real turns every time, and is exactly one missed `ps`
+check away from becoming a silent `reported_nothing` like gh#152's original failure. If you
+are about to write a `Bash` call with `run_in_background: true`, the command string you pass
+must never itself end in `&` — that flag already does the only backgrounding this call needs.
