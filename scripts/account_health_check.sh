@@ -38,7 +38,7 @@ set -uo pipefail
 
 LOG_DIR="${FLEET_LOG_DIR:?set FLEET_LOG_DIR -- same dir account_pool.sh writes account-pool.log into}"
 POOL_LOG="$LOG_DIR/account-pool.log"
-NTFY_TOPIC="${NTFY_TOPIC:?set NTFY_TOPIC -- the ntfy.sh topic to page}"
+NTFY_TOPIC="${NTFY_TOPIC:-}"   # optional: fleet_alert.sh emails regardless
 THRESHOLD_MINUTES="${ACCOUNT_HEALTH_THRESHOLD_MINUTES:-30}"
 STATE_FILE="${ACCOUNT_HEALTH_STATE_FILE:-$LOG_DIR/.account_health_paged.state}"
 CONTAINER_NAME="${FLEET_CONTAINER_NAME:-philanthropy}"
@@ -52,10 +52,8 @@ already_paged=""
 
 _ntfy() {
   local title="$1" msg="$2" priority="$3"
-  curl -sf -o /dev/null \
-    -H "Title: $title" -H "Priority: $priority" -H "Tags: warning" \
-    -d "$msg" "https://ntfy.sh/$NTFY_TOPIC" \
-    || echo "[account_health_check] WARNING: ntfy POST failed, could not page"
+  bash /home/ubuntu/fleet-kit/scripts/fleet_alert.sh "fleet account pool DOWN" "$msg" \
+    || echo "[alert] fleet_alert.sh failed" >&2
 }
 
 if [[ "$last_line" != *"ALL accounts in"*"failed this call"* ]]; then

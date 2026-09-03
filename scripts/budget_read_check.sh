@@ -1,0 +1,103 @@
+#!/bin/bash
+# budget_read_check.sh -- page when the budget meter is UNREADABLE for the account the fleet
+# is actually spending from.
+#
+# WHY THIS EXISTS (incident 2026-09-02/03, cost: ~2.5 days of a whole account unused):
+# the budget chain has THIRTEEN fail-open paths and, before this script, ZERO notifications.
+# maxx_reader returns (None, "<label>") on a bad read; maxx_share_ceiling prints ""; and
+# gru_allowance's own comment says it plainly -- `return ""  # fail open: no ceiling => caller
+# keeps its own fallback`. Each is individually CORRECT: a bad reading may only ever be used
+# to conserve, never to invent headroom. But "conserve" silently is indistinguishable from
+# "working", and that is the whole failure:
+#
+#   reif_tgp's anchor froze 2026-08-31 (nothing on dino ever emitted for it).
+#   -> maxx served verdict=stale for 60.2h
+#   -> maxx_reader refused it (correctly), returning label=maxx_verdict_stale
+#   -> gru fell back to a hardcoded constant and paced the fleet at ~1/8 of real headroom
+#   -> the pool skipped a HEALTHY account for a day on a stale gate epoch from that same row
+#   -> ONE account carried all 12 members while the other sat at 3% used, for days.
+#
+# Nothing anywhere said a word. A human found it by looking at a usage screenshot.
+#
+# WHAT IT CHECKS: the handle resolve_maxx_handle.sh picks -- i.e. the account this pass WOULD
+# spend from, not a hardcoded one. That matters: the same incident had FLEET_MAXX_HANDLE
+# pointing at a different account than FLEET_ACCOUNTS was spending, so a check against the
+# static handle would have reported a healthy meter for an account doing no work.
+#
+# Pages when: the meter is unreadable (any non-ok label), OR readable but the anchor behind it
+# is older than MAX_ANCHOR_AGE (a fresh-looking verdict computed from frozen data).
+set -uo pipefail
+
+KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+INSTANCE_DIR="${FLEET_INSTANCE_DIR:?set FLEET_INSTANCE_DIR}"
+CALLER_LOG_DIR="${FLEET_LOG_DIR:-}"
+[ -f "$INSTANCE_DIR/fleet.env" ] && { set -a; . "$INSTANCE_DIR/fleet.env"; set +a; }
+[ -n "$CALLER_LOG_DIR" ] && FLEET_LOG_DIR="$CALLER_LOG_DIR"
+
+LOG_DIR="${FLEET_LOG_DIR:-/home/ubuntu/fleet-kit-logs}"
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/budget_read_check.log"
+STATE="${BUDGET_READ_STATE_FILE:-$LOG_DIR/.budget_read_paged.state}"
+MAX_ANCHOR_AGE="${BUDGET_MAX_ANCHOR_AGE:-3600}"
+log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" >> "$LOG"; }
+
+CONTAINER="${FLEET_CONTAINER_NAME:?set FLEET_CONTAINER_NAME}"
+
+# Resolve handle+key the same way run_member.sh does, so we check the SPENDING account.
+read -r HANDLE KEY < <(podman exec "$CONTAINER" bash -c \
+  'cd /fleet-kit && set -a; . /fleet-kit/fleet.env; set +a; bash scripts/resolve_maxx_handle.sh' 2>/dev/null)
+HANDLE="${HANDLE:-${FLEET_MAXX_HANDLE:-}}"
+[ -z "$HANDLE" ] && { log "no handle resolved and no FLEET_MAXX_HANDLE -- cannot check"; exit 0; }
+
+READ=$(podman exec "$CONTAINER" bash -c \
+  "cd /fleet-kit && set -a; . /fleet-kit/fleet.env; set +a; FLEET_MAXX_HANDLE='$HANDLE' FLEET_MAXX_KEY='$KEY' python3 scripts/maxx_reader.py" 2>/dev/null)
+
+LABEL=$(printf '%s' "$READ" | python3 -c "import json,sys;print(json.load(sys.stdin).get('label','parse_fail'))" 2>/dev/null || echo parse_fail)
+AGE=$(podman exec "$CONTAINER" bash -c '
+cd /fleet-kit; set -a; . fleet.env; set +a
+read -r H K < <(bash scripts/resolve_maxx_handle.sh)
+curl -s --max-time 25 -X POST "$FLEET_MAXX_URL/mcp?handle=$H&k=$K" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"maxx_budget\",\"arguments\":{}}}" > /tmp/mx_age.json 2>/dev/null
+python3 -c "
+import json
+try:
+    d=json.load(open(\"/tmp/mx_age.json\"))
+    t=json.loads(d[\"result\"][\"content\"][0][\"text\"])
+    print(int(t.get(\"anchor_age_sec\", -1)))
+except Exception:
+    print(-1)
+"' 2>/dev/null | tr -cd '0-9-' )
+[ -z "$AGE" ] && AGE=-1
+
+problem=""
+[ "$LABEL" != "ok" ] && problem="meter UNREADABLE (label=$LABEL)"
+if [ -z "$problem" ] && [ "$AGE" -gt 0 ] 2>/dev/null && [ "$AGE" -ge "$MAX_ANCHOR_AGE" ]; then
+  problem="anchor STALE (${AGE}s old, max ${MAX_ANCHOR_AGE}s) -- verdict looks fine but is computed from frozen data"
+fi
+
+if [ -n "$problem" ]; then
+  already=""; [ -f "$STATE" ] && already=$(cat "$STATE" 2>/dev/null)
+  log "ALARM handle=$HANDLE $problem"
+  if [ "$already" != "$LABEL/$problem" ]; then
+    # Both channels, via the shared helper: an alarm that only reaches ntfy reaches nobody
+    # who does not have the app (fleet_alert.sh's header documents the incident).
+    bash "$KIT_DIR/scripts/fleet_alert.sh" \
+      "fleet budget meter unreadable ($HANDLE)" \
+      "The fleet is spending from @$HANDLE and its budget meter is not usable: $problem
+
+This FAILS OPEN -- gru keeps running on a fallback constant instead of real headroom, and nothing else reports it. Last time this went unseen for 60h and left a whole account unused.
+
+Check which account:  bash scripts/resolve_maxx_handle.sh
+Then read its meter:  FLEET_MAXX_HANDLE=<handle> FLEET_MAXX_KEY=<key> python3 scripts/maxx_reader.py
+If the anchor is stale, the probe token may need re-minting:
+  bash /home/ubuntu/Classified/dino/maxx/register_probe.sh <acct> <handle>"
+    printf '%s' "$LABEL/$problem" > "$STATE"
+  fi
+  exit 0
+fi
+
+[ -f "$STATE" ] && { rm -f "$STATE"; log "RECOVERED handle=$HANDLE label=ok anchor=${AGE}s"; }
+log "ok handle=$HANDLE label=ok anchor=${AGE}s"
+exit 0
