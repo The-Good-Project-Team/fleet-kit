@@ -824,6 +824,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/status":
+            # Server-rendered, unauthenticated, no JS: a status page has to be readable
+            # precisely when the thing it reports on is broken, so it must not depend on
+            # this server's own API, a session, or a client runtime to say "down".
+            try:
+                import status_page
+                body = status_page.render().encode()
+                code = 200
+            except Exception as exc:  # noqa: BLE001
+                # Never 500 a status page into a blank screen -- say what broke.
+                body = ("<!doctype html><meta charset=utf-8><title>Fleet status</title>"
+                        "<body style='font:14px system-ui;padding:40px'>"
+                        "<h1>Fleet status unavailable</h1><p>The status page itself failed "
+                        "to render: <code>%s</code></p>" % type(exc).__name__).encode()
+                code = 503
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/":
             html = PAGE.read_text() if PAGE.exists() else "<h1>fleet_view.html missing</h1>"
             body = html.encode()
@@ -1095,8 +1117,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             p = subprocess.run([sys.executable, str(KIT_DIR / "scripts" / "board_github.py"),
                                "release", str(number), note],
-                               cwd=REPO or None, env=subprocess_env(),
-                               capture_output=True, text=True, timeout=15)
+                               cwd=REPO or None, capture_output=True, text=True, timeout=15)
             self._json({"ok": p.returncode == 0, "out": p.stdout, "err": p.stderr})
             return
 
