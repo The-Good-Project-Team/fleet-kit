@@ -126,8 +126,8 @@ pick_pr() {
   return 1
 }
 
-report_run() { # <pr> <head_sha> <usage_file> <outcome-line> <evidence-line>
-  printf 'Outcome: %s\nEvidence: %s\n' "$4" "$5" | python3 "$KIT_DIR/scripts/run_report.py" \
+report_run() { # <pr> <head_sha> <usage_file> <outcome-line> <evidence-line> <self-critique-line>
+  printf 'Outcome: %s\nEvidence: %s\nSelf-critique: %s\n' "$4" "$5" "${6:-none}" | python3 "$KIT_DIR/scripts/run_report.py" \
     --member "judge-judy" --run-id "review-${1}-${2:0:12}" --kind llm --exit-code 0 \
     --pass-file - --usage-file "$3" --pr "$1" >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
 }
@@ -339,13 +339,16 @@ This reflects a parse/format issue in the reviewer's own output, not a finding a
     [ -n "$EXPLICIT_PR" ] && break
     continue
   fi
+  PRIOR_STRIKES=$(cat "$STRIKE_FILE" 2>/dev/null || echo 0)
   rm -f "$STRIKE_FILE" "$STRIKE_DIR/pr-${PR}-${HEAD_SHA}".strike*.raw
+  SELF_CRITIQUE="none -- clean single-pass verdict"
+  [ "${PRIOR_STRIKES:-0}" -gt 0 ] && SELF_CRITIQUE="needed $PRIOR_STRIKES parse-strike(s) at this head before producing a parseable verdict (see gh#221) -- not a finding about the diff, a format miss on my own output"
 
   if [ "$VERDICT" = "VERDICT: approve" ]; then
     post_status "$HEAD_SHA" "success" "Code review passed (local claude, model=$MODEL)" \
       && log "PR #$PR: APPROVED -- status posted" \
       || log "PR #$PR: WARN approved but status POST failed"
-    report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "approved PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: success"
+    report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "approved PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: success" "$SELF_CRITIQUE"
   else
     # Findings comment first, status second: a failure status pointing at nothing is worse
     # than no status at all.
@@ -372,7 +375,7 @@ $FINDINGS"
       && log "PR #$PR: filed fix item for blocked review" \
       || log "PR #$PR: WARN failed to file fix item for blocked review"
 
-    report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "blocked PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: failure, see PR comment"
+    report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "blocked PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: failure, see PR comment" "$SELF_CRITIQUE"
   fi
 
   cleanup_pass
