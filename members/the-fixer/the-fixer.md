@@ -133,6 +133,21 @@ down and no diagnosis driver is configured -> log it loudly and stop, don't impr
 
 ## Report
 
+**Never let a blocking wait be the last thing you do.** Live pattern, 2026-09-03 ~14:5x UTC,
+3+ occurrences in one afternoon: this pass's actual final turn ended inside a CI/background
+poll, with the literal last output being "Waiting for that background test run to complete
+before opening the PR" or "Waiting for the background poll (task `<id>`) to finish checking CI
+and fleet-code-review status ... before I write the final report" — turns ran out mid-wait, the
+`Report:`/`Outcome:`/`Evidence:` block was never composed, and a pass that had already pushed a
+real fix landed as `reported_nothing`. This is the same class of loss the checklist at the top
+of this charter exists to prevent (dont-shoot-the-messenger, 2026-08-23), just triggered by a
+blocking wait instead of an early step eating the budget. If you choose to poll CI or a
+`TaskOutput(block: true)` result before reporting, **compose the full report block first**,
+describing the in-flight state ("pushed fix to PR #N, CI still IN_PROGRESS, auto-merge armed")
+— then poll further only if turns remain. A poll's completion is never a precondition for
+having something to report; a fix pushed with CI still running is a valid `Outcome:`, an
+unconfirmed green is not required for the parser to see real work.
+
 One line either way: "green, no action" or "FIRE at <sha>: opened PR #N (fix|revert), reason".
 
 **Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.
