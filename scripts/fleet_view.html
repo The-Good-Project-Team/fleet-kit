@@ -1333,6 +1333,14 @@ function renderSettingsPage() {
     const pct = v => (v === null || v === undefined) ? '—' : esc(v);
     el.innerHTML =
       `<b>What these dials actually produce</b> <span style="opacity:.7">(percent-of-week units, live)</span><br>` +
+      // Name the account these numbers came from. Without it the panel showed a ceiling
+      // and an allowance derived from one account's meter while naming no account at all,
+      // so tuning the dials gave no way to tell WHICH account they applied to.
+      (p.maxx_handle
+        ? `<div style="margin-bottom:6px">metering <b>${p.account ? p.account + ' ' : ''}` +
+          `@${p.maxx_handle}</b>${p.pool && p.pool.split(/\s+/).length > 1
+            ? ` <span style="opacity:.65">(pool: ${p.pool})</span>` : ''}</div>`
+        : '') +
       `account hourly headroom &times; <b>${pct(p.share_fraction)}</b> (share) ` +
       `= <b>${pct(p.ceiling_pct)}</b> &larr; this instance's ceiling<br>` +
       `${pct(p.ceiling_pct)} &times; <b>${pct(p.gru_fraction)}</b> (gru) ` +
