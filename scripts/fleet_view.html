@@ -1285,33 +1285,75 @@ async function renderStatsPage() {
 // as schedule={"hourly_at_minute":12}.
 const DIAL_FIELDS = [
   ['FLEET_SHARE_FRACTION', 'Fleet budget share',
-   "How much of this account's hourly headroom this whole instance may use. 0.90 = 90%. Turn it DOWN when another instance shares the account, or when you want the week to last; UP to spend budget that would otherwise expire unused at week reset."],
+   "How much of this account's hourly headroom this whole instance may use. 0.90 = 90%. Turn it DOWN when another instance shares the account, or when you want the week to last; UP to spend budget that would otherwise expire unused at week reset.",
+   ['0.25', '0.5', '0.6', '0.7', '0.75', '0.8', '0.85', '0.9', '0.95', '1.0']],
   ['FLEET_GRU_ALLOWANCE_FRACTION', "Gru's cut of that share",
-   'Of the share above, how much gru may spend spawning minions. Multiplies: 0.90 share x 0.90 cut = 0.81 of headroom. Turn it UP for more minions per pass and faster backlog burn; DOWN if marie, jefe, roomba or sentry start reporting budget_declined -- they draw from what is left.'],
+   'Of the share above, how much gru may spend spawning minions. Multiplies: 0.90 share x 0.90 cut = 0.81 of headroom. Turn it UP for more minions per pass and faster backlog burn; DOWN if marie, jefe, roomba or sentry start reporting budget_declined -- they draw from what is left.',
+   ['0.25', '0.5', '0.6', '0.7', '0.75', '0.8', '0.85', '0.9', '0.95', '1.0']],
   ['FLEET_GRU_CADENCE', 'How often gru runs (cron minute)',
-   'Which minute of each hour gru wakes to claim work and spawn minions. Blank = every hour. "0,30" = twice an hour, which roughly doubles minion throughput at the same per-pass budget. This is the one schedule dial that is actually wired.'],
+   'Which minute of each hour gru wakes to claim work and spawn minions. Blank = every hour. "0,30" = twice an hour, which roughly doubles minion throughput at the same per-pass budget. This is the one schedule dial that is actually wired.',
+   ['', '3', '0,30', '0,20,40', '0,15,30,45'], {labels: {'': 'once an hour (default)', '3': 'once an hour, at :03', '0,30': 'twice an hour', '0,20,40': '3x an hour', '0,15,30,45': '4x an hour'}, allowCustom: true}],
   ['FLEET_BUILDER_MODEL', 'Model minions build with',
-   'sonnet is the default and right for almost all backlog work. opus costs several times more per pass -- worth it only for genuinely hard reasoning, and it will empty the budget faster.'],
+   'sonnet is the default and right for almost all backlog work. opus costs several times more per pass -- worth it only for genuinely hard reasoning, and it will empty the budget faster.',
+   ['sonnet', 'opus', 'haiku']],
   ['FLEET_CODE_REVIEW_MODEL', 'Model that reviews PRs',
-   'The reviewer reads diffs and blocks bad merges. Raising this to opus catches more, and costs more, on every single PR.'],
+   'The reviewer reads diffs and blocks bad merges. Raising this to opus catches more, and costs more, on every single PR.',
+   ['sonnet', 'opus', 'haiku']],
   ['FLEET_MAX_BUDGET_USD', 'Hard spend cap per pass (USD)',
-   'One pass is killed outright above this. A real stop, not a pace target -- at $5 it binds long before the fractions above do, so raise it first if passes are dying mid-work.'],
+   'One pass is killed outright above this. A real stop, not a pace target -- at $5 it binds long before the fractions above do, so raise it first if passes are dying mid-work.',
+   ['1', '2', '5', '10', '20', '50'], {labels: {'1': '$1', '2': '$2', '5': '$5', '10': '$10', '20': '$20', '50': '$50'}, allowCustom: true}],
 ];
 
 function renderSettingsPage() {
   if (PAGE !== 'settings') return;
   detailHeadEl.innerHTML = `<div class="title-row"><h2>Settings</h2></div>`;
   const on = !!FLEET_STATE.FLEET_ENABLED;
-  const dialRows = DIAL_FIELDS.map(([key, label, hint]) => `
+  // PICKERS, NOT FREE TEXT. Every dial here has either a closed set of valid values or a
+  // small set of sane ones, and free text on any of them fails silently:
+  //   - the model fields feed straight into `claude --model "$MODEL"`
+  //     (worktree_builder.sh:28, judge-judy.sh:52) with NO validation anywhere in the kit,
+  //     so a typo like "sonet" saves cleanly, looks right here, and then fails every build
+  //     pass at the API with nothing on this page to suggest why
+  //   - the fractions are 0-1, where typing 9 instead of 0.9 is one keystroke and means
+  //     something wildly different (it clamps, so it also does not error)
+  //   - the spend cap is dollars, where a stray zero is a 10x change to a hard kill switch
+  // The two dials whose valid values are not enumerable (gru's cron field, the cap) keep an
+  // "other..." escape that swaps in a text box, so the picker never blocks a real value.
+  const dialRows = DIAL_FIELDS.map(([key, label, hint, options, opts]) => {
+    const cur = FLEET_STATE[key] || '';
+    const o = opts || {};
+    const labels = o.labels || {};
+    const box = 'display:block;width:100%;box-sizing:border-box;margin-top:3px;padding:5px 7px;'
+      + 'background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);'
+      + 'font-family:inherit;font-size:12.5px';
+    let field;
+    if (options) {
+      // A stored value outside the list is KEPT and shown, never silently rewritten to a
+      // default -- that would hide a real misconfiguration behind a healthy-looking page.
+      const known = options.includes(cur);
+      const list = known || !cur ? options.slice() : options.concat([cur]);
+      const optsHtml = list.map(v => {
+        const text = labels[v] !== undefined ? labels[v] : (v === '' ? '(default)' : v);
+        const flag = options.includes(v) ? '' : ' \u2014 current, not a listed value';
+        return `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(text)}${flag}</option>`;
+      }).join('');
+      const custom = o.allowCustom
+        ? `<option value="__custom__">other...</option>` : '';
+      field = `<select class="dial-input" data-key="${key}" style="${box}"
+        onchange="if(this.value==='__custom__'){const i=document.createElement('input');
+          i.className='dial-input';i.dataset.key='${key}';i.value='';i.style.cssText='${box}';
+          i.placeholder='type a value';this.replaceWith(i);i.focus();}">${optsHtml}${custom}</select>`;
+    } else {
+      field = `<input class="dial-input" data-key="${key}" value="${esc(cur)}" style="${box}">`;
+    }
+    return `
     <label style="display:block;font-size:11.5px;color:var(--dim);margin-top:14px">
       <span style="color:var(--text);font-weight:500">${esc(label)}</span>
-      <input class="dial-input" data-key="${key}" value="${esc(FLEET_STATE[key] || '')}"
-        style="display:block;width:100%;box-sizing:border-box;margin-top:3px;padding:5px 7px;
-          background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);
-          font-family:inherit;font-size:12.5px">
+      ${field}
       ${hint ? `<span style="display:block;margin-top:3px;font-size:11px;color:var(--dim);
         line-height:1.45">${esc(hint)}</span>` : ''}
-    </label>`).join('');
+    </label>`;
+  }).join('');
   runListEl.innerHTML = `
     <div class="settings-block">
       <h3>Fleet</h3>
