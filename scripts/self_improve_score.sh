@@ -67,6 +67,11 @@ if [ -f "$OUT_FILE" ] && grep -q "\"slot\": \"$SLOT\"" "$OUT_FILE" 2>/dev/null; 
   exit 0
 fi
 
+# Unconditional heartbeat -- a tick that dies before RC=$? (killed, or account_pool_run/claude
+# never returns) previously left zero trace in either log this script owns. This line alone
+# proves the tick fired and reached this point, diagnosable from self_improve_score.log alone.
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) attempting slot=$SLOT" >> "$FLEET_LOG_DIR/self_improve_score.log"
+
 source "$KIT_DIR/scripts/account_pool.sh" 2>/dev/null || true
 command -v account_pool_run >/dev/null 2>&1 || account_pool_run() { "$@"; }
 
@@ -238,6 +243,9 @@ RAW=$(account_pool_run timeout 90 claude -p "$PROMPT" \
   --model claude-sonnet-5 --dangerously-skip-permissions --setting-sources user \
   --max-turns 1 --output-format text 2>>"$FLEET_LOG_DIR/self_improve_score.log")
 RC=$?
+# Unconditional -- logged regardless of RC, so a stalled/killed run's last known state is
+# always visible even when the line 267 failure line below never gets a chance to fire.
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) account_pool_run rc=$RC" >> "$FLEET_LOG_DIR/self_improve_score.log"
 
 SCORE_JSON=$(printf '%s' "$RAW" | python3 -c "
 import json, sys, re
