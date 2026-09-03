@@ -83,7 +83,21 @@ your head — read the allowance, subtract what is reserved, and say what you co
 
 ## 3. Spawn one nerd per qualifying lane
 
-Use the `Bash` tool with `run_in_background: true`, one call per nerd — **not** a shell `&`:
+Use the `Bash` tool with `run_in_background: true`, one call per nerd — **not** a shell `&`.
+The command string itself must have NO trailing `&`; `run_in_background: true` is the only
+thing that backgrounds the call. **gh#319: this exact nested shape recurred in 8 of ~24 datta
+passes in one day** — a trailing `&` added to the command on TOP of `run_in_background: true`:
+
+```
+# WRONG — the trailing `&` defeats run_in_background: the call returns instantly with no real
+# task_id tied to the actual process, which is how you end up "recovering" via `ps`/`/proc`.
+Bash(command: "FLEET_RUN_NOW=1 bash /fleet-kit/scripts/run_member.sh nerd --task '...' &",
+     run_in_background: true)
+
+# RIGHT — no `&` anywhere in the command string:
+Bash(command: "FLEET_RUN_NOW=1 bash /fleet-kit/scripts/run_member.sh nerd --task '...'",
+     run_in_background: true)
+```
 
 ```
 FLEET_RUN_NOW=1 bash /fleet-kit/scripts/run_member.sh nerd --task "lane=<lane> — <the one
