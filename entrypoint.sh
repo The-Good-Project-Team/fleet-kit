@@ -192,6 +192,25 @@ case "${1:-cron-foreground}" in
       # (unclaimed on the minute map above) is enough to catch a race well inside the 5-minute
       # auto_deploy poll cadence that produced it.
       echo "44 * * * * root bash /fleet-kit/scripts/auto_deploy_race_check.sh >> $LOG_DIR/auto_deploy_race_check.log 2>&1"
+      # lane_kpi.py (gh#324): independent devops-lane KPI job -- deploy_success_rate/
+      # deploy_count_7d were previously only ad-hoc greps a nerd pass ran by hand against
+      # auto_deploy.log, i.e. the lane computing its own number (kpi-doctrine.md rule 1
+      # violation). Runs inside the container like deploy_staleness_check.sh/
+      # auto_deploy_race_check.sh above, for the same reason: it only reads/appends plain
+      # files under $LOG_DIR (auto_deploy.log, fleet.db), both already reachable over the same
+      # bind mount those two scripts use -- no podman needed. Hourly at :14 (unclaimed on the
+      # minute map above); its own read_latest() flags a reading stale past 2x this interval.
+      #
+      # A plain python3 script, unlike deploy_staleness_check.sh, has no shell preamble to
+      # source fleet.env itself -- so this cron line sources it inline (same shape
+      # account_health_check.sh's line above uses, for the same reason: FLEET_LOG_DIR must
+      # resolve to the container-scoped /var/log/fleet-kit fleet.env sets, not lane_kpi.py's
+      # own $HOME-based fallback) before invoking it. `export FLEET_LOG_DIR=$LOG_DIR` first,
+      # same as account_health_check.sh's line -- if fleet.env is ever missing/unreadable at
+      # tick time the `[ -f ... ]` guard below short-circuits and never sources it, and without
+      # this export lane_kpi.py would silently fall back to fleet_db.py's own $HOME-based
+      # default and read/write a completely different, wrong fleet.db with no error at all.
+      echo "14 * * * * root export FLEET_LOG_DIR=$LOG_DIR && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; python3 /fleet-kit/scripts/lane_kpi.py record >> $LOG_DIR/lane_kpi.log 2>&1"
       # account_health_check.sh + tunnel_health_check.sh (gh#171): the fleet's only outage
       # pagers per README step 6. PR#169 wired both into schedulers/systemd + schedulers/launchd
       # -- the bare-host path -- but never into THIS heredoc, the container-native path, so

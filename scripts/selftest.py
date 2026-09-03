@@ -2890,6 +2890,93 @@ def _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget():
         "Dockerfile does not accept/write DEPLOY_SHA -- deploy.sh's build-arg has nowhere to land"
 
 
+def _lane_kpi_is_actually_scheduled():
+    """Same failure class as _deploy_staleness_check_is_actually_scheduled/
+    _auto_deploy_race_check_is_actually_scheduled: gh#324 shipping lane_kpi.py and nothing
+    scheduling it would leave devops's deploy_success_rate uncomputed forever, exactly the gap
+    this issue exists to close.
+    """
+    entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
+    assert "python3 /fleet-kit/scripts/lane_kpi.py record" in entry, (
+        "lane_kpi.py has no line in entrypoint.sh's crontab -- it will never run, and "
+        "deploy_success_rate/deploy_count_7d stay uncomputed exactly as gh#324 found them.")
+
+
+def _lane_kpi_classifies_ticks_and_ignores_in_progress_drains():
+    """gh#324 AC2: success/failure/ABORT lines are each one tick; a `drain:` line (deploy.sh's
+    own in-flight-pass wait, captured into the same log) belongs to a tick not yet resolved and
+    must count as neither -- otherwise a still-running deploy would be silently miscounted
+    before its own outcome is even known.
+    """
+    import lane_kpi
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "auto_deploy.log"
+        log.write_text(
+            "[2026-09-01 00:00:00 UTC] main moved: local=a remote=b -- pulling + deploying\n"
+            "[2026-09-01 00:00:01 UTC] drain: 2 agent pass(es) in flight -- deferring cutover\n"
+            "[2026-09-01 00:05:00 UTC] deploy OK at b\n"
+            "[2026-09-01 01:00:00 UTC] DEPLOY FAILED at c\n"
+            "[2026-09-01 02:00:00 UTC] ABORT: working tree dirty -- refusing to pull\n"
+            "[2026-09-01 03:00:00 UTC] ABORT: local HEAD is not an ancestor of origin/main\n"
+            # A tick still draining at scan time -- no resolution line yet, must not count.
+            "[2026-09-01 04:00:00 UTC] drain: 1 agent pass(es) in flight -- deferring cutover\n"
+        )
+        successes, total = lane_kpi.classify_ticks(log, since=0.0)
+        assert successes == 1, successes
+        assert total == 4, total  # 1 OK + 1 FAILED + 2 ABORT; the two drain: lines don't count
+
+        # The trailing-window cutoff actually excludes old ticks, not just accepts everything.
+        since = lane_kpi._line_epoch(
+            "[2026-09-01 01:00:00 UTC] DEPLOY FAILED at c\n"
+        )
+        successes2, total2 = lane_kpi.classify_ticks(log, since=since)
+        assert total2 == 3, total2  # drops the 00:00 OK tick, keeps FAILED + 2 ABORT
+
+
+def _lane_kpi_is_append_only_and_distinguishes_missing_from_stale():
+    """gh#324 AC3/AC5/AC6: a consumer must be able to tell "never computed" (None) from "real
+    reading, possibly stale" (a dict with a `stale` flag) from a silently-frozen last value --
+    and consecutive denominators must both survive so a >10% swing (kpi-doctrine.md rule 3) is
+    detectable from the store alone, not just the newest row.
+    """
+    import lane_kpi, fleet_db
+    with tempfile.TemporaryDirectory() as d:
+        conn = fleet_db.connect(Path(d) / "fleet.db")
+
+        # Never run: must read as missing, not as a 0% rate.
+        assert lane_kpi.read_latest(conn) is None
+
+        log = Path(d) / "auto_deploy.log"
+        log.write_text("[2026-09-01 00:00:00 UTC] deploy OK at a\n")
+        r1 = lane_kpi.compute_and_record(conn, log, now=1000.0)
+        assert r1["value"] == 1.0 and r1["denominator"] == 1, r1
+
+        # A second reading with a different denominator must not overwrite the first --
+        # append-only, so both remain queryable for a rule-3 swing check.
+        log.write_text(
+            "[2026-09-01 00:00:00 UTC] deploy OK at a\n"
+            "[2026-09-01 00:05:00 UTC] DEPLOY FAILED at b\n"
+        )
+        lane_kpi.compute_and_record(conn, log, now=2000.0)
+        rows = conn.execute(
+            "SELECT denominator FROM lane_kpi WHERE lane=? AND metric=? ORDER BY computed_at",
+            (lane_kpi.LANE, lane_kpi.METRIC),
+        ).fetchall()
+        assert [r[0] for r in rows] == [1, 2], rows
+
+        fresh = lane_kpi.read_latest(conn, now=2000.0 + 1.0)
+        assert fresh is not None and fresh["stale"] is False, fresh
+        stale = lane_kpi.read_latest(conn, now=2000.0 + 2 * lane_kpi.EXPECTED_INTERVAL_S + 1)
+        assert stale is not None and stale["stale"] is True, stale
+
+        # Zero ticks in the window is "no data", not a real 0% -- NULL, never 0.0.
+        empty_log = Path(d) / "empty.log"
+        empty_log.write_text("")
+        r_empty = lane_kpi.compute_and_record(
+            conn, empty_log, lane="devops", metric="deploy_success_rate_test_empty", now=3000.0)
+        assert r_empty["value"] is None and r_empty["denominator"] == 0, r_empty
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -3942,6 +4029,9 @@ if __name__ == "__main__":
     check("nothing hardcodes a read of the frozen instances/*/logs mirror", _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror)
     check("self-evolution panel catches the member/<name>-<id> branch shape", _self_evolution_panel_catches_the_member_dash_branch_shape)
     check("gru.md clamps allowance_pct to FLEET_SHARE_CEILING_PCT", _gru_md_clamps_allowance_to_share_ceiling)
+    check("lane_kpi.py is actually scheduled", _lane_kpi_is_actually_scheduled)
+    check("lane_kpi classifies ticks and ignores in-progress drains", _lane_kpi_classifies_ticks_and_ignores_in_progress_drains)
+    check("lane_kpi is append-only and distinguishes missing from stale", _lane_kpi_is_append_only_and_distinguishes_missing_from_stale)
 
     for n in ok:
         print(f"  ok    {n}")
