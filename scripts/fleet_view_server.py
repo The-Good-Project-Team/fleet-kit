@@ -1095,7 +1095,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             p = subprocess.run([sys.executable, str(KIT_DIR / "scripts" / "board_github.py"),
                                "release", str(number), note],
-                               cwd=REPO or None, capture_output=True, text=True, timeout=15)
+                               cwd=REPO or None, env=subprocess_env(),
+                               capture_output=True, text=True, timeout=15)
             self._json({"ok": p.returncode == 0, "out": p.stdout, "err": p.stderr})
             return
 
