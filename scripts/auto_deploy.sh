@@ -100,8 +100,18 @@ fi
 # Never deploy over a dirty checkout -- a local uncommitted edit (a live-patch hotfix, say)
 # silently getting stashed/blown away by a pull is exactly the kind of "healed silently" this
 # kit's own persona_law.md warns against. Loud stop, not a guess.
-if [ -n "$(git status --porcelain)" ]; then
-  log "ABORT: working tree dirty -- refusing to pull over local changes. Resolve by hand."
+#
+# gh#278 (2026-09-03, 60+ ticks / 5h+ stall): every prior incident on this thread hit this
+# exact ABORT but none could say WHAT was dirty, because the log line never captured it --
+# and every pass diagnosing it lacked host access to run `git status` itself. That made this
+# guard's own self-heal question ("is a reset safe here?") unanswerable from any automated
+# pass, unlike the diverged-HEAD guard below which already has FLEET_AUTO_DEPLOY_SELF_HEAL.
+# This does not add auto-recovery -- the persona_law warning above still applies, a real
+# hotfix must never be auto-discarded -- it only makes the NEXT occurrence diagnosable without
+# needing a human to SSH in first.
+PORCELAIN="$(git status --porcelain)"
+if [ -n "$PORCELAIN" ]; then
+  log "ABORT: working tree dirty -- refusing to pull over local changes. Resolve by hand. Dirty entries: $(echo "$PORCELAIN" | tr '\n' '|')"
   exit 1
 fi
 

@@ -71,6 +71,25 @@ SUSPECT_REGEX="cannot lock ref|Cannot fast-forward to multiple branches|would be
 # if that tuning happens later, rather than editing this default.
 SANCTIONED_ABORT_THRESHOLD="${FLEET_AUTO_DEPLOY_SANCTIONED_ABORT_THRESHOLD:-3}"
 
+# gh#278 (2026-09-03): the alert this function writes has always landed only in $ALERT_LOG --
+# read by nobody except a fleet member that happens to look, which is why the 2026-09-03
+# dirty-tree stall got FIVE separate member passes re-confirming the exact same stuck state
+# over 5+ hours (jefe x3, nerd x2) with no human ever paged, while every one of them lacked the
+# host access needed to actually clear it. account_health_check.sh/path_health_check.sh/
+# tunnel_health_check.sh already page a human via ntfy.sh for exactly this shape of "sanctioned,
+# detected, but needs a human's hands" condition -- this wires the same precedent in here.
+# Optional, not required (unlike account_health_check.sh's hard `:?`): this script runs on
+# every instance's container per its own header, and not every instance may have NTFY_TOPIC
+# provisioned yet, so a missing topic degrades to log-only (today's behavior), never a hard
+# failure of the detector itself.
+_ntfy_page() {
+    [ -n "${NTFY_TOPIC:-}" ] || { echo "[auto_deploy_race_check] NTFY_TOPIC unset -- alert stayed log-only: $2" >> "$ALERT_LOG"; return 0; }
+    curl -sf -o /dev/null \
+        -H "Title: $1" -H "Priority: $3" -H "Tags: warning" \
+        -d "$2" "https://ntfy.sh/$NTFY_TOPIC" \
+        || echo "[auto_deploy_race_check] WARNING: ntfy POST failed, could not page: $2" >> "$ALERT_LOG"
+}
+
 # gh#255's original detector: an unrecognized (SUSPECT_REGEX) git failure in auto_deploy.cron.log.
 # Unchanged by gh#275 -- AC4 requires this path's behavior to stay identical.
 check_unrecognized_race() {
@@ -188,6 +207,17 @@ check_sanctioned_escalation() {
                 diverged_count=$((diverged_count + 1))
                 ;;
             *'deploy OK'*)
+                # Page the recovery too, once, only if this streak actually paged someone --
+                # a human who got paged at threshold deserves an explicit all-clear instead of
+                # having to keep polling $ALERT_LOG to learn it self-resolved.
+                if [ "$dirty_alerted" -eq 1 ]; then
+                    _ntfy_page "fleet-kit: deploy stall cleared" \
+                        "auto_deploy.sh's working-tree-dirty stall recovered after $dirty_count stuck ticks -- deploy OK." "default"
+                fi
+                if [ "$diverged_alerted" -eq 1 ]; then
+                    _ntfy_page "fleet-kit: deploy stall cleared" \
+                        "auto_deploy.sh's diverged-HEAD stall recovered after $diverged_count stuck ticks -- deploy OK." "default"
+                fi
                 dirty_count=0; dirty_alerted=0
                 diverged_count=0; diverged_alerted=0
                 ;;
@@ -200,10 +230,16 @@ check_sanctioned_escalation() {
     # resolved, not stuck, same as AC3's "self-resolving" case.
     if [ "$dirty_count" -ge "$SANCTIONED_ABORT_THRESHOLD" ] && [ "$dirty_alerted" -eq 0 ]; then
         echo "[$now] SANCTIONED ABORT stuck (gh#275): working tree dirty has recurred $dirty_count consecutive ticks with no intervening 'deploy OK' -- host checkout needs manual resolution." >> "$ALERT_LOG"
+        _ntfy_page "fleet-kit: deploy stalled" \
+            "auto_deploy.sh has hit ABORT: working tree dirty for $dirty_count consecutive ticks with no successful deploy in between. Host checkout needs manual resolution (git status/stash/reset on the host)." \
+            "high"
         dirty_alerted=1
     fi
     if [ "$diverged_count" -ge "$SANCTIONED_ABORT_THRESHOLD" ] && [ "$diverged_alerted" -eq 0 ]; then
         echo "[$now] SANCTIONED ABORT stuck (gh#275): local HEAD is not an ancestor of origin/main has recurred $diverged_count consecutive ticks with no intervening 'deploy OK' -- host checkout needs manual resolution." >> "$ALERT_LOG"
+        _ntfy_page "fleet-kit: deploy stalled" \
+            "auto_deploy.sh has hit ABORT: local HEAD diverged from origin/main for $diverged_count consecutive ticks with no successful deploy in between. Host checkout needs manual resolution." \
+            "high"
         diverged_alerted=1
     fi
 
