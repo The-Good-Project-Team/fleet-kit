@@ -921,6 +921,44 @@ def _jefe_can_unstick_a_pr_that_is_merely_behind():
         "jefe's manual retrigger must point at the automated mechanism it stands in for"
 
 
+def _jefe_precedent_citations_are_repo_qualified():
+    """gh#286: jefe posted PR #3875 / issue #3831 / PR #3853 as "gathered live" evidence on
+    gh#269 -- fleet-kit's own outage tracker -- none of which resolve in fleet-kit. They sit in
+    nonprofit-atlas's numbering range, the same range jefe.md's own worked examples cite as
+    precedent (`nonprofit-atlas#3108`, etc.), unmarked as "a different repo's history" at the
+    exact spots a pass composing a status comment would be reading. This locks in two things:
+    (1) jefe.md actually carries the verify-before-you-cite guard, and (2) every bare 4+-digit
+    `#NNNN` citation in the file (fleet-kit's own numbering is still 3-digit as of this check --
+    a genuine future ceiling, not enforced here) has `nonprofit-atlas` within a short window of
+    the SAME citation, not merely somewhere in the same paragraph -- an earlier version of this
+    check matched on whole paragraphs (some run 300-1700 chars) and would have waved through a
+    brand-new unrelated bare citation riding along on an unrelated `nonprofit-atlas` mention
+    elsewhere in a long paragraph, exactly the unmarked-precedent shape gh#286 was filed over.
+    """
+    md = (ROOT / "members/jefe/jefe.md").read_text()
+    assert "verify before you cite" in md.lower(), \
+        "jefe.md lost its verify-before-you-cite guard -- see gh#286"
+    assert "gh pr view" in md and "gh issue view" in md, \
+        "jefe.md's citation guard must name the actual verification command"
+
+    # Strip fenced code blocks first -- a future code snippet could legitimately embed a
+    # 4+-digit number (a real command's issue-number argument, a URL) that is not a citation
+    # at all and must never be counted against the paragraph it sits in.
+    stripped = re.sub(r"```.*?```", "", md, flags=re.DOTALL)
+    cite = re.compile(r"#\d{4,}")
+    window = 120  # chars either side -- covers "nonprofit-atlas already ships ... gh#3315"
+    #                 style same-sentence references without spanning into unrelated prose.
+    bad = []
+    for m in cite.finditer(stripped):
+        lo, hi = max(0, m.start() - window), min(len(stripped), m.end() + window)
+        if "nonprofit-atlas" not in stripped[lo:hi]:
+            line_no = stripped.count("\n", 0, m.start()) + 1
+            bad.append(f"line {line_no}: ...{stripped[lo:hi].strip()[:100]}...")
+    assert not bad, (
+        "jefe.md cites a specific numbered PR/issue with no nonprofit-atlas qualifier nearby "
+        f"(gh#286's exact failure shape): {bad}")
+
+
 def _score_reasoning_is_not_guillotined_mid_word():
     """The Magikarp score's reasoning must survive to the dashboard whole.
 
@@ -4022,6 +4060,7 @@ if __name__ == "__main__":
     check("self-evolution evidence covers fleet-kit's own repo, not just $FLEET_REPO", _self_evo_evidence_covers_both_repos)
     check("self_improve_score.sh's evidence catches the member/<name>-<id> branch shape", _self_improve_score_evidence_covers_member_branch_shape)
     check("jefe can unstick a PR that is merely behind its base", _jefe_can_unstick_a_pr_that_is_merely_behind)
+    check("jefe.md's precedent citations are repo-qualified, and the verify-before-you-cite guard is present", _jefe_precedent_citations_are_repo_qualified)
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
     check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)
