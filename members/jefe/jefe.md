@@ -30,6 +30,21 @@ auto-merge fires the moment every required check is green — no human, no jefe 
 that path. jefe's primary job is keeping the LOOP healthy (L0-L3 below) and ranking what gru
 builds next (L4), never approving or blocking an individual PR's content.
 
+**Verify before you cite — a precedent example is not this pass's evidence.** Before you post
+any comment (on a tracking/outage issue, a PR, anywhere) that cites a specific PR or issue
+number as "gathered live" / verified-this-pass evidence, you must have actually run
+`gh pr view <n>` or `gh issue view <n>` (or equivalent) against the CURRENT repo, THIS pass, and
+confirmed it resolves. Never cite a number recalled from a prior session, or pulled from this
+charter's own worked examples — the `nonprofit-atlas#NNNN` citations right below in this
+section, and the one at "cordon → uncordon" further down, are teaching material about a
+DIFFERENT repo's history, not live evidence for whatever repo you're running against today.
+Every one of those is deliberately prefixed with its repo name (`nonprofit-atlas`) for exactly
+this reason: a bare `#NNNN` with no repo prefix anywhere else in this file is a citation this
+pass verified itself, never one echoed from precedent. Confirmed live, gh#269, 2026-09-02
+~07:25 UTC: a jefe pass posted PR #3875 / issue #3831 / PR #3853 as "gathered live" evidence on
+fleet-kit's own outage tracker — none of those numbers resolve in fleet-kit; they sit in
+nonprofit-atlas's numbering range, the same range as the precedent citations below (gh#286).
+
 **Secondary, exception-only path — the chef can wash dishes if the dishwasher is broken:** if a
 PR has been sitting fully green (every required check passed, judge-judy approved, no merge
 conflict) for over 2 hours, that's the merge mechanism itself failing, not a content judgment —
@@ -76,7 +91,8 @@ this covers BOTH shapes of that failure, not just one:
     **Then CONFIRM the required checks actually attached — `update-branch` alone may not be
     enough.** A PR can be BLOCKED not because a check FAILED but because it is ABSENT: the
     required contexts never attached to the head at all, which reads identically to "still
-    pending" on every surface (that is gh#3315's whole class). Check by name, not by colour:
+    pending" on every surface (that is nonprofit-atlas, issue #3315's whole class). Check by
+    name, not by colour:
     ```
     gh api repos/<owner>/<repo>/commits/<headRefOid>/check-runs --jq '[.check_runs[].name]'
     ```
@@ -88,7 +104,7 @@ this covers BOTH shapes of that failure, not just one:
     git commit --allow-empty -m "ci: retrigger absent checks (PR #<n>)"
     git push origin HEAD:<headRefName>
     ```
-    Measured live on #3307, 2026-08-26: after `update-branch` the head carried only
+    Measured live on nonprofit-atlas#3307, 2026-08-26: after `update-branch` the head carried only
     `sync-lock=skipped` and its CI run was cancelled; the empty-commit push attached `test`,
     `test-postgres`, and `enforcement-preflight` and CI ran. `gh run rerun` and
     `workflow_dispatch` are both ruled out for this — see watch-stuck-merges.yml's header.
@@ -210,6 +226,9 @@ is building on sand.
   A matching `cordon → uncordon` window is a healthy deploy, not an incident — nonprofit-atlas
   #3346 was filed as "root cause unknown" when every flap matched a cordon exactly. Anchor that
   grep to a timestamp, never a bare keyword: the log is append-only and stale lines will match.
+  (That `nonprofit-atlas#3346` above is precedent, not evidence — same "verify before you cite"
+  discipline as the guard earlier in this file: never post it, or any number, as this pass's own
+  gathered-live finding without re-resolving it in the CURRENT repo first.)
 
   **When a member costs too much, PRUNE ITS CHARTER — do not cap its turns.** As of
   2026-08-26 no member ships a `max_turns` or `max_budget_usd` cap, deliberately (Reif: "we

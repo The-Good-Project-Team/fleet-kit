@@ -921,6 +921,40 @@ def _jefe_can_unstick_a_pr_that_is_merely_behind():
         "jefe's manual retrigger must point at the automated mechanism it stands in for"
 
 
+def _jefe_precedent_citations_are_repo_qualified():
+    """gh#286: jefe posted PR #3875 / issue #3831 / PR #3853 as "gathered live" evidence on
+    gh#269 -- fleet-kit's own outage tracker -- none of which resolve in fleet-kit. They sit in
+    nonprofit-atlas's numbering range, the same range jefe.md's own worked examples cite as
+    precedent (`nonprofit-atlas#3108`, `#3307`, etc.), unmarked as "a different repo's history"
+    at the exact spots a pass composing a status comment would be reading. This locks in two
+    things: (1) jefe.md actually carries the verify-before-you-cite guard, and (2) every bare
+    4+-digit `#NNNN` citation in the file -- fleet-kit's own numbering tops out in the low
+    hundreds, so 4+ digits is nonprofit-atlas's range -- sits in a paragraph that names
+    `nonprofit-atlas` somewhere in it, the existing citation style. A NEW bare citation slipped
+    into jefe.md without that qualifier is exactly the unmarked-precedent shape that caused the
+    original fabrication.
+    """
+    md = (ROOT / "members/jefe/jefe.md").read_text()
+    assert "verify before you cite" in md.lower(), \
+        "jefe.md lost its verify-before-you-cite guard -- see gh#286"
+    assert "gh pr view" in md and "gh issue view" in md, \
+        "jefe.md's citation guard must name the actual verification command"
+
+    # Strip fenced code blocks first -- a shell snippet's `#!/bin/bash` or a placeholder like
+    # `PR #<n>` must never be mistaken for a citation.
+    stripped = re.sub(r"```.*?```", "", md, flags=re.DOTALL)
+    # Paragraphs = blank-line-separated blocks, the same unit a reader takes in at once.
+    paragraphs = re.split(r"\n\s*\n", stripped)
+    cite = re.compile(r"#\d{4,}")
+    bad = []
+    for para in paragraphs:
+        if cite.search(para) and "nonprofit-atlas" not in para:
+            bad.append(para.strip().splitlines()[0][:80])
+    assert not bad, (
+        "jefe.md cites a specific numbered PR/issue without marking it as nonprofit-atlas "
+        f"precedent in the same paragraph (gh#286's exact failure shape): {bad}")
+
+
 def _score_reasoning_is_not_guillotined_mid_word():
     """The Magikarp score's reasoning must survive to the dashboard whole.
 
@@ -4022,6 +4056,7 @@ if __name__ == "__main__":
     check("self-evolution evidence covers fleet-kit's own repo, not just $FLEET_REPO", _self_evo_evidence_covers_both_repos)
     check("self_improve_score.sh's evidence catches the member/<name>-<id> branch shape", _self_improve_score_evidence_covers_member_branch_shape)
     check("jefe can unstick a PR that is merely behind its base", _jefe_can_unstick_a_pr_that_is_merely_behind)
+    check("jefe.md's precedent citations are repo-qualified, and the verify-before-you-cite guard is present", _jefe_precedent_citations_are_repo_qualified)
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
     check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)
