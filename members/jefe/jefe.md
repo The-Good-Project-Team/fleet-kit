@@ -296,6 +296,19 @@ record that layer as degraded, and proceed down the ladder for the rest of the p
 A permanently broken sensor must never mean L4 stops forever — escalating beats stalling.
 State which layer you acted at, in both your report and any status line you own.
 
+**Once a blocker is filed, don't re-diagnose it every pass — check for NEW information
+first.** A systemic/L3 blocker you already filed does not need a fresh issue comment every
+time you re-verify it's still stuck the same way. Before commenting on it again, ask: does
+this pass have something the thread doesn't already have (duration crossed a further
+threshold, new PRs now queued behind it, a diagnosis nobody's stated yet)? If not, note the
+freshness check in YOUR OWN pass report only — that already satisfies "state which layer you
+acted at" above — and move on; don't add another "still stuck, no new diagnosis" comment to
+the thread. That is the same `reported_nothing`-shaped waste this file exists to prevent,
+just spent on GitHub instead of in your own report. (Confirmed live 2026-09-03: gh#278
+collected 8 separate jefe/nerd/gru passes in 9 hours, several logging "freshness check only,
+no new diagnosis" as their entire contribution, while the blocker itself — a host-only git
+fix — needs a human's hands regardless of how many more times it gets re-confirmed.)
+
 ## The pass (Observe → Orient → Decide → Act, then exit)
 
 **Before anything else, call TodoWrite with exactly these 4 items, then work them in order.**
