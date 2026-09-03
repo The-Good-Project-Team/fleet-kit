@@ -412,6 +412,70 @@ def _fanout_packs_the_hour_by_complexity():
         raise AssertionError("unit_pct=0 silently accepted")
 
 
+def _cost_bridge_converts_real_spend_into_fanouts_observed_shape():
+    """gh#4020 / fleet-kit#260: fanout.py's own docstring promises `unit_pct` is derived from
+    what passes ACTUALLY spent, but nothing ever built that derivation -- every gru pass since
+    2026-08-30 called it with a hand-typed `--unit-pct 0.05` guess. cost_bridge.to_observed()
+    is the missing function: it distributes one already-known allowance_pct across real
+    cost_usd, proportional to each run's share of the group's total spend, into exactly the
+    shape fanout.py --observed expects.
+    """
+    import time
+    import cost_bridge
+    import fanout
+
+    runs = [{"item_id": "10", "cost_usd": 2.0}, {"item_id": "20", "cost_usd": 1.0}]
+    observed = cost_bridge.to_observed(runs, allowance_pct=0.03,
+                                       complexity_by_item={"10": 8, "20": 3})
+    assert len(observed) == 2, observed
+    by_item = {o["complexity"]: o["pct"] for o in observed}
+    # $2 : $1 spend must split the 0.03 allowance 2:1, not evenly and not by complexity.
+    assert abs(by_item[8] - 0.02) < 1e-9, observed
+    assert abs(by_item[3] - 0.01) < 1e-9, observed
+    assert abs(sum(o["pct"] for o in observed) - 0.03) < 1e-9, "must exhaust the allowance"
+
+    # An item missing from complexity_by_item is median, never free -- same convention as an
+    # unlabelled item everywhere else in this file.
+    unlabelled = cost_bridge.to_observed([{"item_id": "30", "cost_usd": 1.0}], allowance_pct=0.01)
+    assert unlabelled[0]["complexity"] == fanout.DEFAULT_COMPLEXITY, unlabelled
+
+    # Refuses to invent a split when there's nothing usable -- same discipline as
+    # fanout.calibrate(), never a fabricated number.
+    assert cost_bridge.to_observed([], 0.03) == []
+    assert cost_bridge.to_observed(runs, 0.0) == []
+    assert cost_bridge.to_observed([{"item_id": "1", "cost_usd": 0}], 0.03) == []
+    assert cost_bridge.to_observed([{"item_id": "1", "cost_usd": None}], 0.03) == []
+
+    # The output feeds fanout.calibrate() directly -- that's the whole point of matching its
+    # --observed shape exactly.
+    unit = fanout.calibrate(observed)
+    assert unit is not None and unit > 0, unit
+
+    # recent_minion_costs() is the thin DB seam -- exercised through fleet.db like the other
+    # fleet_db-backed checks in this file, not mocked.
+    import fleet_db
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        runs_file = d / "runs.jsonl"
+        recs = [
+            {"run_id": "r1", "member": "minion", "item_id": "10", "_recorded_at": time.time(),
+             "tokens": {"cost_usd": 2.0}},
+            {"run_id": "r2", "member": "minion", "item_id": "20", "_recorded_at": time.time(),
+             "tokens": {"cost_usd": 1.0}},
+            # a different member's spend must not leak into minion's calibration.
+            {"run_id": "r3", "member": "gru", "item_id": "99", "_recorded_at": time.time(),
+             "tokens": {"cost_usd": 99.0}},
+            # stale (outside the lookback window) must not count either.
+            {"run_id": "r4", "member": "minion", "item_id": "40", "_recorded_at": time.time() - 999999,
+             "tokens": {"cost_usd": 5.0}},
+        ]
+        runs_file.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+        conn = fleet_db.connect(d / "fleet.db")
+        fleet_db.sync(conn, runs_file=runs_file)
+        real = cost_bridge.recent_minion_costs(conn, member="minion", hours=2.0)
+        assert {r["item_id"] for r in real} == {"10", "20"}, real
+
+
 def _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing():
     """The meter gru spends against is the FLEET's per-diem hour, never a session's pacing.
 
@@ -3945,6 +4009,7 @@ if __name__ == "__main__":
     check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
     check("fleet.db composite-PK migration is lock-serialized", _fleet_db_composite_pk_migration_is_lock_serialized)
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
+    check("cost_bridge converts real spend into fanout's --observed shape", _cost_bridge_converts_real_spend_into_fanouts_observed_shape)
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
     check("maxx lease reserves, releases, and self-expires", _maxx_lease_reserves_releases_and_self_expires)
     check("maxx lease concurrent reserves don't clobber each other", _maxx_lease_concurrent_reserves_dont_clobber_each_other)

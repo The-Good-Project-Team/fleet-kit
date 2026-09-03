@@ -154,14 +154,29 @@ spawns exactly one). Your job, in order:
    hour that one complexity-9 would blow.
 
    First **calibrate against what passes really cost**, then pack. Never hand it a guessed
-   unit cost — it refuses to invent one, and that refusal is deliberate:
+   unit cost — it refuses to invent one, and that refusal is deliberate. Build `--observed`
+   from real `fleet.db` spend via `cost_bridge.py` (gh#4020 / fleet-kit#260) — never a
+   hand-typed guess:
 
    ```
+   OBSERVED=$(python3 /fleet-kit/scripts/cost_bridge.py \
+     --allowance-pct <allowance_pct from step 1, ALREADY clamped to FLEET_SHARE_CEILING_PCT> \
+     --complexity '{"<item_id>":<its fleet:complexity label>, ...}')  # from step 2's own candidates
+
    python3 /fleet-kit/scripts/fanout.py \
      --allowance-pct <allowance_pct from step 1, ALREADY clamped to FLEET_SHARE_CEILING_PCT> \
-     --observed '[{"pct":<real % of week that pass spent>,"complexity":<its label>}, ...]' \
+     --observed "$OBSERVED" \
      --items '[{"number":3253,"complexity":3},{"number":3252,"complexity":5}, ...]'
    ```
+
+   `cost_bridge.py` distributes this pass's own `allowance_pct` across the last 2h of real
+   `minion` `cost_usd` rows in `fleet.db`, proportional to each run's share of that spend —
+   the one real signal every pass already has, turned into the exact `{"pct":...,
+   "complexity":...}` shape `--observed` expects. If it prints `[]` (a cold start, or a long
+   quiet stretch with no recent minion runs), `fanout.py` will correctly refuse to invent a
+   unit cost (`ERROR`, exit 2) rather than pack blind — in that specific, documented case
+   only, fall back to `--unit-pct 0.05` explicitly and say so plainly in your report. Do not
+   fall back silently, and do not fall back just because the derived number looks surprising.
 
    `--items` must be in **marie's priority order** — the packer walks that order and never
    reorders by size, because shipping the most important work beats shipping the most work.
@@ -205,10 +220,12 @@ spawns exactly one). Your job, in order:
    ```
 
    Compare each of last pass's `est_pct` values against what that minion really spent. Report
-   the error plainly — "estimated 0.05%, actual 0.11%, 2.2x under" — and feed the real numbers
-   back in as `--observed` this pass so the unit self-corrects. A systematic miss in one
-   direction is a finding worth naming: if complexity-8s consistently cost 3x their estimate,
-   marie's ladder is mis-calibrated for this repo and she should hear about it in a comment.
+   the error plainly — "estimated 0.05%, actual 0.11%, 2.2x under". `cost_bridge.py` (step 3)
+   already feeds these real numbers back in as `--observed` every pass so the unit
+   self-corrects automatically — this query is for your own narrative comparison and for
+   spotting a systematic miss worth naming: if complexity-8s consistently cost 3x their
+   estimate, marie's ladder is mis-calibrated for this repo and she should hear about it in a
+   comment.
 
    Do NOT silently adjust the estimate to match your intuition. The correction happens through
    `--observed` (real data) or through marie's scoring, never by you overriding the number.
