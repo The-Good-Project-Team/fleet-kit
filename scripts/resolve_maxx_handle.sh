@@ -39,7 +39,18 @@
 # reading may only ever be usable to CONSERVE, never to invent headroom).
 set -uo pipefail
 
+# Strip surrounding quotes. When fleet.env is SOURCED by a shell, `FLEET_ACCOUNTS="tgp gmail"`
+# arrives unquoted -- but a caller that parses the file itself (fleet_view_server's
+# subprocess_env, which reads KEY=value as text so a key added after startup is still visible)
+# passes the literal `"tgp gmail"`, quotes included. The first account then became `"tgp`, this
+# script built `FLEET_MAXX_HANDLE_"TGP`, bash rejected it as an invalid variable name, and the
+# loop fell through to its no-mapping path -- exiting 0 with EMPTY output. Every such caller
+# silently got no resolution and kept metering whatever static handle it already had, which is
+# precisely the wrong-account bug this script exists to prevent. Found 2026-09-03 wiring the
+# resolved account into the Settings page, which could not name the account for this reason.
 ACCOUNTS="${FLEET_ACCOUNTS:-primary}"
+ACCOUNTS="${ACCOUNTS%\"}"; ACCOUNTS="${ACCOUNTS#\"}"
+ACCOUNTS="${ACCOUNTS%\'}"; ACCOUNTS="${ACCOUNTS#\'}"
 STATE_FILE="${ACCOUNT_POOL_STATE_FILE:-${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}/account-pool-exhausted.state}"
 
 _suffix_for() {

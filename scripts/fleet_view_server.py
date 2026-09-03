@@ -474,6 +474,9 @@ def _budget_preview() -> dict:
     read-only display route and a broken meter must degrade to an explanation, not a 500.
     """
     flags = read_env_flags()
+    # read_env_flags only carries DIAL_FIELDS; FLEET_ACCOUNTS and the per-account
+    # FLEET_MAXX_HANDLE_<ACCT> map are not dials, so read the file itself for those.
+    _env_all = read_env_values()
     share = (flags.get("FLEET_SHARE_FRACTION") or "").strip()
     gru_frac = (flags.get("FLEET_GRU_ALLOWANCE_FRACTION") or "").strip()
 
@@ -486,7 +489,35 @@ def _budget_preview() -> dict:
         "formula": "instance_ceiling = account_hourly_headroom x share_fraction ; "
                    "gru_allowance = instance_ceiling x gru_fraction",
         "note": None,
+        "account": None,
+        "maxx_handle": None,
+        "pool": (_env_all.get("FLEET_ACCOUNTS") or "").strip().strip('"\'') or None,
     }
+
+    # WHICH ACCOUNT these numbers describe. Settings rendered a ceiling and an allowance
+    # derived from one account's meter while naming no account anywhere on the page, so an
+    # operator tuning the dials could not tell whether they applied to the account actually
+    # doing the spending. That is not hypothetical: 2026-09-02 ran FLEET_ACCOUNTS="gmail tgp"
+    # against FLEET_MAXX_HANDLE=reif_tgp, pacing the fleet on a gated account's frozen meter
+    # while the other one did all the real work -- and the page looked entirely normal
+    # throughout. Resolve it the same way run_member.sh does (the account this pass WOULD
+    # spend from), never the static handle, because those two disagreeing is the whole bug.
+    try:
+        rp = subprocess.run(
+            ["bash", str(KIT_DIR / "scripts" / "resolve_maxx_handle.sh")],
+            capture_output=True, text=True, timeout=15, env=subprocess_env())
+        resolved = (rp.stdout or "").split()
+        if resolved:
+            out["maxx_handle"] = resolved[0]
+            # Map the handle back to its pool account name via FLEET_MAXX_HANDLE_<ACCT>,
+            # so the UI can say "tgp (reif_tgp)" -- the operator thinks in account names.
+            for acct in (out["pool"] or "").split():
+                key = "FLEET_MAXX_HANDLE_" + acct.upper().replace("-", "_")
+                if (_env_all.get(key) or "").strip().strip('"\'') == resolved[0]:
+                    out["account"] = acct
+                    break
+    except Exception:  # noqa: BLE001 -- display route, a missing name must never 500
+        pass
     if not share or share == "1.0":
         out["note"] = ("FLEET_SHARE_FRACTION is unset or 1.0, so no ceiling is exported and "
                        "gru falls back to its own default -- set it below to cap this instance.")
