@@ -56,9 +56,9 @@ for pr in $(gh pr list --state open --json number,isDraft,mergeable,mergeStateSt
   CHECKED=$((CHECKED+1))
   head_ref=$(gh pr view "$pr" --json headRefName -q '.headRefName' 2>/dev/null)
   [ -z "$head_ref" ] && continue
-  behind_by=$(gh api "repos/${REPO_SLUG}/compare/main...${head_ref}" --jq '.behind_by' 2>/dev/null || echo 0)
+  behind_by=$(timeout 25s gh api "repos/${REPO_SLUG}/compare/main...${head_ref}" --jq '.behind_by' 2>/dev/null || echo 0)
   [ "${behind_by:-0}" -le 0 ] && continue
-  if gh api -X PUT "repos/${REPO_SLUG}/pulls/${pr}/update-branch" >/dev/null 2>&1; then
+  if timeout 25s gh api -X PUT "repos/${REPO_SLUG}/pulls/${pr}/update-branch" >/dev/null 2>&1; then
     log "PR #$pr: updated branch (was $behind_by commit(s) behind main)"
     UPDATED=$((UPDATED+1))
   else
