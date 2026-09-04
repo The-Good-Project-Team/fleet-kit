@@ -75,7 +75,15 @@ if [ "$DEPLOYED_SHA" = "unknown" ] || [ -z "$DEPLOYED_SHA" ]; then
     exit 0
 fi
 
-MAIN_SHA="$(gh api "repos/$KIT_REPO_SLUG/commits/main" --jq .sha 2>/dev/null || echo "")"
+# timeout wrapper (2026-09-04, dumbledore rot hunt): confirmed live via deploy.log/
+# deploy_staleness_check.log both going silent for 6 consecutive hourly ticks
+# (2026-09-03 16:57-21:57 UTC) during the exact gh#278/#275 host stall this check exists to
+# catch -- cron kept firing (other members' logs updated normally the whole window) but this
+# script produced zero output, including none of its own early-exit log() lines, which only
+# happens if the process itself never returned. Neither `gh api` call here had a timeout, so a
+# slow/hung network response (plausible under the same host-level disruption gh#278 documents)
+# can wedge the ONE independent watchdog for this class of failure for hours with no trace.
+MAIN_SHA="$(timeout 25s gh api "repos/$KIT_REPO_SLUG/commits/main" --jq .sha 2>/dev/null || echo "")"
 if [ -z "$MAIN_SHA" ]; then
     log "could not reach GitHub API for $KIT_REPO_SLUG's main HEAD -- staleness check skipped this tick"
     exit 0
@@ -92,7 +100,7 @@ fi
 # delivery has actually been dark -- the same measure the issue's own evidence used by hand
 # (oldest un-synced commit's merge time vs wall clock). The compare API returns commits
 # strictly after base, oldest first, so [0] is exactly that commit.
-OLDEST_UNDEPLOYED_DATE="$(gh api "repos/$KIT_REPO_SLUG/compare/$DEPLOYED_SHA...$MAIN_SHA" --jq '.commits[0].commit.committer.date' 2>/dev/null || echo "")"
+OLDEST_UNDEPLOYED_DATE="$(timeout 25s gh api "repos/$KIT_REPO_SLUG/compare/$DEPLOYED_SHA...$MAIN_SHA" --jq '.commits[0].commit.committer.date' 2>/dev/null || echo "")"
 if [ -z "$OLDEST_UNDEPLOYED_DATE" ]; then
     log "DRIFT: live sha=$DEPLOYED_SHA differs from main=$MAIN_SHA but the compare could not be resolved (force-push/rebase on main?) -- duration unknown, cannot confirm against the ${STALENESS_BUDGET_S}s budget"
     exit 0
