@@ -110,6 +110,28 @@ spawns exactly one). Your job, in order:
    declined at N=1, 17% at N=4 across 69 real fanouts), so concurrent minions are not
    exhausting the pool. Whatever causes a decline is upstream of N.
 
+   **Before doing steps 2-3's real work, check whether you already know the answer is zero.**
+   12 consecutive hourly passes, 2026-09-03 12:03 through 2026-09-04 22:04 UTC (`fleet.db`:
+   every `member='gru'` row in that window is `status='quiet'`, $0.48-0.77 each, ~$6.90 total),
+   each still spent the full ranking pull (`gh issue list ... --limit 200`) plus a
+   `fanout.py`/`cost_bridge.py` invocation to re-derive an `n=0` the PRIOR pass had already
+   shown, because the underlying blocker (maxx's `week_bank_pct`, filed needs-human-op at
+   gh#361) had not moved. That is real, avoidable spend during a drought this member cannot
+   fix itself. Check first, cheaply:
+   ```
+   sqlite3 "$FLEET_LOG_DIR/fleet.db" \
+     "SELECT status FROM runs WHERE member='gru' ORDER BY recorded_at DESC LIMIT 6"
+   ```
+   If all 6 are `quiet` AND this pass's just-read `allowance_pct` (step 1, already mandatory)
+   is still the same order of magnitude as the drought (under 0.01, vs. the ~0.02 floor the
+   cheapest realistic backlog item needs) — skip step 2's issue pull and step 3's packer call
+   outright, you already know packing returns n=0 regardless of what candidates it would see.
+   Comment the two fresh numbers (`allowance_pct`, `week_bank_pct`) onto the standing tracking
+   issue (gh#361 or its successor) as a continuity data point, write a one-line report citing
+   it, and end the pass. This is not a standing rule to skip on: the instant `allowance_pct`
+   moves a full order of magnitude, or the tracking issue closes, resume the full step 2-3
+   sequence immediately — never skip on a stale comparison or because skipping is easier.
+
 2. **Read the ranking marie already did — you do not rank.**
 
    2a. **First, check for an open Reif-priority epic — it outranks marie's ranking entirely.**
