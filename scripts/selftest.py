@@ -1739,14 +1739,39 @@ def _auto_deploy_race_check_does_not_alert_on_a_self_resolving_sanctioned_abort(
             "a streak that crossed threshold but resolved before this tick ran still alerted"
 
 
-def _auto_deploy_race_check_is_actually_scheduled():
-    """Same failure class as _deploy_staleness_check_is_actually_scheduled, one script over
-    (gh#255): a detector that exists but that nothing puts on cron never runs, and the race it
-    is meant to surface goes back to being invisible until a human stumbles onto it.
+# Table-driven replacement for the "_X_is_actually_scheduled" pattern (gh#378): four
+# near-identical hand-written guards each asserted one hardcoded crontab substring, and every
+# one of them was written only AFTER an incident where the matching script shipped with no
+# crontab line and silently did nothing until a human or a nerd pass noticed
+# (gh#154/#171/#249/#255/#324/#346, and #376 was about to add a 5th bespoke copy instead of
+# closing the class). PR#375 (2026-09-04, gh#278-class) proved this exact shape works for the
+# gh-api-timeout class -- one table walked by one generalized check, instead of one bespoke
+# function per incident. Porting it here: the next incident-response script gets protection by
+# adding one table row, not by a future pass hand-writing a 5th/6th near-duplicate function.
+_ENTRYPOINT_SCHEDULED_SCRIPTS = (
+    # (human label, exact substring expected in entrypoint.sh's crontab, originating issue)
+    ("auto_deploy_race_check.sh", "bash /fleet-kit/scripts/auto_deploy_race_check.sh", "gh#255"),
+    ("self_improve_score.sh", "self_improve_score.sh", "gh#196-adjacent"),
+    ("deploy_staleness_check.sh", "deploy_staleness_check.sh", "gh#201"),
+    ("lane_kpi.py", "python3 /fleet-kit/scripts/lane_kpi.py record", "gh#324"),
+)
+
+
+def _every_entrypoint_scheduled_script_is_actually_scheduled():
+    """dumbledore's own entrypoint.sh charter is 'a script existing is not the same as a
+    script running' -- this is that assertion, checked once for every script this table
+    knows about instead of once per bespoke function. A future incident-response script that
+    ships inside the container joins this table as a new row; it does not need a new function.
     """
     entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
-    assert "bash /fleet-kit/scripts/auto_deploy_race_check.sh" in entry, (
-        "auto_deploy_race_check.sh has no line in entrypoint.sh's crontab -- it will never run.")
+    missing = [
+        f"{label} ({issue}): expected {substring!r} in entrypoint.sh's crontab"
+        for label, substring, issue in _ENTRYPOINT_SCHEDULED_SCRIPTS
+        if substring not in entry
+    ]
+    assert not missing, (
+        "script(s) with no line in entrypoint.sh's crontab -- they will never run:\n"
+        + "\n".join(missing))
 
 
 def _run_member_logs_critical_when_postflight_dirty_check_fails_to_source():
@@ -2837,36 +2862,10 @@ def _every_scheduled_member_is_actually_on_cron():
         "A spec does not schedule a member; entrypoint.sh's crontab does.")
 
 
-def _self_improve_score_is_actually_scheduled():
-    """self_improve_score.sh is not a member -- the check above can't see it, and it didn't.
-
-    Found live by dumbledore 2026-08-28: self_improve_score.jsonl did not exist anywhere under
-    FLEET_LOG_DIR, because entrypoint.sh's hand-written crontab had no line for it at all -- the
-    exact same "spec/reality exists, but nothing put it on cron" failure class as datta
-    (nonprofit-atlas#3321, fixed in #114), recurring in the one place #114's own fix cannot
-    reach: _every_scheduled_member_is_actually_on_cron only walks members/*/*.fleet.json, and
-    this script has no member spec to walk. dumbledore's and jefe's entire read of the Magikarp
-    score depends on this file existing; a silent gap here breaks the one feedback loop this
-    whole kit is built around, with no crash and no failing check -- until now.
-    """
-    entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
-    assert "self_improve_score.sh" in entry, (
-        "self_improve_score.sh has no line in entrypoint.sh's crontab -- it will never run, "
-        "so self_improve_score.jsonl never gets written and dumbledore/jefe read nothing.")
-
-
-def _deploy_staleness_check_is_actually_scheduled():
-    """Same failure class as _self_improve_score_is_actually_scheduled, one script over.
-
-    gh#201: deploy_staleness_check.sh is the independent gate that catches a deploy that never
-    ran at all -- it is worthless if nothing puts it on cron, exactly the "spec/reality exists,
-    but nothing scheduled it" gap that bit datta (nonprofit-atlas#3321) and self_improve_score.sh
-    (gh#196-adjacent) before it.
-    """
-    entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
-    assert "deploy_staleness_check.sh" in entry, (
-        "deploy_staleness_check.sh has no line in entrypoint.sh's crontab -- it will never run, "
-        "so a dark deploy pipeline goes back to being invisible until a human stumbles onto it.")
+# _self_improve_score_is_actually_scheduled and _deploy_staleness_check_is_actually_scheduled
+# (found live by dumbledore 2026-08-28, gh#201) were folded into the table-driven
+# _every_entrypoint_scheduled_script_is_actually_scheduled above (gh#378) alongside
+# _auto_deploy_race_check_is_actually_scheduled and _lane_kpi_is_actually_scheduled.
 
 
 def _account_and_tunnel_health_checks_are_actually_scheduled():
@@ -3021,16 +3020,8 @@ def _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget():
         "Dockerfile does not accept/write DEPLOY_SHA -- deploy.sh's build-arg has nowhere to land"
 
 
-def _lane_kpi_is_actually_scheduled():
-    """Same failure class as _deploy_staleness_check_is_actually_scheduled/
-    _auto_deploy_race_check_is_actually_scheduled: gh#324 shipping lane_kpi.py and nothing
-    scheduling it would leave devops's deploy_success_rate uncomputed forever, exactly the gap
-    this issue exists to close.
-    """
-    entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
-    assert "python3 /fleet-kit/scripts/lane_kpi.py record" in entry, (
-        "lane_kpi.py has no line in entrypoint.sh's crontab -- it will never run, and "
-        "deploy_success_rate/deploy_count_7d stay uncomputed exactly as gh#324 found them.")
+# _lane_kpi_is_actually_scheduled (gh#324) was folded into
+# _every_entrypoint_scheduled_script_is_actually_scheduled above (gh#378).
 
 
 def _lane_kpi_classifies_ticks_and_ignores_in_progress_drains():
@@ -4118,7 +4109,7 @@ if __name__ == "__main__":
     check("auto-deploy race check dedups an already-recorded line", _auto_deploy_race_check_dedups_an_already_recorded_line)
     check("auto-deploy race check escalates after 3 consecutive sanctioned ABORTs", _auto_deploy_race_check_escalates_after_three_consecutive_sanctioned_aborts)
     check("auto-deploy race check does not alert on a self-resolving sanctioned ABORT", _auto_deploy_race_check_does_not_alert_on_a_self_resolving_sanctioned_abort)
-    check("auto-deploy race check is actually scheduled", _auto_deploy_race_check_is_actually_scheduled)
+    check("every entrypoint.sh-scheduled incident script is actually scheduled (gh#378, table-driven)", _every_entrypoint_scheduled_script_is_actually_scheduled)
     check("run_member.sh logs CRITICAL when postflight_dirty_check.sh fails to source", _run_member_logs_critical_when_postflight_dirty_check_fails_to_source)
     check("run_member.sh rejects a non-numeric --item", _run_member_rejects_a_non_numeric_item)
     check("both worktree callers check $REPO before tearing the worktree down", _run_member_and_builder_check_repo_before_removing_the_worktree)
@@ -4137,8 +4128,6 @@ if __name__ == "__main__":
     check("a run records the item it worked", _a_run_records_the_item_it_worked)
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
-    check("self_improve_score.sh is actually scheduled", _self_improve_score_is_actually_scheduled)
-    check("deploy staleness check is actually scheduled", _deploy_staleness_check_is_actually_scheduled)
     check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
     check("every required health-check script in README is actually scheduled", _required_health_check_scripts_in_readme_are_scheduled)
     check("NTFY_TOPIC is deferred to tick-time, not baked in at boot", _ntfy_topic_is_deferred_to_tick_time_not_baked_in_at_boot)
@@ -4177,7 +4166,6 @@ if __name__ == "__main__":
     check("nothing hardcodes a read of the frozen instances/*/logs mirror", _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror)
     check("self-evolution panel catches the member/<name>-<id> branch shape", _self_evolution_panel_catches_the_member_dash_branch_shape)
     check("gru.md clamps allowance_pct to FLEET_SHARE_CEILING_PCT", _gru_md_clamps_allowance_to_share_ceiling)
-    check("lane_kpi.py is actually scheduled", _lane_kpi_is_actually_scheduled)
     check("lane_kpi classifies ticks and ignores in-progress drains", _lane_kpi_classifies_ticks_and_ignores_in_progress_drains)
     check("lane_kpi is append-only and distinguishes missing from stale", _lane_kpi_is_append_only_and_distinguishes_missing_from_stale)
 
