@@ -119,7 +119,15 @@ case "${1:-cron-foreground}" in
       # alongside this), so */5 was pure churn, not signal. Now that it does real work (the
       # local messenger driver verifies transcripts are actually findable), hourly is plenty --
       # nothing about "is a transcript readable" needs sub-hour latency.
-      echo "51 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dont-shoot-the-messenger >> $LOG_DIR/dont-shoot-the-messenger.log 2>&1"
+      # ARCHIVED 2026-09-04 (Reif): this instance has no FLEET_MESSENGER_DRIVER set, so
+      # dont-shoot-the-messenger.sh exits at its first guard ("no driver configured -- logs
+      # stay local-only, transcript relay unavailable. This is a valid mode, not an error.")
+      # having done nothing. Every tick still paid for a full `claude -p` spawn to run a
+      # script that returns immediately. The comment above describes a local driver doing
+      # real work -- that is NOT true on this instance: `grep FLEET_MESSENGER_DRIVER
+      # fleet.env` returns nothing. Re-enable by setting FLEET_MESSENGER_DRIVER to an
+      # executable driver, then uncommenting the line below.
+      # echo "51 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dont-shoot-the-messenger >> $LOG_DIR/dont-shoot-the-messenger.log 2>&1"
       echo "*/15 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh judge-judy >> $LOG_DIR/judge-judy.log 2>&1"
       # auto_update_branch.sh (gh#172): nothing else in this repo keeps an open PR's branch
       # current with main, so one merge pushes every other open PR BEHIND/BLOCKED forever --
