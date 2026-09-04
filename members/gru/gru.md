@@ -132,7 +132,7 @@ spawns exactly one). Your job, in order:
    label (high/medium/low). Your read is:
    ```
    gh issue list --state open --label fleet:backlog --label fleet:priority-high \
-     --json number,title,body,labels --limit 200
+     --json number,title,body,labels,createdAt --limit 200 --jq 'sort_by(.createdAt)'
    ```
    filtering out anything already `fleet:claimed` **or carrying `fleet:needs-human-op`**
    (that label means a prior pass already confirmed the item is blocked on something no fleet
@@ -142,6 +142,19 @@ spawns exactly one). Your job, in order:
    only once medium is too. You are choosing FROM marie's ranking, not re-deriving it — an item
    marie hasn't gotten to yet (no priority label at all) is lowest priority by default, not an
    oversight you correct yourself.
+
+   **Within a tier, walk oldest-`createdAt`-first, never raw API order.** `gh issue list` with
+   no explicit sort returns newest-created-first; since step 3's packer walks candidates
+   front-to-back and never looks past what the hour's budget covers, that default order makes
+   an old item's odds of ever being built purely a function of how many same-tier items happened
+   to be filed after it — pure filing-order luck, not merit, even though marie ranked it
+   correctly. Documented in gh#360 (evidence gathered 2026-09-03): `#64` (filed 2026-08-25,
+   `fleet:priority-high` + `fleet:prd`, a build-ready spec) sat at position 22 of 23 in the high
+   tier and was still unclaimed 10 days later when this fix landed, purely because newer
+   high-priority items kept landing ahead of it. The
+   `sort_by(.createdAt)` above fixes this — it only reorders WITHIN a tier (high still always
+   precedes medium/low) and never drops or blocks a newer item, it just queues behind older
+   same-tier work until the hour's budget reaches it.
 
    Collect each candidate's `fleet:complexity-<1-10>` label along with its number — that is
    marie's size estimate and it is what makes packing possible. An item with no complexity
