@@ -2964,6 +2964,35 @@ def _ntfy_topic_is_deferred_to_tick_time_not_baked_in_at_boot():
         "fresh at tick-time.")
 
 
+def _every_gh_api_call_is_timeout_guarded():
+    """gh#278-class: a bare `gh api` call with no timeout can wedge the calling script
+    indefinitely under host-level disruption, with zero trace -- confirmed live three separate
+    times in three different scripts (deploy_staleness_check.sh went dark for 6 consecutive
+    hourly ticks, PR#370; auto_update_branch.sh and judge-judy.sh carried the identical
+    unguarded shape, fixed alongside this check). Three incident-by-incident PRs patching one
+    script each is not a fix, it's the same bug recurring -- this check makes the whole CLASS
+    fail CI instead, so a fourth site can never ship unguarded.
+
+    Deliberately a plain grep, not a shell parser: `timeout` must appear on the same line as
+    `gh api` (the pattern every existing fix uses), which is precise enough to catch a bare
+    call while staying simple enough that this check itself won't rot.
+    """
+    offenders = []
+    for sh in ROOT.rglob("*.sh"):
+        if "node_modules" in sh.parts:
+            continue
+        for lineno, line in enumerate(sh.read_text().splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if "gh api" in line and "timeout" not in line:
+                offenders.append(f"{sh.relative_to(ROOT)}:{lineno}")
+    assert not offenders, (
+        "bare `gh api` call(s) with no `timeout` wrapper on the same line -- wrap each in "
+        f"`timeout 25s gh api ...` (gh#278-class, see PR#370): {offenders}"
+    )
+
+
 def _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget():
     """The check must compare something REAL (a SHA baked at build time), and must only write
     a durable record when actually past budget -- not on every tick, or the STALE line this
@@ -4113,6 +4142,7 @@ if __name__ == "__main__":
     check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
     check("every required health-check script in README is actually scheduled", _required_health_check_scripts_in_readme_are_scheduled)
     check("NTFY_TOPIC is deferred to tick-time, not baked in at boot", _ntfy_topic_is_deferred_to_tick_time_not_baked_in_at_boot)
+    check("every gh api call in a shell script is timeout-guarded", _every_gh_api_call_is_timeout_guarded)
     check("deploy staleness check reads a baked SHA and only alerts past budget", _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget)
     check("deploy.sh's host log dir survives sourcing the instance's container-scoped fleet.env", _deploy_sh_host_log_dir_survives_sourcing_the_instances_container_scoped_fleet_env)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)

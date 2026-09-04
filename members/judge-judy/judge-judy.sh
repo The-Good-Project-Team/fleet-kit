@@ -88,7 +88,7 @@ REPO_SLUG=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null ||
 [ -z "$REPO_SLUG" ] && { log "FATAL: cannot resolve repo slug (gh auth?)"; exit 1; }
 
 post_status() { # <sha> <state> <description>
-  gh api -X POST "repos/${REPO_SLUG}/statuses/$1" \
+  timeout 25s gh api -X POST "repos/${REPO_SLUG}/statuses/$1" \
     -f state="$2" -f context="$CONTEXT" -f description="${3:0:139}" >/dev/null 2>&1
 }
 
@@ -107,14 +107,14 @@ pick_pr() {
     case " $skip_list " in *" $pr "*) continue ;; esac
     head=$(gh pr view "$pr" --json headRefOid -q '.headRefOid' 2>/dev/null) || continue
     [ -z "$head" ] && continue
-    statuses=$(gh api "repos/${REPO_SLUG}/statuses/${head}" 2>/dev/null || echo "[]")
+    statuses=$(timeout 25s gh api "repos/${REPO_SLUG}/statuses/${head}" 2>/dev/null || echo "[]")
     review_seen=$(jq -r --arg c "$CONTEXT" '[.[] | select(.context==$c)] | length' <<<"$statuses" 2>/dev/null || echo 0)
     [ "${review_seen:-0}" -gt 0 ] && continue   # this head already has a verdict (any state)
     if [ -n "$REQUIRED_CHECKS" ]; then
       # Reviewing a dead head is pure spend: skip if any named required check is red at this head.
       checks=0
       for name in $REQUIRED_CHECKS; do
-        n=$(gh api "repos/${REPO_SLUG}/commits/${head}/check-runs" \
+        n=$(timeout 25s gh api "repos/${REPO_SLUG}/commits/${head}/check-runs" \
           --jq ".check_runs[] | select(.name==\"$name\") | select(.conclusion==\"failure\" or .conclusion==\"timed_out\" or .conclusion==\"cancelled\")" 2>/dev/null | wc -l | tr -d ' ')
         checks=$((checks + ${n:-0}))
       done
