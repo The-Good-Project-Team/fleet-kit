@@ -39,10 +39,15 @@ check (main/deploy never touches those branches, so nothing else watches them), 
 double-probes prod if `FIXER_HEALTH_URL`/`FIXER_PAGE_URL` are set, and dedupes against its own
 state file so the same failing SHA never fires twice. It prints one line:
 
-- `green` (or `green (already-fighting <sha>)`) -- **stop here.** Report "checked, all green"
-  and end the pass. Do not read logs, do not open a worktree, do not spend more turns. This is
-  the whole reason the check is a script and not a prompt: a poll that costs nothing on every
-  green tick is what keeps this member cheap to run on any cadence without burning budget.
+- `green` (or `green (already-fighting <sha>)`) -- **stop here.** Report `Outcome: QUIET —
+  check.sh reported <its exact output>` (the literal `QUIET` prefix, not prose like "checked,
+  all green" -- run_report.py's `classify()` only routes to `quiet` when `outcome` starts with
+  that literal word; anything else with no `#123`/URL/`file:line` artifact in it falls through
+  to `reported_nothing` instead, which is exactly what happened to 14+ real, correct green
+  passes before this fix (confirmed live 2026-09-04 via `runs.jsonl`)) and end the pass. Do not
+  read logs, do not open a worktree, do not spend more turns. This is the whole reason the check
+  is a script and not a prompt: a poll that costs nothing on every green tick is what keeps this
+  member cheap to run on any cadence without burning budget.
 - `FIRE <what> <sha-prefix>` -- proceed to Step 2.
 
 ## Step 2: fix or revert, PR-backed only
@@ -148,6 +153,8 @@ describing the in-flight state ("pushed fix to PR #N, CI still IN_PROGRESS, auto
 having something to report; a fix pushed with CI still running is a valid `Outcome:`, an
 unconfirmed green is not required for the parser to see real work.
 
-One line either way: "green, no action" or "FIRE at <sha>: opened PR #N (fix|revert), reason".
+One line either way: `Outcome: QUIET — green, no action` or `Outcome: FIRE at <sha>: opened PR
+#N (fix|revert), reason`. The `QUIET` prefix on the green path is literal and required --
+see Step 1 above for why.
 
 **Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.
