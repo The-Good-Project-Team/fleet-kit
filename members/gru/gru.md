@@ -246,6 +246,28 @@ spawns exactly one). Your job, in order:
    this pass. If the derivation looks wrong, say so explicitly and act on what you can defend
    — but never silently substitute a number you like better.
 
+   **Anti-starvation floor — gh#360 fixed candidate ORDER, this fixes candidate PROGRESS.**
+   Even with the age-sort in step 2b, packing above is greedy-and-continue: an item too big for
+   what's left of the hour is skipped, and the walk keeps going to grab whatever cheaper item
+   comes next — including one filed days after the one it skipped. Nothing shrinks the front of
+   the queue when that happens, so a moderately-sized old item can be correctly first-in-line
+   and still never ship: it just loses the same crumbs to a smaller, younger item every single
+   hour. Confirmed live 2026-09-05 (gh#427): `#225` (complexity-3, filed 08-29) was the first
+   entry in `skipped` in three straight passes while `#347` (complexity-1, filed 09-03, five
+   days younger) got chosen in that same pack() call purely because it was small enough to fit
+   what `#225` didn't.
+
+   Check: is the first entry in THIS pass's `skipped` list the same issue number as the first
+   `skipped` entry in each of your previous 2 passes (grep your own `gru.log`)? If so, it has
+   now starved 3 consecutive hours on a wallet technicality alone, not on priority or claim
+   history — re-invoke `fanout.py` once more this pass with `--min-items` set to
+   `len(chosen)+1`. The forcing mechanism already exists (`min_items` pulls oldest-first off the
+   front of `skipped`); nothing before this told gru to use it. Bound this tightly: never force
+   more than one extra item per pass, never force an item that hasn't been front-of-skipped for
+   3 consecutive passes, and always quote `forced_over_floor`/`over_allowance` in your report
+   when it fires — a deliberate, visible, bounded overspend to clear a starving item, not silent
+   budget creep.
+
 3a. **Reserve `est_spend_pct` before you claim or spawn anything.** `reserved_pct` in step 1's
    read has been silently 0 on every pass until now -- the formula subtracts it, but nothing
    ever WROTE it, so the next hour's gru saw no trace of this hour's spend until maxx's own
