@@ -143,6 +143,57 @@ def runs_summary(runs: list[dict], hours: float = 24.0, roster: list[dict] | Non
     }
 
 
+def lost_passes(runs: list[dict], grace_minutes: float = 90.0) -> list[dict]:
+    """gh#145: run_ids with a "started" row (run_report.py's build_started_record, written by
+    run_member.sh before `claude -p` is even invoked) and no completion row -- normal-exit or
+    the SIGTERM trap's `killed` record, any status other than "started" counts -- landed after
+    at least `grace_minutes` have passed. That pairing is what makes a pass killed before
+    either of run_member.sh's own two write points (SIGKILL, container replacement, OOM)
+    detectable as a gap instead of silently reading as "never ran" (the incident this issue is
+    named for: 4 real `gh issue close` calls, zero runs.jsonl trace).
+
+    Pairs purely on `run_id` -- both legs of a healthy run share the exact same one (see
+    run_member.sh's RUN_ID) -- so this reads correctly regardless of `runs`' ordering (jsonl is
+    append-only, so in practice a "started" row always precedes its completion, but nothing
+    here depends on that).
+
+    `grace_minutes` default (90) is a flat fallback, not tuned per member -- the PRD (gh#145)
+    left the choice of a smarter one (e.g. 2x a member's typical pass duration) an open
+    question; a caller with that data can pass its own value.
+    """
+    now = _now_epoch()
+    started: dict[str, dict] = {}
+    completed_ids: set[str] = set()
+    for r in runs:
+        rid = r.get("run_id")
+        if not rid:
+            continue
+        if r.get("status") == "started":
+            started[rid] = r
+        else:
+            completed_ids.add(rid)
+
+    out = []
+    for rid, r in started.items():
+        if rid in completed_ids:
+            continue
+        ts = r.get("ts")
+        if ts is None:
+            continue
+        age_minutes = (now - ts) / 60.0
+        if age_minutes < grace_minutes:
+            continue
+        out.append({
+            "run_id": rid,
+            "member": r.get("member"),
+            "item_id": r.get("item_id"),
+            "started_ts": ts,
+            "age_minutes": round(age_minutes, 1),
+        })
+    out.sort(key=lambda x: -x["age_minutes"])
+    return out
+
+
 def backlog_history(issues_json: str, days: int = 30) -> list[dict]:
     """Open fleet:backlog issue count per day over the last `days` days, reconstructed from
     every issue's createdAt/closedAt (a still-open issue has closedAt=None, counts as open at

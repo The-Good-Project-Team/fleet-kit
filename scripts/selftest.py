@@ -1300,6 +1300,80 @@ def _a_killed_pass_is_recorded_not_lost():
         "backgrounded pipeline does not re-raise PIPESTATUS -- claude's exit code is lost"
 
 
+def _run_member_writes_a_started_row_before_claude_p(src=None):
+    """gh#145: a pass that vanishes before EITHER of run_member.sh's two existing write points
+    (normal-exit, or record_killed_pass's SIGTERM trap -- see _a_killed_pass_is_recorded_not_lost
+    above) still leaves zero runs.jsonl trace, because both of those only fire after `claude -p`
+    returns or is trapped. This asserts the fix is actually wired in, not just a library
+    function nothing calls: run_member.sh must write a `--started` row, sharing $RUN_ID, before
+    the `claude -p` invocation and before the SIGTERM trap even arms -- structural, since a real
+    SIGKILL can't be exercised from a unit test.
+    """
+    src = src if src is not None else (Path(__file__).parent / "run_member.sh").read_text()
+    started_call = re.search(r'run_report\.py"\s*--started.*?--run-id "\$RUN_ID"', src, re.S)
+    assert started_call, "no `run_report.py --started ... --run-id \"$RUN_ID\"` call found"
+    claude_invoke = src.index('claude -p "$PROMPT"')
+    trap_arm = src.index("trap record_killed_pass TERM INT")
+    assert started_call.start() < claude_invoke, \
+        "started row is written AFTER claude -p is invoked -- too late to catch a kill during it"
+    assert started_call.start() < trap_arm, \
+        "started row is written after the SIGTERM trap arms -- a kill in between still vanishes"
+
+
+def _run_report_started_row_pairs_with_a_later_completion_by_run_id():
+    """gh#145 AC1/AC2: `run_report.py --started` must produce a row shaped so a reconciliation
+    query can pair it against whichever completion record (or none) eventually lands for the
+    SAME run_id -- same field name, same value, nothing derived or reformatted in between.
+    """
+    import run_report
+    started = run_report.build_started_record(member="marie", run_id="marie-item145-123-9",
+                                              item_id="145", lane=None)
+    assert started["status"] == run_report.STATUS_STARTED == "started"
+    assert started["run_id"] == "marie-item145-123-9"
+    assert started["member"] == "marie"
+    assert started["item_id"] == "145"
+    assert isinstance(started["ts"], float), "no wall-clock timestamp on the started row"
+
+    completion = run_report.build_record(
+        member="marie", run_id="marie-item145-123-9", kind="llm", exit_code=0,
+        pass_text="Outcome: closed #145\nEvidence: gh issue close 145", usage=None,
+        vision_required=False, item_id="145")
+    assert completion["run_id"] == started["run_id"], \
+        "completion record's run_id must match the started row's -- reconciliation pairs on it"
+    assert completion["status"] != run_report.STATUS_STARTED, \
+        "a normal completion must never itself read as 'started'"
+
+
+def _lost_passes_flags_a_started_row_with_no_completion_past_the_grace_window():
+    """gh#145 AC3: the reconciliation query itself. A "started" row with no matching completion
+    row (same run_id) must surface once it's older than the grace window -- and must NOT surface
+    a moment after starting (still plausibly mid-run), and must NOT surface at all once its
+    completion (any non-'started' status) lands, however late.
+    """
+    import fleet_stats
+    now = fleet_stats._now_epoch()
+
+    def started(run_id, member, ts_offset):
+        return {"run_id": run_id, "member": member, "status": "started",
+                "item_id": None, "ts": now - ts_offset}
+
+    def completed(run_id, member, status="killed", ts_offset=0):
+        return {"run_id": run_id, "member": member, "status": status, "ts": now - ts_offset}
+
+    runs = [
+        started("lost-1", "marie", ts_offset=120 * 60),           # old, no completion -- LOST
+        started("fresh-1", "marie", ts_offset=5 * 60),            # too young -- not yet lost
+        started("healthy-1", "datta", ts_offset=120 * 60),
+        completed("healthy-1", "datta", status="ok", ts_offset=1 * 60),  # paired -- not lost
+    ]
+    lost = fleet_stats.lost_passes(runs, grace_minutes=90.0)
+    lost_ids = {r["run_id"] for r in lost}
+    assert lost_ids == {"lost-1"}, f"lost_passes() = {lost_ids}, want exactly {{'lost-1'}}"
+    row = lost[0]
+    assert row["member"] == "marie"
+    assert row["age_minutes"] >= 90.0
+
+
 def _signal_rate_excludes_all_never_executed_statuses():
     """fleet-kit#150: fleet_stats.py's `_NOT_EXECUTED_STATUSES` once listed only
     `budget_declined`, while run_report.py classifies THREE statuses as "never got the chance
@@ -4678,6 +4752,9 @@ if __name__ == "__main__":
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
     check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)
+    check("run_member.sh writes a started row before claude -p and before the SIGTERM trap arms", _run_member_writes_a_started_row_before_claude_p)
+    check("run_report's started row pairs with a later completion by run_id", _run_report_started_row_pairs_with_a_later_completion_by_run_id)
+    check("lost_passes flags a started row with no completion past the grace window", _lost_passes_flags_a_started_row_with_no_completion_past_the_grace_window)
     check("signal_rate/dormant exclude killed+timed_out, not just budget_declined", _signal_rate_excludes_all_never_executed_statuses)
     check("a leaked absolute-path write into $REPO is caught and alerted", _postflight_dirty_check_catches_a_leaked_absolute_path_write)
     check("a git-status failure alerts rather than reading as clean", _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure)

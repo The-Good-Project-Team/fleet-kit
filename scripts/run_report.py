@@ -125,6 +125,11 @@ STATUS_BUDGET_DECLINED = "budget_declined"
 STATUS_TIMED_OUT = "timed_out"
 STATUS_KILLED = "killed"
 STATUS_INCOMPLETE_FANOUT = "incomplete_fanout"
+# gh#145: a provisional row written before `claude -p` even runs, NOT a completion status --
+# see build_started_record below. Never returned by classify(), so this is not a new status()
+# a completed run can carry; it exists only to be the "started" leg fleet_stats.lost_passes()
+# looks for with no matching completion row past a grace window.
+STATUS_STARTED = "started"
 
 # gh#252: a fan-out parent (the-fixer, or any member that spawns one `--item` sub-pass per
 # unit of work, per docs/gru-minions.md's own reasoning) that dispatches background sub-passes
@@ -212,6 +217,33 @@ def classify(report: dict, *, vision_required: bool, exit_code: int | None = Non
     return STATUS_OK
 
 
+def build_started_record(*, member: str, run_id: str, kind: str = "llm",
+                         item_id: str | None = None, lane: str | None = None) -> dict:
+    """gh#145: the FIRST leg of a run record, written before `claude -p` is ever invoked.
+
+    build_record's two callers (run_member.sh's normal-exit path and its SIGTERM trap,
+    record_killed_pass) both write only after the pass returns control to the wrapper -- a
+    pass that vanishes before either point (SIGKILL, container replacement, OOM) leaves no
+    trace in runs.jsonl at all, indistinguishable from never having run. This is that trace: a
+    provisional row sharing $RUN_ID with whichever completion record eventually lands (or
+    never does), so fleet_stats.lost_passes() can pair the two -- "started" + a completion row
+    for the same run_id is healthy; "started" with none after a grace window is a detected gap.
+
+    Deliberately minimal: no exit_code, no tokens, no outcome/evidence -- none of that exists
+    yet. Adding fields here later must not change what classify()/build_record() do with an
+    ordinary completion record (that's a separate, unrelated status space -- see STATUS_STARTED).
+    """
+    return {
+        "member": member,
+        "run_id": run_id,
+        "kind": kind,
+        "ts": time.time(),
+        "status": STATUS_STARTED,
+        "item_id": item_id,
+        "lane": lane,
+    }
+
+
 def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
                  pass_text: str, usage: dict | None, vision_required: bool,
                  item_id: str | None = None, pr: str | None = None,
@@ -291,7 +323,16 @@ def main(argv=None) -> int:
     ap.add_argument("--item-id", help="board item id this pass worked, if any")
     ap.add_argument("--pr", help="PR number this pass produced, if any")
     ap.add_argument("--lane", help="lane this pass was dispatched for, if any (e.g. nerd's lane=<name> --task prefix)")
+    ap.add_argument("--started", action="store_true",
+                    help="write a provisional 'started' row (gh#145), before claude -p runs -- "
+                         "ignores --exit-code/--pass-file/--usage-file/--vision-required/--pr")
     a = ap.parse_args(argv)
+
+    if a.started:
+        rec = build_started_record(member=a.member, run_id=a.run_id, kind=a.kind,
+                                   item_id=a.item_id, lane=a.lane)
+        print(json.dumps(rec))
+        return 0
 
     if a.pass_file == "-":
         text = sys.stdin.read()

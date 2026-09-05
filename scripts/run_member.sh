@@ -414,6 +414,18 @@ fi
 
 log "pass start (kind=llm charter=$BEHAVIOR model=$MODEL max_turns=${MAX_TURNS:-uncapped} budget=${MAX_BUDGET:+\$}${MAX_BUDGET:-uncapped})"
 
+# gh#145: write a provisional "started" row NOW -- before claude -p, before the kill trap even
+# arms -- sharing $RUN_ID with whichever completion record eventually lands (the normal-exit
+# write below, or record_killed_pass's SIGTERM trap). Neither of those two writes can help a
+# pass that vanishes before either of them runs at all (SIGKILL, container replacement, OOM);
+# this closes exactly that gap. fleet_stats.lost_passes() pairs "started" rows against later
+# rows sharing the same run_id and flags any with no match past a grace window. Best-effort:
+# a failure here must not block the pass itself, only lose the extra visibility this adds.
+python3 "$KIT_DIR/scripts/run_report.py" --started \
+  --member "$MEMBER" --run-id "$RUN_ID" --kind llm \
+  ${ITEM:+--item-id "$ITEM"} $LANE_FLAG >> "$LOG_DIR/runs.jsonl" 2>>"$LOG" \
+  || log "WARNING: failed to write started row for run_id=$RUN_ID"
+
 # A pass killed from OUTSIDE (deploy cutover stopping the container, operator `podman stop`,
 # an OOM kill) never reaches the run_report.py call ~40 lines below -- that write happens only
 # after `claude -p` returns. Found live 2026-08-26: auto_deploy landed #92 mid-pass, SIGKILLed
