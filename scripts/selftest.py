@@ -3645,6 +3645,100 @@ def _fleet_kpi_marie_catches_her_real_triage_verb_vocabulary():
     ) == (2, "PRs reviewed")
 
 
+def _fleet_kpi_nerd_catches_filed_and_commented_verbs():
+    """gh#225: `_KPI_TABLE` had entries for only roomba/marie/judge-judy -- nerd (one of the
+    fleet's highest-volume members) returned `total: null` on `/api/kpi`, visually identical to
+    the module's own deliberately-excluded members, despite consistently count-shaped outcome
+    prose ("Filed gh#N...", "Filed N issues...", "Commented on gh#N...", the issue's own three
+    quoted shapes). A 2026-09-05 pull of nerd's full real runs.jsonl history (237 outcomes) found
+    "Posted"/"Edited" alongside "Filed"/"Commented" as real, frequent verbs, and found the same
+    prose routinely NEGATES those verbs for a QUIET pass ("no new issue filed", "already filed",
+    "not re-posted") while still naming old issue numbers later in the same sentence -- the exact
+    gh#409 bug nerd itself found in marie's patterns, one file over.
+    """
+    import fleet_kpi
+    # the issue's own three quoted shapes
+    assert fleet_kpi.extract_kpi(
+        "nerd", "Filed gh#380 -- FLEET_GRU_CADENCE Settings picker ships invalid cron values."
+    ) == (1, "issues filed/commented")
+    assert fleet_kpi.extract_kpi(
+        "nerd", "Filed 3 issues in The-Good-Project-Team/fleet-kit -- #141, #150, #155."
+    ) == (3, "issues filed/commented")
+    assert fleet_kpi.extract_kpi(
+        "nerd", "Commented on gh#339 with fresh same-day dispatch evidence."
+    ) == (1, "issues filed/commented")
+
+    # real full-URL phrasing (github.com/.../issues/NNN, no bare '#') must match despite the
+    # literal '.' inside "github.com" -- the naive "stop at any '.'" clause boundary missed
+    # 100/237 real runs entirely until narrowed to "stop only at a sentence-ending '.'".
+    assert fleet_kpi.extract_kpi(
+        "nerd",
+        "Filed https://github.com/The-Good-Project-Team/fleet-kit/issues/150 -- "
+        "fleet_stats.py's signal_rate/dormant logic excludes budget_declined.",
+    ) == (1, "issues filed/commented")
+
+    # multiple distinct actions in one outcome sum together, same summing contract as
+    # roomba/marie's patterns -- 1 filed issue plus 2 separate cross-link comments = 3 actions,
+    # not 1 clause = 1 action.
+    assert fleet_kpi.extract_kpi(
+        "nerd",
+        "Filed https://github.com/The-Good-Project-Team/fleet-kit/issues/378 (bespoke selftest "
+        "guards should generalize); commented cross-links on #376 and #371.",
+    ) == (3, "issues filed/commented")
+
+    # Posted/Edited are real, frequent verbs in nerd's actual prose (49 and 2 occurrences in a
+    # 237-run sample respectively) -- neither of the issue's own 3 quoted shapes covers them.
+    assert fleet_kpi.extract_kpi(
+        "nerd", "Posted fresh evidence to gh#278 confirming the live 16:05-16:10 UTC recurrence."
+    ) == (1, "issues filed/commented")
+    assert fleet_kpi.extract_kpi(
+        "nerd", "Edited https://github.com/The-Good-Project-Team/fleet-kit/issues/68 to prepend "
+        "a correction banner."
+    ) == (1, "issues filed/commented")
+
+    # a genuinely zero-action QUIET pass must still return a real zero via sum_kpi_over_runs
+    # (member is in _KPI_TABLE), never a fabricated non-zero from an old issue number named in
+    # the same "nothing new" sentence -- same failure class as gh#409.
+    assert fleet_kpi.extract_kpi(
+        "nerd", "QUIET -- no new issue filed since gh#379/#143/#339 already fully cover this."
+    ) is None
+    assert fleet_kpi.extract_kpi(
+        "nerd", "No new gh#143 comment posted -- the prior pass already filed the escalation."
+    ) is None
+    assert fleet_kpi.extract_kpi(
+        "nerd", "Reconfirmed gh#352 and gh#356 still open via live evidence; not re-filed."
+    ) is None
+    assert fleet_kpi.extract_kpi(
+        "nerd", "gh#399 was already filed by lens; not re-posted."
+    ) is None
+    got = fleet_kpi.sum_kpi_over_runs(
+        "nerd",
+        [{"member": "nerd", "outcome": "QUIET -- no new issue filed since gh#143 already covers this."}],
+    )
+    assert got == {
+        "member": "nerd", "total": 0, "unit": "", "runs_with_kpi": 0, "runs_total": 1,
+    }, got
+
+    # issues merely mentioned as prior context alongside a real filing don't get double-counted
+    # into the same action.
+    assert fleet_kpi.extract_kpi(
+        "nerd",
+        "Filed https://github.com/The-Good-Project-Team/fleet-kit/issues/379 -- revenue lane "
+        "has zero lane_kpi rows, same infra-gap class as gh#330/#345/#352/#365.",
+    ) == (1, "issues filed/commented")
+
+    # other members' patterns are untouched by this change.
+    assert fleet_kpi.extract_kpi(
+        "roomba", "Worktree sweep clean (5 evaluated/0 removed)"
+    ) == (5, "worktrees evaluated")
+    assert fleet_kpi.extract_kpi(
+        "marie", "Cleared stale fleet:claimed on #2075 and #2759"
+    ) == (1, "issues triaged")
+    assert fleet_kpi.extract_kpi(
+        "judge-judy", "approved PR #4250 and blocked PR #4200"
+    ) == (2, "PRs reviewed")
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -4939,6 +5033,7 @@ if __name__ == "__main__":
     check("lane_kpi is append-only and distinguishes missing from stale", _lane_kpi_is_append_only_and_distinguishes_missing_from_stale)
     check("fleet_kpi's roomba pattern catches all three real 'evaluated' phrasings", _fleet_kpi_roomba_catches_all_three_real_evaluated_phrasings)
     check("fleet_kpi's marie pattern catches her real triage verb vocabulary", _fleet_kpi_marie_catches_her_real_triage_verb_vocabulary)
+    check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
 
     for n in ok:
