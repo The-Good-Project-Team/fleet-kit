@@ -1889,6 +1889,7 @@ _ENTRYPOINT_SCHEDULED_SCRIPTS = (
     ("self_improve_score.sh", "self_improve_score.sh", "gh#196-adjacent"),
     ("deploy_staleness_check.sh", "deploy_staleness_check.sh", "gh#201"),
     ("lane_kpi.py", "python3 /fleet-kit/scripts/lane_kpi.py record", "gh#324"),
+    ("git_pull_guard.sh", "bash /fleet-kit/scripts/git_pull_guard.sh", "gh#68"),
 )
 
 
@@ -2315,6 +2316,150 @@ def _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in()
         assert not marker_b.exists(), "deploy.sh ran despite a genuine, unresolved divergence"
         assert git(checkout_b, "rev-parse", "HEAD").stdout.strip() == local_only_sha, \
             "checkout was mutated despite a genuine, unresolved divergence"
+
+
+def _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged():
+    """gh#68 (originally nonprofit-atlas#3130, recurred 3x): a bare `git pull --ff-only`
+    against $FLEET_REPO fails hard, and stays failed, once the checked-out branch's history can
+    never fast-forward onto origin/main again -- the common cause being a squash-merged PR whose
+    branch was deleted upstream. Runs the REAL git_pull_guard.sh against a real git fixture that
+    reproduces that exact shape (same fixture idea as auto_deploy.sh's own diverged-HEAD test
+    above), and proves a normal fast-forward pull is untouched by the new wrapper.
+    """
+    import subprocess
+
+    def git(repo, *args, check=True):
+        return subprocess.run(["git", *args], cwd=repo, check=check, capture_output=True, text=True)
+
+    def run_guard(repo):
+        return subprocess.run(["bash", str(ROOT / "scripts" / "git_pull_guard.sh"), str(repo)],
+                               capture_output=True, text=True, timeout=15)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        origin = tmp / "origin.git"
+        git(tmp, "init", "-q", "--bare", "-b", "main", str(origin))
+
+        seed = tmp / "seed"
+        seed.mkdir()
+        for cmd in (("init", "-q", "-b", "main"), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(seed, *cmd)
+        git(seed, "remote", "add", "origin", str(origin))
+        (seed / "foo.txt").write_text("v1\n")
+        git(seed, "add", "-A")
+        git(seed, "commit", "-q", "-m", "init")
+        git(seed, "push", "-q", "origin", "main")
+
+        # --- Scenario A: stray branch, squash-merged and deleted upstream ---
+        checkout_a = tmp / "case-stray"
+        git(tmp, "clone", "-q", str(origin), str(checkout_a))
+        for cmd in (("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(checkout_a, *cmd)
+        git(checkout_a, "checkout", "-q", "-b", "member/some-item")
+        (checkout_a / "foo.txt").write_text("v2\n")
+        git(checkout_a, "commit", "-aq", "-m", "feat: update foo")
+        feature_sha = git(checkout_a, "rev-parse", "HEAD").stdout.strip()
+        # The squash merge landing on origin/main: same content, brand new commit/SHA -- the
+        # feature branch tip can never become an ancestor of it, and (in reality) GitHub then
+        # deletes the now-merged branch upstream.
+        git(seed, "fetch", "-q", "origin", "main")
+        git(seed, "reset", "-q", "--hard", "origin/main")
+        (seed / "foo.txt").write_text("v2\n")
+        git(seed, "commit", "-aq", "-m", "Squash merge feat/thing (#1)")
+        git(seed, "push", "-q", "origin", "main")
+        origin_main_sha = git(seed, "rev-parse", "HEAD").stdout.strip()
+        assert feature_sha != origin_main_sha
+
+        assert git(checkout_a, "merge-base", "--is-ancestor", "HEAD", "origin/main", check=False).returncode != 0, \
+            "fixture is wrong: local HEAD must NOT be an ancestor of origin/main before the guard runs"
+
+        proc = run_guard(checkout_a)
+        assert proc.returncode == 0, f"guard must recover a stray branch, not fail: {proc.stdout}{proc.stderr}"
+        assert "SELF-HEAL" in proc.stdout, f"no self-heal line emitted: {proc.stdout!r}"
+        assert git(checkout_a, "rev-parse", "HEAD").stdout.strip() == origin_main_sha, \
+            "guard did not land the checkout on origin/main's real SHA"
+        assert git(checkout_a, "branch", "--show-current").stdout.strip() == "main", \
+            "guard did not leave the checkout on a branch named main"
+
+        # Idempotent: a second tick with nothing new must stay quiet, not re-trigger self-heal.
+        proc2 = run_guard(checkout_a)
+        assert proc2.returncode == 0
+        assert "SELF-HEAL" not in proc2.stdout, "guard re-ran self-heal on an already-healed, unchanged checkout"
+
+        # --- Scenario B: a normal fast-forward pull must succeed exactly as before ---
+        checkout_b = tmp / "case-normal"
+        git(tmp, "clone", "-q", str(origin), str(checkout_b))
+        for cmd in (("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(checkout_b, *cmd)
+        before_sha = git(checkout_b, "rev-parse", "HEAD").stdout.strip()
+        assert before_sha == origin_main_sha
+
+        (seed / "foo.txt").write_text("v3\n")
+        git(seed, "commit", "-aq", "-m", "a normal, linear commit")
+        git(seed, "push", "-q", "origin", "main")
+        new_main_sha = git(seed, "rev-parse", "HEAD").stdout.strip()
+
+        proc = run_guard(checkout_b)
+        assert proc.returncode == 0, f"a normal ff pull must still succeed: {proc.stdout}{proc.stderr}"
+        assert "fast-forwarded" in proc.stdout, f"expected a plain fast-forward, not a self-heal: {proc.stdout!r}"
+        assert "SELF-HEAL" not in proc.stdout, "self-heal fired on a plain fast-forward pull"
+        assert git(checkout_b, "rev-parse", "HEAD").stdout.strip() == new_main_sha, \
+            "normal pull did not land on the new upstream SHA"
+
+
+def _git_pull_guard_serializes_via_a_lock_on_the_git_directory():
+    """gh#68/gh#255: the container's gitpull cron and the host's auto_deploy.sh can touch the
+    exact same .git directory (when a box self-hosts fleet-kit) with no lock between them at
+    all -- confirmed live via matching SHA pairs across gitpull.log and auto_deploy's own race
+    errors. git_pull_guard.sh takes a flock on `<repo>/.git/fleet_pull.lock` before touching any
+    ref; this proves that lock is real and externally observable -- held from OUTSIDE the
+    script, the guard must block until it's released, not race past it.
+    """
+    import subprocess
+    import time
+
+    def git(repo, *args, check=True):
+        return subprocess.run(["git", *args], cwd=repo, check=check, capture_output=True, text=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        origin = tmp / "origin.git"
+        git(tmp, "init", "-q", "--bare", "-b", "main", str(origin))
+        seed = tmp / "seed"
+        seed.mkdir()
+        for cmd in (("init", "-q", "-b", "main"), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(seed, *cmd)
+        git(seed, "remote", "add", "origin", str(origin))
+        (seed / "foo.txt").write_text("v1\n")
+        git(seed, "add", "-A")
+        git(seed, "commit", "-q", "-m", "init")
+        git(seed, "push", "-q", "origin", "main")
+
+        checkout = tmp / "checkout"
+        git(tmp, "clone", "-q", str(origin), str(checkout))
+        for cmd in (("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(checkout, *cmd)
+
+        lockfile = checkout / ".git" / "fleet_pull.lock"
+        holder = subprocess.Popen(["bash", "-c", f'exec 8>"{lockfile}"; flock 8; sleep 2'])
+        time.sleep(0.3)  # let the holder actually acquire the lock before the guard starts
+
+        start = time.monotonic()
+        proc = subprocess.run(["bash", str(ROOT / "scripts" / "git_pull_guard.sh"), str(checkout)],
+                               capture_output=True, text=True, timeout=15)
+        elapsed = time.monotonic() - start
+        holder.wait(timeout=5)
+
+        assert elapsed >= 1.5, (
+            f"git_pull_guard.sh did not block on an externally-held lock on {lockfile} "
+            f"(elapsed={elapsed:.2f}s) -- gh#255's race is unguarded again")
+        assert proc.returncode == 0, f"guard failed once the lock freed: {proc.stdout}{proc.stderr}"
+
+        # auto_deploy.sh locks the identical path formula inside its OWN repo dir -- when
+        # $FLEET_REPO and its KIT_DIR really are the same checkout, they lock each other out.
+        auto_deploy_src = (ROOT / "scripts" / "auto_deploy.sh").read_text()
+        assert 'GIT_LOCKFILE="$KIT_DIR/.git/fleet_pull.lock"' in auto_deploy_src, \
+            "auto_deploy.sh no longer locks the same fleet_pull.lock inside its own .git dir"
 
 
 def _judge_judy_ticks_dont_overlap():
@@ -4379,6 +4524,8 @@ if __name__ == "__main__":
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
     check("auto_deploy.sh self-heals a content-identical diverged HEAD only when opted in", _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in)
+    check("git_pull_guard.sh self-heals a stray branch and leaves a normal pull unchanged", _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged)
+    check("git_pull_guard.sh serializes via a lock on the .git directory", _git_pull_guard_serializes_via_a_lock_on_the_git_directory)
     check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
     check("judge-judy lock lives somewhere persistent", _judge_judy_lock_lives_somewhere_persistent)
     check("judge-judy strikes are head-scoped and leave diagnosable evidence", _judge_judy_strikes_are_scoped_by_head_and_leave_diagnosable_evidence)
