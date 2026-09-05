@@ -143,6 +143,29 @@ if [ -z "$VIEW_PORT" ]; then
 fi
 WEBHOOK_PORT=$(( VIEW_PORT + 1 ))
 
+# Reap orphaned entrypoints bound to THIS instance before starting a new one (2026-09-04,
+# gh#4340). A blue-green deploy (`philanthropy-green`) left its entrypoint.sh + cron + watchdog
+# running for 9 days after podman had already forgotten the container -- still bind-mounted to
+# this instance's logs and repo. Under rootless podman pids are host-global, so that dead
+# container's watchdog kept `kill -9`-ing the LIVE container's cron every 5 minutes, taking
+# in-flight member runs down with it, and its cron kept running git operations against the same
+# worktree (which is what corrupted branch.main.merge). `podman run --replace` below only
+# replaces the container RECORD -- it does not reap a process tree podman has lost track of, so
+# it has to be done here explicitly.
+for _pid in $(pgrep -f 'entrypoint\.sh cron-foreground' 2>/dev/null || true); do
+  # Match on the mount table: does this process have OUR instance dir bind-mounted?
+  if grep -qF " $INSTANCE_DIR/logs /var/log/fleet-kit " "/proc/$_pid/mountinfo" 2>/dev/null; then
+    # Skip anything podman still knows about -- only truly orphaned trees get reaped.
+    _cid="$(tr '\0' '\n' < "/proc/$_pid/environ" 2>/dev/null | sed -n 's/^HOSTNAME=//p')"
+    if [ -n "$_cid" ] && podman container exists "$_cid" 2>/dev/null; then
+      continue
+    fi
+    echo "[up] reaping orphaned entrypoint pid $_pid (container ${_cid:-unknown} gone from podman, still mounted on $INSTANCE_DIR)"
+    pkill -9 -P "$_pid" 2>/dev/null || true
+    kill -9 "$_pid" 2>/dev/null || true
+  fi
+done
+
 echo "[up] starting fleet '$NAME' as container '$CONTAINER_NAME' -> $REPO_URL (image $IMAGE_TAG, accounts [${ACCOUNT_LIST[*]}], view port $VIEW_PORT, webhook port $WEBHOOK_PORT)"
 podman run -d \
   --name "$CONTAINER_NAME" \
