@@ -182,7 +182,9 @@ DAILY_OUTCOMES="unavailable"
 if [ -f "$RUNS_FILE" ]; then
   DAILY_OUTCOMES=$(tail -n 5000 "$RUNS_FILE" | python3 -c "
 import json, sys, datetime
-cutoff = datetime.datetime.now(datetime.timezone.utc).timestamp() - 7*86400
+now = datetime.datetime.now(datetime.timezone.utc)
+today = now.date().isoformat()
+cutoff = now.timestamp() - 7*86400
 by_day = {}
 for line in sys.stdin:
     try:
@@ -196,6 +198,12 @@ for line in sys.stdin:
     s = r.get('status', 'unknown')
     d = by_day.setdefault(day, {})
     d[s] = d.get(s, 0) + 1
+# gh#263: every day's object also carries how much of that UTC day had elapsed at digest
+# generation time -- 24 (complete) for any past day, actual elapsed hours for today -- so the
+# grader can normalize a same-day-vs-full-day comparison instead of guessing.
+elapsed_today = round(now.hour + now.minute / 60 + now.second / 3600, 1)
+for day, counts in by_day.items():
+    counts['hours_elapsed'] = 24 if day != today else elapsed_today
 print(json.dumps(by_day, indent=None, sort_keys=True))
 " 2>/dev/null || echo "unavailable")
 fi
@@ -232,7 +240,7 @@ ${SELF_EVO_JEFE:-none}
 Self-evolution PRs sourced by dumbledore (whose entire charter is 'fix the charter/instruction that caused the symptom'), with merge dates:
 ${SELF_EVO_DUMBLEDORE:-none}
 
-Run outcome counts BY DAY, last 7 days (ok = did real work, quiet/reported_nothing = ran but found nothing, budget_declined = didn't run at all) -- look for the shift a PR's merge date should have caused:
+Run outcome counts BY DAY, last 7 days (ok = did real work, quiet/reported_nothing = ran but found nothing, budget_declined = didn't run at all) -- look for the shift a PR's merge date should have caused. Each day's object also carries \"hours_elapsed\": 24 for a full past day, or the actual elapsed hours so far for the current UTC day. NORMALIZE by this before calling anything a regression or an improvement -- a lower raw count on a partial today than a complete yesterday is not a regression if today's per-hour rate (count / hours_elapsed) is actually higher; compare rates, not raw totals, whenever either day being compared has hours_elapsed < 24:
 ${DAILY_OUTCOMES}
 
 Score 1-100. Reasoning must either (a) name a specific PR, its merge date, and the specific before/after shift in the daily numbers that followed it, or (b) explicitly say no such shift is visible in the evidence and that's why the score is capped low. Output ONLY this JSON, nothing else, no markdown fences:
