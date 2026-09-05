@@ -298,6 +298,14 @@ case "${1:-cron-foreground}" in
     CRON_PID=$!
     echo "[entrypoint] cron started (pid $CRON_PID, watchdog $WATCHDOG_TAG)"
     CANARY="$LOG_DIR/gitpull.log"
+    # Seed the canary at boot (2026-09-04, gh#4340). $LOG_DIR is bind-mounted from the host and
+    # SURVIVES the container, so a fresh container inherits the previous one's gitpull.log --
+    # already minutes or hours stale. auto_deploy.sh blue-green-replaces this container roughly
+    # every 30 minutes, so without this the watchdog reads that inherited mtime, concludes "cron
+    # is not firing" within one 5-minute tick of every single deploy, and kill -9's a cron that
+    # has simply not reached its first */10 tick yet. Touching it here means the age measured
+    # below is always age-since-THIS-container-started, which is what the check actually means.
+    echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] [$WATCHDOG_TAG] entrypoint start -- seeding canary" >> "$CANARY"
     STALL_THRESHOLD_S="${FLEET_CRON_STALL_THRESHOLD_S:-1800}"
     WATCHDOG_LOG="$LOG_DIR/cron_watchdog.log"
     while true; do
