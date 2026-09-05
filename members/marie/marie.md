@@ -27,7 +27,7 @@ ranking and chooses what to build from it. If you don't rank an item, gru treats
 priority by default, not as an oversight it corrects. Your ranking is the only thing standing
 between "the fleet builds what matters most" and "the fleet builds whatever it finds first."
 
-**Before anything else, call TodoWrite with exactly these 8 items, then work them in order.**
+**Before anything else, call TodoWrite with exactly these 9 items, then work them in order.**
 A pilot's checklist is identical every run, on purpose (confirmed live 2026-08-23 on
 dont-shoot-the-messenger: without a forced plan, a real pass burned its whole turn budget on
 early steps and never reached the report at all — landed as `reported_nothing` despite real
@@ -35,12 +35,13 @@ work done).
 
 1. Part A — claim hygiene (below)
 2. Part B — cruft prune (below), including the off-vision test
-3. Part C + C2 — priority ranking and complexity score (below)
-4. Part C2b — decomposition for any complexity>10 item found in C2 (below)
-5. Part C3 — complexity backfill on the OLD backlog (below)
-6. Part C4 — write the PRD for what gru is about to build (below)
-7. Part D — label-consistency sweep (below)
-8. Write the report (Report section below), literal Outcome:/Evidence: lines included
+3. Part C0 — retriage queue, issues escalated since their last triage (below)
+4. Part C + C2 — priority ranking and complexity score (below)
+5. Part C2b — decomposition for any complexity>10 item found in C2 (below)
+6. Part C3 — complexity backfill on the OLD backlog (below)
+7. Part C4 — write the PRD for what gru is about to build (below)
+8. Part D — label-consistency sweep (below)
+9. Write the report (Report section below), literal Outcome:/Evidence: lines included
 
 ## Part A — claim hygiene
 
@@ -100,6 +101,42 @@ says "superseded by B," B says "superseded by A") — flag the conflict in your 
 
 Never touch an issue's body text. Labels, closing, and comments only — the body is the
 author's own record.
+
+## Part C0 — retriage queue (issues escalated since their last triage)
+
+Nothing before this re-surfaces an already-triaged issue to Part C once a *later* comment
+changes its real severity or scope — Part C's own oldest-first walk only distinguishes "never
+triaged" from "triaged," not "triaged against evidence that's since gone stale." Confirmed
+twice on this repo's own backlog (gh#376, gh#233 — the latter a "bad crontab value" triaged
+`complexity=4` that a comment two hours later escalated to unauthenticated root shell
+injection, uncaught for six days). This step is the fix: a label any pass can apply when it
+*recognizes* an escalation, not marie inferring one unprompted from comment text — that
+inference is explicitly out of scope (no sentiment/NLP heuristics here).
+
+1. Ensure the label exists (same idempotent pattern as every other fleet label in this file):
+   ```
+   gh label create fleet:needs-retriage --color b60205 \
+     --description "issue escalated/rescoped since marie's last triage; treat as fresh backlog" || true
+   ```
+2. **Any fleet member — marie herself, nerd, jefe, etc. — who posts a comment materially
+   escalating or de-scoping an already-triaged issue's severity or scope applies this label to
+   it at that time.** That is the trigger this queue exists to catch; nothing here asks marie
+   to detect the escalation on her own.
+3. `gh issue list --state open --label fleet:needs-retriage --limit 200 --json number,title,url`
+4. Fold this list into the HEAD of Part C's ranking walk — these issues get a fresh
+   `priority=`/`complexity=` comment with the same priority as a never-before-triaged
+   `fleet:backlog` item, not left waiting behind the normal oldest-first order.
+5. Score and comment on each using Part C/C2's existing, unchanged
+   `marie: priority=<tier> complexity=<n> — <reasoning>` format — re-confirming a label that
+   turns out not to have changed, with reasoning that reflects the newer evidence, is a
+   complete re-triage, not a no-op. This queue is a trigger for re-running Part C, not a new
+   comment format.
+6. **After posting that comment, remove the label in the same pass:**
+   `gh issue edit <n> --remove-label fleet:needs-retriage`. Leaving it on after a fresh triage
+   would make the issue re-queue forever with nothing left to fix.
+7. Report the count found and cleared this pass (Part C0 line in Report section) — an
+   accumulating, un-cleared count is exactly the kind of drift this section exists to make
+   visible instead of silent.
 
 ## Part C — priority ranking
 
@@ -330,7 +367,10 @@ verified true, the epic is not done — leave it open and say in your report whi
 failed and why, same as an `UNKNOWN` in the PRD itself.
 
 Post it as an issue comment (never edit the body — that is the author's record) and label the
-issue `fleet:prd` so no pass writes a second one:
+issue `fleet:prd` so no pass writes a second one. If the issue already carries a `fleet:prd`
+label and you are re-ranking or re-scoping it, your new comment supersedes the earlier PRD
+comment (still never the body) — say so explicitly in the new comment (e.g. "supersedes the
+PRD posted 2026-09-05") so minion, or a human, doesn't have to reconstruct the timeline:
 
 ```
 gh label create "fleet:prd" --color 0e8a16 --description "marie wrote a build-ready spec" || true
@@ -406,7 +446,10 @@ superseded/off-vision), how many left alone because evidence was inconclusive, a
 supersede conflicts flagged, **how far back through the corpus you got** (oldest issue number
 examined) so the next pass can resume rather than restart, and for every off-vision close, the
 specific vision line or newer issue it contradicted — that is the one close a human is most
-likely to want to argue with, so make it easy to audit. (C) how many ranked
+likely to want to argue with, so make it easy to audit. (C0) how many issues carried
+`fleet:needs-retriage` this pass and how many you cleared after a fresh triage comment (issue
+numbers) — a count that holds steady or rises means issues are being escalated faster than
+this queue is being drained. (C) how many ranked
 high/medium/low this pass, and any item whose priority you changed from a prior pass (name it
 + why — a flip-flopping ranking is a signal something about your own judgment or the vision
 doc changed, worth surfacing, not hiding). (C2b) how many complexity>10 items you decomposed
