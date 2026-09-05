@@ -51,9 +51,32 @@ last_line=$(tail -1 "$POOL_LOG")
 already_paged=""
 [ -f "$STATE_FILE" ] && already_paged=$(cat "$STATE_FILE")
 
+# An age this large cannot be a real outage -- it is a synthetic or epoch-0 timestamp. The
+# selftest seeds account-pool.log with a 2020-01-01 fixture, and on 2026-09-04 that produced
+# a REAL email claiming "No fleet account has succeeded in 3511675+ minutes" (6.7 years).
+# fleet_alert.sh runs by absolute path, so the selftest's stubbed `curl` never intercepted it.
+# A pager that cries wolf from its own test suite is worse than no pager: it is indistinguish-
+# able from the real thing at a glance, and it is the reason to stop reading the alerts.
+MAX_PLAUSIBLE_OUTAGE_MINUTES="${ACCOUNT_HEALTH_MAX_PLAUSIBLE_MINUTES:-10080}"  # 7 days
+
 _ntfy() {
   local title="$1" msg="$2" priority="$3"
-  bash "$KIT_DIR/scripts/fleet_alert.sh" "$title" "$msg" \
+  # Under the selftest, send through the stubbed `curl` on PATH instead of the real helper.
+  # fleet_alert.sh runs by ABSOLUTE path, so a PATH stub cannot intercept it -- which is
+  # exactly how the suite emailed a human on 2026-09-04. The test still observes a real call
+  # (it asserts on NTFY_CALLS_FILE), it just cannot escape to Resend.
+  if [ -n "${NTFY_CALLS_FILE:-}" ]; then
+    # Mirror fleet_alert.sh's own gate: its ntfy leg is conditional on a non-empty
+    # NTFY_TOPIC, so with the topic unset NOTHING may reach ntfy. Defaulting the topic here
+    # would fire the leg fleet_alert.sh would have skipped, which is the difference between
+    # standing in for the helper and quietly routing around it.
+    if [ -n "${NTFY_TOPIC:-}" ]; then
+      curl -s -H "Title: $title" -d "$msg" "https://ntfy.sh/$NTFY_TOPIC" >/dev/null 2>&1
+    fi
+    return 0
+  fi
+  bash "$KIT_DIR/scripts/fleet_alert.sh" \
+    --check account_health --problem "$title" --severity critical "$title" "$msg" \
     || echo "[alert] fleet_alert.sh failed" >&2
 }
 
@@ -101,6 +124,12 @@ if [ -z "$line_epoch" ]; then
 fi
 
 age_minutes=$(( (now_epoch - line_epoch) / 60 ))
+
+if [ "$age_minutes" -gt "$MAX_PLAUSIBLE_OUTAGE_MINUTES" ]; then
+  echo "[account_health_check] implausible outage age ${age_minutes}m (>${MAX_PLAUSIBLE_OUTAGE_MINUTES}m)" \
+       "-- treating the log timestamp as synthetic/corrupt rather than paging"
+  exit 0
+fi
 
 if [ "$age_minutes" -ge "$THRESHOLD_MINUTES" ] && [ -z "$already_paged" ]; then
   paged_at="$(date -u '+%Y-%m-%d %H:%M UTC')"
