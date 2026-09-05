@@ -41,6 +41,12 @@ LOG_DIR="${FLEET_LOG_DIR:?set FLEET_LOG_DIR -- same dir account_pool.sh writes a
 POOL_LOG="$LOG_DIR/account-pool.log"
 NTFY_TOPIC="${NTFY_TOPIC:-}"   # optional: fleet_alert.sh emails regardless
 THRESHOLD_MINUTES="${ACCOUNT_HEALTH_THRESHOLD_MINUTES:-30}"
+# gh#266: the 2026-08-30->09-01 outage paged once at 33 minutes then went silent for the
+# remaining ~48h45m of a ~2-day outage -- 585 consecutive ticks logged "already paged" and
+# pushed nothing. This re-pages on a fixed cadence while the outage stays open, instead of
+# once total. 2h is the issue's own starting point; no data in this repo justifies a different
+# default (see gh#266's own UNKNOWN note on ntfy rate limits at shorter cadences).
+REPAGE_MINUTES="${ACCOUNT_HEALTH_REPAGE_MINUTES:-120}"
 STATE_FILE="${ACCOUNT_HEALTH_STATE_FILE:-$LOG_DIR/.account_health_paged.state}"
 CONTAINER_NAME="${FLEET_CONTAINER_NAME:-philanthropy}"
 RESTART_STATE_FILE="${ACCOUNT_HEALTH_RESTART_STATE_FILE:-$LOG_DIR/.account_health_restarted.state}"
@@ -48,8 +54,18 @@ RESTART_STATE_FILE="${ACCOUNT_HEALTH_RESTART_STATE_FILE:-$LOG_DIR/.account_healt
 [ -f "$POOL_LOG" ] || { echo "[account_health_check] no pool log at $POOL_LOG yet -- nothing to check"; exit 0; }
 
 last_line=$(tail -1 "$POOL_LOG")
+# STATE_FILE's first line is the ORIGINAL page time, written once and never touched again --
+# the recovery message below ("outage flagged at $already_paged") and the re-page message's
+# "since first page" both need it unchanged. A second line, `last_repage=<timestamp>`, is
+# added/updated only once re-pages start; reusing this one file (not a new one) for both is
+# gh#266's own non-goal ("not adding a new state store").
 already_paged=""
-[ -f "$STATE_FILE" ] && already_paged=$(cat "$STATE_FILE")
+last_repage_at=""
+if [ -f "$STATE_FILE" ]; then
+  _repage_line=""
+  { read -r already_paged; read -r _repage_line; } < "$STATE_FILE" || true
+  last_repage_at="${_repage_line#last_repage=}"
+fi
 
 # An age this large cannot be a real outage -- it is a synthetic or epoch-0 timestamp. The
 # selftest seeds account-pool.log with a 2020-01-01 fixture, and on 2026-09-04 that produced
@@ -88,6 +104,16 @@ _ntfy() {
       bash "$KIT_DIR/scripts/fleet_alert.sh" --resolve --check account_health "$title" "$msg" ;;
     info)
       bash "$KIT_DIR/scripts/fleet_alert.sh" "$title" "$msg" ;;
+    repage)
+      # Deliberately bypasses alert_store's --check/--severity gate (unlike mode "page" below):
+      # the FIRST page already recorded this (check, problem) key as an open critical, and
+      # alert_store's own dedupe (`already_paged` in alert_store.py's `record()`) suppresses
+      # every later call for that same key until it resolves -- calling that path again here
+      # would make a re-page permanently silent, exactly the bug gh#266 exists to fix. The
+      # plain positional form always sends, same underlying call as mode "info", but kept as
+      # its own case so a reader doesn't read a re-page (an outage that already escalated once
+      # and is still open) as info's "never escalated" meaning.
+      bash "$KIT_DIR/scripts/fleet_alert.sh" "$title" "$msg" ;;
     *)
       bash "$KIT_DIR/scripts/fleet_alert.sh" \
         --check account_health --problem "$title" --severity critical "$title" "$msg" ;;
@@ -119,6 +145,15 @@ _line_epoch() {
   [ -z "$ts" ] && return 1
   date -u -d "$ts" +%s 2>/dev/null \
     || TZ=UTC date -j -f "%Y-%m-%d %H:%M:%S" "$ts" +%s 2>/dev/null
+}
+
+# Same GNU/BSD split as _line_epoch above, for STATE_FILE's own "%Y-%m-%d %H:%M UTC" format
+# (paged_at/repaged_at below) rather than the pool log's "%Y-%m-%d %H:%M:%S" format.
+_state_ts_epoch() {
+  local ts="$1"
+  [ -z "$ts" ] && return 1
+  date -u -d "$ts" +%s 2>/dev/null \
+    || TZ=UTC date -j -f "%Y-%m-%d %H:%M %Z" "$ts" +%s 2>/dev/null
 }
 
 now_epoch=$(date +%s)
@@ -203,6 +238,31 @@ if [ "$age_minutes" -ge "$THRESHOLD_MINUTES" ] && [ -z "$already_paged" ]; then
     "urgent"
   echo "$paged_at" > "$STATE_FILE"
   echo "[account_health_check] PAGED -- last success was ${age_minutes}m ago"
+elif [ "$age_minutes" -ge "$THRESHOLD_MINUTES" ] && [ -n "$already_paged" ]; then
+  # Outage still open and already paged once -- re-page every REPAGE_MINUTES instead of
+  # staying silent for the rest of the outage (gh#266). Measured from STATE_FILE's own stored
+  # timestamp: the last re-page if one has happened this outage, else the original page.
+  reference_at="${last_repage_at:-$already_paged}"
+  reference_epoch=$(_state_ts_epoch "$reference_at")
+  # An unparseable reference must not wedge the pager silent forever -- fail open (page) the
+  # same way the rest of this file treats an unparseable timestamp as reason to act, not stall.
+  since_last_page_minutes=999999
+  [ -n "$reference_epoch" ] && since_last_page_minutes=$(( (now_epoch - reference_epoch) / 60 ))
+
+  if [ "$since_last_page_minutes" -ge "$REPAGE_MINUTES" ]; then
+    repaged_at="$(date -u '+%Y-%m-%d %H:%M UTC')"
+    first_paged_epoch=$(_state_ts_epoch "$already_paged")
+    since_first_page_minutes="$age_minutes"
+    [ -n "$first_paged_epoch" ] && since_first_page_minutes=$(( (now_epoch - first_paged_epoch) / 60 ))
+    h=$(( since_first_page_minutes / 60 )); m=$(( since_first_page_minutes % 60 ))
+    _ntfy "🚨🚨 fleet-kit: accounts STILL exhausted (re-page)" \
+      "Still down, ${h}h ${m}m since first page -- no fleet account has succeeded in ${age_minutes}+ minutes. Last pool-log line: $last_line" \
+      "repage"
+    printf '%s\nlast_repage=%s\n' "$already_paged" "$repaged_at" > "$STATE_FILE"
+    echo "[account_health_check] RE-PAGED -- outage still open (${since_first_page_minutes}m since first page), next re-page in ${REPAGE_MINUTES}m"
+  else
+    echo "[account_health_check] failing but only ${age_minutes}m old (threshold ${THRESHOLD_MINUTES}m), or already paged (next re-page in $(( REPAGE_MINUTES - since_last_page_minutes ))m)"
+  fi
 else
-  echo "[account_health_check] failing but only ${age_minutes}m old (threshold ${THRESHOLD_MINUTES}m), or already paged"
+  echo "[account_health_check] failing but only ${age_minutes}m old (threshold ${THRESHOLD_MINUTES}m)"
 fi
