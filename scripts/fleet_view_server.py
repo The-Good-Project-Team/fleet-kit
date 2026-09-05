@@ -485,6 +485,11 @@ def poll_gh_state() -> dict:
                    "number,title,isDraft,headRefName,url,statusCheckRollup,mergeStateStatus,updatedAt")
     issues_raw = _gh("issue", "list", "--state", "open", "--label", "fleet:backlog", "--json",
                       "number,title,labels,updatedAt", "--limit", "100")
+    # Independent call, not a filter over the fleet:backlog list above -- gh#340: nothing
+    # enforces that fleet:needs-human-op issues are always also fleet:backlog, so filtering
+    # the backlog-scoped list would silently miss one filed without that pairing.
+    needs_human_op_raw = _gh("issue", "list", "--state", "open", "--label", "fleet:needs-human-op",
+                              "--json", "number,title,createdAt", "--limit", "100")
     # Recently merged: plain feed, whatever's most recent -- what just shipped, any branch.
     merged_raw = _gh("pr", "list", "--state", "merged", "--json",
                       "number,title,mergedAt,url,author,files,headRefName", "--limit", "30")
@@ -519,6 +524,10 @@ def poll_gh_state() -> dict:
         merged = json.loads(merged_raw) if merged_raw else []
     except json.JSONDecodeError:
         merged = []
+    try:
+        needs_human_op_issues = json.loads(needs_human_op_raw) if needs_human_op_raw else []
+    except json.JSONDecodeError:
+        needs_human_op_issues = []
     try:
         self_evolution_raw = (
             (json.loads(jefe_raw) if jefe_raw else []) +
@@ -557,8 +566,25 @@ def poll_gh_state() -> dict:
         issue["_claimed"] = any(n and n.endswith(":claimed") for n in names)
     merged.sort(key=lambda pr: pr.get("mergedAt") or "", reverse=True)
     self_evolution.sort(key=lambda pr: pr.get("mergedAt") or "", reverse=True)
+    # gh#340: count + oldest age of open fleet:needs-human-op issues, so the dashboard can
+    # surface a label that otherwise has zero notification surface -- see poll_gh_forever's
+    # GH_POLL_S cadence and watch_and_broadcast's "gh" SSE event, both reused as-is here.
+    oldest_age_hours = 0.0
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for issue in needs_human_op_issues:
+        created = issue.get("createdAt")
+        if not created:
+            continue
+        try:
+            age_hours = (now - datetime.datetime.fromisoformat(
+                created.replace("Z", "+00:00"))).total_seconds() / 3600
+        except ValueError:
+            continue
+        oldest_age_hours = max(oldest_age_hours, age_hours)
+    needs_human_op = {"count": len(needs_human_op_issues), "oldest_age_hours": oldest_age_hours}
     return {"prs": prs, "issues": issues, "merged": merged,
-            "self_evolution": self_evolution, "polled_at": time.time()}
+            "self_evolution": self_evolution, "needs_human_op": needs_human_op,
+            "polled_at": time.time()}
 
 
 
@@ -720,7 +746,8 @@ class State:
     def __init__(self):
         self.lock = threading.Lock()
         self.runs: list[dict] = []
-        self.gh = {"prs": [], "issues": [], "polled_at": 0}
+        self.gh = {"prs": [], "issues": [],
+                   "needs_human_op": {"count": 0, "oldest_age_hours": 0.0}, "polled_at": 0}
         self._seen_offset = 0
 
     def load_existing_runs(self):
