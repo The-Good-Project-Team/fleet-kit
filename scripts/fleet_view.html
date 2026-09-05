@@ -179,6 +179,7 @@
     background: color-mix(in srgb, var(--tag-color) 18%, var(--panel));
     color: color-mix(in srgb, var(--tag-color) 70%, var(--text)); border: 1px solid var(--tag-color); }
   .checks-green { color: var(--ok); } .checks-pending { color: var(--warn); } .checks-failing { color: var(--bad); }
+  .checks-blocked { color: var(--bad); }
 
   /* ---------- sidebar nav items: PRs/Backlog + Settings, same list as agents, separated ---------- */
   .side-nav-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer;
@@ -797,7 +798,8 @@ function renderQueuePage() {
   detailHeadEl.innerHTML = `<div class="title-row"><h2>PRs &amp; Backlog</h2></div>`;
 
   const prsHtml = prs.map(pr => {
-    const cls = pr._rollup === 'green' ? 'checks-green' : pr._rollup === 'failing' ? 'checks-failing' : 'checks-pending';
+    const cls = pr._rollup === 'green' ? 'checks-green' : pr._rollup === 'failing' ? 'checks-failing' :
+      pr._rollup === 'blocked' ? 'checks-blocked' : 'checks-pending';
     return `<div class="rail-row">
       <a href="${esc(pr.url)}" target="_blank">#${pr.number}</a> ${pr.isDraft ? '<span class="rmeta">draft</span>' : ''}
       <div>${esc(pr.title)}</div>

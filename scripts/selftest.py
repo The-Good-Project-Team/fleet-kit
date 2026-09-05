@@ -4724,7 +4724,59 @@ def _self_evolution_panel_catches_the_member_dash_branch_shape():
     assert mergedats == sorted(mergedats, reverse=True), "self_evolution not sorted by mergedAt desc"
 
 
+def _pr_tile_rollup_reflects_mergeability_not_just_ci():
+    """#179: the PR tile's badge came from `statusCheckRollup` (CI) alone -- a PR stuck BEHIND
+    or BLOCKED (GitHub's own mergeability verdict, unrelated to CI) still rendered green as
+    long as its checks were green. Confirmed live 2026-08-29: 7/7 open PRs were BEHIND/BLOCKED
+    while the dashboard showed passing/green for every one with green CI.
+
+    Four fixtures, one call: a BEHIND PR and a DIRTY (real merge conflict) PR, both with
+    all-green checks, must NOT roll up to "green" (AC2, and the PRD's own "dirty-or-other"
+    bucket); a CLEAN PR with all-green checks must still roll up to "green" -- no regression to
+    the healthy case (AC3); a BLOCKED PR with a FAILING check keeps "failing", the worse of the
+    two signals, rather than being masked by the newer "blocked" bucket.
+    """
+    import fleet_view_server as fvs
+
+    def _pr(number, merge_state, checks):
+        return {"number": number, "title": f"{merge_state} fixture", "isDraft": False,
+                "headRefName": f"x/{number}", "url": f"https://github.com/x/y/pull/{number}",
+                "statusCheckRollup": checks, "mergeStateStatus": merge_state,
+                "updatedAt": "2026-08-29T00:00:00Z"}
+
+    green_check = [{"state": "SUCCESS"}]
+    failing_check = [{"state": "FAILURE"}]
+
+    behind_green_pr = _pr(301, "BEHIND", green_check)
+    clean_green_pr = _pr(302, "CLEAN", green_check)
+    blocked_failing_pr = _pr(303, "BLOCKED", failing_check)
+    dirty_green_pr = _pr(304, "DIRTY", green_check)
+
+    def fake_gh(*args, timeout=15):
+        if args[:2] == ("pr", "list") and "open" in args:
+            return json.dumps([behind_green_pr, clean_green_pr, blocked_failing_pr, dirty_green_pr])
+        return "[]"
+
+    orig_gh = fvs._gh
+    fvs._gh = fake_gh
+    try:
+        state = fvs.poll_gh_state()
+    finally:
+        fvs._gh = orig_gh
+
+    by_number = {pr["number"]: pr for pr in state["prs"]}
+    assert by_number[301]["_rollup"] != "green", \
+        f"BEHIND PR with green checks rolled up green: {by_number[301]['_rollup']}"
+    assert by_number[302]["_rollup"] == "green", \
+        f"CLEAN PR with green checks regressed off green: {by_number[302]['_rollup']}"
+    assert by_number[303]["_rollup"] == "failing", \
+        f"BLOCKED+FAILING PR should keep the worse 'failing' signal: {by_number[303]['_rollup']}"
+    assert by_number[304]["_rollup"] != "green", \
+        f"DIRTY PR with green checks rolled up green: {by_number[304]['_rollup']}"
+
+
 if __name__ == "__main__":
+    check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
     check("member_spec's OWN default MEMBERS_DIR resolves (not just an explicit path)", _members_dir_default_is_right)
     check("report contract: ok + silence is recorded", _report_contract)
