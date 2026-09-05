@@ -84,6 +84,12 @@ def _boot_mocks(route):
         route.fulfill(json=({"ok": True, "state": {"FLEET_ENABLED": False}}))
     elif path == "/api/fleet_settings":
         route.fulfill(json=({"ok": True, "written": ["FLEET_QUEUE_CAP"], "state": {}}))
+    elif path == "/api/alerts":
+        # gh#399: alert_store.snapshot() shape, healthy case -- worst="ok" so renderAlerts()
+        # hides the banner and this test's own "zero console errors" assertion isn't tripped by
+        # this route falling through to the unmocked-404 branch below.
+        route.fulfill(json=({"open": [], "recently_resolved": [], "counts": {},
+                              "budget_safe": True, "worst": "ok"}))
     elif path == "/api/stream":
         # EventSource: an empty event-stream body it can hang onto quietly. es.onerror doesn't
         # log to console, so this never trips the "zero console errors" assertion below.
