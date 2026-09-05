@@ -3636,6 +3636,77 @@ def _datta_dispatches_and_nerds_analyse():
     assert minion_spec.get("schedule"), "empty schedule fails member_spec validation (found live)"
 
 
+def _nerd_invalid_lane_rejected_before_lane_work():
+    """gh#374: a `lane=<name>` dispatch outside the canonical seven must be rejected BEFORE any
+    lane-specific work begins, not discovered only after a full pass ran.
+
+    Measured live 2026-09-04/05: two dispatches (`lane=audience`, `lane=coordination`) used
+    names that appear nowhere in nerd.md's own table or this file's
+    `_datta_dispatches_and_nerds_analyse` list -- each burned a full nerd pass with no matching
+    checklist, no expected credentials, and no code surface, because nothing validated the
+    `lane=` value before the charter ran. Runs the real `run_member.sh` end-to-end (same
+    stub-free pattern used elsewhere in this file for scripts that exit before touching
+    network/gh/claude) against a bogus lane name, and checks:
+
+    1. it exits 0 and writes exactly one runs.jsonl row, so a rejection is a real record, not
+       silence,
+    2. that row's status is `ok` with a real artifact in its Outcome (never
+       `reported_nothing` -- AC2's own bar),
+    3. the rejection happened before spec resolution / worktree creation / `claude -p` ever
+       ran -- proven by the log never reaching "pass start", which only prints after all of
+       that (see run_member.sh's normal-exit path).
+    """
+    import os
+    import subprocess
+
+    tmp = tempfile.mkdtemp()
+    log_dir = Path(tmp) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    env = dict(os.environ)
+    env.update({
+        "FLEET_REPO": str(ROOT),
+        "FLEET_LOG_DIR": str(log_dir),
+        "FLEET_ENV_FILE": str(Path(tmp) / "nonexistent.env"),
+    })
+    proc = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "run_member.sh"), "nerd",
+         "--task", "lane=coordination — prior context that does not belong to this repo"],
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+    assert proc.returncode == 0, (
+        f"rejected dispatch must exit 0, got {proc.returncode}\n"
+        f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+
+    runs_file = log_dir / "runs.jsonl"
+    assert runs_file.exists(), f"no runs.jsonl written for a rejected dispatch\nstderr={proc.stderr}"
+    lines = [l for l in runs_file.read_text().splitlines() if l.strip()]
+    assert len(lines) == 1, f"expected exactly one run record, got {len(lines)}: {lines}"
+    rec = json.loads(lines[0])
+    assert rec["status"] == "ok", f"rejected dispatch landed status={rec['status']!r}, want ok (AC2)"
+    assert "coordination" in (rec.get("outcome") or ""), \
+        f"Outcome does not name the rejected lane: {rec.get('outcome')!r}"
+    assert rec.get("lane") == "coordination", f"lane column not set: {rec.get('lane')!r}"
+
+    nerd_log = (log_dir / "nerd.log").read_text()
+    assert "REJECTED" in nerd_log, "no rejection logged"
+    assert "pass start" not in nerd_log, \
+        "rejection reached 'pass start' -- lane-specific work began before validation (AC1/AC2)"
+
+    # AC4: the seven real lanes must be completely unaffected -- proven by NOT hitting the
+    # rejection path (it falls through to the normal enabled-spec check instead, which for the
+    # real, disabled-by-design nerd.fleet.json exits 0 with its own distinct log line).
+    proc2 = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "run_member.sh"), "nerd",
+         "--dry-run", "--task", "lane=growth — normal task"],
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+    assert proc2.returncode == 0, f"valid lane broke: rc={proc2.returncode} stderr={proc2.stderr}"
+    assert "REJECTED" not in proc2.stdout and "REJECTED" not in proc2.stderr, \
+        "a valid canonical lane was rejected -- AC4 behavior change"
+
+
 def _every_pass_files_a_written_report():
     """A pass costs real money; it owes a memo, not three one-line fields.
 
@@ -6133,6 +6204,7 @@ if __name__ == "__main__":
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
     check("datta dispatches by coverage, nerds analyse one lane", _datta_dispatches_and_nerds_analyse)
+    check("nerd rejects an invalid lane before any lane-specific work (gh#374)", _nerd_invalid_lane_rejected_before_lane_work)
     check("a run records the item it worked", _a_run_records_the_item_it_worked)
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
