@@ -56,7 +56,7 @@ running, not the box -- one box can run several containers for several projects 
 | known_hosts file | `$INFRA_NAME-vm_known_hosts` | `lucky-vm_known_hosts` | `setup-ssh.sh` |
 | ingress paths (on the one hostname) | your choice per service | `/ssh`, `/webhook`, `/` | `setup-tunnel.sh`'s `INFRA_INGRESS_JSON` |
 | podman container *(fleet-kit's own `up.sh`, not this kit)* | `fleet-kit-<target-repo-name>` | `fleet-kit-nonprofit-atlas` | `up.sh --name` -- keyed to the PROJECT, not the box |
-| podman image *(same)* | fixed tag | `fleet-kit:latest` | one image, many containers |
+| podman image *(same)* | `fleet-kit:<target-repo-name>` | `fleet-kit:nonprofit-atlas` | `up.sh --name` -- one tag per instance (gh#395), never shared |
 
 `ssh lucky-host` (direct), `ssh lucky-vm` (via the host's LAN), `ssh lucky` (via the internet) --
 three ways to the same box, one word decides all three names.

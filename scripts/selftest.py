@@ -6001,6 +6001,69 @@ def _pr_tile_rollup_reflects_mergeability_not_just_ci():
         f"DIRTY PR with green checks rolled up green: {by_number[304]['_rollup']}"
 
 
+def _up_sh_never_emits_the_shared_image_tag_into_a_generated_fleet_env():
+    """gh#395: two instances on one box both defaulting to the same `fleet-kit:latest` image
+    tag meant their independent 5-minute auto_deploy.sh builds raced on one shared image --
+    the confirmed root cause of the 27h outage PR#393 patched the symptom of. The fix is
+    up.sh deriving a per-instance tag from $NAME and writing it into the fleet.env it
+    generates, so deploy.sh's `${FLEET_IMAGE_NAME:-fleet-kit:latest}` read (scripts/deploy.sh:94)
+    picks up the per-instance value instead of falling through to the shared default.
+
+    Extracts the REAL fleet.env-generation block out of up.sh (not a reimplementation) and runs
+    it for two different --name values against the real fleet.env.example template, same
+    pattern as _run_member_logs_critical_when_postflight_dirty_check_fails_to_source above.
+    Asserts each generated fleet.env's FLEET_IMAGE_NAME line is instance-derived and distinct
+    -- closing the class the way _every_entrypoint_scheduled_script_is_actually_scheduled
+    (PR#382) closed the pager-wiring class, so a 3rd hardcoded-shared-resource regression
+    (a future edit dropping the `-e "s|^FLEET_IMAGE_NAME=.*"` line, say) fails CI instead of
+    waiting for a nerd pass to find it.
+    """
+    import subprocess
+
+    up_sh = (ROOT / "up.sh").read_text()
+    start_marker = 'if [ ! -f "$ENV_FILE" ]; then'
+    assert start_marker in up_sh, "up.sh no longer guards fleet.env generation -- did gh#395's fix regress?"
+    i = up_sh.index(start_marker)
+    j = up_sh.index("\nfi\n", i) + len("\nfi")
+    snippet = up_sh[i:j]
+    assert "FLEET_IMAGE_NAME" in snippet, \
+        "up.sh's fleet.env-generation block no longer writes FLEET_IMAGE_NAME -- did gh#395's fix regress?"
+
+    def generate(name, tmp):
+        env_file = Path(tmp) / "fleet.env"
+        script = (
+            f'set -euo pipefail\n'
+            f'cd "{ROOT}"\n'
+            f'NAME="{name}"\n'
+            f'IMAGE_TAG="fleet-kit:{name}"\n'
+            f'ACCOUNTS="primary"\n'
+            f'ENV_FILE="{env_file}"\n'
+            f"{snippet}\n"
+        )
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, f"fleet.env-generation snippet itself failed: {proc.stderr.strip()[:300]}"
+        return env_file.read_text()
+
+    with tempfile.TemporaryDirectory() as tmp_a, tempfile.TemporaryDirectory() as tmp_b:
+        env_a = generate("alpha", tmp_a)
+        env_b = generate("beta", tmp_b)
+
+    def image_name_line(env_text):
+        lines = [l for l in env_text.splitlines() if l.startswith("FLEET_IMAGE_NAME=")]
+        assert len(lines) == 1, f"expected exactly one FLEET_IMAGE_NAME= line, got: {lines}"
+        return lines[0]
+
+    line_a = image_name_line(env_a)
+    line_b = image_name_line(env_b)
+    assert line_a == "FLEET_IMAGE_NAME=fleet-kit:alpha", \
+        f"instance 'alpha' did not get its own derived tag: {line_a}"
+    assert line_b == "FLEET_IMAGE_NAME=fleet-kit:beta", \
+        f"instance 'beta' did not get its own derived tag: {line_b}"
+    assert line_a != line_b, "two different --name instances produced the SAME FLEET_IMAGE_NAME"
+    assert "fleet-kit:latest" not in (line_a, line_b), \
+        "a generated fleet.env's FLEET_IMAGE_NAME still fell through to the shared 'fleet-kit:latest' tag"
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -6141,6 +6204,7 @@ if __name__ == "__main__":
     check("status_data.members() reads fleet.db in-process, no podman on $PATH needed (gh#364)", _status_data_members_reads_fleet_db_with_no_podman_on_path)
     check("status_data's other four components are unaffected by the members() fix (gh#364)", _status_data_other_components_unaffected_by_members_fix)
     check("status page banner distinguishes unknown from good and bad (gh#358)", _status_page_banner_distinguishes_unknown_from_good)
+    check("up.sh never emits the shared 'fleet-kit:latest' tag into a generated fleet.env (gh#395)", _up_sh_never_emits_the_shared_image_tag_into_a_generated_fleet_env)
 
     for n in ok:
         print(f"  ok    {n}")
