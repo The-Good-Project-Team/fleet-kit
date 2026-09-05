@@ -3242,6 +3242,66 @@ def _fleet_kpi_roomba_catches_all_three_real_evaluated_phrasings():
     ) == (2, "PRs reviewed")
 
 
+def _fleet_kpi_marie_catches_her_real_triage_verb_vocabulary():
+    """gh#351: `_MARIE_PATTERNS`'s verb-anchored regex only recognized cleared/closed/ranked,
+    silently ZERO-counting the rest of marie's real triage vocabulary -- triaged, corrected
+    priority, backfilled/scored/bumped complexity, wrote/posted a PRD, labeled -- and never
+    caught the explicit "N new ranking(s)" count phrasing at all (same failure class as
+    gh#343's roomba gap, one file over). Quantified in the issue over a real 48h fleet.db
+    window: 30/41 runs matched (summed 35) before, 37/41 (summed 54) after broadening.
+
+    Sample strings below are the verb phrasings the issue quotes from marie's real outcome
+    prose.
+    """
+    import fleet_kpi
+    assert fleet_kpi.extract_kpi("marie", "Triaged #3201 for priority") == (1, "issues triaged")
+    # NOTE: a multi-issue reference list after the verb undercounts to 1, not 2 -- the same
+    # pre-existing greedy-\D{0,6} quirk already baked into the "Cleared ... #2075 and #2759"
+    # case below. Out of scope here (non-goal: don't change extract_kpi's summation semantics,
+    # only the pattern list content) -- asserting the ACTUAL behavior, not the ideal one.
+    assert fleet_kpi.extract_kpi(
+        "marie", "Corrected priority on #3202 and #3203"
+    ) == (1, "issues triaged")
+    assert fleet_kpi.extract_kpi(
+        "marie", "Backfilled complexity on #3204"
+    ) == (1, "issues triaged")
+    assert fleet_kpi.extract_kpi("marie", "Bumped #3205's complexity to 3") == (1, "issues triaged")
+    assert fleet_kpi.extract_kpi(
+        "marie", "Scored complexity on #3206 and #3207"
+    ) == (1, "issues triaged")
+    assert fleet_kpi.extract_kpi("marie", "Wrote a PRD for #3208") == (1, "issues triaged")
+    assert fleet_kpi.extract_kpi("marie", "Posted a PRD for #3209") == (1, "issues triaged")
+    assert fleet_kpi.extract_kpi("marie", "Labeled #3210 as cruft") == (1, "issues triaged")
+
+    # explicit-count phrasing that names no issue numbers at all -- neither prior family could
+    # ever have caught this.
+    assert fleet_kpi.extract_kpi("marie", "3 new rankings this pass") == (3, "issues triaged")
+    assert fleet_kpi.extract_kpi("marie", "1 new ranking this pass") == (1, "issues triaged")
+
+    # a genuinely zero-action pass must still return a real zero, not None or a fabricated
+    # non-zero.
+    assert fleet_kpi.extract_kpi(
+        "marie", "QUIET -- reviewed backlog, 0 new rankings, nothing to triage"
+    ) == (0, "issues triaged")
+
+    # the original verb phrasings this pattern was first built for must still match.
+    assert fleet_kpi.extract_kpi(
+        "marie", "Cleared stale fleet:claimed on #2075 and #2759"
+    ) == (1, "issues triaged")
+    assert fleet_kpi.extract_kpi("marie", "Closed #2217 as cruft") == (1, "issues triaged")
+
+    # issues merely mentioned for context, never a triage verb, still correctly return None.
+    assert fleet_kpi.extract_kpi("marie", "confirmed 65 open issues, 5 newly-merged PRs") is None
+
+    # other members' patterns are untouched by this change.
+    assert fleet_kpi.extract_kpi(
+        "roomba", "Worktree sweep clean (5 evaluated/0 removed)"
+    ) == (5, "worktrees evaluated")
+    assert fleet_kpi.extract_kpi(
+        "judge-judy", "approved PR #4250 and blocked PR #4200"
+    ) == (2, "PRs reviewed")
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -4328,6 +4388,7 @@ if __name__ == "__main__":
     check("lane_kpi classifies ticks and ignores in-progress drains", _lane_kpi_classifies_ticks_and_ignores_in_progress_drains)
     check("lane_kpi is append-only and distinguishes missing from stale", _lane_kpi_is_append_only_and_distinguishes_missing_from_stale)
     check("fleet_kpi's roomba pattern catches all three real 'evaluated' phrasings", _fleet_kpi_roomba_catches_all_three_real_evaluated_phrasings)
+    check("fleet_kpi's marie pattern catches her real triage verb vocabulary", _fleet_kpi_marie_catches_her_real_triage_verb_vocabulary)
 
     for n in ok:
         print(f"  ok    {n}")
