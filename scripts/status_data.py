@@ -37,7 +37,14 @@ COMPONENTS = [
      ["account_health_check.cron.log", "account_health_check.log"],
      "Claude accounts the fleet spends from"),
     ("Public path",
-     ["path_health_check.philanthropy.cron.log", "path_health_check.log"],
+     # gh#387: this box's own host cron writes the bare name below with no instance suffix
+     # (confirmed live: `path_health_check.cron.log`, 99.76% healthy over ~5.8 days) --
+     # `.philanthropy.` is kept as a fallback candidate, not deleted, in case some OTHER
+     # deployed instance's host scheduler really does suffix it that way; a repo-wide search
+     # (up.sh, entrypoint.sh, schedulers/) turned up no template that produces it, but the PRD
+     # explicitly warned this box's evidence can't rule that out everywhere.
+     ["path_health_check.cron.log", "path_health_check.philanthropy.cron.log",
+      "path_health_check.log"],
      "public URL for this instance"),
     ("Tunnel",
      ["tunnel_health_check.cron.log", "tunnel_health_check.log"],
@@ -86,6 +93,19 @@ def classify(line: str) -> str:
     return UNKNOWN
 
 
+def _cadence_minutes(path: Path) -> int:
+    """Minutes between lines the resolved file's own writer produces -- used only to
+    back-fill lines that carry no per-line timestamp of their own (see _TS above for the
+    lines that do). A `*.cron.log` name is one of this fleet's 5-minute host-cron writers
+    (e.g. account_health_check.cron.log, the anchor_staleness budget meters); a bare `*.log`
+    name is entrypoint.sh's own hourly in-container crontab (path/tunnel-health tick at
+    :24/:37). Hardcoding 5 minutes for every resolved file (gh#387) packed an hourly log's
+    real history into a couple of hours instead of spreading it across the window it was
+    actually written over.
+    """
+    return 5 if path.name.endswith(".cron.log") else 60
+
+
 def read_component(names, hours: int = 72) -> tuple[list[str], float | None]:
     """Return (per-hour buckets oldest->newest, uptime pct). No file -> all unknown."""
     path = _resolve(names if isinstance(names, (list, tuple)) else [names])
@@ -104,15 +124,17 @@ def read_component(names, hours: int = 72) -> tuple[list[str], float | None]:
         mtime = _dt.datetime.fromtimestamp(path.stat().st_mtime, _dt.timezone.utc)
         lines = [l for l in text.splitlines() if l.strip()]
         # Most of these lines carry no timestamp of their own, so distribute them backwards
-        # from the file's mtime at the known 5-minute cadence. That is an approximation and is
-        # labelled as such in the UI rather than presented as exact.
+        # from the file's mtime at the cadence the resolved file is actually written at (see
+        # _cadence_minutes). That is an approximation and is labelled as such in the UI rather
+        # than presented as exact.
+        cadence = _cadence_minutes(path)
         for i, line in enumerate(reversed(lines)):
             m = _TS.search(line)
             if m:
                 ts = _dt.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").replace(
                     tzinfo=_dt.timezone.utc)
             else:
-                ts = mtime - _dt.timedelta(minutes=5 * i)
+                ts = mtime - _dt.timedelta(minutes=cadence * i)
             age_h = int((now - ts.replace(minute=0, second=0, microsecond=0)).total_seconds() // 3600)
             if 0 <= age_h < hours:
                 buckets.setdefault(age_h, []).append(classify(line))
