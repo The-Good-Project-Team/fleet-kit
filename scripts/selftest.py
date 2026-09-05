@@ -476,6 +476,97 @@ def _cost_bridge_converts_real_spend_into_fanouts_observed_shape():
         assert {r["item_id"] for r in real} == {"10", "20"}, real
 
 
+def _claim_history_blocks_an_item_that_keeps_dead_ending():
+    """gh#64: gru.md step 2 filtered `fleet:claimed` and (later) `fleet:needs-human-op`, but
+    nothing distinguished "never tried" from "tried and dead-ended N times" -- the same
+    chronically-blocked item got reclaimed and respawned every hour, burning a full
+    claim/spawn/clear cycle each time on doomed work (nonprofit-atlas#3104/#3088).
+
+    AC4's own fixture: an item with N prior dead-end claims (still open, so none of those
+    claims resulted in a merge -- see claim_history.py's module docstring for why that's
+    inferable without a separate `gh pr view` per candidate) must be excluded once N reaches
+    the threshold, and must NOT be excluded before it.
+    """
+    import time
+    import claim_history
+
+    # Pure core: run_id shape matching, independent of any DB.
+    run_ids = ["minion-item64-111-1", "minion-item64-222-2", "minion-item99-333-3"]
+    assert claim_history.dead_end_claim_count(run_ids, 64) == 2
+    assert claim_history.dead_end_claim_count(run_ids, 99) == 1
+    assert claim_history.dead_end_claim_count(run_ids, 12345) == 0
+    assert not claim_history.is_dead_end_blocked(run_ids, 64, threshold=3)
+    assert claim_history.is_dead_end_blocked(
+        run_ids + ["minion-item64-444-4"], 64, threshold=3)
+
+    # Real integration, through fleet.db like the other fleet_db-backed checks in this file --
+    # a run's own reported `status` must NOT matter (a prior "ok" minion run against an item
+    # that is STILL in gru's open-candidate list is still a dead end; only the issue closing
+    # would prove otherwise, and a closed issue would never reach this check at all).
+    import fleet_db
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        runs_file = d / "runs.jsonl"
+        now = time.time()
+        recs = [
+            {"run_id": "minion-item64-100-1", "member": "minion", "item_id": "64",
+             "status": "ok", "_recorded_at": now - 3 * 86400},
+            {"run_id": "minion-item64-100-2", "member": "minion", "item_id": "64",
+             "status": "reported_nothing", "_recorded_at": now - 2 * 86400},
+            # a different item's claim must not count against #64.
+            {"run_id": "minion-item99-100-3", "member": "minion", "item_id": "99",
+             "status": "ok", "_recorded_at": now - 1 * 86400},
+            # outside the 14-day window: must not count.
+            {"run_id": "minion-item64-100-4", "member": "minion", "item_id": "64",
+             "status": "ok", "_recorded_at": now - 20 * 86400},
+        ]
+        runs_file.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+        conn = fleet_db.connect(d / "fleet.db")
+        fleet_db.sync(conn, runs_file=runs_file)
+
+        run_ids_64 = claim_history.minion_runs_for_item(conn, 64, window_days=14.0)
+        assert len(run_ids_64) == 2, run_ids_64  # the 20-day-old one is excluded
+        assert not claim_history.is_dead_end_blocked(run_ids_64, 64, threshold=3)
+
+        # A third dead end inside the window tips it over the default threshold.
+        runs_file.write_text(runs_file.read_text() + json.dumps(
+            {"run_id": "minion-item64-100-5", "member": "minion", "item_id": "64",
+             "status": "reported_nothing", "_recorded_at": now}) + "\n")
+        fleet_db.sync(conn, runs_file=runs_file)
+        run_ids_64 = claim_history.minion_runs_for_item(conn, 64, window_days=14.0)
+        assert len(run_ids_64) == 3, run_ids_64
+        assert claim_history.is_dead_end_blocked(
+            run_ids_64, 64, threshold=claim_history.DEFAULT_DEAD_END_THRESHOLD)
+
+        # The CLI surfaces the same verdict via exit code -- what gru.md's step 2c actually runs.
+        import subprocess
+        out = subprocess.run(
+            [sys.executable, str(HERE / "claim_history.py"), "--item", "64",
+             "--db-path", str(d / "fleet.db")],
+            capture_output=True, text=True)
+        assert out.returncode == 1, (out.returncode, out.stdout, out.stderr)
+        assert "BLOCKED" in out.stdout, out.stdout
+
+        out_clean = subprocess.run(
+            [sys.executable, str(HERE / "claim_history.py"), "--item", "99",
+             "--db-path", str(d / "fleet.db")],
+            capture_output=True, text=True)
+        assert out_clean.returncode == 0, (out_clean.returncode, out_clean.stdout, out_clean.stderr)
+        assert "ok" in out_clean.stdout, out_clean.stdout
+
+
+def _gru_md_checks_claim_history_before_claiming():
+    """Doc-consistency guard, same shape as `_gru_md_clamps_allowance_to_share_ceiling`: proves
+    the gh#64 dead-end check is actually wired into gru.md's step order (between step 2's
+    candidate read and step 4's claim), not just implemented and never called."""
+    text = (HERE.parent / "members" / "gru" / "gru.md").read_text()
+    assert "claim_history.py" in text, \
+        "gru.md never calls claim_history.py -- gh#64's dead-end check is unreachable"
+    step2c = text.index("2c.")
+    step4 = text.index("4. **Claim your chosen items")
+    assert step2c < step4, "step 2c must run before step 4's claim, not after"
+
+
 def _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing():
     """The meter gru spends against is the FLEET's per-diem hour, never a session's pacing.
 
@@ -4148,6 +4239,8 @@ if __name__ == "__main__":
     check("fleet.db composite-PK migration is lock-serialized", _fleet_db_composite_pk_migration_is_lock_serialized)
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("cost_bridge converts real spend into fanout's --observed shape", _cost_bridge_converts_real_spend_into_fanouts_observed_shape)
+    check("claim_history blocks an item that keeps dead-ending", _claim_history_blocks_an_item_that_keeps_dead_ending)
+    check("gru.md checks claim_history before claiming", _gru_md_checks_claim_history_before_claiming)
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
     check("maxx lease reserves, releases, and self-expires", _maxx_lease_reserves_releases_and_self_expires)
     check("maxx lease concurrent reserves don't clobber each other", _maxx_lease_concurrent_reserves_dont_clobber_each_other)

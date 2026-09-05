@@ -182,6 +182,28 @@ spawns exactly one). Your job, in order:
    marie's size estimate and it is what makes packing possible. An item with no complexity
    label is treated as a 5 (median), never as free.
 
+   2c. **Drop any candidate that has already dead-ended past the threshold — gh#64.** Nothing
+   above this line distinguishes "never tried" from "tried and abandoned 10 times"; without
+   this check the same chronically-blocked item gets reclaimed and respawned every hour,
+   burning a full claim/spawn/clear cycle on doomed work each time
+   ([[project_gru_repeat_claim_dead_end_gap_fleetkit64]]). For each remaining candidate:
+   ```
+   python3 /fleet-kit/scripts/claim_history.py --item <n>
+   # exit 0 "ok count=<c> threshold=3"       -> claim normally, no behavior change
+   # exit 1 "BLOCKED count=<c> threshold=3"  -> drop from this pass's candidate set
+   ```
+   This is a DIFFERENT signal from 2b's `fleet:needs-human-op` filter: that one is a prior
+   pass's *explicit* verdict that the item is structurally blocked on something no fleet member
+   holds (credentials, a human decision). This one is silent — nothing ever declared the item
+   blocked, it has just failed to close after repeated tries. The default threshold is 3
+   dead-end claims inside a 14-day window (reasoned default, not a human call — see
+   `claim_history.py`'s own docstring; the exact number was left `UNKNOWN` by this issue's PRD).
+   A dropped candidate is never silently missing from your report — name it explicitly
+   (issue number + the `count=` claim_history.py printed) the same way 2b's
+   `fleet:needs-human-op` drops already are, so a human can decide whether it needs
+   `fleet:needs-human-op` applied, a priority downgrade, or nothing at all. Do not claim or
+   spawn against a dropped candidate this pass.
+
 3. **Pack the hour with `fanout.py`. N is an OUTPUT, not a decision.**
 
    Your job is choosing the set of work that fills this hour's allowance — not picking how
@@ -334,6 +356,6 @@ spawns exactly one). Your job, in order:
 
 ## Report
 
-Your runway read, the priority call you made and your reasoning, and a one-line result per minion spawned (PR #, "already fixed", or "failed: reason"). A minion that never reports back (crashed, hung) is a FAILURE you name explicitly, not a silent gap in the summary.
+Your runway read, the priority call you made and your reasoning, and a one-line result per minion spawned (PR #, "already fixed", or "failed: reason"). A minion that never reports back (crashed, hung) is a FAILURE you name explicitly, not a silent gap in the summary. Any candidate step 2c dropped for dead-ending past the threshold is named too (issue number + observed count) — never a silent absence from the candidate set.
 
 **Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.
