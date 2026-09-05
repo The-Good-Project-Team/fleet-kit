@@ -267,10 +267,18 @@ case "${1:-cron-foreground}" in
       # container reads) shows one anyway, some OTHER unidentified process is running unscoped
       # git ops against the same checkout, and today that is silent until a human happens to
       # tail a raw cron log. Runs inside the container (like deploy_staleness_check.sh above),
-      # not on the host: it only reads/appends plain log files, no podman needed. Hourly at :44
-      # (unclaimed on the minute map above) is enough to catch a race well inside the 5-minute
-      # auto_deploy poll cadence that produced it.
-      echo "44 * * * * root bash /fleet-kit/scripts/auto_deploy_race_check.sh >> $LOG_DIR/auto_deploy_race_check.log 2>&1"
+      # not on the host: it only reads/appends plain log files, no podman needed.
+      #
+      # gh#464 (2026-09-05): was hourly at :44 -- but gh#275's own sanctioned-ABORT escalation
+      # (SANCTIONED_ABORT_THRESHOLD, 3 consecutive ticks / ~15min at auto_deploy.sh's 5-minute
+      # poll cadence) can only ever page as often as THIS cron fires, not as often as it
+      # detects. A live diverged-HEAD stall crossed the 3-tick threshold at ~21:05 UTC but the
+      # hourly checker didn't evaluate it until :44 -- a ~54min silent window, most of an
+      # auto_deploy_race_check.sh cron period, on the fleet's only escalation path for exactly
+      # this failure shape. The scan itself is a cheap cursor-based read of append-only log
+      # files (no git/podman work), so running it at the same 5-minute cadence as the thing it
+      # watches costs nothing and closes that window to ~1 tick (~5min) instead of ~1 hour.
+      echo "*/5 * * * * root bash /fleet-kit/scripts/auto_deploy_race_check.sh >> $LOG_DIR/auto_deploy_race_check.log 2>&1"
       # lane_kpi.py (gh#324): independent devops-lane KPI job -- deploy_success_rate/
       # deploy_count_7d were previously only ad-hoc greps a nerd pass ran by hand against
       # auto_deploy.log, i.e. the lane computing its own number (kpi-doctrine.md rule 1
