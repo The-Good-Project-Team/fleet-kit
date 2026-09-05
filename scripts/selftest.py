@@ -5375,6 +5375,34 @@ def _jefe_owns_the_fleet_wide_token_budget():
             f"jefe.md cites scripts/{tool} but it does not exist -- the pass will hunt for it"
 
 
+def _law_carries_the_pr_and_report_contracts():
+    """The law every member inherits must carry the PR contract.
+
+    These are the rules that decide whether a human can actually read what the fleet produces
+    (Reif, 2026-09-05: PRs in plain language, with an OKR link, under a 50-char title). They live
+    in persona_law.md rather than one charter because every member that opens a PR inherits them
+    -- and a rule that lives in only one charter is a rule the next member added does not have.
+
+    Reports are deliberately NOT capped: Reif asked for the LONG form of run messages in the
+    hourly digest (gh#4455), so a ceiling in the law would starve the surface he actually reads.
+
+    Asserts the contract is PRESENT, not that any given PR obeys it: whether a body reads as
+    plain language is a judgement, and a selftest that tried to score prose would be measuring
+    typography. What it can prove is that the instruction has not been silently dropped by an
+    edit, which is the failure this catches.
+    """
+    law = (ROOT / "agents" / "persona_law.md").read_text()
+
+    assert "## 10d" in law, \
+        "the PR contract is not in the law every member inherits"
+    for needle in ("## What this does", "## How this fits the OKR"):
+        assert needle in law, f"10d does not name the required PR block {needle!r}"
+    assert "50 characters" in law, \
+        "10d does not carry the PR title limit -- a 95-char title list is unscannable"
+    assert "docs/VISION.md" in law, \
+        "10d tells members to name a KR but never points at where the KRs are defined"
+
+
 def _bash_eval(setup: str, expr: str) -> str:
     """Source account_pool.sh in a scratch HOME and echo one expression's result."""
     import subprocess
@@ -6408,6 +6436,7 @@ if __name__ == "__main__":
     check("fleet-view reads FLEET_API_KEY from fleet.env", _fleet_view_reads_the_api_key_from_the_env_file)
     check("FLEET_API_KEY never reaches an LLM pass", _api_key_never_reaches_an_llm)
     check("incidental 'rate limit' text does not gate an account", _classifier_ignores_incidental_rate_limit_text)
+    check("law carries the PR contract", _law_carries_the_pr_and_report_contracts)
     check("soonest-reset account is tried first", _soonest_reset_account_is_tried_first)
     check("no known reset keeps configured order", _unknown_reset_keeps_configured_order)
     check("known reset outranks unknown reset", _known_reset_outranks_unknown)
