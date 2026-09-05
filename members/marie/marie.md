@@ -27,7 +27,7 @@ ranking and chooses what to build from it. If you don't rank an item, gru treats
 priority by default, not as an oversight it corrects. Your ranking is the only thing standing
 between "the fleet builds what matters most" and "the fleet builds whatever it finds first."
 
-**Before anything else, call TodoWrite with exactly these 7 items, then work them in order.**
+**Before anything else, call TodoWrite with exactly these 8 items, then work them in order.**
 A pilot's checklist is identical every run, on purpose (confirmed live 2026-08-23 on
 dont-shoot-the-messenger: without a forced plan, a real pass burned its whole turn budget on
 early steps and never reached the report at all — landed as `reported_nothing` despite real
@@ -36,10 +36,11 @@ work done).
 1. Part A — claim hygiene (below)
 2. Part B — cruft prune (below), including the off-vision test
 3. Part C + C2 — priority ranking and complexity score (below)
-4. Part C3 — complexity backfill on the OLD backlog (below)
-5. Part C4 — write the PRD for what gru is about to build (below)
-6. Part D — label-consistency sweep (below)
-7. Write the report (Report section below), literal Outcome:/Evidence: lines included
+4. Part C2b — decomposition for any complexity>10 item found in C2 (below)
+5. Part C3 — complexity backfill on the OLD backlog (below)
+6. Part C4 — write the PRD for what gru is about to build (below)
+7. Part D — label-consistency sweep (below)
+8. Write the report (Report section below), literal Outcome:/Evidence: lines included
 
 ## Part A — claim hygiene
 
@@ -200,7 +201,7 @@ Anchor every score to these, not to a feeling:
 | 10 | **the most a single minion should ever attempt in one pass** |
 
 **10 is a ceiling, not a size.** If an item is genuinely bigger than a 10, it is an EPIC and
-labeling it 10 is the wrong move — decompose it in Part D into pieces that each score 7 or
+labeling it 10 is the wrong move — decompose it in Part C2b into pieces that each score 7 or
 below, and let gru build those. An item you score 10 should be rare and should make you ask
 whether it wants splitting anyway. Never score above 10 to signal "very big"; split instead.
 
@@ -215,6 +216,54 @@ Unsure between two adjacent scores? Take the LOWER one. gru measures its estimat
 actual spend every pass and corrects; a slightly-low guess self-corrects, while inflated
 scores make gru schedule less work than the hour can afford and the allowance is lost — an
 hour's unspent tokens do not roll over.
+
+## Part C2b — decomposition (for anything that scores above the complexity-10 ceiling)
+
+Narrow: this only fires when C2 finds an item genuinely bigger than a 10. But when it does
+fire, until now there was no working procedure at all — the pointer above said "decompose it
+in Part D" while Part D had been repurposed into the label-consistency sweep, so the item
+just sat scored-10 with nowhere real to go. That gap is confirmed real cost, not theoretical:
+the nonprofit-atlas `#3188` saga (filed as one epic-scale issue, never split) burned three
+consecutive `budget_declined` dead-ends (~$8+) and ~17 hours before it finally shipped as three
+separate PRs through organic incremental narrowing — exactly what splitting at file time would
+have done on purpose instead of by accident.
+
+1. **Split along the item's real seams**, not into equal-sized shares — the distinct defects
+   or components the reporter already enumerated, or a natural build sequence, usually give you
+   the seams for free. **How many sub-issues** is therefore a per-item judgment call, same as
+   any other C2 estimate, with one hard rule: keep splitting until **every** piece independently
+   scores `complexity <= 7` under C2's own scale. If one honest split already gets everything
+   to <=7, that's enough — there's no minimum beyond 2, and no reason to over-split a clean
+   3-way problem into 6 slivers.
+2. **If the pieces have a dependency order** (one can't be built or reviewed before another
+   merges), say so in each child issue's body — sequencing is information a reporter/builder
+   needs, not something to hide by filing them all as equally-ready.
+3. **File each sub-issue** with `gh issue create`, referencing the parent issue number in its
+   body, then score (Part C/C2 format) and PRD (Part C4 format) it exactly like any other
+   backlog item — a sub-issue is not a special case once it exists.
+4. **The parent issue is relabeled, not closed.** It was never buildable as filed and closing
+   it would erase the record of why it was split:
+   ```
+   gh label create "fleet:epic" --color 5319e7 \
+     --description "tracking-only parent, decomposed into sub-issues by marie (Part C2b)" || true
+   gh issue edit <parent> --add-label fleet:epic \
+     --remove-label fleet:priority-<tier> --remove-label fleet:complexity-<n>
+   gh issue comment <parent> --body "marie: decomposed into #<a>, #<b>, #<c> (Part C2b) — tracking-only from here, closes once every child is closed."
+   ```
+   Priority/complexity labels come off (gru should never schedule the parent directly — there
+   is nothing left to build against it), `fleet:backlog` stays on, and it stays open. Close it
+   only once every linked child is closed, and only after checking — same as any other epic
+   closure (Part C4's note above) — that the children's own acceptance criteria actually
+   verify true, not just that no open issue/PR references the parent anymore.
+5. **Report it** same as any other Part C action: how many complexity>10 items you decomposed
+   this pass (parent + child issue numbers), and any item you judged >10 but chose NOT to split
+   yet — name it and why. Leaving one for a later pass is fine; skipping it silently is not.
+
+UNKNOWN — whether step 3's `gh issue create` calls happen live in this same pass (e.g. folded
+into the Part C4 PRD-writing step) or are deferred to a separate, later pass is not resolved
+here. File as many children as this pass's turn budget affords and name any you judged but
+did not yet file as pending in your report; do not read this section as requiring same-pass
+filing of every child if the budget doesn't allow it.
 
 ## Part C3 — complexity backfill (the same safety net, for size)
 
@@ -360,7 +409,9 @@ specific vision line or newer issue it contradicted — that is the one close a 
 likely to want to argue with, so make it easy to audit. (C) how many ranked
 high/medium/low this pass, and any item whose priority you changed from a prior pass (name it
 + why — a flip-flopping ranking is a signal something about your own judgment or the vision
-doc changed, worth surfacing, not hiding). (C3) how many backlog issues you scored for
+doc changed, worth surfacing, not hiding). (C2b) how many complexity>10 items you decomposed
+this pass (parent + child issue numbers), and any item scored >10 but not yet split (name it +
+why). (C3) how many backlog issues you scored for
 complexity this pass, and **how many still carry a priority label with no complexity label** —
 that second number is the one to watch: it should fall every pass, and a run where it holds
 steady or rises means the backfill is not keeping up with new work and wants a bigger slice.
