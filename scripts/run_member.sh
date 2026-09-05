@@ -90,6 +90,36 @@ LOG="$LOG_DIR/${MEMBER}.log"
 ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
 
+# gh#374: a `lane=<name>` dispatch to nerd whose name is not one of the seven real lanes
+# (nerd.md's own table / scripts/selftest.py's `_datta_dispatches_and_nerds_analyse`) burns a
+# full pass discovering only that it should never have run -- no matching checklist, no
+# expected credentials, no code surface. Reject BEFORE the worktree is built, BEFORE
+# `claude -p` is ever invoked, and record a real, non-`reported_nothing` Outcome naming the
+# rejected lane -- not a full pass's worth of tokens spent to conclude the same thing.
+NERD_CANONICAL_LANES="growth searchquality ui datadog devops lens revenue"
+if [ "$MEMBER" = "nerd" ] && [ -n "$LANE" ]; then
+  case " $NERD_CANONICAL_LANES " in
+    *" $LANE "*) ;;  # valid lane -- fall through, no behavior change
+    *)
+      log "REJECTED: nerd dispatched with lane='$LANE', not in the canonical seven ($NERD_CANONICAL_LANES) -- exiting before any lane-specific work"
+      if [ "$DRY_RUN" -eq 1 ]; then
+        echo "[dry-run] REJECTED: lane '$LANE' not in canonical list ($NERD_CANONICAL_LANES) -- would exit without running"
+        exit 0
+      fi
+      REJECT_RUN_ID="${MEMBER}-adhoc-$$-$(date +%s)"
+      # gh#374 (a real artifact reference) lives in the Outcome line itself so classify()'s
+      # _ARTIFACT check always passes here -- this must never land as reported_nothing, the
+      # exact failure mode this rejection exists to avoid.
+      printf "Outcome: dispatch rejected -- lane '%s' not in canonical table (gh#374)\nEvidence: scripts/run_member.sh's nerd lane-validation checked lane='%s' against canonical list (%s) before any lane-specific work began\n" \
+          "$LANE" "$LANE" "$NERD_CANONICAL_LANES" \
+        | python3 "$KIT_DIR/scripts/run_report.py" \
+            --member "$MEMBER" --run-id "$REJECT_RUN_ID" --kind llm --exit-code 0 \
+            --pass-file - ${ITEM:+--item-id "$ITEM"} $LANE_FLAG >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
+      exit 0
+      ;;
+  esac
+fi
+
 # --- master kill switch, before anything with a cost --------------------------------------
 . "$KIT_DIR/scripts/fleet_enabled.sh"
 fleet_enabled_or_exit "$MEMBER"
