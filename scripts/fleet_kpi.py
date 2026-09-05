@@ -8,11 +8,14 @@ report format. A member's KPI is domain knowledge (what does THIS member's job a
 not a string-shape you can infer generically. See each pattern's own comment for the real
 outcome strings it was built against.
 
-Members whose job isn't count-shaped (the-fixer: did a fire happen y/n; jefe/gru: orchestration
-verdicts; minion: one item worked or blocked; dumbledore/dont-shoot-the-messenger: poll-and-
-report) get no pattern and correctly return None -- the dashboard shows a pass/fail ratio for
-those instead of a fabricated number, per the same "don't fake it" reasoning `/api/spend`
-already applies to zero-cost runs elsewhere in this kit.
+gh#230: gru/jefe/minion DO have a count-shaped headline after all -- "PRs shipped," read off
+the same `PR #<n>` / `pull/<n>` mentions their own outcome prose already names -- so they're in
+`_KPI_TABLE` below like everyone else. Members that still get no pattern and correctly return
+None are the-fixer (its own PR-mention hit rate doesn't fit a "shipped" headline, see gh#230's
+non-goals) and dumbledore/dont-shoot-the-messenger (poll-and-report, nothing to count). There is
+no pass/fail-ratio dashboard fallback for those -- none exists anywhere in this kit (checked:
+neither `fleet_view.html` nor `fleet_view_server.py` render one) -- they simply have no KPI slot
+today.
 """
 from __future__ import annotations
 
@@ -77,11 +80,35 @@ _MARIE_PATTERNS = [
 
 
 def _count_issue_refs(fragment: str) -> int:
-    return len(re.findall(r"#\d+", fragment))
+    # "#\d+" covers marie/nerd's issue references; "pull/\d+" covers `_PR_SHIPPED_PATTERNS`
+    # below (a "PR #\d+" ref is already caught by "#\d+", but a bare "pull/4488" ref has no
+    # "#" at all -- without this second alternative a clause naming two "pull/N" PRs and no
+    # "PR #N" ones would undercount to 1 via extract_kpi's `max(1, ...)` floor).
+    return len(re.findall(r"#\d+|pull/\d+", fragment))
 
 _JUDGE_JUDY_PATTERNS = [
     (re.compile(r"approved PR #\d+"), "PRs reviewed"),
     (re.compile(r"(?:blocked|rejected) PR #\d+"), "PRs reviewed"),
+]
+
+# gh#230: gru/jefe/minion's real outcome prose is heavily PR-shaped ("Shipped PR #226 ... and
+# PR #227 ... both auto-merge armed"). Anchored to an actual shipping VERB
+# (shipped/opened/merged/armed) immediately before the PR reference(s), same shape as
+# `_JUDGE_JUDY_PATTERNS`'s own verb anchor -- an EARLIER version of this matched bare
+# "PR #\d+"/"pull/\d+" with no verb at all, so a plausible outcome like "Attempted PR #225 but
+# CI failed, blocked. Retried and shipped PR #226." counted BOTH PRs as shipped when only #226
+# actually was (found live in fleet-code-review on this PR, 2026-09-05). The clause gap mirrors
+# `_NERD_CLAUSE_GAP` below: stops at ';' or a real sentence-ending '.', so "Attempted PR #225
+# ... blocked." and "Retried and shipped PR #226." are two separate clauses and the verb never
+# reaches back across the boundary to credit #225.
+_PR_REF = r"(?:PR #\d+|pull/\d+)"
+_PR_CLAUSE_GAP = r"(?:(?!;|\.(?:\s|$)).)*?"
+_PR_SHIPPED_PATTERNS = [
+    (re.compile(
+        r"\b(?:shipped|opened|merged|armed)\b(?!\s+(?:no|nothing)\b)"
+        + _PR_CLAUSE_GAP + r"(" + _PR_REF + r"(?:[^;.]*?" + _PR_REF + r")*)",
+        re.I,
+    ), "PRs shipped"),
 ]
 
 # gh#225: nerd's real outcome prose (2026-09-05 sample, 237 runs.jsonl records, since the
@@ -127,8 +154,19 @@ _KPI_TABLE: dict[str, list[tuple[re.Pattern, str]]] = {
     "roomba": _ROOMBA_PATTERNS,
     "marie": _MARIE_PATTERNS,
     "judge-judy": _JUDGE_JUDY_PATTERNS,
+    "gru": _PR_SHIPPED_PATTERNS,
+    "jefe": _PR_SHIPPED_PATTERNS,
+    "minion": _PR_SHIPPED_PATTERNS,
     "nerd": _NERD_PATTERNS,
 }
+
+# gh#230 AC3: these three must report a real (0, "PRs shipped") -- not None -- on a pass that
+# shipped nothing, since a build-loop run genuinely CAN complete with no PR (blocked, already
+# fixed, QUIET). roomba/marie/judge-judy don't need this: roomba's "N evaluated" phrasing is
+# present on every one of its passes by convention, and marie/judge-judy's None-on-no-match is
+# their own already-tested, intentional behavior (a pass that named no issue/PR really did
+# nothing triage/review-shaped) -- not something this issue's scope touches.
+_REAL_ZERO_MEMBERS = {"gru", "jefe", "minion"}
 
 
 def extract_kpi(member: str, outcome: str | None) -> tuple[int, str] | None:
@@ -159,6 +197,8 @@ def extract_kpi(member: str, outcome: str | None) -> tuple[int, str] | None:
                 total += int(g) if g.isdigit() else max(1, _count_issue_refs(g))
             unit = label
     if not matched_any_pattern:
+        if member in _REAL_ZERO_MEMBERS:
+            return (0, patterns[0][1])
         return None
     return (total, unit or "")
 

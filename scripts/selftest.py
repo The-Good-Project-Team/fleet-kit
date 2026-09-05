@@ -3753,6 +3753,41 @@ def _fleet_kpi_marie_catches_her_real_triage_verb_vocabulary():
     ) == (2, "PRs reviewed")
 
 
+def _fleet_kpi_gru_jefe_minion_ship_a_real_prs_shipped_count():
+    """gh#230: `_KPI_TABLE` omitted gru/jefe/minion entirely, so `/api/kpi` returned a null
+    total for the fleet's own build-orchestration chain even though their outcome text is
+    heavily PR-shaped ("Shipped PR #226 ... and PR #227 ... both auto-merge armed"). Samples
+    below are the issue's own quoted strings.
+    """
+    import fleet_kpi
+    for member in ("gru", "jefe", "minion"):
+        assert fleet_kpi.extract_kpi(
+            member, "Shipped PR #226 (fix retry backoff) and PR #227 (add health check), "
+                    "both auto-merge armed."
+        ) == (2, "PRs shipped")
+        assert fleet_kpi.extract_kpi(member, "Opened pull/4488, auto-merge armed.") == (
+            1, "PRs shipped")
+
+        # a run that shipped nothing (blocked/already-fixed/QUIET, no PR mention at all) is a
+        # real zero, not None -- the same "real zero vs true None" contract `extract_kpi`'s own
+        # docstring documents, extended here per gh#230 AC3.
+        assert fleet_kpi.extract_kpi(
+            member, "QUIET -- item was already fixed, nothing to build this pass."
+        ) == (0, "PRs shipped")
+
+        # a crashed/budget-declined run has no outcome at all -- still a true None, same as
+        # every other member.
+        assert fleet_kpi.extract_kpi(member, None) is None
+
+        # fleet-code-review BLOCK, 2026-09-05: an unanchored "PR #\d+"/"pull/\d+" match counted
+        # a blocked/attempted PR as "shipped" just because it was mentioned. Only the PR named
+        # after an actual shipping verb, in its own clause, counts.
+        assert fleet_kpi.extract_kpi(
+            member,
+            "Attempted PR #225 but CI failed, blocked. Retried and shipped PR #226.",
+        ) == (1, "PRs shipped")
+
+
 def _fleet_kpi_nerd_catches_filed_and_commented_verbs():
     """gh#225: `_KPI_TABLE` had entries for only roomba/marie/judge-judy -- nerd (one of the
     fleet's highest-volume members) returned `total: null` on `/api/kpi`, visually identical to
@@ -3846,6 +3881,13 @@ def _fleet_kpi_nerd_catches_filed_and_commented_verbs():
         "judge-judy", "approved PR #4250 and blocked PR #4200"
     ) == (2, "PRs reviewed")
 
+    # the-fixer stays out of _KPI_TABLE per this issue's own non-goals -- its PR-mention hit
+    # rate doesn't fit a "shipped" headline.
+    assert fleet_kpi.extract_kpi("the-fixer", "Fixed PR #4250's failing gate.") is None
+
+    # the docstring's old, false "dashboard shows a pass/fail ratio instead" claim is gone.
+    src = (Path(__file__).parent / "fleet_kpi.py").read_text()
+    assert "pass/fail ratio for" not in src, "docstring still claims the nonexistent UI fallback"
 
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
@@ -5142,6 +5184,7 @@ if __name__ == "__main__":
     check("lane_kpi is append-only and distinguishes missing from stale", _lane_kpi_is_append_only_and_distinguishes_missing_from_stale)
     check("fleet_kpi's roomba pattern catches all three real 'evaluated' phrasings", _fleet_kpi_roomba_catches_all_three_real_evaluated_phrasings)
     check("fleet_kpi's marie pattern catches her real triage verb vocabulary", _fleet_kpi_marie_catches_her_real_triage_verb_vocabulary)
+    check("fleet_kpi's gru/jefe/minion ship a real 'PRs shipped' count", _fleet_kpi_gru_jefe_minion_ship_a_real_prs_shipped_count)
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
     check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
