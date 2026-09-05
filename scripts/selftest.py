@@ -16,7 +16,9 @@ from __future__ import annotations
 import datetime
 import json
 import re
+import pathlib
 import sys
+import time
 import tempfile
 from pathlib import Path
 
@@ -4949,6 +4951,129 @@ def _bash_eval(setup: str, expr: str) -> str:
         return proc.stdout.strip()
 
 
+def _run_loop_actually_uses_the_ordering():
+    """account_pool_run must ITERATE the ordering, not just have the function defined.
+
+    Written because the first cut of this feature defined _account_pool_order correctly, passed
+    every unit test above (they call the function directly), and still ran the old fixed order --
+    the run loop was never wired to it. A function nobody calls is the same "authority written
+    down and ignored" failure run_member.sh's own header exists to document.
+
+    Drives the REAL entry point: seed gmail as the soonest reset, make every account's command
+    fail as 'other' (so the loop tries them all and gates nobody on the first tick), and assert
+    from the log which account the pool reached for FIRST.
+    """
+    import subprocess
+    pool = ROOT / "scripts" / "account_pool.sh"
+    now = int(time.time())
+    with tempfile.TemporaryDirectory() as tmp:
+        state = pathlib.Path(tmp) / "account-pool-exhausted.state"
+        log = pathlib.Path(tmp) / "account-pool.log"
+        # tgp resets far out, gmail resets soon -> gmail must be reached for FIRST, inverting
+        # FLEET_ACCOUNTS order. Both gates are still in the future, so the budget verdict skips
+        # both without spending a call -- which is what makes this a clean assertion: the log
+        # records the ORDER the loop walked them in, with no command actually run.
+        state.write_text(f"tgp {now + 86400}\ngmail {now + 600}\n")
+        script = (
+            "set -uo pipefail\n"
+            f'export FLEET_LOG_DIR="{tmp}"\n'
+            'export FLEET_ACCOUNTS="tgp gmail"\n'
+            f'export ACCOUNT_POOL_STATE_FILE="{state}"\n'
+            f'export ACCOUNT_POOL_LOG_FILE="{log}"\n'
+            f'source "{pool}"\n'
+            "account_pool_run bash -c 'exit 1' >/dev/null 2>&1 || true\n"
+        )
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        text = log.read_text() if log.exists() else ""
+
+    tried = [ln.split("account=")[1].split()[0]
+             for ln in text.splitlines() if "budget verdict=" in ln]
+    assert tried, f"pool logged no attempt at all -- log was:\n{text[:500]}"
+    assert tried[0] == "gmail", \
+        f"run loop ignored the ordering (tried {tried}) -- is account_pool_run still iterating $ACCOUNT_POOL_ORDER?"
+
+
+def _pool_order(state_lines, accounts="tgp gmail"):
+    """Return _account_pool_order's output as a list, given a seeded state file."""
+    import subprocess
+    pool = ROOT / "scripts" / "account_pool.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        state = pathlib.Path(tmp) / "account-pool-exhausted.state"
+        state.write_text("".join(line + "\n" for line in state_lines))
+        script = (
+            "set -uo pipefail\n"
+            f'export FLEET_LOG_DIR="{tmp}"\n'
+            f'export FLEET_ACCOUNTS="{accounts}"\n'
+            f'export ACCOUNT_POOL_STATE_FILE="{state}"\n'
+            f'source "{pool}"\n'
+            "_account_pool_order\n"
+        )
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        return proc.stdout.split()
+
+
+def _soonest_reset_account_is_tried_first():
+    """The account whose quota resets SOONEST is drained first.
+
+    Quota that resets in an hour is worth less than quota that resets in five days -- whatever
+    the near-reset account does not spend is simply lost. A fixed FLEET_ACCOUNTS order always
+    drains the same account first, so the other one's window can lapse with quota unspent.
+
+    Seeded so the SECOND account in FLEET_ACCOUNTS resets sooner: order must invert.
+    """
+    now = int(time.time())
+    got = _pool_order([f"tgp {now + 86400}", f"gmail {now + 600}"])
+    assert got == ["gmail", "tgp"], \
+        f"soonest-reset account not tried first: {got}"
+
+    # ...and the reverse seeding must NOT invert, or the test would pass on any reordering.
+    got = _pool_order([f"tgp {now + 600}", f"gmail {now + 86400}"])
+    assert got == ["tgp", "gmail"], \
+        f"ordering ignored the epochs it was given: {got}"
+
+
+def _unknown_reset_keeps_configured_order():
+    """No known reset for anyone == the old fixed order, exactly.
+
+    This is the normal steady state: both accounts healthy, nothing gated, so nothing has ever
+    reported a reset time. The feature must be a NO-OP here rather than inventing an order.
+    """
+    now = int(time.time())
+    assert _pool_order([]) == ["tgp", "gmail"], "empty state file changed the order"
+    # A PAST epoch is not a pending reset -- it is a gate that already expired, so the account
+    # is 'unknown' again and keeps configured order.
+    assert _pool_order([f"gmail {now - 5000}"]) == ["tgp", "gmail"], \
+        "an expired gate was treated as a pending reset"
+    # A malformed epoch must degrade to unknown, never sort as garbage.
+    assert _pool_order(["gmail notanumber"]) == ["tgp", "gmail"], \
+        "unreadable state file reordered the pool"
+
+
+def _known_reset_outranks_unknown():
+    """A known future reset sorts ahead of an account with no known reset.
+
+    The known-reset account is the one holding perishable quota; the unknown one is not known
+    to be perishable at all.
+    """
+    now = int(time.time())
+    got = _pool_order([f"gmail {now + 600}"])
+    assert got == ["gmail", "tgp"], f"known reset did not outrank unknown: {got}"
+
+
+def _every_configured_account_survives_ordering():
+    """Ordering may reorder, never drop or duplicate -- a dropped account is an account that
+    silently never gets tried, which is the failover-is-theater class this pool exists to end.
+    """
+    now = int(time.time())
+    for state in ([], [f"tgp {now + 10}"], [f"tgp {now + 10}", f"gmail {now + 20}"],
+                  ["tgp junk", f"gmail {now + 20}"]):
+        got = _pool_order(state, accounts="tgp gmail primary")
+        assert sorted(got) == ["gmail", "primary", "tgp"], \
+            f"ordering dropped or duplicated an account for state={state}: {got}"
+
+
 def _classifier_ignores_incidental_rate_limit_text():
     """A fleet member that merely PRINTS the words "rate limit" must not gate its account.
 
@@ -5779,6 +5904,11 @@ if __name__ == "__main__":
     check("fleet-view reads FLEET_API_KEY from fleet.env", _fleet_view_reads_the_api_key_from_the_env_file)
     check("FLEET_API_KEY never reaches an LLM pass", _api_key_never_reaches_an_llm)
     check("incidental 'rate limit' text does not gate an account", _classifier_ignores_incidental_rate_limit_text)
+    check("soonest-reset account is tried first", _soonest_reset_account_is_tried_first)
+    check("no known reset keeps configured order", _unknown_reset_keeps_configured_order)
+    check("known reset outranks unknown reset", _known_reset_outranks_unknown)
+    check("ordering never drops an account", _every_configured_account_survives_ordering)
+    check("run loop actually uses the ordering", _run_loop_actually_uses_the_ordering)
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)
     check("exhaustion with no stated reset backs off minutes, not an hour", _unparseable_exhaustion_gates_briefly_not_for_an_hour)
     check("a stated reset time is honored over the fallback", _a_real_reset_time_is_still_honored)
