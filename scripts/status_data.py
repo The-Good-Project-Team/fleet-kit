@@ -135,6 +135,23 @@ def read_component(names, hours: int = 72) -> tuple[list[str], float | None]:
     return out, pct
 
 
+def live_alerts() -> dict:
+    """The current live /api/alerts feed (alert_store.py, PR#397), for status_page.py's own
+    banner (gh#399 AC7). Deliberately NOT merged into `overall`/`worst` above: that is an
+    older, log-derived per-component uptime rollup computing a different thing (historical
+    check pass/fail), while this is alert_store's live, deduped severity state. An import or
+    read failure here must not render as "no alerts" -- the exact silent fail-open
+    alert_store.snapshot() itself already refuses to do -- so any exception is surfaced the
+    same shape its own snapshot() uses for its own internal errors.
+    """
+    try:
+        import alert_store
+        return alert_store.snapshot()
+    except Exception as exc:  # noqa: BLE001
+        return {"open": [], "counts": {}, "budget_safe": False, "worst": "unknown",
+                "error": f"{type(exc).__name__}: {exc}"}
+
+
 def snapshot(hours: int = 72) -> dict:
     comps = []
     worst = OK
@@ -152,6 +169,7 @@ def snapshot(hours: int = 72) -> dict:
         "components": comps,
         "hours": hours,
         "members": members(hours),
+        "live_alerts": live_alerts(),
         "generated_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     }
 

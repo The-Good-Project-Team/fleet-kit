@@ -1961,6 +1961,85 @@ def _status_page_banner_distinguishes_unknown_from_good():
     assert unknown != bad, ".banner.unknown must not render identically to .banner.bad"
 
 
+def _status_data_live_alerts_proxies_alert_store_without_touching_overall():
+    """gh#399 AC7: status_data.snapshot()'s `live_alerts` key must carry alert_store.py's
+    (PR#397) live severity feed verbatim, and must NEVER change `overall` -- that field is the
+    older, separate log-derived component-uptime rollup (status_data.py:130-141) and merging
+    the two concepts is explicitly out of scope."""
+    import status_data
+    import alert_store
+
+    fake = {"worst": "critical", "budget_safe": False,
+            "counts": {"transient": 0, "degraded": 0, "critical": 1},
+            "open": [{"check": "probe_token", "problem": "token rejected", "handles": ["reif"]}]}
+    real_alert_snapshot = alert_store.snapshot
+    try:
+        alert_store.snapshot = lambda *a, **k: fake
+        snap = status_data.snapshot()
+        assert snap["live_alerts"] == fake, f"live_alerts did not proxy alert_store: {snap.get('live_alerts')}"
+        assert snap["overall"] in (status_data.OK, status_data.BAD, status_data.UNKNOWN), (
+            "overall must still be one of the log-derived states, untouched by live_alerts")
+    finally:
+        alert_store.snapshot = real_alert_snapshot
+
+
+def _status_data_live_alerts_fails_open_on_a_broken_store():
+    """A live_alerts() that raised would take status_data.snapshot() down with it -- the exact
+    silent-failure class alert_store.snapshot() itself already refuses to produce. Mirror its
+    fail-open contract: an exception must still read as unsafe/unknown, never as no-alerts."""
+    import status_data
+    import alert_store
+
+    real_alert_snapshot = alert_store.snapshot
+    try:
+        def _boom(*a, **k):
+            raise RuntimeError("state file corrupt")
+        alert_store.snapshot = _boom
+        result = status_data.live_alerts()
+        assert result["worst"] == "unknown", f"a broken store must read as unknown, got {result}"
+        assert result["budget_safe"] is False, "a broken store must never read as budget_safe"
+    finally:
+        alert_store.snapshot = real_alert_snapshot
+
+
+def _status_page_renders_live_alert_banner_distinct_from_component_grid():
+    """gh#399 AC7/AC8: when live_alerts.worst != "ok", /status must show a banner distinct
+    from the existing per-component uptime grid; when worst == "ok", neither the live-alert
+    block nor the component banner's own text should claim a live alert is open."""
+    import status_data
+    import status_page
+
+    real_snapshot = status_data.snapshot
+
+    def _fake(live_alerts):
+        def _snap(hours=72):
+            return {"overall": "ok", "components": [], "hours": hours, "members": [],
+                     "live_alerts": live_alerts, "generated_at": "2026-09-05 00:00 UTC"}
+        return _snap
+
+    try:
+        status_data.snapshot = _fake({"worst": "ok", "budget_safe": True, "counts": {}, "open": []})
+        html_ok = status_page.render()
+        assert "class='live-alert" not in html_ok, "worst=ok must render no live-alert block (AC8)"
+
+        status_data.snapshot = _fake({
+            "worst": "critical", "budget_safe": False,
+            "counts": {"critical": 2, "degraded": 1},
+            "open": [{"check": "probe_token", "problem": "token rejected", "handles": ["reif"]}],
+        })
+        html_bad = status_page.render()
+        assert "class='live-alert" in html_bad, "worst=critical must render the live-alert block"
+        assert "2 critical" in html_bad and "1 degraded" in html_bad, (
+            "banner must name the actual counts (AC3-equivalent for /status)")
+        assert "probe_token" in html_bad and "token rejected" in html_bad, (
+            "banner must list the specific open condition, not a generic message (AC4-equivalent)")
+        # AC7: must not reuse or overwrite the pre-existing component banner's own class/copy.
+        assert "banner good" in html_bad or "banner bad" in html_bad or "banner unknown" in html_bad, (
+            "the older per-component banner must still render unchanged alongside the new block")
+    finally:
+        status_data.snapshot = real_snapshot
+
+
 def _postflight_dirty_check_catches_a_leaked_absolute_path_write():
     """fleet-kit#78 / nonprofit-atlas#3113 (15+ recurrences): worktree isolation is a `cd`, not
     a sandbox -- it does not stop a tool call that names the shared checkout by its absolute
@@ -6141,6 +6220,9 @@ if __name__ == "__main__":
     check("status_data.members() reads fleet.db in-process, no podman on $PATH needed (gh#364)", _status_data_members_reads_fleet_db_with_no_podman_on_path)
     check("status_data's other four components are unaffected by the members() fix (gh#364)", _status_data_other_components_unaffected_by_members_fix)
     check("status page banner distinguishes unknown from good and bad (gh#358)", _status_page_banner_distinguishes_unknown_from_good)
+    check("status_data.live_alerts() proxies alert_store without touching overall (gh#399)", _status_data_live_alerts_proxies_alert_store_without_touching_overall)
+    check("status_data.live_alerts() fails open on a broken store (gh#399)", _status_data_live_alerts_fails_open_on_a_broken_store)
+    check("status page renders a live-alert banner distinct from the component grid (gh#399)", _status_page_renders_live_alert_banner_distinct_from_component_grid)
 
     for n in ok:
         print(f"  ok    {n}")

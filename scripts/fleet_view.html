@@ -39,15 +39,24 @@
   .btn.primary { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
   .btn.primary:hover { filter: brightness(1.1); }
 
-  /* ---------- boot-error banner: gh#262 -- boot()/loadMembers() used to fail silently on any
-     API hiccup, rendering a blank dashboard pixel-identical to a genuinely idle fleet. This is
-     a fixed overlay (not a grid row) so it never reflows the shell's two-row layout above. ---- */
-  .boot-error-banner { position: fixed; top: 40px; left: 0; right: 0; z-index: 50;
-    display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+  /* ---------- top banners: gh#262 boot-error banner, and gh#399's /api/alerts banner stacked
+     below it. Both used to be one fixed overlay each at the same top:40px, which would
+     overlap if a boot error AND an open alert were ever visible at once -- so the fixed
+     positioning now lives on the shared wrapper and the individual banners just flow inside
+     it, keeping the exact same look (this is the only place .boot-error-banner is used, so
+     nothing else depends on it carrying its own position). ---------- */
+  .top-banners { position: fixed; top: 40px; left: 0; right: 0; z-index: 50;
+    display: flex; flex-direction: column; }
+  .boot-error-banner { display: flex; align-items: center; gap: 12px; padding: 8px 14px;
     background: var(--bad); color: #fff; font-size: 12px; box-shadow: 0 2px 6px rgba(0,0,0,.25); }
   .boot-error-banner .msg { flex: 1; }
   .boot-error-banner .btn { background: rgba(255,255,255,.15); color: #fff; border-color: rgba(255,255,255,.4); }
   .boot-error-banner .btn:hover { border-color: #fff; }
+  /* gh#399: a "degraded" alert is real but self-healing/bounded (see alert_store.py's own
+     severity doc) -- render it as the existing --warn amber rather than the same red as a
+     boot failure or a critical alert, so severity is visible at a glance. */
+  .boot-error-banner.degraded { background: var(--warn); }
+  .topbar .stat.bad { color: var(--bad); font-weight: 600; }
 
   .body { display: grid; grid-template-columns: 220px 1fr; min-height: 0; }
 
@@ -242,11 +251,18 @@
     <span class="spacer"></span>
     <span class="stat" id="needsHumanOp"></span>
     <span class="stat" id="globalSpend"></span>
+    <span class="stat bad" id="budgetUnsafe" style="display:none;"
+      title="an open alert says the budget signal cannot be trusted -- see the alert banner">&#9888; budget unsafe</span>
   </div>
-  <div class="boot-error-banner" id="bootError" style="display:none;">
-    <span class="msg" id="bootErrorMsg"></span>
-    <button class="btn small" id="bootErrorRetry">retry</button>
-    <button class="btn small" id="bootErrorDismiss">dismiss</button>
+  <div class="top-banners">
+    <div class="boot-error-banner" id="bootError" style="display:none;">
+      <span class="msg" id="bootErrorMsg"></span>
+      <button class="btn small" id="bootErrorRetry">retry</button>
+      <button class="btn small" id="bootErrorDismiss">dismiss</button>
+    </div>
+    <div class="boot-error-banner" id="alertBanner" style="display:none;">
+      <span class="msg" id="alertBannerMsg"></span>
+    </div>
   </div>
   <div class="body">
     <div class="sidebar">
@@ -1578,6 +1594,53 @@ document.getElementById('bootErrorRetry').onclick = () => boot();
 document.getElementById('bootErrorDismiss').onclick = clearBootError;
 
 // ---------------------------------------------------------------------------------------------
+// gh#399: /api/alerts is the one place the fleet's own severity feed (alert_store.py, PR#397)
+// gets a human-visible consumer. Reuses the boot-error-banner DOM/CSS pattern rather than a
+// dismiss-able toast: a resolved alert must clear itself on the next poll (AC5), never require
+// a click, so unlike bootError there is no dismiss button here at all.
+// ---------------------------------------------------------------------------------------------
+const alertBannerEl = document.getElementById('alertBanner');
+const alertBannerMsgEl = document.getElementById('alertBannerMsg');
+const budgetUnsafeEl = document.getElementById('budgetUnsafe');
+
+function renderAlertsUI(data) {
+  const worst = data.worst || 'unknown';
+  budgetUnsafeEl.style.display = data.budget_safe === false ? '' : 'none';
+  if (worst === 'ok') {
+    alertBannerEl.style.display = 'none';
+    return;
+  }
+  const counts = data.counts || {};
+  const headParts = [];
+  if (counts.critical) headParts.push(`${counts.critical} critical`);
+  if (counts.degraded) headParts.push(`${counts.degraded} degraded`);
+  if (!headParts.length) headParts.push(worst === 'unknown' ? 'alerts feed unreachable' : worst);
+  const detail = (data.open || []).map(a => {
+    const who = (a.handles && a.handles.length) ? ` (${a.handles.join(',')})` : '';
+    return `${a.check}: ${a.problem}${who}`;
+  }).join('; ');
+  alertBannerMsgEl.textContent = `${headParts.join(', ')} alert(s) open` + (detail ? ` — ${detail}` : '');
+  alertBannerEl.classList.toggle('degraded', worst === 'degraded');
+  alertBannerEl.style.display = '';
+}
+
+async function renderAlerts() {
+  let data;
+  try {
+    // Not fetchJSON(): /api/alerts fails open with a 503 body ({budget_safe:false,
+    // worst:"unknown"}) on its own internal error (see alert_store snapshot()'s docstring) --
+    // fetchJSON() would throw on that non-2xx and discard exactly the "do not trust me" signal
+    // the endpoint went out of its way to hand back. Parse the body regardless of status.
+    const r = await fetch('/api/alerts');
+    data = await r.json();
+  } catch (err) {
+    // Couldn't even reach it -- never render that as healthy.
+    data = { worst: 'unknown', budget_safe: false, open: [], counts: {} };
+  }
+  renderAlertsUI(data);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Fleet state (master toggle) + members (spec/effective/overrides/spend) + queue (next fires)
 // ---------------------------------------------------------------------------------------------
 async function renderFleetState() {
@@ -1667,6 +1730,7 @@ async function boot() {
         fetchJSON('/api/snapshot'),
         renderFleetState(),
         loadMembers(),
+        renderAlerts(),
       ]);
       ALL_RUNS = snap.runs || [];
       GH = snap.gh || { prs: [], issues: [], merged: [], self_evolution: [] };
@@ -1686,6 +1750,9 @@ async function boot() {
     setInterval(async () => {
       try { await loadMembers(); renderSidebar(); if (PAGE === 'agent') renderDetailHead(); }
       catch (err) { console.error('periodic loadMembers() failed:', err); }
+      // gh#399 AC1: /api/alerts rides this same 30s "other live tiles" interval rather than
+      // a new setInterval of its own.
+      renderAlerts();
     }, 30000);
     setInterval(renderQueue, 15000);
 
