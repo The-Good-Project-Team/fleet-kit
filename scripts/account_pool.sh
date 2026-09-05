@@ -209,6 +209,62 @@ _account_pool_budget_verdict() {
   fi
 }
 
+# _account_pool_order — print the accounts to try, soonest-reset FIRST.
+#
+# WHY (Reif, 2026-09-05): quota that resets in an hour is worth less than quota that resets in
+# five days, because the near-reset account loses whatever it did not spend. Draining the
+# soonest-resetting account first, and only failing over once it is genuinely exhausted,
+# extracts more total work from the same two subscriptions. A fixed order does the opposite:
+# it always drains the SAME account first, so the other one's window can lapse with quota
+# unspent.
+#
+# WHAT WE ACTUALLY KNOW, and what we do not. This module only learns a reset time when an
+# account FAILS as exhausted and the CLI names its own reset (_account_pool_parse_reset), and
+# the success path deliberately CLEARS that line the moment the account works again. So a
+# healthy account has NO known reset here, and there is no API this kit can read for one. That
+# is a real limit, not an oversight -- so this function must never pretend otherwise:
+#
+#   - accounts with a KNOWN future reset sort first, soonest epoch first
+#   - accounts with NO known reset keep their FLEET_ACCOUNTS order, after those
+#
+# The second group is the normal steady state (both accounts healthy, nothing gated), so this
+# function is a NO-OP exactly when nothing is known -- the fixed order still governs and
+# behavior is identical to before. It only steers once an account has actually reported a
+# reset, which is precisely when the information to steer by exists.
+#
+# INTERACTION with _account_pool_budget_verdict: an account whose gate is still in the future is
+# SKIPPED by the caller without spending a call. So a soonest-reset that has not arrived yet is
+# not tried early -- it is skipped, exactly as before. What this ordering changes is the window
+# AFTER a gate expires: the just-reset account is the one whose fresh quota is most perishable,
+# and it is now drained first instead of sitting behind whatever FLEET_ACCOUNTS listed first.
+#
+# An 'unauthenticated' or 'other' entry carries an epoch too (a 1h / 5m holdoff, not a real
+# quota reset). Sorting on it is still correct: it is a time-to-retry, and the account that
+# becomes retryable soonest is the right one to reach for first. It is skipped while gated
+# either way.
+#
+# Any malformed epoch is treated as unknown rather than sorted as garbage -- an unreadable state
+# file must never reorder the pool into nonsense.
+_account_pool_order() {
+  local account epoch now known="" unknown=""
+  now=$(date +%s)
+  for account in $ACCOUNT_POOL_ORDER; do
+    epoch=""
+    if [ -f "$ACCOUNT_POOL_STATE_FILE" ]; then
+      epoch=$(awk -v a="$account" '$1==a{print $2}' "$ACCOUNT_POOL_STATE_FILE" 2>/dev/null | tail -1)
+    fi
+    if [[ "$epoch" =~ ^[0-9]+$ ]] && [ "$epoch" -gt "$now" ]; then
+      known="${known}${epoch} ${account}"$'\n'
+    else
+      unknown="${unknown}${account}"$'\n'
+    fi
+  done
+  {
+    [ -n "$known" ] && printf '%s' "$known" | sort -n | awk '{print $2}'
+    [ -n "$unknown" ] && printf '%s' "$unknown"
+  } | grep -v '^$' || true
+}
+
 # _account_pool_classify_failure <combined_output> — best-effort text match. Real accounts
 # report exhaustion/auth failure in human-readable text on stderr; there is no structured
 # error code from the CLI to key off instead. Extend the patterns below if your provider's
@@ -256,7 +312,7 @@ account_pool_run() {
   export ACCOUNT_POOL_SELECTED="" ACCOUNT_POOL_LAST_REASON=""
   capture=$(mktemp "${TMPDIR:-/tmp}/account_pool_out.XXXXXX")
   trap 'rm -f "$capture"' RETURN
-  for account in $ACCOUNT_POOL_ORDER; do
+  for account in $(_account_pool_order); do
     verdict=$(_account_pool_budget_verdict "$account" 2>/dev/null || echo "unknown")
     case "$verdict" in
       gated*)
