@@ -116,6 +116,14 @@ LOG_DIR="${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}"
 # the other instance's spend). Deliberately OUTSIDE $INSTANCE_DIR -- that is the whole point.
 SHARED_LEASE_DIR="${FLEET_LEASE_DIR:-$HOME/.cache/fleet-kit/leases}"
 mkdir -p "$SHARED_LEASE_DIR"
+
+# Same shape, one number: every instance publishes just its own FLEET_SHARE_FRACTION here
+# (publish_share.sh) so check_share_sum.sh can sum every sibling's share from inside any one
+# container (gh#293) -- without bind-mounting the `instances/` parent tree wholesale, which
+# would leak every instance's fleet.env (live CLAUDE_CODE_OAUTH_TOKEN/FLEET_MAXX_KEY) into
+# every other instance's container. Deliberately OUTSIDE $INSTANCE_DIR, same as the lease dir.
+SHARED_SHARE_DIR="${FLEET_SHARE_DIR:-$HOME/.cache/fleet-kit/shares}"
+mkdir -p "$SHARED_SHARE_DIR"
 mkdir -p "$LOG_DIR"
 DEPLOY_LOG="$LOG_DIR/deploy.log"
 
@@ -162,8 +170,10 @@ run_args() {
         -e FLEET_WEBHOOK_PORT="$webhook_port" \
         -e FLEET_REPO=/repo \
         -e FLEET_LEASE_DIR=/fleet-kit/leases \
+        -e FLEET_SHARE_DIR=/fleet-kit/shares \
         -e FLEET_INSTANCE_NAME="$name" \
         -v "$SHARED_LEASE_DIR:/fleet-kit/leases" \
+        -v "$SHARED_SHARE_DIR:/fleet-kit/shares" \
         -v "$INSTANCE_DIR/repo:/repo" \
         -v "$INSTANCE_DIR/logs:/var/log/fleet-kit" \
         -v "$INSTANCE_DIR/fleet.env:/fleet-kit/fleet.env" \
