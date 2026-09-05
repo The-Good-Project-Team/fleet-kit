@@ -54,8 +54,13 @@
   .boot-error-banner .btn:hover { border-color: #fff; }
   /* gh#399: a "degraded" alert is real but self-healing/bounded (see alert_store.py's own
      severity doc) -- render it as the existing --warn amber rather than the same red as a
-     boot failure or a critical alert, so severity is visible at a glance. */
+     boot failure or a critical alert, so severity is visible at a glance. A "transient" alert
+     is neither -- it means the check could not observe its target (e.g. a container mid
+     restart) and alert_store.py never pages on it alone, so it gets a neutral grey rather
+     than either alarm color: showing it at all (AC2's "worst != ok") without making it look
+     like a confirmed fault. */
   .boot-error-banner.degraded { background: var(--warn); }
+  .boot-error-banner.transient { background: var(--dim); }
   .topbar .stat.bad { color: var(--bad); font-weight: 600; }
 
   .body { display: grid; grid-template-columns: 220px 1fr; min-height: 0; }
@@ -1614,6 +1619,11 @@ function renderAlertsUI(data) {
   const headParts = [];
   if (counts.critical) headParts.push(`${counts.critical} critical`);
   if (counts.degraded) headParts.push(`${counts.degraded} degraded`);
+  // transient is deliberately NOT urgent -- alert_store.py's own severity doc: "NOT evidence
+  // the watched thing is broken; it is evidence we are blind. NEVER pages on its own." Naming
+  // it separately (and never in the red/amber classes below) keeps a container mid-restart
+  // from reading as a real fault, which is the exact noise this whole feed exists to end.
+  if (counts.transient) headParts.push(`${counts.transient} transient (unconfirmed)`);
   if (!headParts.length) headParts.push(worst === 'unknown' ? 'alerts feed unreachable' : worst);
   const detail = (data.open || []).map(a => {
     const who = (a.handles && a.handles.length) ? ` (${a.handles.join(',')})` : '';
@@ -1621,23 +1631,33 @@ function renderAlertsUI(data) {
   }).join('; ');
   alertBannerMsgEl.textContent = `${headParts.join(', ')} alert(s) open` + (detail ? ` — ${detail}` : '');
   alertBannerEl.classList.toggle('degraded', worst === 'degraded');
+  alertBannerEl.classList.toggle('transient', worst === 'transient');
   alertBannerEl.style.display = '';
 }
 
 async function renderAlerts() {
-  let data;
   try {
-    // Not fetchJSON(): /api/alerts fails open with a 503 body ({budget_safe:false,
-    // worst:"unknown"}) on its own internal error (see alert_store snapshot()'s docstring) --
-    // fetchJSON() would throw on that non-2xx and discard exactly the "do not trust me" signal
-    // the endpoint went out of its way to hand back. Parse the body regardless of status.
-    const r = await fetch('/api/alerts');
-    data = await r.json();
+    let data;
+    try {
+      // Not fetchJSON(): /api/alerts fails open with a 503 body ({budget_safe:false,
+      // worst:"unknown"}) on its own internal error (see alert_store snapshot()'s docstring) --
+      // fetchJSON() would throw on that non-2xx and discard exactly the "do not trust me"
+      // signal the endpoint went out of its way to hand back. Parse the body regardless of
+      // status.
+      const r = await fetch('/api/alerts');
+      data = await r.json();
+    } catch (err) {
+      // Couldn't even reach it -- never render that as healthy.
+      data = { worst: 'unknown', budget_safe: false, open: [], counts: {} };
+    }
+    renderAlertsUI(data);
   } catch (err) {
-    // Couldn't even reach it -- never render that as healthy.
-    data = { worst: 'unknown', budget_safe: false, open: [], counts: {} };
+    // A malformed-but-successfully-fetched body must not take the whole boot() sequence down
+    // with it -- renderAlerts() is awaited inside boot()'s own Promise.all, and an uncaught
+    // throw here would surface as a full-page "dashboard failed to load" for what is really
+    // just this one tile misbehaving.
+    console.error('renderAlerts() failed:', err);
   }
-  renderAlertsUI(data);
 }
 
 // ---------------------------------------------------------------------------------------------

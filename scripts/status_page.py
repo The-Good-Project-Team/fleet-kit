@@ -71,6 +71,7 @@ a bullet list of the actual open conditions) so the two are never mistaken for o
 .live-alert{border:1px solid var(--warn);border-radius:10px;padding:14px 18px;
 margin-bottom:24px;background:var(--warnbg)}
 .live-alert.critical{border-color:var(--down);background:rgba(229,72,77,.08)}
+.live-alert.transient{border-color:var(--unknownbd);background:var(--unknownbg)}
 .live-alert-head{font-weight:600;display:flex;align-items:center;gap:8px}
 .live-alert ul{margin:10px 0 0;padding-left:20px;font-size:13px;color:var(--muted)}
 """
@@ -95,6 +96,11 @@ def _live_alert_html(live_alerts: dict) -> str:
         head.append("%d critical" % counts["critical"])
     if counts.get("degraded"):
         head.append("%d degraded" % counts["degraded"])
+    # transient means the check could not observe its target (e.g. a container mid restart) --
+    # alert_store.py's own severity doc says it "NEVER pages on its own", so it is named
+    # separately here rather than folded into the same wording/color as a confirmed fault.
+    if counts.get("transient"):
+        head.append("%d transient (unconfirmed)" % counts["transient"])
     if not head:
         head.append("alerts feed unreachable" if worst == "unknown" else worst)
     items = "".join(
@@ -104,7 +110,7 @@ def _live_alert_html(live_alerts: dict) -> str:
         )
         for a in live_alerts.get("open", [])
     )
-    cls = "critical" if worst == "critical" else ""
+    cls = "critical" if worst == "critical" else "transient" if worst == "transient" else ""
     return (
         "<div class='live-alert %s'><div class=live-alert-head>&#9888; %s alert(s) open</div>"
         "%s</div>" % (cls, escape(", ".join(head)), ("<ul>%s</ul>" % items if items else ""))

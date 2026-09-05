@@ -2002,6 +2002,24 @@ def _status_data_live_alerts_fails_open_on_a_broken_store():
         alert_store.snapshot = real_alert_snapshot
 
 
+def _status_page_transient_alert_does_not_render_as_a_confirmed_fault():
+    """gh#399: alert_store.py's own severity doc says transient "is NOT evidence the watched
+    thing is broken; it is evidence we are blind. NEVER pages on its own." A worst=="transient"
+    response (e.g. a container mid-restart) must still be visible per AC2's literal "worst !=
+    ok", but must never render with the same class as a confirmed critical fault -- that would
+    reintroduce, at the display layer, exactly the false-alarm noise this whole feed exists to
+    eliminate."""
+    import status_page
+
+    html = status_page._live_alert_html(
+        {"worst": "transient", "budget_safe": True, "counts": {"transient": 1},
+         "open": [{"check": "budget_read", "problem": "meter unreadable", "handles": []}]})
+    assert html, "worst=transient must still render something (AC2's literal worst != ok)"
+    assert "class='live-alert critical" not in html, (
+        "a transient (unconfirmed) condition must not render with the critical class")
+    assert "transient" in html
+
+
 def _status_page_renders_live_alert_banner_distinct_from_component_grid():
     """gh#399 AC7/AC8: when live_alerts.worst != "ok", /status must show a banner distinct
     from the existing per-component uptime grid; when worst == "ok", neither the live-alert
@@ -2011,9 +2029,9 @@ def _status_page_renders_live_alert_banner_distinct_from_component_grid():
 
     real_snapshot = status_data.snapshot
 
-    def _fake(live_alerts):
+    def _fake(live_alerts, overall="ok"):
         def _snap(hours=72):
-            return {"overall": "ok", "components": [], "hours": hours, "members": [],
+            return {"overall": overall, "components": [], "hours": hours, "members": [],
                      "live_alerts": live_alerts, "generated_at": "2026-09-05 00:00 UTC"}
         return _snap
 
@@ -2022,20 +2040,25 @@ def _status_page_renders_live_alert_banner_distinct_from_component_grid():
         html_ok = status_page.render()
         assert "class='live-alert" not in html_ok, "worst=ok must render no live-alert block (AC8)"
 
+        # overall="down" here, deliberately DIFFERENT from live_alerts' own worst -- if
+        # rendering live_alerts ever clobbered or was driven by `overall` (the thing AC7
+        # forbids), this would catch it, unlike pinning both to "ok"/"critical" together.
         status_data.snapshot = _fake({
             "worst": "critical", "budget_safe": False,
             "counts": {"critical": 2, "degraded": 1},
             "open": [{"check": "probe_token", "problem": "token rejected", "handles": ["reif"]}],
-        })
+        }, overall="down")
         html_bad = status_page.render()
         assert "class='live-alert" in html_bad, "worst=critical must render the live-alert block"
         assert "2 critical" in html_bad and "1 degraded" in html_bad, (
             "banner must name the actual counts (AC3-equivalent for /status)")
         assert "probe_token" in html_bad and "token rejected" in html_bad, (
             "banner must list the specific open condition, not a generic message (AC4-equivalent)")
-        # AC7: must not reuse or overwrite the pre-existing component banner's own class/copy.
-        assert "banner good" in html_bad or "banner bad" in html_bad or "banner unknown" in html_bad, (
-            "the older per-component banner must still render unchanged alongside the new block")
+        # AC7: the pre-existing component banner must reflect ITS OWN `overall` ("down" here),
+        # not be overwritten or dragged along by live_alerts' independent "critical".
+        assert "banner bad" in html_bad, (
+            "the older per-component banner must still render its own overall=down state "
+            "independently of live_alerts")
     finally:
         status_data.snapshot = real_snapshot
 
@@ -6297,6 +6320,7 @@ if __name__ == "__main__":
     check("status_data.live_alerts() proxies alert_store without touching overall (gh#399)", _status_data_live_alerts_proxies_alert_store_without_touching_overall)
     check("status_data.live_alerts() fails open on a broken store (gh#399)", _status_data_live_alerts_fails_open_on_a_broken_store)
     check("status page renders a live-alert banner distinct from the component grid (gh#399)", _status_page_renders_live_alert_banner_distinct_from_component_grid)
+    check("status page's transient alert does not render as a confirmed fault (gh#399)", _status_page_transient_alert_does_not_render_as_a_confirmed_fault)
 
     for n in ok:
         print(f"  ok    {n}")
