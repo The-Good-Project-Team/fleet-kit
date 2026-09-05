@@ -1364,10 +1364,17 @@ function renderSettingsPage() {
       }).join('');
       const custom = o.allowCustom
         ? `<option value="__custom__">other...</option>` : '';
-      field = `<select class="dial-input" data-key="${key}" style="${box}"
-        onchange="if(this.value==='__custom__'){const i=document.createElement('input');
-          i.className='dial-input';i.dataset.key='${key}';i.value='';i.style.cssText='${box}';
-          i.placeholder='type a value';this.replaceWith(i);i.focus();}">${optsHtml}${custom}</select>`;
+      // gh#355: when cur is unset and the option list has no '' entry, no <option> above gets
+      // `selected` -- the browser still defaults the rendered <select>.value to the FIRST
+      // listed option with no visual flag. data-unset marks that case so saveDials (below)
+      // can skip it unless the operator actually touches the control (onchange sets
+      // data-touched on every real interaction, including picking "other...").
+      const unset = !cur && !options.includes('');
+      field = `<select class="dial-input" data-key="${key}"${unset ? ' data-unset="1"' : ''} style="${box}"
+        onchange="this.dataset.touched='1';
+          if(this.value==='__custom__'){const i=document.createElement('input');
+          i.className='dial-input';i.dataset.key='${key}';i.dataset.touched='1';i.value='';
+          i.style.cssText='${box}';i.placeholder='type a value';this.replaceWith(i);i.focus();}">${optsHtml}${custom}</select>`;
     } else {
       field = `<input class="dial-input" data-key="${key}" value="${esc(cur)}" style="${box}">`;
     }
@@ -1459,7 +1466,14 @@ function renderSettingsPage() {
   };
   document.getElementById('saveDials').onclick = async () => {
     const body = {};
-    runListEl.querySelectorAll('.dial-input').forEach(i => { body[i.dataset.key] = i.value; });
+    runListEl.querySelectorAll('.dial-input').forEach(i => {
+      // gh#355: an untouched, unset dial (data-unset, see renderSettingsPage above) reads back
+      // the browser's own first-option default -- send it here and Save would silently write
+      // that fabricated value into fleet.env even though the operator never chose it. Skip it;
+      // any dial the operator actually edits gets data-touched='1' and is still sent normally.
+      if (i.dataset.unset === '1' && i.dataset.touched !== '1') return;
+      body[i.dataset.key] = i.value;
+    });
     const r = await fetch('/api/fleet_settings', { method: 'POST', body: JSON.stringify(body) });
     const resp = await r.json().catch(() => ({}));
     await renderFleetState();
