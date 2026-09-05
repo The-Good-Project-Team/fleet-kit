@@ -38,6 +38,12 @@ mkdir -p "$LOG_DIR"
 # fleet_view tile greps for anything deploy-shaped, not a new log to remember to check.
 DEPLOY_LOG="$LOG_DIR/deploy.log"
 
+# gh#381: healthy-silent (in-sync no-op tick) and dead-silent (process never got this far) were
+# byte-identical -- nothing distinguished "checked, all fine" from "never ran at all". Write this
+# unconditionally, before any exit 0 branch below, so every invocation leaves a positive trace
+# regardless of which path it takes afterward (including a `gh api` failure/timeout further down).
+date -u '+%Y-%m-%dT%H:%M:%SZ' > "$LOG_DIR/deploy_staleness_check.lastrun"
+
 log() {
     local line="[deploy-staleness $(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*"
     echo "$line"

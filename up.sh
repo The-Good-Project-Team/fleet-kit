@@ -23,7 +23,6 @@ CONTAINER_NAME=""
 # in order and fails over; up.sh's job is just mounting creds for EVERY name in the list, not
 # only the first. `--account` (singular) still works as an alias for one name.
 ACCOUNTS="${FLEET_ACCOUNTS:-primary}"
-IMAGE_TAG="fleet-kit:latest"
 VIEW_PORT=""
 
 while [ $# -gt 0 ]; do
@@ -58,6 +57,15 @@ if [ -z "$REPO_URL" ] || [ -z "$NAME" ]; then
   exit 1
 fi
 
+# Per-instance image tag, same reasoning as VIEW_PORT's per-instance offset below: every
+# instance on a box building/running against the identical `fleet-kit:latest` tag meant two
+# instances' independent 5-minute auto_deploy.sh builds raced on one shared image underneath
+# them -- the confirmed root cause of the 27h outage PR#393 patched the symptom of (gh#395).
+# Deriving straight from $NAME (not a hash/offset like VIEW_PORT needs) is enough here: unlike
+# a port there's no collision space to avoid, just two instances needing to never say the same
+# string.
+IMAGE_TAG="fleet-kit:$NAME"
+
 INSTANCE_DIR="$(pwd)/instances/$NAME"
 mkdir -p "$INSTANCE_DIR/repo" "$INSTANCE_DIR/logs"
 ENV_FILE="$INSTANCE_DIR/fleet.env"
@@ -85,9 +93,13 @@ if [ ! -f "$ENV_FILE" ]; then
   # writes under root's un-mounted $HOME instead, invisible to the host and to
   # fleet_view_server.py. Found live on dino, 2026-08-21: a real pass's log silently landed at
   # /root/Library/Logs/fleet-kit inside the container, never on the mounted volume.
+  # FLEET_IMAGE_NAME: this instance's own derived $IMAGE_TAG, not the template's shared
+  # `fleet-kit:latest` default -- every later auto_deploy.sh/deploy.sh cutover for this instance
+  # reads it via deploy.sh:94's `${FLEET_IMAGE_NAME:-fleet-kit:latest}` default (gh#395).
   sed -e "s|^FLEET_REPO=.*|FLEET_REPO=/repo|" \
       -e "s|^FLEET_ACCOUNTS=.*|FLEET_ACCOUNTS=\"$ACCOUNTS\"|" \
       -e "s|^FLEET_LOG_DIR=.*|FLEET_LOG_DIR=/var/log/fleet-kit|" \
+      -e "s|^FLEET_IMAGE_NAME=.*|FLEET_IMAGE_NAME=$IMAGE_TAG|" \
       fleet.env.example > "$ENV_FILE"
 fi
 
