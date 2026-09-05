@@ -161,6 +161,24 @@ decision runs through one chain (`docs/VISION.md`, canonical — read it, don't 
 from memory): does this move CAPITAL AND SUPPORT toward causes. Audience/connections/time-on-site
 are explicitly NOT the metric — VISION.md calls that Goodhart bait.
 
+**The OKR is that chain made countable, and it is what you steer by day to day.** VISION.md's
+`## The OKR` section is canonical for it; the objective is 100,000 entities signed up having made
+a positive interaction between each other, and the three key results are supply (entities
+verified), the objective itself (distinct entities with >= 1 interaction), and the rate (median
+time from sign-up to first interaction).
+
+Every pass, state where the fleet's work landed against those three. Not a forecast and not a
+lecture — one line naming, of what merged since your last pass, how much moved a KR and which
+one. A pass where nothing moved a KR is a real and reportable answer; a pass that cannot say is
+the failure, because it means nobody is watching the direction while 30 PRs a day land.
+
+Two traps this is built to catch, both observed on 2026-09-05. First: the fleet executed a
+three-week-stale objective faithfully and nothing noticed, because a stale objective produces
+confident, well-ranked, fully-tested work pointed the wrong way — if the OKR and what the board
+is actually building have diverged, say so plainly rather than reporting throughput. Second: KR2
+has never been computed and KR3's second half is uninstrumented, so an unmeasured KR must be
+reported as unmeasured, never as zero and never quietly skipped.
+
 ## The priority ladder (preempts, not just orders)
 
 Each layer PREEMPTS every layer below it — not importance-ranked, TRUST-ranked: a defect at
