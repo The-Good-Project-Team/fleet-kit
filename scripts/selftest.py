@@ -1953,6 +1953,108 @@ def _status_data_other_components_unaffected_by_members_fix():
             _il.reload(status_data)
 
 
+def _status_page_public_path_resolves_bare_cron_log_first():
+    """gh#387 AC1: this box's own host cron writes `path_health_check.cron.log` with no
+    instance suffix (99.76% healthy over ~5.8 days at filing) -- the OLD candidate list's
+    first entry, `path_health_check.philanthropy.cron.log`, never exists here, so `_resolve()`
+    fell all the way through to the thin `path_health_check.log` fallback and the page showed
+    "no data" for a component that has been healthy nearly the whole time. The suffixed name
+    is kept as a later fallback candidate (not deleted), per the PRD's own non-goal, in case
+    some other deployed instance's host scheduler really does suffix it that way.
+    """
+    import importlib as _il
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    import status_data
+
+    names = next(names for label, names, _desc in status_data.COMPONENTS
+                 if label == "Public path")
+    assert names[0] == "path_health_check.cron.log", (
+        f"bare path_health_check.cron.log must be the first candidate, got {names!r}")
+    assert "path_health_check.philanthropy.cron.log" in names, (
+        f"the suffixed candidate must be kept as a fallback, not deleted: {names!r}")
+    assert names[-1] == "path_health_check.log", (
+        f"path_health_check.log must remain the final fallback: {names!r}")
+
+    old = _os.environ.get("FLEET_LOG_DIR")
+    with tempfile.TemporaryDirectory() as td:
+        _os.environ["FLEET_LOG_DIR"] = td
+        try:
+            _il.reload(status_data)
+            # Only the bare, unsuffixed file exists on this box -- the real topology gh#387
+            # found live.
+            (Path(td) / "path_health_check.cron.log").write_text(
+                "[path_health_check] healthy -- https://... returned 200\n")
+            names = next(n for label, n, _d in status_data.COMPONENTS
+                         if label == "Public path")
+            cells, pct = status_data.read_component(names)
+            assert cells[-1] == status_data.OK, (
+                f"a bare path_health_check.cron.log with a healthy line must resolve and "
+                f"classify as ok, got {cells[-1]!r}")
+        finally:
+            if old is None:
+                _os.environ.pop("FLEET_LOG_DIR", None)
+            else:
+                _os.environ["FLEET_LOG_DIR"] = old
+            _il.reload(status_data)
+
+
+def _status_page_hourly_log_cadence_not_flattened_to_5min():
+    """gh#387 AC3/AC4: `read_component()`'s back-fill for lines with no timestamp of their
+    own used to assume every resolved file is written every 5 minutes, regardless of which
+    candidate actually resolved. Tunnel's real fallback, `tunnel_health_check.log`, is written
+    HOURLY by entrypoint.sh's own crontab (:37) -- the old fixed 5-minute assumption packed 26
+    real hourly checks into ~2 hours of buckets, leaving the rest of the 72h window gray even
+    though the check ran (and passed) almost the whole time.
+
+    RED against the old code: 26 no-timestamp lines land within ~130 minutes (2 hour-buckets).
+    GREEN after the fix: the same 26 lines, resolved from a bare `.log` name, spread across
+    ~26 distinct hour-buckets -- one real check per hour, matching how the file was actually
+    written. A `.cron.log`-suffixed file with the identical 26 lines must still compress into
+    a couple of hours (AC5: the 5-minute-cadence components must not change).
+    """
+    import importlib as _il
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    import status_data
+
+    old = _os.environ.get("FLEET_LOG_DIR")
+    with tempfile.TemporaryDirectory() as td:
+        _os.environ["FLEET_LOG_DIR"] = td
+        try:
+            _il.reload(status_data)
+            healthy_lines = "\n".join(
+                "[tunnel_health_check] healthy -- reachable" for _ in range(26)) + "\n"
+
+            (Path(td) / "tunnel_health_check.log").write_text(healthy_lines)
+            hourly_cells, _pct = status_data.read_component(
+                ["tunnel_health_check.cron.log", "tunnel_health_check.log"])
+            hourly_ok = sum(1 for c in hourly_cells if c == status_data.OK)
+            assert hourly_ok >= 20, (
+                f"26 hourly-cadence lines with no per-line timestamp must spread across "
+                f"~26 hour-buckets, got only {hourly_ok} ok buckets: {hourly_cells!r}")
+
+            (Path(td) / "tunnel_health_check.log").unlink()
+            (Path(td) / "tunnel_health_check.cron.log").write_text(healthy_lines)
+            fivemin_cells, _pct2 = status_data.read_component(
+                ["tunnel_health_check.cron.log", "tunnel_health_check.log"])
+            fivemin_ok = sum(1 for c in fivemin_cells if c == status_data.OK)
+            assert fivemin_ok <= 3, (
+                f"a .cron.log-suffixed (5-minute-cadence) file must NOT be re-cadenced -- "
+                f"26 lines at 5 minutes apart span ~2 hours, got {fivemin_ok} ok buckets: "
+                f"{fivemin_cells!r}")
+        finally:
+            if old is None:
+                _os.environ.pop("FLEET_LOG_DIR", None)
+            else:
+                _os.environ["FLEET_LOG_DIR"] = old
+            _il.reload(status_data)
+
+
 def _status_page_banner_distinguishes_unknown_from_good():
     """gh#358: status_page.py computed the banner box's class as a 2-way `bad`/`good` boolean
     (`bad = overall == "down"`), so an `unknown` overall -- the state that fires right now with
@@ -6260,6 +6362,8 @@ if __name__ == "__main__":
     check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
     check("status_data.members() reads fleet.db in-process, no podman on $PATH needed (gh#364)", _status_data_members_reads_fleet_db_with_no_podman_on_path)
     check("status_data's other four components are unaffected by the members() fix (gh#364)", _status_data_other_components_unaffected_by_members_fix)
+    check("status page's Public path resolves the bare cron.log before the suffixed/legacy fallbacks (gh#387)", _status_page_public_path_resolves_bare_cron_log_first)
+    check("status page's hourly-cadence log is not flattened to a 5-minute back-fill (gh#387)", _status_page_hourly_log_cadence_not_flattened_to_5min)
     check("status page banner distinguishes unknown from good and bad (gh#358)", _status_page_banner_distinguishes_unknown_from_good)
 
     for n in ok:
