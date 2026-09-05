@@ -3444,6 +3444,8 @@ def _marie_writes_a_prd_and_minion_reads_it():
     assert "fleet:prd" in minion, "minion never checks for a PRD -- marie would write into a void"
     assert "--comments" in minion, "minion reads only the body, so a PRD comment is invisible to it"
     assert "UNKNOWN" in minion, "minion is not told to leave UNKNOWNs alone rather than guess"
+    assert "latest" in minion.lower() or "most recent" in minion.lower(), \
+        "minion has no rule for picking among multiple PRD-shaped comments on the same issue"
 
     # The forced checklist is what a pass executes; a part missing from it is a part skipped.
     todo = marie[marie.find("call TodoWrite"):marie.find("## Part A")]
