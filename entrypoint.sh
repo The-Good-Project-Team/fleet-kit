@@ -330,6 +330,16 @@ case "${1:-cron-foreground}" in
       # than silently checking nothing. NTFY_TOPIC is re-sourced at tick-time here too (gh#279,
       # see account_health_check.sh's cron line above for the full reasoning).
       echo "24 * * * * root export PUBLIC_PATH_URL=${PUBLIC_PATH_URL:-} STATE_FILE=$LOG_DIR/.path_health_paged.state && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; bash /fleet-kit/scripts/path_health_check.sh >> $LOG_DIR/path_health_check.log 2>&1"
+      # sync_health_check.sh (gh#273): the fleet's FOURTH outage pager -- fleet.db's own
+      # sync_state.offset against runs.jsonl's byte size, the ONLY watchdog on whether
+      # fleet_view_server.py's tail_runs_forever thread (which every nerd/gru/dumbledore read
+      # of fleet.db depends on) is still alive. Unlike account/tunnel/path-health above, this
+      # runs every 5 minutes rather than hourly: the sync loop itself ticks every 2 seconds, so
+      # a dead thread is a much faster-onset failure than a dead account pool or tunnel, and an
+      # hourly sample could sit on a stalled fleet.db for up to an hour before even taking its
+      # first reading. NTFY_TOPIC re-sourced at tick-time, same reasoning as the cron lines
+      # above (gh#279).
+      echo "*/5 * * * * root export FLEET_LOG_DIR=$LOG_DIR && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; bash /fleet-kit/scripts/sync_health_check.sh >> $LOG_DIR/sync_health_check.log 2>&1"
     } > "$CRONTAB"
     chmod 0644 "$CRONTAB"
     # Validate BEFORE cron ever reads this file (2026-09-05, gh#4340). Vixie cron rejects the

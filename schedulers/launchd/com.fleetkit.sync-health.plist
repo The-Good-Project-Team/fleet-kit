@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- fleet-kit fleet.db sync-lag pager — pages when tail_runs_forever has fallen behind
+     runs.jsonl for a sustained stretch, scripts/sync_health_check.sh (gh#273). Fourth of the
+     fleet's outage pagers; see com.fleetkit.account-health.plist / .tunnel-health.plist. Required
+     if any member reads fleet.db directly (nerd's dedup history, gru's allowance calibration,
+     dumbledore's prediction-accuracy history all do). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fleetkit.sync-health</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>exec "{{KIT_PATH}}/scripts/sync_health_check.sh"</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/{{USER}}</string>
+    <key>FLEET_LOG_DIR</key>
+    <string>{{LOG_DIR}}</string>
+    <key>NTFY_TOPIC</key>
+    <string>{{NTFY_TOPIC}}</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/{{USER}}/Library/Logs/fleet-kit/sync-health.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/{{USER}}/Library/Logs/fleet-kit/sync-health.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

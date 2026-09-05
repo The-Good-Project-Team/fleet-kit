@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -676,6 +677,24 @@ def _budget_preview() -> dict:
     return out
 
 
+def log_sync_error(exc: Exception) -> None:
+    """Append a timestamped message + traceback to fleet_view.log. A direct file write
+    (webhook_receiver.py's own log() shape) rather than relying on stdout redirection, so the
+    error lands in fleet_view.log the same way under every deploy shape this kit supports --
+    entrypoint.sh's `>> fleet_view.log` redirect, but also schedulers/systemd's ExecStart,
+    which has no such redirect and would otherwise only reach the journal.
+    """
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with (LOG_DIR / "fleet_view.log").open("a") as fh:
+            fh.write(f"[{ts}] tail_runs_forever sync error: {exc}\n")
+            fh.write(traceback.format_exc())
+            fh.write("\n")
+    except OSError:
+        pass  # logging the error must never itself take down the sync loop
+
+
 class State:
     """In-memory snapshot, refreshed by two background loops. Reads never block on either."""
     def __init__(self):
@@ -723,8 +742,17 @@ class State:
                                     continue
                             self.runs = self.runs[-MAX_RUNS:]
                 fleet_db.sync(db)
-            except OSError:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # gh#273: this thread is the ONLY thing keeping fleet.db in sync with
+                # runs.jsonl (nerd's dedup history, gru's allowance calibration, dumbledore's
+                # prediction accuracy all read fleet.db directly). Python's daemon-thread
+                # default for an uncaught exception is a traceback on stderr and a dead
+                # thread -- the HTTP server keeps answering 200 while sync_state.offset
+                # freezes forever, with zero error signal to any of those readers. Catching
+                # broadly and looping again (rather than letting the thread exit) trades "one
+                # bad tick" for "the whole sync mechanism silently stops" -- a single
+                # transient exception (a locked db, a bad line) must not end this loop.
+                log_sync_error(exc)
             time.sleep(2)
 
     def poll_gh_forever(self):
