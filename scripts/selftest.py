@@ -3172,6 +3172,7 @@ def _fleet_cron_members_gates_entrypoint_crontab():
         log_dir.mkdir(exist_ok=True)
         header = (
             f'set -euo pipefail\n'
+            f'FLEET_REPO="{tmp}"\n'
             f'TOKEN_FILE="{tmp}/token"\n'
             f'LOG_DIR="{log_dir}"\n'
             f'FLEET_GRU_CADENCE="*"\n'
