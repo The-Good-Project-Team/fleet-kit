@@ -9,5 +9,9 @@ Type=oneshot
 # FLEET_ENV_FILE.
 Environment=FLEET_LOG_DIR={{LOG_DIR}}
 Environment=NTFY_TOPIC={{NTFY_TOPIC}}
+# Unlike account/tunnel/path-health, this script also shells out to `python3` (to read
+# fleet.db's sync_state.offset) -- explicit here, matching the launchd plist's own explicit
+# PATH, rather than relying on systemd's default PATH to include it on every host.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 ExecStart={{KIT_PATH}}/scripts/sync_health_check.sh
 User={{USER}}

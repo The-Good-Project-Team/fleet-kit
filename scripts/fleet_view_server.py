@@ -677,13 +677,31 @@ def _budget_preview() -> dict:
     return out
 
 
+_last_sync_error_key: tuple[str, str] | None = None
+_last_sync_error_logged_at = 0.0
+_SYNC_ERROR_LOG_THROTTLE_S = 60  # see log_sync_error's own docstring
+
+
 def log_sync_error(exc: Exception) -> None:
     """Append a timestamped message + traceback to fleet_view.log. A direct file write
     (webhook_receiver.py's own log() shape) rather than relying on stdout redirection, so the
     error lands in fleet_view.log the same way under every deploy shape this kit supports --
     entrypoint.sh's `>> fleet_view.log` redirect, but also schedulers/systemd's ExecStart,
     which has no such redirect and would otherwise only reach the journal.
+
+    Throttled: tail_runs_forever ticks every 2s, and a PERSISTENT failure (a locked/corrupt
+    db, a poison-pill record fleet_db.sync() re-hits every tick since its own offset can't
+    advance past it) would otherwise write a full traceback to disk roughly 30 times a minute
+    forever -- a real disk-fill risk over a long outage, and purely repeated noise once the
+    first occurrence has already been captured. The SAME (exception type, message) is logged
+    at most once per _SYNC_ERROR_LOG_THROTTLE_S; a DIFFERENT error (a new failure mode
+    appearing mid-outage) still logs immediately regardless of timing.
     """
+    global _last_sync_error_key, _last_sync_error_logged_at
+    key = (type(exc).__name__, str(exc))
+    now = time.time()
+    if key == _last_sync_error_key and now - _last_sync_error_logged_at < _SYNC_ERROR_LOG_THROTTLE_S:
+        return
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -691,8 +709,10 @@ def log_sync_error(exc: Exception) -> None:
             fh.write(f"[{ts}] tail_runs_forever sync error: {exc}\n")
             fh.write(traceback.format_exc())
             fh.write("\n")
-    except OSError:
-        pass  # logging the error must never itself take down the sync loop
+        _last_sync_error_key = key
+        _last_sync_error_logged_at = now
+    except Exception:  # noqa: BLE001 -- logging the error must never itself take down the
+        pass          # sync loop, including a failure inside str(exc)/format_exc() itself.
 
 
 class State:
