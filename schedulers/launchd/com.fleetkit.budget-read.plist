@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- fleet-kit budget-meter read pager — pages when the account the fleet is actually spending
+     from goes unreadable, instead of failing open silently, scripts/budget_read_check.sh
+     (gh#376). Same "must run host-side, needs FLEET_INSTANCE_DIR/FLEET_CONTAINER_NAME" reasoning
+     as com.fleetkit.account-heartbeat.plist -- this script also `podman exec`s into the fleet's
+     own container. Required if you want the fleet's budget-blindness pager (shipped in PR#338
+     for the 2026-09-02/03 incident, never turned on) turned on at all. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fleetkit.budget-read</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>exec "{{KIT_PATH}}/scripts/budget_read_check.sh"</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/{{USER}}</string>
+    <key>FLEET_INSTANCE_DIR</key>
+    <string>{{INSTANCE_DIR}}</string>
+    <key>FLEET_CONTAINER_NAME</key>
+    <string>{{CONTAINER_NAME}}</string>
+    <key>FLEET_LOG_DIR</key>
+    <string>{{LOG_DIR}}</string>
+    <key>NTFY_TOPIC</key>
+    <string>{{NTFY_TOPIC}}</string>
+  </dict>
+  <!-- 15 min, not the 300s other pagers use -- each tick is several `podman exec` round-trips,
+       still comfortably inside the script's own MAX_ANCHOR_AGE default (3600s). See
+       fleetkit-budget-read.timer's comment; a documented UNKNOWN (gh#376), tune if wrong. -->
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/{{USER}}/Library/Logs/fleet-kit/budget-read.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/{{USER}}/Library/Logs/fleet-kit/budget-read.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

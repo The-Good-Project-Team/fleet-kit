@@ -1,0 +1,15 @@
+[Unit]
+Description=fleet-kit budget-meter read pager — pages when the account the fleet is actually spending from goes unreadable, instead of failing open silently (scripts/budget_read_check.sh)
+
+[Service]
+Type=oneshot
+# Same reasoning as fleetkit-account-heartbeat.service: budget_read_check.sh `podman exec`s
+# into the fleet's own container (to resolve the spending handle and read its budget meter),
+# so it cannot run inside entrypoint.sh's in-container crontab -- it needs FLEET_INSTANCE_DIR
+# and FLEET_CONTAINER_NAME, same as its sibling script (gh#376).
+Environment=FLEET_INSTANCE_DIR={{INSTANCE_DIR}}
+Environment=FLEET_CONTAINER_NAME={{CONTAINER_NAME}}
+Environment=FLEET_LOG_DIR={{LOG_DIR}}
+Environment=NTFY_TOPIC={{NTFY_TOPIC}}
+ExecStart=/bin/bash {{KIT_PATH}}/scripts/budget_read_check.sh
+User={{USER}}
