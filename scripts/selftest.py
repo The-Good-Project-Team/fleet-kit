@@ -4935,6 +4935,109 @@ def _account_health_check_actually_pages_when_configured():
         assert not ntfy_calls.exists(), "an unset NTFY_TOPIC must never reach the ntfy leg"
 
 
+def _sync_health_check_pages_on_a_real_stalled_offset_not_on_a_caught_up_one():
+    """gh#273: tail_runs_forever is the only thing keeping fleet.db in sync with runs.jsonl,
+    and nothing watched whether it was still alive -- account_health_check.sh,
+    tunnel_health_check.sh and path_health_check.sh watch the account pool, the tunnel, and
+    per-instance dashboard routing, none of them fleet.db's own freshness. sync_health_check.sh
+    closes that gap by comparing sync_state.offset (fleet.db) against runs.jsonl's on-disk
+    byte size.
+
+    Same style as _account_health_check_actually_pages_when_configured: exercises the real
+    script end-to-end rather than re-deriving its logic by inspection, curl stubbed via
+    NTFY_CALLS_FILE so nothing reaches the real network.
+
+    (a) A stalled offset against a runs.jsonl that kept growing -- with the gap already old
+        enough to cross the threshold -- must page.
+    (b) An offset that tracks the file size (freshly synced) must NOT page, and must clear any
+        prior gap/paged state so a real recovery is announced instead of staying silent.
+    """
+    import os
+    import subprocess
+    script_path = ROOT / "scripts" / "sync_health_check.sh"
+    fleet_db_path = ROOT / "scripts" / "fleet_db.py"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        log_dir = tmp / "logs"
+        log_dir.mkdir()
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        ntfy_calls = tmp / "ntfy_calls.log"
+        runs_file = log_dir / "runs.jsonl"
+
+        (bin_dir / "curl").write_text('#!/bin/bash\necho "$@" >> "$NTFY_CALLS_FILE"\nexit 0\n')
+        (bin_dir / "curl").chmod(0o755)
+
+        base_env = {
+            "FLEET_LOG_DIR": str(log_dir),
+            "SYNC_HEALTH_THRESHOLD_MINUTES": "15",
+            "NTFY_CALLS_FILE": str(ntfy_calls),
+            "SELFTEST": "1",
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+        }
+
+        def _run_check(env_extra):
+            return subprocess.run(
+                ["bash", str(script_path)], capture_output=True, text=True, timeout=30,
+                env={**base_env, **env_extra},
+            )
+
+        def _sync():
+            proc = subprocess.run(
+                [sys.executable, str(fleet_db_path), "sync"], capture_output=True, text=True,
+                timeout=30, env={**os.environ, "FLEET_LOG_DIR": str(log_dir)},
+            )
+            assert proc.returncode == 0, f"fleet_db.py sync failed: {proc.stderr[:300]}"
+
+        runs_file.write_text(json.dumps({
+            "run_id": "r1", "member": "minion", "kind": "build",
+            "status": "ok", "outcome": "x", "evidence": "y",
+        }) + "\n")
+        _sync()  # offset now == size -- a real, caught-up starting point.
+
+        # (b) caught up: must not page, must print healthy.
+        proc = _run_check({"NTFY_TOPIC": "selftest-fake-topic"})
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        assert "healthy" in proc.stdout, (
+            f"offset tracking runs.jsonl's size was not reported healthy -- stdout: {proc.stdout[:400]!r}"
+        )
+        assert "PAGED" not in proc.stdout, "a caught-up offset must never page"
+        assert not ntfy_calls.exists(), "a caught-up offset must never reach the ntfy leg"
+
+        # New data lands but nothing syncs it -- the thread-died scenario. Back-date the gap's
+        # own first-seen marker past the threshold so this run behaves as a PERSISTED gap, not
+        # a fresh one from this instant (same reasoning account_health_check.sh's own test
+        # documents: a gap measured from "just now" can never cross a threshold).
+        runs_file.write_text(runs_file.read_text() + json.dumps({
+            "run_id": "r2", "member": "minion", "kind": "build",
+            "status": "ok", "outcome": "x", "evidence": "y",
+        }) + "\n")
+        old_epoch = int(datetime.datetime.now().timestamp()) - 20 * 60
+        (log_dir / ".sync_health_gap_since.state").write_text(str(old_epoch))
+
+        # (a) stalled offset (fleet.db was never re-synced) vs a grown runs.jsonl: must page.
+        proc = _run_check({"NTFY_TOPIC": "selftest-fake-topic"})
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        assert "PAGED" in proc.stdout, (
+            "a 20-minute-old offset/size gap (threshold 15m) never printed PAGED -- "
+            f"stdout: {proc.stdout[:500]!r} stderr: {proc.stderr[:500]!r}"
+        )
+        assert (log_dir / ".sync_health_paged.state").exists(), \
+            "PAGED but no state file written -- a 5-minute cron would re-page every tick"
+        assert ntfy_calls.exists() and "fleet.db sync stalled" in ntfy_calls.read_text(), \
+            "PAGED but the ntfy call itself never fired (or fired with the wrong message)"
+
+        # Recovery: catching fleet.db up again must clear both state files and stop paging.
+        ntfy_calls.unlink(missing_ok=True)
+        _sync()
+        proc = _run_check({"NTFY_TOPIC": "selftest-fake-topic"})
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        assert "healthy" in proc.stdout, f"did not recover after re-sync -- stdout: {proc.stdout[:400]!r}"
+        assert not (log_dir / ".sync_health_gap_since.state").exists(), "gap marker survived recovery"
+        assert not (log_dir / ".sync_health_paged.state").exists(), "paged marker survived recovery"
+
+
 def _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror():
     """No script or charter may read instances/<name>/logs/*.jsonl as a live data source.
 
@@ -5177,6 +5280,7 @@ if __name__ == "__main__":
     check("a non-primary account with no override does not inherit the ambient oauth token", _non_primary_account_without_override_does_not_inherit_the_ambient_token)
     check("pool logs successes so outage length is measurable", _pool_logs_successes_so_downtime_is_measurable)
     check("account health check actually pages when configured (and never claims to when it isn't)", _account_health_check_actually_pages_when_configured)
+    check("sync health check pages on a real stalled offset, not on a caught-up one (gh#273)", _sync_health_check_pages_on_a_real_stalled_offset_not_on_a_caught_up_one)
     check("nothing hardcodes a read of the frozen instances/*/logs mirror", _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror)
     check("self-evolution panel catches the member/<name>-<id> branch shape", _self_evolution_panel_catches_the_member_dash_branch_shape)
     check("gru.md clamps allowance_pct to FLEET_SHARE_CEILING_PCT", _gru_md_clamps_allowance_to_share_ceiling)
