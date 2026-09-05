@@ -483,6 +483,10 @@ trap record_killed_pass TERM INT
 # into the member's own log AS THEY HAPPEN, piped straight to `log` so a human tailing the log
 # (or dumbledore reading it back) sees the pass unfold, not just its outcome.
 RESULT_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_result.XXXXXX")
+# gh#257 AC2/AC3: a side channel, separate from RESULT_FILE, carrying only whether
+# stream_log.py's _detect_trailing_loss fired for THIS run -- never its content, so the loss
+# can only ever flip run_report.py's `status`, never resurrect lost Outcome:/Evidence: text.
+TRAILING_LOSS_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_trailing_loss.XXXXXX")
 # the-fixer's own check.sh dedups fires against ONE global state file
 # (~/.cache/fleet-kit/the-fixer.state) so the same red SHA never re-fires every 2 minutes. But
 # a sub-pass the-fixer spawns for a SPECIFIC stale PR (`run_member.sh the-fixer --item N`,
@@ -541,6 +545,7 @@ export ACCOUNT_POOL_SELECTED_FILE ACCOUNT_POOL_REASON_FILE
     --output-format stream-json --verbose \
     "${CAP_ARGS[@]}" "${TOOL_ARGS[@]}" 2>>"$LOG" \
     | python3 "$KIT_DIR/scripts/stream_log.py" --result-out "$RESULT_FILE" \
+        --trailing-loss-out "$TRAILING_LOSS_FILE" \
     | while IFS= read -r line; do log "$line"; done
   exit "${PIPESTATUS[0]}" ) &
 PASS_PID=$!
@@ -559,9 +564,15 @@ OUT=$(printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" text)
 USAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_usage.XXXXXX")
 printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" usage > "$USAGE_FILE" 2>/dev/null
 
+# gh#257 AC2/AC3: non-empty only if stream_log.py's _detect_trailing_loss fired -- same
+# non-empty-file-as-boolean pattern as $ACCOUNT_POOL_SELECTED_FILE above.
+TRAILING_LOSS_FLAG=""
+[ -s "$TRAILING_LOSS_FILE" ] && TRAILING_LOSS_FLAG="--trailing-loss"
+rm -f "$TRAILING_LOSS_FILE"
+
 echo "$OUT" | python3 "$KIT_DIR/scripts/run_report.py" \
   --member "$MEMBER" --run-id "$RUN_ID" --kind llm --exit-code "$RC" \
-  --pass-file - --usage-file "$USAGE_FILE" ${ITEM:+--item-id "$ITEM"} $VISION_FLAG $LANE_FLAG >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
+  --pass-file - --usage-file "$USAGE_FILE" ${ITEM:+--item-id "$ITEM"} $VISION_FLAG $LANE_FLAG $TRAILING_LOSS_FLAG >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
 rm -f "$USAGE_FILE"
 
 SUMMARY=$(tail -c 400 <<<"$OUT" | tr '\n' ' ' | tail -c 300)

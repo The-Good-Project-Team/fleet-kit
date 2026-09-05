@@ -158,6 +158,130 @@ def _incomplete_fanout_matches_task_dispatch_shape():
     assert reported["orphaned_items"] is None, reported["orphaned_items"]
 
 
+def _report_lost_is_not_reported_nothing():
+    """gh#257 AC2/AC3, unit level: dont-shoot-the-messenger's Case 1 -- a real Report:/Outcome:/
+    Evidence: block composed correctly, then overwritten by one more trailing turn (gh#167's
+    shape). stream_log.py's own `_detect_trailing_loss` already recognizes this from the raw
+    event stream and prints a WARNING, but run_report.py's classify() never consulted it, so
+    even a detected loss still landed `reported_nothing` -- no different from a pass that
+    genuinely found nothing. This pins classify()'s new `trailing_loss` param: with the
+    wrapper's signal present, an empty-outcome run reads as the new `report_lost` status
+    (AC2); with the identical input and no signal -- exactly today's pre-fix code path -- it
+    still reads `reported_nothing` (AC3), proving the fix changes real behavior.
+    """
+    import run_report
+    # The trailing wrap-up text itself carries no Outcome:/Evidence: lines -- the real report
+    # was in the turn before it and is gone by the time run_report.py ever sees `pass_text`.
+    lost_wrapup_text = "**Status:** QUIET (no-op) -- nothing to improve, driver absence is by design"
+
+    # AC3: identical input, trailing_loss not signalled -- today's pre-fix behavior, unchanged.
+    pre_fix = run_report.build_record(member="dont-shoot-the-messenger", run_id="r1", kind="llm",
+                                      exit_code=0, pass_text=lost_wrapup_text, usage=None,
+                                      vision_required=False)
+    assert pre_fix["status"] == "reported_nothing", pre_fix["status"]
+
+    # AC2: identical input, trailing_loss signalled by the wrapper -- new, distinct status.
+    post_fix = run_report.build_record(member="dont-shoot-the-messenger", run_id="r2", kind="llm",
+                                       exit_code=0, pass_text=lost_wrapup_text, usage=None,
+                                       vision_required=False, trailing_loss=True)
+    assert post_fix["status"] == "report_lost", post_fix["status"]
+    assert post_fix["status"] not in ("ok", "reported_nothing"), post_fix["status"]
+
+    # AC4-style: neither fix writes/infers the lost Outcome:/Evidence: text anywhere -- only
+    # `status` differs between the two records above.
+    assert post_fix["outcome"] == pre_fix["outcome"] is None, (post_fix["outcome"], pre_fix["outcome"])
+    assert post_fix["evidence"] == pre_fix["evidence"] is None, (post_fix["evidence"], pre_fix["evidence"])
+
+    # A pass that DOES have a real, present outcome is unaffected by the flag even if it were
+    # (wrongly) set -- trailing_loss only ever matters on the already-empty-outcome branch.
+    reported = run_report.build_record(member="t", run_id="r3", kind="llm", exit_code=0,
+                                       pass_text="Outcome: did a thing #12\nEvidence: ran it\n",
+                                       usage=None, vision_required=False, trailing_loss=True)
+    assert reported["status"] == "ok", reported["status"]
+
+
+def _gh167_trailing_loss_flows_end_to_end_through_stream_log_and_run_report():
+    """gh#257 AC2/AC3, sourced end-to-end through stream_log.py -> run_report.py (the same two
+    scripts run_member.sh chains, minus the `claude -p`/timeout wrapper around them): a synthetic
+    stream-json fixture reproducing dont-shoot-the-messenger's real 2026-08-30 06:52:04 UTC shape
+    (a report-shaped assistant text block, one intervening tool round-trip, then a short
+    non-report wrap-up that becomes the actual `result`) run through stream_log.py's REAL
+    `main()` -- not a hand-built dict -- must (AC2) detect the loss and, once run_member.sh's
+    `--trailing-loss` flag carries that signal to run_report.py, classify as neither `ok` nor
+    `reported_nothing`; and (AC3) the identical fixture, run without that flag -- today's
+    pre-fix code path -- must still classify `reported_nothing`, proving the fix changes real
+    behavior rather than adding a dead branch nothing exercises.
+    """
+    import subprocess
+
+    events = [
+        {"type": "system", "subtype": "init", "model": "claude-x", "tools": [], "cwd": "/tmp"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text":
+            "Report:\nBOTTOM LINE: driver absence is by design, 58 consecutive clean runs.\n\n"
+            "Outcome: confirmed FLEET_MESSENGER_DRIVER absence is intentional, no action needed\n"
+            "Evidence: `grep FLEET_MESSENGER_DRIVER entrypoint.sh` shows it unset on purpose\n"
+        }]}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "TaskUpdate",
+            "input": {"description": "closing out checklist"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "is_error": False,
+            "content": "ok"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text":
+            "**Status:** QUIET (no-op) -- nothing to improve, driver absence is by design"}]}},
+        {"type": "result", "subtype": "success", "num_turns": 12, "total_cost_usd": 0.31,
+         "stop_reason": "end_turn",
+         "result": "**Status:** QUIET (no-op) -- nothing to improve, driver absence is by design"},
+    ]
+    stdin_text = "\n".join(json.dumps(e) for e in events) + "\n"
+
+    with tempfile.TemporaryDirectory() as d:
+        result_file = Path(d) / "result.json"
+        loss_file = Path(d) / "loss.txt"
+        p = subprocess.run(
+            [sys.executable, str(HERE / "stream_log.py"),
+             "--result-out", str(result_file), "--trailing-loss-out", str(loss_file)],
+            input=stdin_text, capture_output=True, text=True, timeout=30)
+        assert p.returncode == 0, p.stderr
+        assert "WARNING: gh#167 trailing-turn report loss detected" in p.stdout, p.stdout
+        # AC2 precondition: the detector actually fired for this fixture -- a non-empty file,
+        # mirroring how run_member.sh itself tests it (`[ -s "$TRAILING_LOSS_FILE" ]`).
+        assert loss_file.read_text().strip(), "expected a non-empty trailing-loss-out file"
+
+        raw = result_file.read_text()
+        out = subprocess.run([sys.executable, str(HERE / "pass_accounting.py"), "text"],
+                             input=raw, capture_output=True, text=True, timeout=30).stdout
+
+        def run_report_status(*extra_args):
+            p = subprocess.run(
+                [sys.executable, str(HERE / "run_report.py"),
+                 "--member", "dont-shoot-the-messenger", "--run-id", "r", "--kind", "llm",
+                 "--exit-code", "0", "--pass-file", "-", *extra_args],
+                input=out, capture_output=True, text=True, timeout=30)
+            assert p.returncode == 0, p.stderr
+            return json.loads(p.stdout)["status"]
+
+        # AC3: pre-fix path (no --trailing-loss) -- unchanged, still reported_nothing.
+        assert run_report_status() == "reported_nothing"
+        # AC2: post-fix path -- the wrapper's signal flips this to a new, distinct status.
+        post_fix_status = run_report_status("--trailing-loss")
+        assert post_fix_status not in ("ok", "reported_nothing"), post_fix_status
+        assert post_fix_status == "report_lost", post_fix_status
+
+
+def _run_member_wires_trailing_loss_flag():
+    """gh#257 AC2/AC3: the two pieces above are useless to a live pass unless run_member.sh
+    actually chains them -- source-checked the same way `_run_member_writes_a_started_row_...`
+    checks its own wiring, so a future edit that drops either flag (rather than the logic behind
+    it) fails a test instead of silently going quiet in prod.
+    """
+    src = (ROOT / "scripts" / "run_member.sh").read_text()
+    assert "--trailing-loss-out" in src, "stream_log.py is never told where to write the loss signal"
+    assert "TRAILING_LOSS_FILE" in src, "no side-channel file variable for the loss signal"
+    assert '[ -s "$TRAILING_LOSS_FILE" ]' in src, \
+        "run_member.sh never tests the loss file for non-emptiness before building the flag"
+    assert "--trailing-loss" in re.sub(r"--trailing-loss-out", "", src), \
+        "run_member.sh never forwards --trailing-loss to run_report.py"
+
+
 def _artifact_regex_accepts_backtick_spans():
     """gh#251: roomba/the-fixer's real evidence is a path, PID, or SHA -- none of which has a
     GitHub-artifact shape (`#123`, a URL, `file.ext:123`), so classify() folded genuinely
@@ -5884,6 +6008,9 @@ if __name__ == "__main__":
     check("report contract: ok + silence is recorded", _report_contract)
     check("a fan-out parent that never reports is incomplete_fanout, not reported_nothing", _incomplete_fanout_is_not_reported_nothing)
     check("datta's --task \"lane=<lane>\" dispatch shape also reads as incomplete_fanout (gh#257)", _incomplete_fanout_matches_task_dispatch_shape)
+    check("a detected gh#167 trailing-turn loss is report_lost, not reported_nothing (gh#257 AC2/AC3)", _report_lost_is_not_reported_nothing)
+    check("gh#167 trailing-loss signal flows end-to-end, stream_log.py -> run_report.py (gh#257 AC2/AC3)", _gh167_trailing_loss_flows_end_to_end_through_stream_log_and_run_report)
+    check("run_member.sh wires --trailing-loss-out/--trailing-loss between the two scripts (gh#257)", _run_member_wires_trailing_loss_flag)
     check("_ARTIFACT accepts a backtick-wrapped path/PID/SHA (#251)", _artifact_regex_accepts_backtick_spans)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
     check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
