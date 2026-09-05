@@ -115,6 +115,20 @@ if [ -n "$PORCELAIN" ]; then
   exit 1
 fi
 
+# gh#68/gh#255: this exact .git directory can also be touched by git_pull_guard.sh, an
+# unrelated unlocked cron tick running INSIDE the container against the same checkout when this
+# box self-hosts fleet-kit (i.e. $FLEET_REPO's bind-mount happens to BE $KIT_DIR) -- confirmed
+# live as matching SHA pairs across gitpull.log and this script's own race errors. Locking on
+# the .git dir itself, not a fleet-kit-specific path, means this serializes against that guard
+# automatically whenever they really do share a directory, and costs nothing (an uncontended,
+# instantly-released lock) when they don't. Released right after the pull below -- no reason to
+# hold it through the build/podman steps that follow.
+GIT_LOCKFILE="$KIT_DIR/.git/fleet_pull.lock"
+exec 8>"$GIT_LOCKFILE"
+if command -v flock >/dev/null 2>&1; then
+    flock 8
+fi
+
 git fetch origin main -q
 REMOTE_SHA="$(git rev-parse origin/main)"
 LOCAL_SHA="$(git rev-parse HEAD)"
@@ -154,6 +168,7 @@ if ! git merge-base --is-ancestor "$LOCAL_SHA" "$REMOTE_SHA"; then
   fi
 fi
 git pull --ff-only origin main -q
+exec 8>&-  # release the shared git lock before the (potentially half-hour) deploy below
 
 if FLEET_INSTANCE_DIR="${FLEET_INSTANCE_DIR:?set FLEET_INSTANCE_DIR}" bash "$KIT_DIR/scripts/deploy.sh" >> "$LOG" 2>&1; then
   echo "$REMOTE_SHA" > "$STATE"
