@@ -110,23 +110,33 @@ claimed for generations was simply wrong, and told every minion it had never onc
    stale and reverting someone else's work — merge the default branch and re-check.
 7. **Open a PR**, referencing your issue number in the body.
 8. **Review your own diff** before pushing, if you have a review tool available.
-9. **Arm auto-merge, always.** `gh pr merge --auto` before you finish (no `--squash`/`--merge`/
-   `--rebase` flag — see below) — this fleet merges on green gates with no human or
-   orchestrator in the loop by design: GitHub's own auto-merge waits for every required check
-   (CI, the reviewer's status), then merges itself the moment they're all green. You do not
-   merge directly (a check might still be running), and you do not wait for a human to drive
-   it through — arming auto-merge IS finishing the job.
+9. **Arm auto-merge, always**, before you finish — this fleet merges on green gates with no
+   human or orchestrator in the loop by design: GitHub's own auto-merge waits for every
+   required check (CI, the reviewer's status), then merges itself the moment they're all
+   green. You do not merge directly (a check might still be running), and you do not wait for
+   a human to drive it through — arming auto-merge IS finishing the job.
 
-   **No strategy flag.** `main` is merge-queue-controlled (`gh api .../branches/main/protection`
-   shows required contexts `test`/`test-postgres` enforced via the native queue) — an explicit
-   `--squash` here is an invalid combination once a branch is queue-controlled and the command
-   ERRORS instead of enqueueing (confirmed live, issue #3108: `! The merge strategy for main is
-   set by the merge queue`). A bare `gh pr merge --auto` lets `gh` pick the queue path
-   automatically, per its own documented behavior. CHECK THE EXIT CODE — issue #3108's root
-   cause was this exact command failing silently, with the failure never mentioned in the
-   final report, leaving fully-green PRs stuck for hours with no human or orchestrator any the
-   wiser. A non-zero exit here is not a quiet detail; say so in your report the same way you
-   would any other failed step.
+   **Check whether your target repo's `main` is queue-controlled before picking a strategy
+   flag — a hardcoded guess has broken real PRs both ways, in both directions.** A bare arm
+   with no strategy flag ERRORS outright on a repo with no queue
+   (`--merge, --rebase, or --squash required when not running interactively`) — confirmed live
+   on fleet-kit's own repo (`gh api repos/The-Good-Project-Team/fleet-kit/branches/main/protection`,
+   reconfirmed 2026-09-05: a plain `required_status_checks` list on `selftest` and
+   `fleet-code-review` with `strict: true`, no ruleset carries a `merge_queue` rule, and
+   `.../fleet-kit/merge-queue` 404s), which cost a wasted retry on nearly every minion pass
+   here since 2026-08-28 (PRs #406/#407/#413/#414/#416/#417 in one day alone) — an explicit
+   strategy flag there instead is the correct fast path. But on a repo where `main` genuinely
+   IS queue-controlled (confirmed live on nonprofit-atlas, issue #3108), that same explicit
+   flag is an invalid combination and gh ERRORS instead of enqueueing (`! The merge strategy
+   for main is set by the merge queue`) — there, the bare form is correct, letting `gh` pick
+   the queue path itself. If you don't already know your target repo's shape, check once
+   (`gh api repos/<owner>/<repo>/rulesets` for a `merge_queue` rule, or
+   `gh api repos/<owner>/<repo>/merge-queue` for a non-404) rather than assuming either one.
+   CHECK THE EXIT CODE regardless of shape — issue #3108's root cause was this exact command
+   failing silently, with the failure never mentioned in the final report, leaving
+   fully-green PRs stuck for hours with no human or orchestrator any the wiser. A non-zero
+   exit here is not a quiet detail; say so in your report the same way you would any other
+   failed step.
 10. **Systemic-failure rule**: if a gate fails you with the SAME error line other open PRs are
     also showing (check 2-3 sibling PRs' statuses), that's a broken GATE, not a broken PR.
     Say so in one line of your PR body ("gate <name> failing identically on #N #M —
