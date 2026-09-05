@@ -3990,16 +3990,30 @@ def _account_health_check_actually_pages_when_configured():
         (bin_dir / "podman").write_text("#!/bin/bash\nexit 0\n")
         (bin_dir / "podman").chmod(0o755)
 
+        # Timestamps must be RECENT, not a 2020 literal. On 2026-09-04 this fixture's
+        # 2020-01-01 dates made account_health_check compute a 3,511,675-minute outage and
+        # send a REAL page ("ALL accounts exhausted") to a human -- the script calls
+        # fleet_alert.sh by absolute path, so the stubbed `curl` on PATH above never
+        # intercepted it. The check now refuses ages beyond MAX_PLAUSIBLE_OUTAGE_MINUTES as
+        # synthetic, which is right, and which this fixture must respect to test anything.
+        from datetime import datetime, timedelta, timezone
+        _now = datetime.now(timezone.utc)
+        _ok_at = (_now - timedelta(minutes=45)).strftime("%Y-%m-%d %H:%M:%S")
+        _fail_at = (_now - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         pool_log = log_dir / "account-pool.log"
         pool_log.write_text(
-            "[2020-01-01 00:00:00 UTC] account_pool: account=tgp call succeeded\n"
-            "[2020-01-01 00:05:00 UTC] account_pool: ALL accounts in 'tgp gmail' failed this call\n"
+            f"[{_ok_at} UTC] account_pool: account=tgp call succeeded\n"
+            f"[{_fail_at} UTC] account_pool: ALL accounts in 'tgp gmail' failed this call\n"
         )
 
         base_env = {
             "FLEET_LOG_DIR": str(log_dir),
             "ACCOUNT_HEALTH_THRESHOLD_MINUTES": "30",
             "NTFY_CALLS_FILE": str(ntfy_calls),
+            # Belt and braces with NTFY_CALLS_FILE: the alert helper is invoked by absolute
+            # path, so a PATH stub alone cannot stop it reaching Resend. This is what keeps
+            # the suite from emailing a human, as it did on 2026-09-04.
+            "SELFTEST": "1",
             "PATH": f"{bin_dir}:/usr/bin:/bin",
         }
 

@@ -46,13 +46,39 @@ CONTAINER="${FLEET_CONTAINER_NAME:?set FLEET_CONTAINER_NAME}"
 # Resolve handle+key the same way run_member.sh does, so we check the SPENDING account.
 read -r HANDLE KEY < <(podman exec "$CONTAINER" bash -c \
   'cd /fleet-kit && set -a; . /fleet-kit/fleet.env; set +a; bash scripts/resolve_maxx_handle.sh' 2>/dev/null)
-HANDLE="${HANDLE:-${FLEET_MAXX_HANDLE:-}}"
-[ -z "$HANDLE" ] && { log "no handle resolved and no FLEET_MAXX_HANDLE -- cannot check"; exit 0; }
+# NEVER fall back to FLEET_MAXX_HANDLE. It is the GMAIL handle (reif) while the fleet spends
+# from FLEET_MAXX_HANDLE_TGP (reif_tgp), so the fallback checks an account the fleet is not
+# using -- the precise failure this script's header warns about ("a check against the static
+# handle would have reported a healthy meter for an account doing no work"). Worse, the
+# resolve only fails when `podman exec` fails, i.e. when the container is down, so the
+# fallback fired exactly when its answer was least trustworthy: the 2026-09-05 02:45 page
+# said "handle=reif" for a fleet that had been spending from reif_tgp all night.
+#
+# If we cannot resolve the spending account, we do not know what to check. Say so as a
+# transient (we are blind, not broken) and let it escalate if we stay blind.
+if [ -z "$HANDLE" ]; then
+  log "cannot resolve spending handle (container down?) -- reporting as transient"
+  bash "$KIT_DIR/scripts/fleet_alert.sh" \
+    --check budget_read --problem "cannot resolve spending handle" --severity transient \
+    "fleet budget check cannot resolve the spending account" \
+    "resolve_maxx_handle.sh returned nothing -- normally because the $CONTAINER container is
+restarting. No page unless this persists; the budget meter itself has NOT been read, so this
+is not evidence the meter is broken."
+  exit 0
+fi
 
 READ=$(podman exec "$CONTAINER" bash -c \
   "cd /fleet-kit && set -a; . /fleet-kit/fleet.env; set +a; FLEET_MAXX_HANDLE='$HANDLE' FLEET_MAXX_KEY='$KEY' python3 scripts/maxx_reader.py" 2>/dev/null)
 
-LABEL=$(printf '%s' "$READ" | python3 -c "import json,sys;print(json.load(sys.stdin).get('label','parse_fail'))" 2>/dev/null || echo parse_fail)
+# An EMPTY read means the podman exec itself failed -- the container is down or restarting.
+# That is not a meter fault and must not be labelled like one. Before this split, a 6-minute
+# restart produced label=parse_fail and paged "meter UNREADABLE", indistinguishable from a
+# genuinely corrupt meter (2026-09-05 02:45; it logged RECOVERED 15 minutes later).
+if [ -z "${READ//[[:space:]]/}" ]; then
+  LABEL="unreachable"
+else
+  LABEL=$(printf '%s' "$READ" | python3 -c "import json,sys;print(json.load(sys.stdin).get('label','parse_fail'))" 2>/dev/null || echo parse_fail)
+fi
 # Pull the whole budget row once: the anchor age AND the fields that say WHICH limit
 # is binding. Without the session terms this check cannot tell a self-resolving 5h
 # block wall apart from a broken meter, and it reported the former as the latter.
@@ -129,13 +155,30 @@ if [ -z "$problem" ] && [ "$AGE" -gt 0 ] 2>/dev/null && [ "$AGE" -ge "$MAX_ANCHO
   problem="anchor STALE (${AGE}s old, max ${MAX_ANCHOR_AGE}s) -- verdict looks fine but is computed from frozen data"
 fi
 
+# Classify before paging. The three classes are genuinely different failures and only two
+# of them are worth waking a person for:
+#   unreachable / http 5xx  -> transient: we could not observe the meter. Says nothing about
+#                              the meter's health. Escalates on its own if we stay blind 30m.
+#   anchor stale            -> critical: the founding incident. Numbers are computed from
+#                              frozen data and gru will pace the whole fleet off fiction.
+#   everything else         -> degraded: really unreadable, but page only if it survives a
+#                              second consecutive run.
+case "$LABEL" in
+  unreachable|maxx_http_5*|maxx_unreachable) SEVERITY=transient ;;
+  *) SEVERITY=degraded ;;
+esac
+case "$problem" in
+  *"anchor STALE"*) SEVERITY=critical ;;
+esac
+
 if [ -n "$problem" ]; then
   already=""; [ -f "$STATE" ] && already=$(cat "$STATE" 2>/dev/null)
-  log "ALARM handle=$HANDLE $problem"
+  log "ALARM [$SEVERITY] handle=$HANDLE $problem"
   if [ "$already" != "$LABEL/$problem" ]; then
     # Both channels, via the shared helper: an alarm that only reaches ntfy reaches nobody
     # who does not have the app (fleet_alert.sh's header documents the incident).
     bash "$KIT_DIR/scripts/fleet_alert.sh" \
+      --check budget_read --problem "$problem" --severity "$SEVERITY" --handle "$HANDLE" \
       "fleet budget meter unreadable ($HANDLE)" \
       "The fleet is spending from @$HANDLE and its budget meter is not usable: $problem
 
@@ -150,6 +193,17 @@ If the anchor is stale, the probe token may need re-minting:
   exit 0
 fi
 
-[ -f "$STATE" ] && { rm -f "$STATE"; log "RECOVERED handle=$HANDLE label=ok anchor=${AGE}s"; }
+# A clean run is this check's current truth: close every alarm it still has open. Doing it
+# by check (rather than by remembering last tick's exact wording) means a message whose text
+# includes a changing number cannot leak a permanently-open alarm.
+if [ -f "$STATE" ]; then
+  rm -f "$STATE"
+  log "RECOVERED handle=$HANDLE label=ok anchor=${AGE}s"
+  bash "$KIT_DIR/scripts/fleet_alert.sh" --resolve --check budget_read \
+    "fleet budget meter readable again ($HANDLE)" \
+    "The budget meter for @$HANDLE reads label=ok with a ${AGE}s anchor." >/dev/null 2>&1
+else
+  python3 "$KIT_DIR/scripts/alert_store.py" resolve-check --check budget_read >/dev/null 2>&1
+fi
 log "ok handle=$HANDLE label=ok anchor=${AGE}s"
 exit 0

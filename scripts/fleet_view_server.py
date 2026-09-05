@@ -1012,6 +1012,39 @@ class Handler(BaseHTTPRequestHandler):
                 limit=int(qs.get("limit", ["100"])[0]))
             self._json({"runs": rows})
             return
+        if path == "/api/alerts":
+            # THE SELF-HEAL FEED. Everything else on this box tells a HUMAN what is wrong;
+            # this is the one place the FLEET can read it back.
+            #
+            # The founding incident was not a missing alarm, it was a missing feedback loop:
+            # maxx_reader correctly refused a stale verdict, maxx_share_ceiling correctly
+            # returned "", and gru_allowance's own comment says `return ""  # fail open` --
+            # each individually right, and together they meant gru silently paced 12 members
+            # off a hardcoded constant for 60h while an entire account sat unused. Nothing
+            # told gru that the number it fell back to was wrong.
+            #
+            # Consumers should branch on `budget_safe`: false means some open alarm says the
+            # budget signal cannot be trusted, so pace conservatively instead of believing a
+            # headroom figure derived from it. `open` carries the detail for anything that
+            # wants to act on a specific condition.
+            #
+            # Unauthenticated ON PURPOSE, like /status directly above: a feed that reports
+            # "the budget signal is broken" has to be readable precisely when things are
+            # broken, and requiring a session here would mean the members most in need of it
+            # (mid-pass, inside the container) are the ones that cannot read it. It is
+            # strictly less sensitive than /status, which already renders publicly: no keys,
+            # no spend figures, no repo content -- only which checks are currently unhappy.
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                import alert_store
+                self._json(alert_store.snapshot())
+            except Exception as exc:  # noqa: BLE001
+                # Never hand back a healthy-looking empty feed. A consumer that reads
+                # budget_safe=true from a broken store is the exact silent fail-open this
+                # endpoint exists to end, so a failure here must read as "do not trust me".
+                self._json({"budget_safe": False, "worst": "unknown", "open": [],
+                            "error": f"{type(exc).__name__}: {exc}"}, 503)
+            return
         if path == "/api/fleet_state":
             self._json(read_env_flags())
             return

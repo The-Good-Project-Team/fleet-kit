@@ -16,14 +16,79 @@
 # (instant, if the app is ever installed). Either failing is logged, never fatal -- an alarm
 # helper that exits non-zero would take down the check that called it.
 #
+# SEVERITY (added 2026-09-05): callers now pass --severity/--check/--problem so that
+# alert_store.py can decide whether this condition should reach a human at all. 27 alarms
+# fired in 48h and 3 were real: a container restarting for 6 minutes paged "meter UNREADABLE"
+# (naming the wrong account), and one maxx outage paged 11 times because two per-handle
+# latches in two scripts could not see each other. Noise is not a cosmetic problem -- an inbox
+# with 24 false pages trains the reader to archive on sight, which is how the NEXT real 60h
+# outage gets missed.
+#
+# The old positional form still works and still pages immediately -- any caller that has not
+# been taught severity keeps its previous behavior exactly, so this change cannot mute an
+# alarm that has not been deliberately reclassified.
+#
 # Usage: fleet_alert.sh "<title>" "<body>"
+#        fleet_alert.sh --check <name> --problem <key> --severity transient|degraded|critical \
+#                       [--handle <h>] "<title>" "<body>"
+#        fleet_alert.sh --resolve --check <name> [--problem <key>] "<title>" "<body>"
 # Config: /home/ubuntu/.config/maxx/alert.env  (RESEND_API_KEY, MAIL_FROM, FLEET_ALERT_EMAIL)
 #         NTFY_TOPIC from the caller's env or anchor.env.
 set -uo pipefail
 
-TITLE="${1:?usage: fleet_alert.sh <title> <body>}"
+KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CHECK=""; PROBLEM=""; SEVERITY=""; HANDLE=""; RESOLVE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check)    CHECK="${2:-}"; shift 2 ;;
+    --problem)  PROBLEM="${2:-}"; shift 2 ;;
+    --severity) SEVERITY="${2:-}"; shift 2 ;;
+    --handle)   HANDLE="${2:-}"; shift 2 ;;
+    --resolve)  RESOLVE=1; shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+
+TITLE="${1:?usage: fleet_alert.sh [--check X --problem Y --severity Z] <title> <body>}"
 BODY="${2:-}"
 LOG=/home/ubuntu/fleet-kit-logs/fleet_alert.log
+_slog() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" >> "$LOG"; }
+
+# Recovery path: only tell a human it recovered if a human was told it broke.
+if [ "$RESOLVE" = "1" ] && [ -n "$CHECK" ]; then
+  WAS_PAGED=$(python3 - "$CHECK" "$PROBLEM" <<'PY' 2>/dev/null || echo unknown
+import sys, pathlib
+sys.path.insert(0, "/home/ubuntu/fleet-kit/scripts")
+try:
+    import alert_store
+    check, problem = sys.argv[1], sys.argv[2]
+    r = alert_store.resolve(check, problem) if problem else {"was_paged": any(
+        x["was_paged"] for x in alert_store.resolve_check(check)) }
+    print("yes" if r.get("was_paged") else "no")
+except Exception:
+    print("unknown")
+PY
+)
+  if [ "$WAS_PAGED" = "no" ]; then
+    _slog "recovery suppressed (never paged) -- $TITLE"
+    exit 0
+  fi
+fi
+
+# Severity gate: ask the store whether this condition should page now.
+if [ -n "$CHECK" ] && [ -n "$SEVERITY" ] && [ "$RESOLVE" = "0" ]; then
+  VERDICT=$(FLEET_LOG_DIR="${FLEET_LOG_DIR:-/home/ubuntu/fleet-kit-logs}" \
+    python3 "$KIT_DIR/scripts/alert_store.py" record \
+      --check "$CHECK" --problem "${PROBLEM:-$TITLE}" --severity "$SEVERITY" \
+      --handle "$HANDLE" --detail "$BODY" 2>&1)
+  RC=$?
+  if [ "$RC" = "10" ]; then
+    _slog "SUPPRESSED [$SEVERITY] $CHECK/$PROBLEM -- $VERDICT"
+    exit 0
+  fi
+  _slog "PAGING [$SEVERITY] $CHECK/$PROBLEM -- $VERDICT"
+fi
 log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" >> "$LOG"; }
 
 [ -f /home/ubuntu/.config/maxx/alert.env ] && { set -a; . /home/ubuntu/.config/maxx/alert.env; set +a; }
