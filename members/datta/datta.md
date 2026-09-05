@@ -123,9 +123,14 @@ Do not pick lanes by intuition. Score each lane on three signals and rank worst-
      weigh it against the parse before trusting a hold this produces).
   2. No prior run, or zero issue numbers found in it: skip this check for the lane this pass —
      the hold never fires on missing or incomplete evidence, same posture as the gh#339 rule.
-  3. For each referenced issue, check `gh issue view <n> --json state,updatedAt,comments`. It
-     counts as **moved** if `state` differs from open, `updatedAt` is later than the lane's last
-     `recorded_at`, or any comment's `createdAt` is later than `recorded_at`.
+  3. For each referenced issue, check `gh issue view <n> --json updatedAt,comments`. It counts
+     as **moved** if `updatedAt` is later than the lane's last `recorded_at` (GitHub bumps
+     `updatedAt` on close/reopen, so this alone already captures a state change since
+     `recorded_at`) or any comment's `createdAt` is later than `recorded_at`. Do not compare
+     current `state` against `open` directly — an issue already closed at `recorded_at` time
+     (a routine citation pattern: a run's own `outcome`/`self_critique` often names an issue it
+     just closed) would always read as "not open" and falsely count as moved on every future
+     pass, permanently defeating this hold for that lane.
   4. Compare the lane's two most recent `lane_kpi` rows (`value`, `denominator`). If the lane's
      guardrail-alert job defines a numeric noise threshold for that metric, a move counts as
      **material** only past that threshold; if none is defined — true fleet-wide as of
