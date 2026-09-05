@@ -5023,6 +5023,83 @@ def _account_health_check_actually_pages_when_configured():
         assert not ntfy_calls.exists(), "an unset NTFY_TOPIC must never reach the ntfy leg"
 
 
+def _account_health_check_repages_on_a_fixed_interval_gh266():
+    """gh#266: account_health_check.sh paged exactly once per outage, then went silent for the
+    rest of it no matter how long it ran -- the 2026-08-30->09-01 outage paged once at 33
+    minutes then logged 585 consecutive silent ticks over the remaining ~48h45m
+    (account_health_check.cron.log:164). This asserts the fix's actual live behavior end to
+    end: with STATE_FILE's own stored timestamp older than ACCOUNT_HEALTH_REPAGE_MINUTES, a
+    SECOND _ntfy call fires while the outage is still open; with it younger, no second call
+    fires and the existing "already paged" tick line still prints (AC4).
+    """
+    import subprocess
+    from datetime import datetime, timedelta, timezone
+    script_path = ROOT / "scripts" / "account_health_check.sh"
+
+    def _run(paged_minutes_ago):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            log_dir = tmp / "logs"
+            log_dir.mkdir()
+            bin_dir = tmp / "bin"
+            bin_dir.mkdir()
+            ntfy_calls = tmp / "ntfy_calls.log"
+
+            (bin_dir / "curl").write_text('#!/bin/bash\necho "$@" >> "$NTFY_CALLS_FILE"\nexit 0\n')
+            (bin_dir / "curl").chmod(0o755)
+            (bin_dir / "podman").write_text("#!/bin/bash\nexit 0\n")
+            (bin_dir / "podman").chmod(0o755)
+
+            _now = datetime.now(timezone.utc)
+            ok_at = (_now - timedelta(minutes=200)).strftime("%Y-%m-%d %H:%M:%S")
+            fail_at = (_now - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+            (log_dir / "account-pool.log").write_text(
+                f"[{ok_at} UTC] account_pool: account=tgp call succeeded\n"
+                f"[{fail_at} UTC] account_pool: ALL accounts in 'tgp gmail' failed this call\n"
+            )
+            state_file = log_dir / ".account_health_paged.state"
+            paged_at = (_now - timedelta(minutes=paged_minutes_ago)).strftime("%Y-%m-%d %H:%M UTC")
+            state_file.write_text(paged_at + "\n")
+
+            env = {
+                "FLEET_LOG_DIR": str(log_dir),
+                "ACCOUNT_HEALTH_THRESHOLD_MINUTES": "30",
+                "ACCOUNT_HEALTH_REPAGE_MINUTES": "60",
+                "NTFY_CALLS_FILE": str(ntfy_calls),
+                "NTFY_TOPIC": "selftest-fake-topic",
+                "SELFTEST": "1",
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+            }
+            proc = subprocess.run(
+                ["bash", str(script_path)], capture_output=True, text=True, timeout=30, env=env,
+            )
+            assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+            calls = ntfy_calls.read_text() if ntfy_calls.exists() else ""
+            state = state_file.read_text() if state_file.exists() else ""
+            return proc.stdout, calls, state
+
+    # STATE_FILE's timestamp is 90 minutes old, past the 60-minute repage interval.
+    stdout_old, calls_old, state_old = _run(90)
+    assert "STILL" in calls_old, (
+        "a STATE_FILE timestamp older than ACCOUNT_HEALTH_REPAGE_MINUTES did not re-page -- "
+        f"stdout: {stdout_old[:400]!r} ntfy calls: {calls_old[:400]!r}"
+    )
+    assert "last_repage=" in state_old, (
+        f"a re-page fired but STATE_FILE was not updated with the new repage timestamp: {state_old!r}"
+    )
+
+    # STATE_FILE's timestamp is 10 minutes old, well inside the 60-minute repage interval.
+    stdout_young, calls_young, _state_young = _run(10)
+    assert calls_young == "", (
+        "a STATE_FILE timestamp younger than ACCOUNT_HEALTH_REPAGE_MINUTES wrongly re-paged: "
+        f"{calls_young[:400]!r}"
+    )
+    assert "already paged" in stdout_young, (
+        "between re-page intervals the existing 'failing but only ...m old ... already paged' "
+        f"line must still print: {stdout_young[:400]!r}"
+    )
+
+
 def _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror():
     """No script or charter may read instances/<name>/logs/*.jsonl as a live data source.
 
@@ -5266,6 +5343,7 @@ if __name__ == "__main__":
     check("a non-primary account with no override does not inherit the ambient oauth token", _non_primary_account_without_override_does_not_inherit_the_ambient_token)
     check("pool logs successes so outage length is measurable", _pool_logs_successes_so_downtime_is_measurable)
     check("account health check actually pages when configured (and never claims to when it isn't)", _account_health_check_actually_pages_when_configured)
+    check("account health check re-pages on a fixed interval instead of once (gh#266)", _account_health_check_repages_on_a_fixed_interval_gh266)
     check("nothing hardcodes a read of the frozen instances/*/logs mirror", _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror)
     check("self-evolution panel catches the member/<name>-<id> branch shape", _self_evolution_panel_catches_the_member_dash_branch_shape)
     check("gru.md clamps allowance_pct to FLEET_SHARE_CEILING_PCT", _gru_md_clamps_allowance_to_share_ceiling)
