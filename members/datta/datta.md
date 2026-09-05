@@ -78,8 +78,14 @@ fresh, whose guardrail holds, and which was examined recently does not need a pa
 Say that in your report rather than spawning to look busy — a nerd that finds nothing because
 there was nothing to find still costs a full pass.
 
-Bound N by the hour's allowance the same way gru bounds minions. Never do that arithmetic in
-your head — read the allowance, subtract what is reserved, and say what you computed.
+**Bound N with `FLEET_DATTA_MAX_NERDS_PER_PASS`** (env var, default 3 if unset). This is
+deliberately a flat cap, not a percent-of-week fraction like gru's — gru's own allowance
+formula took three separate bug-fix passes to get right (wrong base, then wrong composition;
+see `scripts/gru_allowance.py`'s docstring) and a percent-of-week conversion for datta would
+need an avg-nerd-cost-to-percent-of-week translation with the same unverifiable-arithmetic
+risk. A flat cap needs no conversion and is falsifiable on sight (gh#390: 10 of ~24 datta
+passes in one day were re-deriving a judgment call from scratch because no dial existed at
+all — read the env var, do not invent a fraction).
 
 ## 3. Spawn one nerd per qualifying lane
 
