@@ -13,10 +13,11 @@ import status_data
 
 CSS = """
 :root{--bg:#fff;--fg:#1a1a1a;--muted:#6b7280;--line:#e5e7eb;
---ok:#30a46c;--down:#e5484d;--unknown:#e8e8ea;--warn:#ffb224;--warnbg:#fffbeb;--card:#fff}
+--ok:#30a46c;--down:#e5484d;--unknown:#e8e8ea;--warn:#ffb224;--warnbg:#fffbeb;
+--unknownbd:#9ca3af;--unknownbg:#f4f4f5;--card:#fff}
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){
 --bg:#0c0c0d;--fg:#ededef;--muted:#8b8b8f;--line:#232326;--unknown:#232326;
---warnbg:#2a2213;--card:#141416}}
+--warnbg:#2a2213;--unknownbd:#6b7280;--unknownbg:#1c1c1f;--card:#141416}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);
 font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
@@ -27,9 +28,11 @@ h1{font-size:22px;font-weight:700;margin:0;letter-spacing:-.01em}
 .sub{color:var(--muted);font-size:13px;margin-top:2px}
 .banner{border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:24px}
 .banner.bad{border-color:var(--warn)}
+.banner.unknown{border-color:var(--unknownbd)}
 .banner-head{padding:14px 18px;font-weight:600;display:flex;gap:9px;align-items:center}
 .banner.bad .banner-head{background:var(--warnbg)}
 .banner.good .banner-head{background:transparent}
+.banner.unknown .banner-head{background:var(--unknownbg)}
 .dot{width:9px;height:9px;border-radius:50%;flex:none}
 .dot.ok{background:var(--ok)}.dot.down{background:var(--down)}.dot.unknown{background:var(--muted)}
 .card{border:1px solid var(--line);border-radius:10px;background:var(--card);padding:20px 22px}
@@ -65,11 +68,17 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:26px;line-
 
 _LABEL = {"ok": "Operational", "down": "Degraded", "unknown": "No data"}
 
+# gh#358: the banner box itself must never render "unknown" with the same class as "good" --
+# a status page that grays out only the headline text while the surrounding box still reads
+# green is the exact lie its own module docstring warns against.
+_BANNER_CLASS = {"down": "bad", "ok": "good", "unknown": "unknown"}
+
 
 def render(hours: int = 72) -> str:
     d = status_data.snapshot(hours)
     overall = d["overall"]
     bad = overall == "down"
+    banner_class = _BANNER_CLASS.get(overall, "unknown")
 
     rows = []
     for c in d["components"]:
@@ -137,7 +146,7 @@ def render(hours: int = 72) -> str:
         "Grey means no check ran in that hour, never &ldquo;healthy&rdquo;. "
         "Generated %s.</footer>"
         "</div></body></html>"
-        % (CSS, "bad" if bad else "good", overall, escape(headline),
+        % (CSS, banner_class, overall, escape(headline),
            d["hours"], "".join(rows), d["hours"], members_card, d["generated_at"])
     )
 
