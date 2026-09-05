@@ -71,9 +71,23 @@ _MARIE_PATTERNS = [
     # #A", "wrote/posted a PRD for #A", "labeled #A". Anchored to the verb + the reference LIST
     # that immediately follows it (stops at the next `;`/`.` clause boundary), so it never
     # counts issue numbers mentioned later in the sentence for unrelated context.
+    #
+    # gh#409: marie's QUIET-pass boilerplate routinely writes explicit-zero counts right before
+    # the same verb -- "0 claims cleared (gh#98 self-resolved via merged PR#404)", "0 stale
+    # claims cleared" -- where the verb legitimately fires and an unrelated #NNNN reference
+    # (named for context, not as a counted action) sits in the clause that follows. The optional
+    # leading group below captures that "0 <1-3 word noun phrase> " prefix when present,
+    # immediately before the verb; a match carrying it is skipped entirely in extract_kpi()
+    # rather than credited. The `(?!:)` guard after the verb covers the sibling shape "...is
+    # fully triaged: 0 stale claims, ..." -- a label/summary use of the verb, not an action on
+    # what follows it -- so the same non-greedy issue-ref scan can't reach across the colon into
+    # an unrelated later "0 ..." clause that happens to name an issue for context. The `(?<!-)`
+    # guard before the verb excludes compound-modified verbs like "auto-closed"/"self-closed" --
+    # an automated/self-resolved outcome, not marie's own action -- from firing the same verb.
     (re.compile(
-        r"\b(?:cleared|closed|ranked|triaged|corrected|backfilled|bumped|scored|wrote|posted|"
-        r"labeled)\b[^;.]*?((?:#\d+\D{0,6}){1,10})",
+        r"(\b0\s+(?:\S+\s+){1,3})?"
+        r"(?<!-)\b(?:cleared|closed|ranked|triaged|corrected|backfilled|bumped|scored|wrote|posted|"
+        r"labeled)\b(?!:)[^;.]*?((?:#\d+\D{0,6}){1,10})",
         re.I,
     ), "issues triaged"),
 ]
@@ -184,16 +198,23 @@ def extract_kpi(member: str, outcome: str | None) -> tuple[int, str] | None:
     matched_any_pattern = False
     for pat, label in patterns:
         for m in pat.finditer(outcome):
+            groups = m.groups()
+            # gh#409: a pattern with a leading optional "explicit-zero-count" group (currently
+            # only marie's verb-anchored entry) signals a false positive when that group
+            # actually matched -- e.g. "0 claims cleared (gh#98 ...)" -- so skip crediting it
+            # entirely rather than counting the unrelated #issue reference that follows.
+            if len(groups) > 1 and groups[0]:
+                continue
             matched_any_pattern = True
             # Three capture shapes coexist: no group at all (judge-judy -- the match itself IS
             # one occurrence), a group that's a literal digit string (roomba/marie's explicit
             # "N <thing>" patterns), or a group that's a text fragment to count #issue
             # references WITHIN (marie's verb-anchored pattern, whose captured group is
             # "#2075 and #2759 ", not a number). isdigit() tells these apart cheaply.
-            if not m.groups():
+            if not groups:
                 total += 1
             else:
-                g = m.group(1)
+                g = groups[-1]
                 total += int(g) if g.isdigit() else max(1, _count_issue_refs(g))
             unit = label
     if not matched_any_pattern:
