@@ -84,11 +84,50 @@ _JUDGE_JUDY_PATTERNS = [
     (re.compile(r"(?:blocked|rejected) PR #\d+"), "PRs reviewed"),
 ]
 
+# gh#225: nerd's real outcome prose (2026-09-05 sample, 237 runs.jsonl records, since the
+# issue's own three quoted fragments were 6 days stale by build time) leads overwhelmingly with
+# "Filed"/"Commented on"/"Posted ... to/on"/"Edited" -- all real, countable identity-integrity
+# actions this pass took (a filed issue, a comment posted, a stale issue body corrected).
+#
+# That same prose just as often NEGATES those exact verbs to describe a QUIET pass -- "no new
+# issue filed", "filed nothing new", "no new gh#143 comment posted", "already filed", "not
+# re-filed/re-posted" -- while still naming OLD, already-tracked issue numbers later in the same
+# sentence. A naive "verb ... nearby issue ref" match credits those QUIET runs with fake work --
+# the exact gh#409 bug nerd itself found and filed against marie's patterns in this same file.
+# Guarded by refusing to match when the verb is immediately preceded by "issue(s)"/
+# "finding(s)"/"comment(s)"/"already"/"was"/"re-" (every negation phrasing found glues one of
+# those directly onto the verb) or immediately followed by "no"/"nothing". Verified against the
+# full real sample: 0 QUIET runs credited, 0 double-counts, 216 total summed across 187/237 runs.
+_NERD_ISSUE_REF = r"(?:gh#\d+|#\d+|issues/\d+)"
+_NERD_VERB_GUARD = (
+    r"(?<!issue )(?<!issues )(?<!finding )(?<!findings )(?<!comment )(?<!comments )"
+    r"(?<!already )(?<!was )(?<!re-)"
+)
+# Non-greedy "rest of this clause" gap that still crosses the bare '.' inside a github.com URL --
+# stops only at ';' or a real sentence-ending period (one followed by whitespace or EOS).
+_NERD_CLAUSE_GAP = r"(?:(?!;|\.(?:\s|$)).)*?"
+_NERD_PATTERNS = [
+    # explicit count: "Filed 3 issues", "filed 2 new issues" (the issue body's own 2nd quoted
+    # shape) -- checked first so the verb-anchored pattern below doesn't also fire on it.
+    (re.compile(r"\bfiled\s+(\d+)\s+(?:new\s+)?issues?\b", re.I), "issues filed/commented"),
+    (re.compile(
+        _NERD_VERB_GUARD + r"\bfiled\b(?!\s+\d+\s+(?:new\s+)?issues?\b)(?!\s+(?:no|nothing)\b)"
+        + _NERD_CLAUSE_GAP + r"(" + _NERD_ISSUE_REF + r"(?:\D{0,10}" + _NERD_ISSUE_REF + r")*)",
+        re.I,
+    ), "issues filed/commented"),
+    (re.compile(
+        _NERD_VERB_GUARD + r"\b(?:commented|posted|edited)\b(?!\s+(?:no|nothing)\b)"
+        + _NERD_CLAUSE_GAP + r"(" + _NERD_ISSUE_REF + r"(?:\D{0,10}" + _NERD_ISSUE_REF + r")*)",
+        re.I,
+    ), "issues filed/commented"),
+]
+
 # member name -> (pattern list, fallback unit label if any pattern matches with no explicit unit)
 _KPI_TABLE: dict[str, list[tuple[re.Pattern, str]]] = {
     "roomba": _ROOMBA_PATTERNS,
     "marie": _MARIE_PATTERNS,
     "judge-judy": _JUDGE_JUDY_PATTERNS,
+    "nerd": _NERD_PATTERNS,
 }
 
 
