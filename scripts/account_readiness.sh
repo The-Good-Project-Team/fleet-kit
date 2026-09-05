@@ -17,7 +17,12 @@
 # gru can size N against real spawn capacity instead of budget alone.
 #
 # Usage: bash account_readiness.sh
-# Output (stdout, one line, machine-parseable): "ready=<N> total=<N> gated=<name,name,...>"
+# Output (stdout, one line, machine-parseable):
+#   "ready=<N> total=<N> gated=<name:reason,name:reason,...>"
+# gh#134: the state file's 3rd column (written by account_pool.sh for the unauthenticated/
+# other branches, absent -> "exhausted" for the original 2-column format) is now surfaced here
+# too -- a bare "gated=acctname" told a reader an account was down but not why, and "why" is
+# exactly what tells a human whether to wait (a weekly reset) or act (re-authenticate).
 set -uo pipefail
 
 ACCOUNTS="${FLEET_ACCOUNTS:-primary}"
@@ -37,14 +42,20 @@ gated_names=()
 for acct in $ACCOUNTS; do
   total=$((total + 1))
   is_gated=0
+  reason=""
   if [ -f "$STATE_FILE" ]; then
-    epoch=$(awk -v a="$acct" '$1==a{print $2}' "$STATE_FILE" | tail -1)
-    if [ -n "$epoch" ] && [ "$epoch" -gt "$now" ]; then
-      is_gated=1
+    line=$(awk -v a="$acct" '$1==a' "$STATE_FILE" | tail -1)
+    if [ -n "$line" ]; then
+      epoch=$(awk '{print $2}' <<<"$line")
+      reason=$(awk '{print $3}' <<<"$line")
+      [ -z "$reason" ] && reason="exhausted"
+      if [ -n "$epoch" ] && [ "$epoch" -gt "$now" ]; then
+        is_gated=1
+      fi
     fi
   fi
   if [ "$is_gated" -eq 1 ]; then
-    gated_names+=("$acct")
+    gated_names+=("${acct}:${reason}")
   else
     ready=$((ready + 1))
   fi

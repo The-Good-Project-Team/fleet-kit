@@ -4325,6 +4325,98 @@ def _weekly_reset_date_and_hour_is_parsed_not_just_the_hour():
     )
 
 
+def _run_pool_then_readiness(account_cmds):
+    """Run account_pool_run once per entry in `account_cmds` (a shell command each) against a
+    shared scratch state, then return account_readiness.sh's own output line -- gh#134's ACs
+    are about what readiness reports, not the state file's internal shape, so tests should
+    assert on that final line rather than the file.
+    """
+    import subprocess
+    pool = ROOT / "scripts" / "account_pool.sh"
+    readiness = ROOT / "scripts" / "account_readiness.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        lines = [
+            "set -uo pipefail",
+            f'export FLEET_LOG_DIR="{tmp}"',
+            'export FLEET_ACCOUNTS="acct"',
+            f'source "{pool}"',
+        ]
+        for cmd in account_cmds:
+            lines.append(f"account_pool_run bash -c {json.dumps(cmd)} >/dev/null 2>&1 || true")
+        lines.append(f'bash "{readiness}"')
+        proc = subprocess.run(
+            ["bash", "-c", "\n".join(lines)], capture_output=True, text=True, timeout=30
+        )
+        assert proc.returncode in (0, 1), f"bash failed: {proc.stderr.strip()[:300]}"
+        return proc.stdout.strip().splitlines()[-1]
+
+
+_UNAUTH_FAIL = 'echo "Error: not logged in" >&2; exit 1'
+_OTHER_FAIL = 'echo "some weird transient glitch" >&2; exit 1'
+_SUCCEED = 'echo ok'
+
+
+def _unauthenticated_failure_gates_the_account_on_first_occurrence():
+    """gh#134 AC1: the unauthenticated branch must write readiness state BEFORE this fix it was
+    a bare `continue` -- account_readiness.sh kept reporting the account healthy for an entire
+    auth outage. Gates on the first occurrence (unlike 'other' below): a login failure is
+    unambiguous, not the kind of thing a retry self-corrects.
+    """
+    out = _run_pool_then_readiness([_UNAUTH_FAIL])
+    assert "ready=0" in out, f"one unauthenticated failure did not reduce readiness: {out!r}"
+    assert "gated=acct:unauthenticated" in out, (
+        f"gated account's reason is not visibly tagged 'unauthenticated': {out!r}"
+    )
+
+
+def _single_other_failure_does_not_gate_the_account():
+    """gh#134 AC2: a single transient/'other' failure is a blip, not an outage -- it must not
+    gate the account (contrast with unauthenticated, which does gate on one occurrence).
+    """
+    out = _run_pool_then_readiness([_OTHER_FAIL])
+    assert "ready=1" in out, f"one 'other' failure wrongly gated the account: {out!r}"
+
+
+def _other_failure_gates_after_consecutive_threshold():
+    """gh#134 AC2: only N CONSECUTIVE 'other' failures for the same account trip the gate.
+    account_pool.sh's own default threshold is 3 -- two failures must still leave it ready,
+    the third must gate it with a visible 'other' reason (distinct from 'exhausted').
+    """
+    out_two = _run_pool_then_readiness([_OTHER_FAIL, _OTHER_FAIL])
+    assert "ready=1" in out_two, f"two consecutive 'other' failures gated early: {out_two!r}"
+
+    out_three = _run_pool_then_readiness([_OTHER_FAIL, _OTHER_FAIL, _OTHER_FAIL])
+    assert "ready=0" in out_three, (
+        f"three consecutive 'other' failures did not trip the gate: {out_three!r}"
+    )
+    assert "gated=acct:other" in out_three, (
+        f"gate tripped by 'other' failures is not tagged 'other': {out_three!r}"
+    )
+
+
+def _success_clears_the_other_failure_streak():
+    """gh#134 AC3: 'a single transient failure followed by a success does NOT trip the new
+    gated state' -- a success must reset the consecutive-failure counter, not just leave it
+    paused, or two failures either side of a success would wrongly add up to the threshold.
+    """
+    out = _run_pool_then_readiness([_OTHER_FAIL, _OTHER_FAIL, _SUCCEED, _OTHER_FAIL, _OTHER_FAIL])
+    assert "ready=1" in out, (
+        f"failures either side of an intervening success wrongly summed to the gate threshold: {out!r}"
+    )
+
+
+def _exhausted_gate_is_still_visibly_tagged_exhausted():
+    """gh#134 AC4/AC5: the pre-existing exhausted branch's state-file format (2 columns, no
+    reason) must still read back correctly through the extended readiness output -- a missing
+    3rd column must default to 'exhausted', not blank or crash.
+    """
+    out = _run_pool_then_readiness(['echo "You have reached your usage limit" >&2; exit 1'])
+    assert "ready=0" in out, f"an exhausted account was not gated: {out!r}"
+    assert "gated=acct:exhausted" in out, (
+        f"a legacy 2-column exhausted entry did not default to reason 'exhausted': {out!r}"
+    )
+
+
 def _non_primary_account_without_override_does_not_inherit_the_ambient_token():
     """992ebfe: only the literal "primary" account may inherit the ambient
     CLAUDE_CODE_OAUTH_TOKEN. Any other account with no CLAUDE_CODE_OAUTH_TOKEN_<NAME> override
@@ -4650,6 +4742,11 @@ if __name__ == "__main__":
     check("exhaustion with no stated reset backs off minutes, not an hour", _unparseable_exhaustion_gates_briefly_not_for_an_hour)
     check("a stated reset time is honored over the fallback", _a_real_reset_time_is_still_honored)
     check("a date+hour weekly reset is parsed, not just the hour-only form", _weekly_reset_date_and_hour_is_parsed_not_just_the_hour)
+    check("an unauthenticated failure gates readiness on the first occurrence", _unauthenticated_failure_gates_the_account_on_first_occurrence)
+    check("a single 'other' failure does not gate the account", _single_other_failure_does_not_gate_the_account)
+    check("'other' failures gate only after the consecutive threshold", _other_failure_gates_after_consecutive_threshold)
+    check("a success clears the 'other' failure streak", _success_clears_the_other_failure_streak)
+    check("an exhausted gate still reads back tagged 'exhausted' via readiness", _exhausted_gate_is_still_visibly_tagged_exhausted)
     check("a non-primary account with no override does not inherit the ambient oauth token", _non_primary_account_without_override_does_not_inherit_the_ambient_token)
     check("pool logs successes so outage length is measurable", _pool_logs_successes_so_downtime_is_measurable)
     check("account health check actually pages when configured (and never claims to when it isn't)", _account_health_check_actually_pages_when_configured)

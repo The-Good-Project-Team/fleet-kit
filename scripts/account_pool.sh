@@ -33,6 +33,16 @@ set -uo pipefail
 ACCOUNT_POOL_ORDER="${FLEET_ACCOUNTS:-primary}"
 ACCOUNT_POOL_LOG_FILE="${ACCOUNT_POOL_LOG_FILE:-${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}/account-pool.log}"
 ACCOUNT_POOL_STATE_FILE="${ACCOUNT_POOL_STATE_FILE:-${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}/account-pool-exhausted.state}"
+# gh#134: consecutive-failure counter for the 'other' (transient) reason ONLY -- kept in a
+# separate file so a still-below-threshold streak never shows up in $ACCOUNT_POOL_STATE_FILE
+# (the file account_readiness.sh reads for gating) until it actually trips. 'unauthenticated'
+# does not use this counter; it gates on the first occurrence (see
+# _account_pool_note_unauthenticated for why). REASONED DEFAULT, not measured: the issue that
+# added this left the exact threshold UNKNOWN (no attempt-history data was available), so 3
+# consecutive 'other' failures for the same account was picked as "more than one blip, fewer
+# than an easy human tolerance for a bad string of ticks."
+ACCOUNT_POOL_STREAK_FILE="${ACCOUNT_POOL_STREAK_FILE:-${ACCOUNT_POOL_STATE_FILE}.streaks}"
+ACCOUNT_POOL_OTHER_FAILURE_THRESHOLD="${ACCOUNT_POOL_OTHER_FAILURE_THRESHOLD:-3}"
 
 _account_pool_log() {
   mkdir -p "$(dirname "$ACCOUNT_POOL_LOG_FILE")" 2>/dev/null
@@ -107,6 +117,76 @@ _account_pool_mark_exhausted() {
   echo "$account $epoch" >> "${ACCOUNT_POOL_STATE_FILE}.tmp"
   mv "${ACCOUNT_POOL_STATE_FILE}.tmp" "$ACCOUNT_POOL_STATE_FILE"
   _account_pool_log "account=$account marked gated until epoch=$epoch ($(date -d "@$epoch" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || date -r "$epoch" '+%Y-%m-%d %H:%M UTC' 2>/dev/null))"
+}
+
+# _account_pool_note_unauthenticated <account> -- gh#134. account_readiness.sh's ONLY signal is
+# $ACCOUNT_POOL_STATE_FILE, so before this an account stuck logged-out never appeared gated --
+# readiness kept reporting it healthy for the whole outage, the exact failure this issue exists
+# to close. Writes a 3rd column ("unauthenticated") so this entry never reads back as a real
+# weekly-limit gate -- account_readiness.sh and _account_pool_budget_verdict both key off
+# column 2 (the epoch) alone, so this stays a drop-in extension of the existing 2-column format
+# rather than a format change for the exhausted branch.
+#
+# Gates on the FIRST occurrence, unlike the 'other' branch below -- a login failure is
+# unambiguous (revoked token, logged out), not the kind of thing a retry fixes. The existing
+# success path already clears an account's state-file line on its very next successful call
+# regardless of tag, so a human re-authenticating self-heals this without a separate "clear the
+# gate" step.
+#
+# Gate window (1 hour) is a REASONED DEFAULT, not measured -- the issue left the right duration
+# UNKNOWN (auth outages have no natural reset time the way a weekly cap does). Long enough that
+# a logged-out account doesn't burn a call and a rotation slot every single tick while waiting
+# on a human; short enough to self-correct within a work day even if nobody is paged.
+_account_pool_note_unauthenticated() {
+  local account="$1" epoch
+  epoch=$(( $(date +%s) + 3600 ))
+  mkdir -p "$(dirname "$ACCOUNT_POOL_STATE_FILE")" 2>/dev/null
+  grep -v "^${account} " "$ACCOUNT_POOL_STATE_FILE" 2>/dev/null > "${ACCOUNT_POOL_STATE_FILE}.tmp" || true
+  echo "$account $epoch unauthenticated" >> "${ACCOUNT_POOL_STATE_FILE}.tmp"
+  mv "${ACCOUNT_POOL_STATE_FILE}.tmp" "$ACCOUNT_POOL_STATE_FILE"
+  _account_pool_log "account=$account marked gated (unauthenticated) until epoch=$epoch -- needs a human to re-auth"
+}
+
+# _account_pool_note_other_failure <account> -- gh#134. A single transient error (a network
+# blip, a one-off 5xx) must not gate an account -- only $ACCOUNT_POOL_OTHER_FAILURE_THRESHOLD
+# CONSECUTIVE 'other' failures for the SAME account do. The streak itself lives in
+# $ACCOUNT_POOL_STREAK_FILE, separate from the readiness state file, so a below-threshold
+# streak is invisible to account_readiness.sh until it actually trips.
+#
+# Trip gate window (5 minutes) mirrors the existing "unparseable exhaustion" fallback above --
+# same reasoning: bias toward re-trying too eagerly on an ambiguous classification rather than
+# staying dark.
+_account_pool_note_other_failure() {
+  local account="$1" count epoch
+  mkdir -p "$(dirname "$ACCOUNT_POOL_STREAK_FILE")" 2>/dev/null
+  count=$(awk -v a="$account" '$1==a{print $2}' "$ACCOUNT_POOL_STREAK_FILE" 2>/dev/null | tail -1)
+  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  count=$((count + 1))
+  grep -v "^${account} " "$ACCOUNT_POOL_STREAK_FILE" 2>/dev/null > "${ACCOUNT_POOL_STREAK_FILE}.tmp" || true
+  echo "$account $count" >> "${ACCOUNT_POOL_STREAK_FILE}.tmp"
+  mv "${ACCOUNT_POOL_STREAK_FILE}.tmp" "$ACCOUNT_POOL_STREAK_FILE"
+  if [ "$count" -ge "$ACCOUNT_POOL_OTHER_FAILURE_THRESHOLD" ]; then
+    epoch=$(( $(date +%s) + 300 ))
+    mkdir -p "$(dirname "$ACCOUNT_POOL_STATE_FILE")" 2>/dev/null
+    grep -v "^${account} " "$ACCOUNT_POOL_STATE_FILE" 2>/dev/null > "${ACCOUNT_POOL_STATE_FILE}.tmp" || true
+    echo "$account $epoch other" >> "${ACCOUNT_POOL_STATE_FILE}.tmp"
+    mv "${ACCOUNT_POOL_STATE_FILE}.tmp" "$ACCOUNT_POOL_STATE_FILE"
+    _account_pool_log "account=$account hit $count consecutive 'other' failures, marked gated (other) until epoch=$epoch"
+    _account_pool_clear_streak "$account"
+  else
+    _account_pool_log "account=$account 'other' failure $count/$ACCOUNT_POOL_OTHER_FAILURE_THRESHOLD consecutive -- not gating yet"
+  fi
+}
+
+# _account_pool_clear_streak <account> -- reset the 'other' consecutive-failure counter. Called
+# on a successful call (whatever was transient has passed) and once a gate actually trips
+# (the streak's job is done; the state-file gate takes over). AC: "a single transient failure
+# followed by a success does NOT trip the new gated state" -- this is what makes that true.
+_account_pool_clear_streak() {
+  local account="$1"
+  [ -f "$ACCOUNT_POOL_STREAK_FILE" ] || return 0
+  grep -v "^${account} " "$ACCOUNT_POOL_STREAK_FILE" > "${ACCOUNT_POOL_STREAK_FILE}.tmp" 2>/dev/null || true
+  mv "${ACCOUNT_POOL_STREAK_FILE}.tmp" "$ACCOUNT_POOL_STREAK_FILE" 2>/dev/null || true
 }
 
 # Extension point: define this yourself (before sourcing this file, or export the function)
@@ -235,6 +315,9 @@ account_pool_run() {
         grep -v "^${account} " "$ACCOUNT_POOL_STATE_FILE" > "${ACCOUNT_POOL_STATE_FILE}.tmp" || true
         mv "${ACCOUNT_POOL_STATE_FILE}.tmp" "$ACCOUNT_POOL_STATE_FILE"
       fi
+      # gh#134: a success also means whatever was tripping the 'other' streak has passed --
+      # clear it so a single transient failure followed by a success never trips the gate.
+      _account_pool_clear_streak "$account"
       return 0
     fi
     reason=$(_account_pool_classify_failure "$(cat "$capture")")
@@ -243,9 +326,11 @@ account_pool_run() {
     [ -n "${ACCOUNT_POOL_REASON_FILE:-}" ] && printf '%s\n' "$reason" > "$ACCOUNT_POOL_REASON_FILE" 2>/dev/null
     case "$reason" in
       exhausted) _account_pool_mark_exhausted "$account" "$(cat "$capture")"; continue ;;
-      unauthenticated) continue ;;
-      *) continue ;;   # a transient/other failure still tries the next account rather than
-                        # giving up on the whole pool over one bad tick
+      unauthenticated) _account_pool_note_unauthenticated "$account"; continue ;;
+      *) _account_pool_note_other_failure "$account"; continue ;;   # a transient/other failure
+                        # still tries the next account rather than giving up on the whole pool
+                        # over one bad tick -- see _account_pool_note_other_failure for why it
+                        # doesn't gate on a single occurrence
     esac
   done
   _account_pool_log "ALL accounts in '$ACCOUNT_POOL_ORDER' failed this call"
