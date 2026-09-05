@@ -37,6 +37,17 @@ claimed for generations was simply wrong, and told every minion it had never onc
    (they are there because that growth is what turns a small item into a stalled one). The
    body stays useful as the original reporter's account of the problem.
 
+   **More than one PRD-shaped comment on the same issue? Build against the latest, not the
+   first one you find.** Marie sometimes re-ranks or re-scopes an item and posts a fresh PRD
+   comment rather than editing the body (she never edits the body — that is the author's
+   record, per `marie.md`). When `gh issue view <n> --comments` returns more than one comment
+   containing its own `## Acceptance criteria` heading, sort by `createdAt` and build against
+   the newest — an earlier one is superseded even though GitHub still shows it further up the
+   thread. Confirmed live 3 times same day 2026-09-05 (gh#376, gh#68, gh#347): a pass that
+   stopped at the first PRD-shaped comment would have shipped an already-superseded scope.
+   Say in your PR body which PRD comment (its timestamp or comment-id) you built against
+   whenever more than one exists, so a reviewer doesn't have to reconstruct the timeline.
+
    A PRD line reading `UNKNOWN — <question>` is marie flagging something she could not resolve
    from the repo. Do NOT invent an answer: build the parts that are specified, leave the
    unknown alone, and name it in your report so a human can close it. Guessing there is how a
