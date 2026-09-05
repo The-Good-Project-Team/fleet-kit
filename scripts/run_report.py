@@ -144,7 +144,18 @@ STATUS_STARTED = "started"
 # marie's flagged candidate for detecting this in the PRD (gh#252) -- the precise pattern is
 # called out there as an open question unresolved from the repo alone, so this is the most
 # literal reading of that candidate, not a final answer a human has signed off on.
-_DISPATCH_RE = re.compile(r"run_member\.sh\s+\S+\s+--item\s+(\d+)")
+#
+# gh#257 AC1: datta's real dispatch invocation (datta.md:109) is a SECOND, different shape --
+# `run_member.sh nerd --task "lane=<lane> — ..."`, with no `--item <N>` anywhere (nerd is
+# lane-dispatched, not item-dispatched). Confirmed live 2026-08-30 07:15:59 UTC
+# (run_id datta-8636-1788073921): datta spawned two real nerd sub-passes this way, then ran out
+# of budget mid-poll before ever writing Outcome:/Evidence: -- dispatched_items was always []
+# for this shape, so classify() fell through to reported_nothing instead of incomplete_fanout,
+# identical to gh#252's the-fixer case but through a pattern the original regex never covered.
+# There is no numeric item ID in this shape, so the captured token is the lane name instead.
+_DISPATCH_RE = re.compile(
+    r"run_member\.sh\s+\S+\s+--item\s+(\d+)"
+    r"|run_member\.sh\s+\S+\s+--task\s+[\"']?lane=(\S+)")
 
 # account_pool.sh's account_pool_run returns 3 for ALL_ACCOUNTS_EXHAUSTED: every account was
 # gated before a single `claude` call was made, so this pass spent ZERO tokens.
@@ -185,11 +196,12 @@ def parse_report(text: str) -> dict:
     # Reuse board_rice's guardrail rather than a second regex: one definition of what counts
     # as a named coordination link, shared by the board and by every run.
     out["vision_link"] = _vision_claim(text)
-    # gh#252: item IDs this pass named in a `run_member.sh <member> --item <N>` dispatch line,
-    # in the order they appear. Only meaningful when `outcome` is empty (see classify()) --
-    # a pass that dispatched AND reported normally may still mention the same line in its
-    # prose, which is fine, since that path never reaches STATUS_INCOMPLETE_FANOUT.
-    out["dispatched_items"] = _DISPATCH_RE.findall(text)
+    # gh#252/gh#257: item IDs (`--item <N>`) or lane names (`--task "lane=<lane> ..."`) this
+    # pass named in a run_member.sh dispatch line, in the order they appear -- whichever
+    # alternative of _DISPATCH_RE matched. Only meaningful when `outcome` is empty (see
+    # classify()) -- a pass that dispatched AND reported normally may still mention the same
+    # line in its prose, which is fine, since that path never reaches STATUS_INCOMPLETE_FANOUT.
+    out["dispatched_items"] = [item or lane for item, lane in _DISPATCH_RE.findall(text)]
     return out
 
 

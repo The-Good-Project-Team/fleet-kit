@@ -123,6 +123,39 @@ def _incomplete_fanout_is_not_reported_nothing():
     assert plain_quiet["orphaned_items"] is None, plain_quiet["orphaned_items"]
 
 
+def _incomplete_fanout_matches_task_dispatch_shape():
+    """gh#257 AC1: datta's real dispatch invocation (datta.md:109) has no `--item <N>` at all --
+    it's `run_member.sh nerd --task "lane=<lane> — ..."`, since nerd is lane-dispatched, not
+    item-dispatched. Confirmed live 2026-08-30 07:15:59 UTC (run_id datta-8636-1788073921):
+    datta spawned two real nerd sub-passes this way, then ran out of budget mid-poll before ever
+    writing Outcome:/Evidence:. Before this fix, `_DISPATCH_RE` only recognized gh#252's `--item`
+    shape, so `dispatched_items` was always `[]` for this pass and classify() fell through to
+    `reported_nothing` instead of `incomplete_fanout` -- identical real-work loss, missed by the
+    original pattern.
+    """
+    import run_report
+    text = ('Spawning nerd sub-passes for the qualifying lanes:\n'
+            'FLEET_RUN_NOW=1 bash scripts/run_member.sh nerd --task "lane=datadog — KPI '
+            'stale 9h" (PID 9834)\n'
+            'FLEET_RUN_NOW=1 bash scripts/run_member.sh nerd --task "lane=ui — guardrail '
+            'breached" (PID 9835)\n'
+            'Waiting for both nerd passes (datadog, ui) to finish -- the background poll will '
+            'notify me when PIDs 9834/9835 exit.\n')
+    rec = run_report.build_record(member="datta", run_id="r", kind="llm", exit_code=0,
+                                  pass_text=text, usage=None, vision_required=False)
+    assert rec["status"] == "incomplete_fanout", rec["status"]
+    assert rec["orphaned_items"] == ["datadog", "ui"], rec["orphaned_items"]
+
+    # AC4: a fan-out parent that DOES wait and report normally is unaffected.
+    reported = run_report.build_record(
+        member="datta", run_id="r2", kind="llm", exit_code=0,
+        pass_text=text + "Outcome: both nerd lanes came back clean (#4301)\n"
+                          "Evidence: fleet.db runs for datadog/ui\n",
+        usage=None, vision_required=False)
+    assert reported["status"] == "ok", reported["status"]
+    assert reported["orphaned_items"] is None, reported["orphaned_items"]
+
+
 def _artifact_regex_accepts_backtick_spans():
     """gh#251: roomba/the-fixer's real evidence is a path, PID, or SHA -- none of which has a
     GitHub-artifact shape (`#123`, a URL, `file.ext:123`), so classify() folded genuinely
@@ -5419,6 +5452,7 @@ if __name__ == "__main__":
     check("member_spec's OWN default MEMBERS_DIR resolves (not just an explicit path)", _members_dir_default_is_right)
     check("report contract: ok + silence is recorded", _report_contract)
     check("a fan-out parent that never reports is incomplete_fanout, not reported_nothing", _incomplete_fanout_is_not_reported_nothing)
+    check("datta's --task \"lane=<lane>\" dispatch shape also reads as incomplete_fanout (gh#257)", _incomplete_fanout_matches_task_dispatch_shape)
     check("_ARTIFACT accepts a backtick-wrapped path/PID/SHA (#251)", _artifact_regex_accepts_backtick_spans)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
     check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
