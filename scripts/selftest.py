@@ -3099,6 +3099,58 @@ def _lane_kpi_is_append_only_and_distinguishes_missing_from_stale():
         assert r_empty["value"] is None and r_empty["denominator"] == 0, r_empty
 
 
+def _fleet_kpi_roomba_catches_all_three_real_evaluated_phrasings():
+    """gh#343: `_ROOMBA_PATTERNS` used to anchor only on a digit sitting immediately before the
+    literal word "evaluated" ("N evaluated"), silently dropping the other two real phrasings
+    roomba's free-text outcome prose routinely uses -- a verb-before-number order ("evaluated N
+    worktree(s)") and an extra "worktree(s)" word wedged between the digit and the verb ("N
+    worktree(s) evaluated"). Quantified against a real fleet.db window: the narrow pattern
+    matched 12/23 runs (summed 13) where a loosened reference matched 18/23 (summed 19) -- a
+    dashboard KPI reading ~30-40% low despite the sweep having actually run.
+
+    Sample strings below are the exact "MISS" quotes from the issue body. The fourth
+    ("Ran full worktree sweep (0/1 removed...)") never says "evaluated" at all -- it's a
+    genuinely different, undocumented phrasing (noted in PR body per the issue's own
+    "grep the full corpus" instruction) and correctly still returns None: building a pattern
+    for it would mean guessing at a generic count-shape, which this file's own docstring
+    already rules out.
+    """
+    import fleet_kpi
+    assert fleet_kpi.extract_kpi(
+        "roomba",
+        "Worktree sweep evaluated 1 worktree (0 removed, correctly kept as too-young); "
+        "crew health sweep clean.",
+    ) == (1, "worktrees evaluated")
+    assert fleet_kpi.extract_kpi(
+        "roomba",
+        "Worktree sweep + crew health sweep both QUIET — 1 worktree evaluated/0 removed, "
+        "12/12 crew healthy.",
+    ) == (1, "worktrees evaluated")
+    assert fleet_kpi.extract_kpi(
+        "roomba",
+        "QUIET — worktree sweep and crew-health sweep both came back clean on fleet-kit "
+        "(1 worktree evaluated/0 removed/0 kept-ambiguous), gh#204 reconfirmed open.",
+    ) == (1, "worktrees evaluated")
+    assert fleet_kpi.extract_kpi(
+        "roomba",
+        "Ran full worktree sweep (0/1 removed, 0 ambiguous) and crew health sweep (0/12 "
+        "ghosts) on fleet-kit; re-confirmed gh#204 still open with fresh evidence, no new "
+        "backlog filed.",
+    ) is None
+
+    # The original bare-number phrasing this pattern was first built for must still match.
+    assert fleet_kpi.extract_kpi("roomba", "Worktree sweep clean (5 evaluated/0 removed)") == (
+        5, "worktrees evaluated")
+
+    # Other members' patterns are untouched by this change.
+    assert fleet_kpi.extract_kpi(
+        "marie", "Cleared stale fleet:claimed on #2075 and #2759"
+    ) == (1, "issues triaged")
+    assert fleet_kpi.extract_kpi(
+        "judge-judy", "approved PR #4250 and blocked PR #4200"
+    ) == (2, "PRs reviewed")
+
+
 def _no_member_ships_a_cap():
     """Caps are off fleet-wide: control by selection and charter quality, not truncation.
 
@@ -4168,6 +4220,7 @@ if __name__ == "__main__":
     check("gru.md clamps allowance_pct to FLEET_SHARE_CEILING_PCT", _gru_md_clamps_allowance_to_share_ceiling)
     check("lane_kpi classifies ticks and ignores in-progress drains", _lane_kpi_classifies_ticks_and_ignores_in_progress_drains)
     check("lane_kpi is append-only and distinguishes missing from stale", _lane_kpi_is_append_only_and_distinguishes_missing_from_stale)
+    check("fleet_kpi's roomba pattern catches all three real 'evaluated' phrasings", _fleet_kpi_roomba_catches_all_three_real_evaluated_phrasings)
 
     for n in ok:
         print(f"  ok    {n}")

@@ -27,13 +27,19 @@ import re
 # roomba's real KPI is its worktree sweep count -- always present, every pass ("Worktree sweep
 # clean (5 evaluated/0 removed...)", "3 worktrees evaluated / 0 removed"). "evaluated" doesn't
 # always sit directly next to the word "worktree" (the sweep-summary sentence separates them),
-# so this pattern anchors on "N evaluated" alone. ONLY this one pattern feeds the KPI -- ghosts
-# found and worktrees pruned are real but SEPARATE metrics with their own units; blending them
-# into one summed number under whichever unit matched last (an earlier version of this file did
-# exactly that) produces a total that's technically-a-number but means nothing (e.g. "46 ghosts
-# found" when only 9 of 21 runs even mentioned a ghost, because worktree-evaluated counts got
-# silently added in under the ghost label). One pattern, one meaning, per member.
+# so one pattern anchors on "N evaluated" alone. gh#343: that bare anchor missed ~30-40% of real
+# sweeps because roomba just as often writes the verb *before* the number ("evaluated 1
+# worktree") or slots the word "worktree" between the digit and "evaluated" ("1 worktree
+# evaluated") -- three real phrasings, three patterns, still all feeding the same one unit.
+# ONLY these patterns feed the KPI -- ghosts found and worktrees pruned are real but SEPARATE
+# metrics with their own units; blending them into one summed number under whichever unit
+# matched last (an earlier version of this file did exactly that) produces a total that's
+# technically-a-number but means nothing (e.g. "46 ghosts found" when only 9 of 21 runs even
+# mentioned a ghost, because worktree-evaluated counts got silently added in under the ghost
+# label). One pattern family, one meaning, per member.
 _ROOMBA_PATTERNS = [
+    (re.compile(r"(\d+)\s+worktrees?\s+evaluated", re.I), "worktrees evaluated"),
+    (re.compile(r"evaluated\s+(\d+)\s+worktrees?", re.I), "worktrees evaluated"),
     (re.compile(r"(\d+)\s+evaluated", re.I), "worktrees evaluated"),
 ]
 
