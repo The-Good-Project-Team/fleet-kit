@@ -1684,6 +1684,106 @@ def _status_page_deploy_component_classifies_stale_as_down():
             _il.reload(status_data)
 
 
+def _status_data_members_reads_fleet_db_with_no_podman_on_path():
+    """gh#364: status_data.py's own server (fleet_view_server.py, started by entrypoint.sh)
+    runs INSIDE the container that owns fleet.db, so the old `_sqlite()` shelled out to
+    `podman exec <container> sqlite3 ...` from a vantage point that never has a `podman`
+    binary reachable -- the resulting FileNotFoundError was swallowed by a bare `except
+    Exception: return ""`, so `members()` silently returned [] and the /status page's entire
+    'Fleet members' card never rendered, with no visual trace it was missing.
+
+    RED against the old code: with no `podman` on $PATH (this container's real topology),
+    `_sqlite()` returns "" regardless of what fleet.db holds, so `members(72)` returns [].
+    GREEN after the fix: a direct in-process `sqlite3.connect()` needs no subprocess, no
+    `podman`, and no container boundary at all -- it reads the real rows.
+    """
+    import importlib as _il
+    import os as _os
+    import sqlite3 as _sqlite3
+    import sys as _sys
+    import time as _time
+
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    import status_data
+
+    old_db = _os.environ.get("FLEET_DB")
+    old_path = _os.environ.get("PATH")
+    with tempfile.TemporaryDirectory() as td:
+        db_path = str(Path(td) / "fleet.db")
+        conn = _sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE runs (run_id TEXT, member TEXT, status TEXT, "
+            "recorded_at REAL, cost_usd REAL)")
+        conn.execute(
+            "INSERT INTO runs VALUES (?,?,?,?,?)",
+            ("r1", "minion", "ok", _time.time(), 0.5))
+        conn.commit()
+        conn.close()
+
+        _os.environ["FLEET_DB"] = db_path
+        # The real topology this bug reproduces: no podman binary reachable from in here.
+        _os.environ["PATH"] = td
+        try:
+            _il.reload(status_data)
+            rows = status_data.members(72)
+            assert rows, (
+                "members(72) returned [] against a fleet.db with a real recent row and no "
+                "podman on $PATH -- the Fleet members card would render as if the fleet "
+                "were empty")
+            assert rows[0]["name"] == "minion", f"unexpected row shape: {rows!r}"
+        finally:
+            if old_db is None:
+                _os.environ.pop("FLEET_DB", None)
+            else:
+                _os.environ["FLEET_DB"] = old_db
+            if old_path is None:
+                _os.environ.pop("PATH", None)
+            else:
+                _os.environ["PATH"] = old_path
+            _il.reload(status_data)
+
+
+def _status_data_other_components_unaffected_by_members_fix():
+    """gh#364 AC5: the fix to `_sqlite()`/`members()` must not touch the other four /status
+    components (Account pool, Public path, Tunnel, Budget meter) -- they read log files
+    directly and are unrelated to fleet.db. Pins that COMPONENTS is unchanged in shape and
+    that read_component() still classifies a plain healthy line as OK, for a fixed fixture.
+    """
+    import importlib as _il
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    import status_data
+
+    labels = [label for label, _names, _desc in status_data.COMPONENTS]
+    assert labels == [
+        "Account pool", "Public path", "Tunnel", "Budget meter (tgp)",
+        "Budget meter (gmail)", "Deploy",
+    ], f"COMPONENTS list drifted: {labels!r}"
+
+    old = _os.environ.get("FLEET_LOG_DIR")
+    with tempfile.TemporaryDirectory() as td:
+        _os.environ["FLEET_LOG_DIR"] = td
+        try:
+            _il.reload(status_data)
+            # Real line shape from account_health_check.sh's own healthy branch -- no
+            # timestamp in the bracket, lowercase "healthy" right after it.
+            (Path(td) / "account_health_check.cron.log").write_text(
+                "[account_health_check] healthy -- newest pool-log line is not a failure\n")
+            names = next(n for label, n, _d in status_data.COMPONENTS
+                         if label == "Account pool")
+            cells, pct = status_data.read_component(names)
+            assert cells[-1] == status_data.OK, (
+                f"Account pool must still classify a healthy line as ok, got {cells[-1]!r}")
+        finally:
+            if old is None:
+                _os.environ.pop("FLEET_LOG_DIR", None)
+            else:
+                _os.environ["FLEET_LOG_DIR"] = old
+            _il.reload(status_data)
+
+
 def _status_page_banner_distinguishes_unknown_from_good():
     """gh#358: status_page.py computed the banner box's class as a 2-way `bad`/`good` boolean
     (`bad = overall == "down"`), so an `unknown` overall -- the state that fires right now with
@@ -4739,6 +4839,85 @@ def _oversubscribed_shares_are_caught():
         assert "OVERSUBSCRIBED" in bad.stdout
 
 
+def _check_share_sum_sees_siblings_from_inside_a_container_via_published_shares():
+    """gh#293: the ROOT scan above can never fire inside a real container -- findmnt there
+    shows only single files bind-mounted from the host, never the `instances/` PARENT tree
+    `${FLEET_INSTANCES_ROOT:-$HOME/fleet-kit/instances}` needs (that tree also carries every
+    sibling's live CLAUDE_CODE_OAUTH_TOKEN/FLEET_MAXX_KEY, so mounting it wholesale would leak
+    credentials across instances). This is the REAL deployed shape: FLEET_INSTANCES_ROOT points
+    nowhere (unset, or -- as here -- pointed at a path that simply does not exist), so the old
+    scan matches zero directories and total stays 0 no matter how oversubscribed the fleet
+    really is.
+
+    FLEET_SHARE_DIR is the fix: a small, purpose-built, non-secret shared directory (same shape
+    as FLEET_LEASE_DIR/maxx_lease.py's already-shipped fix for the identical problem) that each
+    instance publishes just {instance, fraction, published_at} into. Pre-populates two
+    "siblings'" published files by hand (standing in for their own earlier check_share_sum.sh
+    runs) and runs the script as a THIRD instance to prove it sees all three, not just itself.
+    """
+    import os, subprocess, time
+    script = ROOT / "scripts" / "check_share_sum.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        share_dir = Path(tmp) / "shares"
+        share_dir.mkdir()
+        now = int(time.time())
+        (share_dir / "a.json").write_text(json.dumps({"instance": "a", "fraction": 0.3, "published_at": now}))
+        (share_dir / "b.json").write_text(json.dumps({"instance": "b", "fraction": 0.2, "published_at": now}))
+
+        base_env = {**os.environ, "FLEET_INSTANCES_ROOT": str(Path(tmp) / "no-such-instances-tree"),
+                    "FLEET_SHARE_DIR": str(share_dir), "FLEET_INSTANCE_NAME": "c"}
+
+        ok = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                             env={**base_env, "FLEET_SHARE_FRACTION": "0.4"})
+        assert ok.returncode == 0, f"a(0.3)+b(0.2)+c(0.4)=0.9 wrongly flagged: {ok.stdout}{ok.stderr}"
+        assert "a: 0.3" in ok.stdout and "b: 0.2" in ok.stdout and "c: 0.4" in ok.stdout, (
+            f"did not see every sibling's published share: {ok.stdout}"
+        )
+
+        bad = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                              env={**base_env, "FLEET_SHARE_FRACTION": "0.6"})
+        assert bad.returncode == 1, f"a(0.3)+b(0.2)+c(0.6)=1.1 was not flagged as oversubscribed: {bad.stdout}"
+        assert "OVERSUBSCRIBED" in bad.stdout
+
+
+def _check_share_sum_never_reports_ok_on_stale_or_missing_shares():
+    """AC4: a stale or unreadable sibling must never be silently folded into a passing "ok" --
+    that is the exact "dial that looks set but does nothing" failure this whole issue is about,
+    just one layer down (a sibling's PUBLISH went stale instead of the mount never existing).
+    """
+    import os, subprocess
+    script = ROOT / "scripts" / "check_share_sum.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        share_dir = Path(tmp) / "shares"
+        share_dir.mkdir()
+        # Ancient published_at -- long past any sane staleness window.
+        (share_dir / "old.json").write_text(json.dumps({"instance": "old", "fraction": 0.9, "published_at": 1}))
+        env = {**os.environ, "FLEET_INSTANCES_ROOT": str(Path(tmp) / "no-such-instances-tree"),
+               "FLEET_SHARE_DIR": str(share_dir), "FLEET_INSTANCE_NAME": "c", "FLEET_SHARE_FRACTION": "0.1"}
+        stale = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env)
+        assert stale.returncode != 0, (
+            f"a stale sibling share was silently accepted as ok: {stale.stdout}"
+        )
+        assert "STALE" in stale.stdout, f"stale share was not called out in the report: {stale.stdout}"
+        assert "shares total 0.1" in stale.stdout, (
+            f"stale sibling's 0.9 leaked into the total instead of being excluded: {stale.stdout}"
+        )
+
+    # The mount/publish path itself is broken (FLEET_SHARE_DIR points at something that is not
+    # a usable directory) -- zero fresh shares found, must not read as "ok: shares total 0".
+    with tempfile.TemporaryDirectory() as tmp:
+        not_a_dir = Path(tmp) / "not-a-dir"
+        not_a_dir.write_text("")  # a FILE, so publish_share.sh's mkdir/write both fail
+        env = {**os.environ, "FLEET_INSTANCES_ROOT": str(Path(tmp) / "no-such-instances-tree"),
+               "FLEET_SHARE_DIR": str(not_a_dir), "FLEET_INSTANCE_NAME": "c", "FLEET_SHARE_FRACTION": "0.6"}
+        broken = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env)
+        assert broken.returncode != 0 and "ok:" not in broken.stdout, (
+            f"an unusable FLEET_SHARE_DIR still reported ok: {broken.stdout}"
+        )
+        assert "UNKNOWN" in broken.stdout
+
+
 def _jefe_owns_the_fleet_wide_token_budget():
     """jefe is the always-on health pass, so cross-instance spend is its layer.
 
@@ -5715,6 +5894,10 @@ if __name__ == "__main__":
     check("an instance cannot spend past its own slice", _an_instance_cannot_spend_past_its_own_slice)
     check("share ceiling is a slice of the hour, not the leftovers", _share_ceiling_is_a_slice_of_the_hour_not_the_leftovers)
     check("oversubscribed instance shares are caught", _oversubscribed_shares_are_caught)
+    check("check_share_sum sees siblings from inside a container via published shares",
+          _check_share_sum_sees_siblings_from_inside_a_container_via_published_shares)
+    check("check_share_sum never reports ok on stale or missing published shares",
+          _check_share_sum_never_reports_ok_on_stale_or_missing_shares)
     check("jefe owns the fleet-wide token budget", _jefe_owns_the_fleet_wide_token_budget)
     check("the-fixer sees a green-but-parked PR", _fixer_sees_a_green_but_parked_pr)
     check("a green PR with no auto-merge gets armed", _green_pr_with_no_auto_merge_gets_armed)
@@ -5752,6 +5935,8 @@ if __name__ == "__main__":
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
     check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
+    check("status_data.members() reads fleet.db in-process, no podman on $PATH needed (gh#364)", _status_data_members_reads_fleet_db_with_no_podman_on_path)
+    check("status_data's other four components are unaffected by the members() fix (gh#364)", _status_data_other_components_unaffected_by_members_fix)
     check("status page banner distinguishes unknown from good and bad (gh#358)", _status_page_banner_distinguishes_unknown_from_good)
 
     for n in ok:

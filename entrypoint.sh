@@ -101,6 +101,12 @@ case "${1:-cron-foreground}" in
     # reasoning as run_member.sh's own sourcing (2026-08-22 GH_TOKEN incident writeup there).
     [ -f "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}" ] && { set -a; . "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}"; set +a; }
 
+    # Publish this instance's own FLEET_SHARE_FRACTION for sibling containers to read (gh#293)
+    # -- see scripts/publish_share.sh for why. A no-op when FLEET_SHARE_DIR is unset. Runs here
+    # too (not just from inside check_share_sum.sh itself) so a sibling has something to read
+    # even before this instance's first jefe pass.
+    bash /fleet-kit/scripts/publish_share.sh || true
+
     # FLEET_CRON_MEMBERS (gh#138): every member with its own `run_member.sh <name>` line below
     # used to be installed unconditionally, regardless of what fleet.env declared this instance
     # to be -- a "judge-judy only" box still ran the full 9-script crew. Unset (the default)
