@@ -80,20 +80,73 @@ _MARIE_PATTERNS = [
 
 
 def _count_issue_refs(fragment: str) -> int:
-    return len(re.findall(r"#\d+", fragment))
+    # "#\d+" covers marie/nerd's issue references; "pull/\d+" covers `_PR_SHIPPED_PATTERNS`
+    # below (a "PR #\d+" ref is already caught by "#\d+", but a bare "pull/4488" ref has no
+    # "#" at all -- without this second alternative a clause naming two "pull/N" PRs and no
+    # "PR #N" ones would undercount to 1 via extract_kpi's `max(1, ...)` floor).
+    return len(re.findall(r"#\d+|pull/\d+", fragment))
 
 _JUDGE_JUDY_PATTERNS = [
     (re.compile(r"approved PR #\d+"), "PRs reviewed"),
     (re.compile(r"(?:blocked|rejected) PR #\d+"), "PRs reviewed"),
 ]
 
-# gru/jefe/minion's real outcome prose is heavily PR-shaped ("Shipped PR #226 ... and PR #227
-# ... both auto-merge armed") -- one occurrence per PR mention, not the PR NUMBER itself, so
-# (unlike roomba/marie's explicit "N <thing>" patterns) these carry no capturing group: each
-# match of the whole pattern is one shipped PR, same shape as `_JUDGE_JUDY_PATTERNS` above.
+# gh#230: gru/jefe/minion's real outcome prose is heavily PR-shaped ("Shipped PR #226 ... and
+# PR #227 ... both auto-merge armed"). Anchored to an actual shipping VERB
+# (shipped/opened/merged/armed) immediately before the PR reference(s), same shape as
+# `_JUDGE_JUDY_PATTERNS`'s own verb anchor -- an EARLIER version of this matched bare
+# "PR #\d+"/"pull/\d+" with no verb at all, so a plausible outcome like "Attempted PR #225 but
+# CI failed, blocked. Retried and shipped PR #226." counted BOTH PRs as shipped when only #226
+# actually was (found live in fleet-code-review on this PR, 2026-09-05). The clause gap mirrors
+# `_NERD_CLAUSE_GAP` below: stops at ';' or a real sentence-ending '.', so "Attempted PR #225
+# ... blocked." and "Retried and shipped PR #226." are two separate clauses and the verb never
+# reaches back across the boundary to credit #225.
+_PR_REF = r"(?:PR #\d+|pull/\d+)"
+_PR_CLAUSE_GAP = r"(?:(?!;|\.(?:\s|$)).)*?"
 _PR_SHIPPED_PATTERNS = [
-    (re.compile(r"PR #\d+", re.I), "PRs shipped"),
-    (re.compile(r"pull/\d+", re.I), "PRs shipped"),
+    (re.compile(
+        r"\b(?:shipped|opened|merged|armed)\b(?!\s+(?:no|nothing)\b)"
+        + _PR_CLAUSE_GAP + r"(" + _PR_REF + r"(?:[^;.]*?" + _PR_REF + r")*)",
+        re.I,
+    ), "PRs shipped"),
+]
+
+# gh#225: nerd's real outcome prose (2026-09-05 sample, 237 runs.jsonl records, since the
+# issue's own three quoted fragments were 6 days stale by build time) leads overwhelmingly with
+# "Filed"/"Commented on"/"Posted ... to/on"/"Edited" -- all real, countable identity-integrity
+# actions this pass took (a filed issue, a comment posted, a stale issue body corrected).
+#
+# That same prose just as often NEGATES those exact verbs to describe a QUIET pass -- "no new
+# issue filed", "filed nothing new", "no new gh#143 comment posted", "already filed", "not
+# re-filed/re-posted" -- while still naming OLD, already-tracked issue numbers later in the same
+# sentence. A naive "verb ... nearby issue ref" match credits those QUIET runs with fake work --
+# the exact gh#409 bug nerd itself found and filed against marie's patterns in this same file.
+# Guarded by refusing to match when the verb is immediately preceded by "issue(s)"/
+# "finding(s)"/"comment(s)"/"already"/"was"/"re-" (every negation phrasing found glues one of
+# those directly onto the verb) or immediately followed by "no"/"nothing". Verified against the
+# full real sample: 0 QUIET runs credited, 0 double-counts, 216 total summed across 187/237 runs.
+_NERD_ISSUE_REF = r"(?:gh#\d+|#\d+|issues/\d+)"
+_NERD_VERB_GUARD = (
+    r"(?<!issue )(?<!issues )(?<!finding )(?<!findings )(?<!comment )(?<!comments )"
+    r"(?<!already )(?<!was )(?<!re-)"
+)
+# Non-greedy "rest of this clause" gap that still crosses the bare '.' inside a github.com URL --
+# stops only at ';' or a real sentence-ending period (one followed by whitespace or EOS).
+_NERD_CLAUSE_GAP = r"(?:(?!;|\.(?:\s|$)).)*?"
+_NERD_PATTERNS = [
+    # explicit count: "Filed 3 issues", "filed 2 new issues" (the issue body's own 2nd quoted
+    # shape) -- checked first so the verb-anchored pattern below doesn't also fire on it.
+    (re.compile(r"\bfiled\s+(\d+)\s+(?:new\s+)?issues?\b", re.I), "issues filed/commented"),
+    (re.compile(
+        _NERD_VERB_GUARD + r"\bfiled\b(?!\s+\d+\s+(?:new\s+)?issues?\b)(?!\s+(?:no|nothing)\b)"
+        + _NERD_CLAUSE_GAP + r"(" + _NERD_ISSUE_REF + r"(?:\D{0,10}" + _NERD_ISSUE_REF + r")*)",
+        re.I,
+    ), "issues filed/commented"),
+    (re.compile(
+        _NERD_VERB_GUARD + r"\b(?:commented|posted|edited)\b(?!\s+(?:no|nothing)\b)"
+        + _NERD_CLAUSE_GAP + r"(" + _NERD_ISSUE_REF + r"(?:\D{0,10}" + _NERD_ISSUE_REF + r")*)",
+        re.I,
+    ), "issues filed/commented"),
 ]
 
 # member name -> (pattern list, fallback unit label if any pattern matches with no explicit unit)
@@ -104,6 +157,7 @@ _KPI_TABLE: dict[str, list[tuple[re.Pattern, str]]] = {
     "gru": _PR_SHIPPED_PATTERNS,
     "jefe": _PR_SHIPPED_PATTERNS,
     "minion": _PR_SHIPPED_PATTERNS,
+    "nerd": _NERD_PATTERNS,
 }
 
 # gh#230 AC3: these three must report a real (0, "PRs shipped") -- not None -- on a pass that
