@@ -60,7 +60,15 @@ already_paged=""
 MAX_PLAUSIBLE_OUTAGE_MINUTES="${ACCOUNT_HEALTH_MAX_PLAUSIBLE_MINUTES:-10080}"  # 7 days
 
 _ntfy() {
-  local title="$1" msg="$2" priority="$3"
+  # mode "page" (default) records a NEW critical in alert_store -- only for a genuine problem.
+  # mode "resolve" closes the alarm a prior "page" call opened (gh#401: a recovery message that
+  # itself went through the "page" branch was recording as a brand-new unresolved critical, so
+  # the real alarm it should have closed never closed either -- mirrors budget_read_check.sh's
+  # already-correct --resolve pattern). mode "info" is a self-heal notice for an outage that
+  # never escalated to a page in the first place (see the DNS-recovery call site below) -- there
+  # is nothing to record or resolve, so it goes through fleet_alert.sh's plain positional form,
+  # which deliberately never touches alert_store.
+  local title="$1" msg="$2" mode="${3:-page}"
   # Under the selftest, send through the stubbed `curl` on PATH instead of the real helper.
   # fleet_alert.sh runs by ABSOLUTE path, so a PATH stub cannot intercept it -- which is
   # exactly how the suite emailed a human on 2026-09-04. The test still observes a real call
@@ -75,9 +83,15 @@ _ntfy() {
     fi
     return 0
   fi
-  bash "$KIT_DIR/scripts/fleet_alert.sh" \
-    --check account_health --problem "$title" --severity critical "$title" "$msg" \
-    || echo "[alert] fleet_alert.sh failed" >&2
+  case "$mode" in
+    resolve)
+      bash "$KIT_DIR/scripts/fleet_alert.sh" --resolve --check account_health "$title" "$msg" ;;
+    info)
+      bash "$KIT_DIR/scripts/fleet_alert.sh" "$title" "$msg" ;;
+    *)
+      bash "$KIT_DIR/scripts/fleet_alert.sh" \
+        --check account_health --problem "$title" --severity critical "$title" "$msg" ;;
+  esac || echo "[alert] fleet_alert.sh failed" >&2
 }
 
 if [[ "$last_line" != *"ALL accounts in"*"failed this call"* ]]; then
@@ -85,7 +99,7 @@ if [[ "$last_line" != *"ALL accounts in"*"failed this call"* ]]; then
   if [ -n "$already_paged" ]; then
     _ntfy "fleet-kit: accounts recovered" \
       "Fleet account pool is succeeding again after an outage flagged at $already_paged." \
-      "default"
+      "resolve"
     rm -f "$STATE_FILE" "$RESTART_STATE_FILE"
   fi
   echo "[account_health_check] healthy -- newest pool-log line is not a failure"
@@ -168,7 +182,7 @@ if [ "$age_minutes" -ge "$THRESHOLD_MINUTES" ] && [ -z "$already_paged" ]; then
       echo "$paged_at" > "$RESTART_STATE_FILE"
       _ntfy "fleet-kit: auto-recovered from a dead-network outage" \
         "No fleet account had succeeded in ${age_minutes}+ minutes -- DNS inside $CONTAINER_NAME was unreachable (dead slirp4netns), same class as the 2026-08-28 outage. Restarted the container automatically; DNS resolves again. Watching for the next tick to confirm real recovery." \
-        "default"
+        "info"
       echo "[account_health_check] auto-recovery restart succeeded -- DNS resolves again"
       exit 0
     else
