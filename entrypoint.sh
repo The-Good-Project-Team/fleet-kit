@@ -101,6 +101,39 @@ case "${1:-cron-foreground}" in
     # reasoning as run_member.sh's own sourcing (2026-08-22 GH_TOKEN incident writeup there).
     [ -f "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}" ] && { set -a; . "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}"; set +a; }
 
+    # FLEET_CRON_MEMBERS (gh#138): every member with its own `run_member.sh <name>` line below
+    # used to be installed unconditionally, regardless of what fleet.env declared this instance
+    # to be -- a "judge-judy only" box still ran the full 9-script crew. Unset (the default)
+    # keeps today's behavior byte-for-identical: every known member goes on cron, same as
+    # before this existed. Set it to a space/comma-separated subset (e.g.
+    # `FLEET_CRON_MEMBERS=judge-judy`) to schedule only those. dont-shoot-the-messenger is
+    # excluded from ALL_CRON_MEMBERS because its own cron line is already commented out
+    # (archived 2026-09-04, see below) -- re-enabling it is a separate step from this mechanism.
+    ALL_CRON_MEMBERS=(the-fixer judge-judy gru jefe roomba marie datta dumbledore sentry)
+    if [ -n "${FLEET_CRON_MEMBERS:-}" ]; then
+      IFS=', ' read -ra RESOLVED_CRON_MEMBERS <<< "$FLEET_CRON_MEMBERS"
+      for m in "${RESOLVED_CRON_MEMBERS[@]}"; do
+        known=0
+        for candidate in "${ALL_CRON_MEMBERS[@]}"; do
+          [ "$m" = "$candidate" ] && known=1 && break
+        done
+        if [ "$known" -ne 1 ]; then
+          echo "[entrypoint] FATAL: FLEET_CRON_MEMBERS names unknown member '$m' -- known members: ${ALL_CRON_MEMBERS[*]}" >&2
+          exit 1
+        fi
+      done
+    else
+      RESOLVED_CRON_MEMBERS=("${ALL_CRON_MEMBERS[@]}")
+    fi
+
+    cron_member_enabled() {
+      local name="$1" m
+      for m in "${RESOLVED_CRON_MEMBERS[@]}"; do
+        [ "$m" = "$name" ] && return 0
+      done
+      return 1
+    }
+
     CRONTAB=/etc/cron.d/fleet-kit
     {
       echo "FLEET_ENV_FILE=/fleet-kit/fleet.env"
@@ -127,7 +160,9 @@ case "${1:-cron-foreground}" in
       # (check.sh gates the reasoning depth, not the LLM spin-up cost itself), and the webhook
       # above already covers the fast CI/deploy-red path in near-real-time. This tick only needs
       # to catch prod-down-with-no-failing-workflow-run, which doesn't need sub-hour latency.
-      echo "47 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh the-fixer >> $LOG_DIR/the-fixer.log 2>&1"
+      if cron_member_enabled the-fixer; then
+        echo "47 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh the-fixer >> $LOG_DIR/the-fixer.log 2>&1"
+      fi
       # Widened */5 -> hourly (2026-08-23, Reif): 215/215 runs at */5 had failed since it was
       # enabled (own config set max_budget_usd=0 -- claude -p died before any work, fixed
       # alongside this), so */5 was pure churn, not signal. Now that it does real work (the
@@ -142,7 +177,9 @@ case "${1:-cron-foreground}" in
       # fleet.env` returns nothing. Re-enable by setting FLEET_MESSENGER_DRIVER to an
       # executable driver, then uncommenting the line below.
       # echo "51 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dont-shoot-the-messenger >> $LOG_DIR/dont-shoot-the-messenger.log 2>&1"
-      echo "*/15 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh judge-judy >> $LOG_DIR/judge-judy.log 2>&1"
+      if cron_member_enabled judge-judy; then
+        echo "*/15 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh judge-judy >> $LOG_DIR/judge-judy.log 2>&1"
+      fi
       # auto_update_branch.sh (gh#172): nothing else in this repo keeps an open PR's branch
       # current with main, so one merge pushes every other open PR BEHIND/BLOCKED forever --
       # confirmed live 2026-08-29/30 at "full saturation" (8/8 open PRs stuck simultaneously,
@@ -162,17 +199,27 @@ case "${1:-cron-foreground}" in
       # hourly at :03) -- 2026-08-28, Reif: instances doing "small build mode" set this to
       # "*/2" in their own fleet.env without forking this file. Default is unchanged from
       # the original hourly schedule.
-      echo "3 ${FLEET_GRU_CADENCE:-*} * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_gru_fanout.sh"
-      echo "21 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh jefe >> $LOG_DIR/jefe.log 2>&1"
-      echo "41 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh roomba >> $LOG_DIR/roomba.log 2>&1"
-      echo "33 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh marie >> $LOG_DIR/marie.log 2>&1"
+      if cron_member_enabled gru; then
+        echo "3 ${FLEET_GRU_CADENCE:-*} * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_gru_fanout.sh"
+      fi
+      if cron_member_enabled jefe; then
+        echo "21 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh jefe >> $LOG_DIR/jefe.log 2>&1"
+      fi
+      if cron_member_enabled roomba; then
+        echo "41 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh roomba >> $LOG_DIR/roomba.log 2>&1"
+      fi
+      if cron_member_enabled marie; then
+        echo "33 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh marie >> $LOG_DIR/marie.log 2>&1"
+      fi
       # datta (:12, analysis) -- the coverage dispatcher. It spawns nerds itself, so ONLY datta
       # gets a cron line; nerd ships enabled:false and never self-fires, exactly like minion
       # under gru. Added 2026-08-26 after roomba filed nonprofit-atlas#3321: datta had been
       # enabled+scheduled in its own spec since 11:39 that day and had run ZERO times, because
       # a member's spec does not put it on cron -- THIS hand-maintained list does, and nobody
       # remembered. The dashboard read "never run" and nothing else complained.
-      echo "12 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh datta >> $LOG_DIR/datta.log 2>&1"
+      if cron_member_enabled datta; then
+        echo "12 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh datta >> $LOG_DIR/datta.log 2>&1"
+      fi
       # dumbledore: daily -> every 7h (2026-08-25, Reif), now that it OWNS the Magikarp score
       # rather than treating it as one rot-hunt item among five. A once-daily owner gets 1
       # feedback tick per day against a score sampled every 3h; at 7h it gets 3-4, which is
@@ -182,11 +229,15 @@ case "${1:-cron-foreground}" in
       # so */7 fires at 00,07,14,21 and then again at 00 -- a 3h gap across midnight, not 7h.
       # 01/08/15/22 keeps 15:13-ish (its long-standing slot) in the rotation and stays off the
       # :03/:21/:33/:41/:47/:51 minutes the other members already own.
-      echo "13 1,8,15,22 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dumbledore >> $LOG_DIR/dumbledore.log 2>&1"
+      if cron_member_enabled dumbledore; then
+        echo "13 1,8,15,22 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dumbledore >> $LOG_DIR/dumbledore.log 2>&1"
+      fi
       # sentry: every 3h, the USER-FACING surfaces (990 search/report, superadmin, this
       # dashboard). Explicit hours for the same reason dumbledore uses them -- `*/3` restarts
       # its pattern each day. :17 is unclaimed (:03/:12/:13/:21/:33/:41 are taken).
-      echo "17 0,3,6,9,12,15,18,21 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh sentry >> $LOG_DIR/sentry.log 2>&1"
+      if cron_member_enabled sentry; then
+        echo "17 0,3,6,9,12,15,18,21 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh sentry >> $LOG_DIR/sentry.log 2>&1"
+      fi
       # self_improve_score.sh: NOT a member (no members/*/*.fleet.json), so it was invisible
       # to selftest's "every scheduled member is actually on cron" check (#114) and had no
       # line here at all -- the exact same missing-cron-line failure class that bit datta
@@ -281,6 +332,7 @@ case "${1:-cron-foreground}" in
       echo "24 * * * * root export PUBLIC_PATH_URL=${PUBLIC_PATH_URL:-} STATE_FILE=$LOG_DIR/.path_health_paged.state && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; bash /fleet-kit/scripts/path_health_check.sh >> $LOG_DIR/path_health_check.log 2>&1"
     } > "$CRONTAB"
     chmod 0644 "$CRONTAB"
+    echo "[entrypoint] resolved cron members (FLEET_CRON_MEMBERS=${FLEET_CRON_MEMBERS:-<unset, full list>}): ${RESOLVED_CRON_MEMBERS[*]}"
     echo "[entrypoint] installed crontab (token redacted, stored separately at $TOKEN_FILE, mode 600):"
     cat "$CRONTAB"
 
