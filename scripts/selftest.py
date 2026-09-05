@@ -1233,6 +1233,94 @@ def _self_improve_score_evidence_covers_member_branch_shape():
         f"PR #214 (matched by two search terms) was not deduped: appears {prompt.count(chr(34) + 'number' + chr(34) + ': 214')}x"
 
 
+def _daily_outcomes_carries_hours_elapsed_for_partial_today():
+    """#263: `DAILY_OUTCOMES` must state how much of "today" had elapsed at generation time.
+
+    Live evidence from the 08-30 09:07 UTC run: the grader compared 08-30's partial-day count
+    (9.1h elapsed) against 08-29's full 24h count and called a real throughput INCREASE a
+    "regression", because the digest never said today was still in progress. This runs the
+    real script end-to-end (same stub pattern as
+    `_self_improve_score_evidence_covers_member_branch_shape`) against a seeded runs.jsonl with
+    one full past day and one partial "today", and checks the actual prompt the grader would
+    see -- not just that a string appears in the source.
+    """
+    import os
+    import subprocess
+
+    tmp = tempfile.mkdtemp()
+    log_dir = Path(tmp) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    fleet_repo = Path(tmp) / "fleet_repo"
+    fleet_repo.mkdir(parents=True, exist_ok=True)
+    bin_dir = Path(tmp) / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    home_dir = Path(tmp) / "home"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    capture_file = Path(tmp) / "prompt.txt"
+
+    subprocess.run(["git", "-C", str(fleet_repo), "init", "-q"], check=True)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    yesterday = now - datetime.timedelta(days=1)
+    day_start_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start_yesterday = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
+    runs = []
+    # A full past day: 12 "ok" runs spread across all 24h.
+    for h in range(0, 24, 2):
+        runs.append({"ts": (day_start_yesterday + datetime.timedelta(hours=h)).timestamp(), "status": "ok"})
+    # A partial "today": 3 "ok" runs so far, well before the current hour.
+    for h in range(0, min(3, max(now.hour, 1))):
+        runs.append({"ts": (day_start_today + datetime.timedelta(hours=h)).timestamp(), "status": "ok"})
+    runs_file = log_dir / "runs.jsonl"
+    runs_file.write_text("\n".join(json.dumps(r) for r in runs) + "\n")
+
+    gh_stub = (bin_dir / "gh")
+    gh_stub.write_text("#!/usr/bin/env python3\nprint('[]')\n")
+    gh_stub.chmod(0o755)
+
+    claude_stub = (bin_dir / "claude")
+    claude_stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, os\n"
+        "args = sys.argv[1:]\n"
+        "prompt = args[args.index('-p') + 1] if '-p' in args else ''\n"
+        f"open({str(capture_file)!r}, 'w').write(prompt)\n"
+        "print('{\"score\": 42, \"reasoning\": \"test\"}')\n"
+    )
+    claude_stub.chmod(0o755)
+
+    env = dict(os.environ)
+    env.update({
+        "FLEET_REPO": str(fleet_repo),
+        "FLEET_LOG_DIR": str(log_dir),
+        "FLEET_ENV_FILE": str(Path(tmp) / "nonexistent.env"),
+        "HOME": str(home_dir),
+        "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+    })
+    proc = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "self_improve_score.sh")],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert proc.returncode == 0, (
+        f"self_improve_score.sh failed rc={proc.returncode}\nstdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    assert capture_file.exists(), f"claude was never invoked -- stderr={proc.stderr}"
+    prompt = capture_file.read_text()
+
+    today_iso = now.date().isoformat()
+    yesterday_iso = yesterday.date().isoformat()
+    m = re.search(r'\{"' + re.escape(yesterday_iso) + r'".*?\}\}', prompt)
+    assert m, f"DAILY_OUTCOMES block not found in prompt:\n{prompt[-2000:]}"
+    daily = json.loads(m.group(0))
+    assert daily[yesterday_iso]["hours_elapsed"] == 24, \
+        f"a complete past day must carry hours_elapsed=24, got {daily[yesterday_iso]}"
+    today_hours = daily[today_iso]["hours_elapsed"]
+    assert 0 <= today_hours <= 24 and today_hours != 24, \
+        f"today's partial hours_elapsed should reflect wall-clock progress, got {daily[today_iso]}"
+    assert "hours_elapsed" in prompt.split("Run outcome counts BY DAY")[1].split("Score 1-100")[0], \
+        "grader prompt text does not mention hours_elapsed for normalizing same-day comparisons"
+
+
 def _adhoc_task_adds_to_the_charter_never_replaces_it():
     """`--task` runs a member ad-hoc with one extra instruction, charter still governing.
 
@@ -5172,6 +5260,7 @@ if __name__ == "__main__":
     check("score reasoning is not guillotined mid-word", _score_reasoning_is_not_guillotined_mid_word)
     check("self-evolution evidence covers fleet-kit's own repo, not just $FLEET_REPO", _self_evo_evidence_covers_both_repos)
     check("self_improve_score.sh's evidence catches the member/<name>-<id> branch shape", _self_improve_score_evidence_covers_member_branch_shape)
+    check("DAILY_OUTCOMES carries hours_elapsed for a partial today (#263)", _daily_outcomes_carries_hours_elapsed_for_partial_today)
     check("jefe can unstick a PR that is merely behind its base", _jefe_can_unstick_a_pr_that_is_merely_behind)
     check("jefe.md's precedent citations are repo-qualified, and the verify-before-you-cite guard is present", _jefe_precedent_citations_are_repo_qualified)
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
