@@ -23,7 +23,11 @@
 # STATE: two marker files, same shape as account_health_check.sh -- one remembers when the
 # CURRENT gap was first observed (offset != size), so a momentary gap between two 2-second
 # sync ticks can't false-page; the other remembers whether we already paged for it (and, once
-# a re-page has fired, when that was) so a 5-minute cron doesn't re-page every tick.
+# a re-page has fired, when that was) so a 5-minute cron doesn't re-page every tick. Both store
+# a raw epoch second, not a formatted string -- account_health_check.sh's own state file needs
+# a GNU/BSD `date` parser to turn its formatted timestamp back into an epoch for arithmetic;
+# storing the epoch directly here avoids needing that parser at all, and formats to
+# human-readable only when building an alert message.
 #
 # RE-PAGES on a fixed interval while the gap stays open, same fix and same reasoning as
 # account_health_check.sh's own gh#266: paging once and then going silent for the rest of a
@@ -53,6 +57,12 @@ THRESHOLD_MINUTES="${SYNC_HEALTH_THRESHOLD_MINUTES:-15}"
 REPAGE_MINUTES="${SYNC_HEALTH_REPAGE_MINUTES:-120}"
 GAP_STATE_FILE="${SYNC_HEALTH_GAP_STATE_FILE:-$LOG_DIR/.sync_health_gap_since.state}"
 PAGED_STATE_FILE="${SYNC_HEALTH_PAGED_STATE_FILE:-$LOG_DIR/.sync_health_paged.state}"
+# account_health_check.sh added this guard after a 2020-01-01 selftest fixture leaked a
+# synthetic timestamp into a real check and sent a REAL page claiming a 6.7-year outage
+# (confirmed live 2026-09-04, see that script's own header). GAP_STATE_FILE here is an
+# epoch this script itself writes, but the same class of corruption -- a stale fixture, a
+# clock jump, a hand-edited state file -- is just as possible, so the same bound applies.
+MAX_PLAUSIBLE_GAP_MINUTES="${SYNC_HEALTH_MAX_PLAUSIBLE_MINUTES:-10080}"  # 7 days
 
 [ -f "$RUNS_FILE" ] || { echo "[sync_health_check] no runs.jsonl at $RUNS_FILE yet -- nothing to check"; exit 0; }
 
@@ -83,15 +93,6 @@ _ntfy() {
   esac || echo "[alert] fleet_alert.sh failed" >&2
 }
 
-# Same GNU/BSD split account_health_check.sh's own _state_ts_epoch uses, for STATE_FILE's
-# "%Y-%m-%d %H:%M UTC" format.
-_state_ts_epoch() {
-  local ts="$1"
-  [ -z "$ts" ] && return 1
-  date -u -d "$ts" +%s 2>/dev/null \
-    || TZ=UTC date -j -f "%Y-%m-%d %H:%M %Z" "$ts" +%s 2>/dev/null
-}
-
 offset=$(FLEET_LOG_DIR="$LOG_DIR" python3 "$KIT_DIR/scripts/fleet_db.py" offset 2>/dev/null)
 if ! [[ "$offset" =~ ^[0-9]+$ ]]; then
   echo "[sync_health_check] could not read sync_state.offset (fleet_db.py offset returned '$offset') -- fleet.db may not exist yet"
@@ -104,15 +105,15 @@ if [ -z "$size" ]; then
   exit 0
 fi
 
-# PAGED_STATE_FILE's first line is the ORIGINAL page time, written once and never touched
-# again; a second line, `last_repage=<timestamp>`, is added/updated only once re-pages start
-# (same shape account_health_check.sh's gh#266 fix uses -- one state file, not a new store).
-already_paged=""
-last_repage_at=""
+# PAGED_STATE_FILE's first line is the ORIGINAL page epoch, written once and never touched
+# again; a second line, `last_repage=<epoch>`, is added/updated only once re-pages start (same
+# two-line shape account_health_check.sh's gh#266 fix uses -- one state file, not a new store).
+already_paged_epoch=""
+last_repage_epoch=""
 if [ -f "$PAGED_STATE_FILE" ]; then
   _repage_line=""
-  { read -r already_paged; read -r _repage_line; } < "$PAGED_STATE_FILE" || true
-  last_repage_at="${_repage_line#last_repage=}"
+  { read -r already_paged_epoch; read -r _repage_line; } < "$PAGED_STATE_FILE" || true
+  last_repage_epoch="${_repage_line#last_repage=}"
 fi
 
 if [ "$offset" -ge "$size" ]; then
@@ -120,9 +121,9 @@ if [ "$offset" -ge "$size" ]; then
   # self-corrects within one 2s tick, per fleet_db.sync()'s own truncation handling, so this
   # is never worth a gap timer.)
   rm -f "$GAP_STATE_FILE"
-  if [ -n "$already_paged" ]; then
+  if [ -n "$already_paged_epoch" ]; then
     _ntfy "fleet-kit: fleet.db sync recovered" \
-      "sync_state.offset is caught up with runs.jsonl again after a gap flagged at $already_paged." \
+      "sync_state.offset is caught up with runs.jsonl again after a gap flagged at $(date -u -d "@$already_paged_epoch" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || date -u -r "$already_paged_epoch" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "epoch $already_paged_epoch")." \
       "resolve"
     rm -f "$PAGED_STATE_FILE"
   fi
@@ -136,35 +137,40 @@ fi
 now_epoch=$(date +%s)
 gap_since=""
 [ -f "$GAP_STATE_FILE" ] && gap_since=$(cat "$GAP_STATE_FILE")
-if [ -z "$gap_since" ]; then
+if ! [[ "$gap_since" =~ ^[0-9]+$ ]]; then
   echo "$now_epoch" > "$GAP_STATE_FILE"
   gap_since="$now_epoch"
 fi
 
 age_minutes=$(( (now_epoch - gap_since) / 60 ))
+
+if [ "$age_minutes" -gt "$MAX_PLAUSIBLE_GAP_MINUTES" ]; then
+  echo "[sync_health_check] implausible gap age ${age_minutes}m (>${MAX_PLAUSIBLE_GAP_MINUTES}m)" \
+       "-- treating $GAP_STATE_FILE as corrupt/synthetic rather than paging; resetting it"
+  echo "$now_epoch" > "$GAP_STATE_FILE"
+  exit 0
+fi
+
 gap_bytes=$(( size - offset ))
 
-if [ "$age_minutes" -ge "$THRESHOLD_MINUTES" ] && [ -z "$already_paged" ]; then
-  paged_at="$(date -u '+%Y-%m-%d %H:%M UTC')"
+if [ "$age_minutes" -ge "$THRESHOLD_MINUTES" ] && [ -z "$already_paged_epoch" ]; then
   _ntfy "🚨 fleet-kit: fleet.db sync stalled" \
-    "sync_state.offset ($offset) has trailed runs.jsonl's size ($size, gap ${gap_bytes} bytes) for ${age_minutes}+ minutes (threshold ${THRESHOLD_MINUTES}m). tail_runs_forever likely died -- nerd/gru/dumbledore are all reading a silently-truncated fleet.db. Check fleet_view.log for a logged exception and restart fleet_view_server.py." \
+    "sync_state.offset ($offset) has trailed runs.jsonl's size ($size, gap ${gap_bytes} bytes) for ${age_minutes}+ minutes (threshold ${THRESHOLD_MINUTES}m). tail_runs_forever has likely either died or is stuck retrying the same failing sync tick -- nerd/gru/dumbledore are all reading a silently-truncated fleet.db. Check fleet_view.log: a single repeating traceback means restarting fleet_view_server.py alone won't fix it (the same record will fail again); no recent traceback there means the thread is simply dead and a restart is enough." \
     "urgent"
-  echo "$paged_at" > "$PAGED_STATE_FILE"
+  echo "$now_epoch" > "$PAGED_STATE_FILE"
   echo "[sync_health_check] PAGED -- gap has persisted ${age_minutes}m (offset=$offset size=$size)"
-elif [ "$age_minutes" -ge "$THRESHOLD_MINUTES" ] && [ -n "$already_paged" ]; then
+elif [ "$age_minutes" -ge "$THRESHOLD_MINUTES" ] && [ -n "$already_paged_epoch" ]; then
   # Gap still open and already paged once -- re-page every REPAGE_MINUTES instead of staying
   # silent for the rest of the outage (gh#266's fix, mirrored here).
-  reference_at="${last_repage_at:-$already_paged}"
-  reference_epoch=$(_state_ts_epoch "$reference_at")
+  reference_epoch="${last_repage_epoch:-$already_paged_epoch}"
   since_last_page_minutes=999999
-  [ -n "$reference_epoch" ] && since_last_page_minutes=$(( (now_epoch - reference_epoch) / 60 ))
+  [[ "$reference_epoch" =~ ^[0-9]+$ ]] && since_last_page_minutes=$(( (now_epoch - reference_epoch) / 60 ))
 
   if [ "$since_last_page_minutes" -ge "$REPAGE_MINUTES" ]; then
-    repaged_at="$(date -u '+%Y-%m-%d %H:%M UTC')"
     _ntfy "🚨🚨 fleet-kit: fleet.db sync STILL stalled (re-page)" \
-      "Still stalled, ${age_minutes}m since the gap opened -- sync_state.offset ($offset) trails runs.jsonl's size ($size, gap ${gap_bytes} bytes). tail_runs_forever likely died. Check fleet_view.log and restart fleet_view_server.py." \
+      "Still stalled, ${age_minutes}m since the gap opened -- sync_state.offset ($offset) trails runs.jsonl's size ($size, gap ${gap_bytes} bytes). Check fleet_view.log for a repeating traceback before assuming a plain restart will fix it." \
       "repage"
-    printf '%s\nlast_repage=%s\n' "$already_paged" "$repaged_at" > "$PAGED_STATE_FILE"
+    printf '%s\nlast_repage=%s\n' "$already_paged_epoch" "$now_epoch" > "$PAGED_STATE_FILE"
     echo "[sync_health_check] RE-PAGED -- gap still open (${age_minutes}m), next re-page in ${REPAGE_MINUTES}m"
   else
     echo "[sync_health_check] gap open ${age_minutes}m (threshold ${THRESHOLD_MINUTES}m, offset=$offset size=$size), already paged (next re-page in $(( REPAGE_MINUTES - since_last_page_minutes ))m)"
