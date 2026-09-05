@@ -332,6 +332,16 @@ case "${1:-cron-foreground}" in
       echo "24 * * * * root export PUBLIC_PATH_URL=${PUBLIC_PATH_URL:-} STATE_FILE=$LOG_DIR/.path_health_paged.state && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; bash /fleet-kit/scripts/path_health_check.sh >> $LOG_DIR/path_health_check.log 2>&1"
     } > "$CRONTAB"
     chmod 0644 "$CRONTAB"
+    # Validate BEFORE cron ever reads this file (2026-09-05, gh#4340). Vixie cron rejects the
+    # ENTIRE file when one time field is out of range -- it does not skip the bad line. On
+    # 2026-09-03 `FLEET_GRU_CADENCE=0,30` (meant as "every 30 minutes", but this dial feeds the
+    # HOUR field) rendered `3 0,30 * * *`; hour 30 is out of range, so all 18 fleet jobs went
+    # silent at once for ~40h while `cron -f` sat there looking perfectly healthy and the
+    # watchdog restarted it 500+ times against a file cron was never going to load.
+    # --fix comments out only the offending line, so one bad dial costs one job, not the fleet.
+    if ! python3 /fleet-kit/scripts/validate_crontab.py "$CRONTAB" --fix; then
+      echo "[entrypoint] CRITICAL: crontab failed validation and could not be repaired" >&2
+    fi
     echo "[entrypoint] resolved cron members (FLEET_CRON_MEMBERS=${FLEET_CRON_MEMBERS:-<unset, full list>}): ${RESOLVED_CRON_MEMBERS[*]}"
     echo "[entrypoint] installed crontab (token redacted, stored separately at $TOKEN_FILE, mode 600):"
     cat "$CRONTAB"
