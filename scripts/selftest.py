@@ -4430,6 +4430,68 @@ def _fleet_kpi_marie_catches_her_real_triage_verb_vocabulary():
     ) == (2, "PRs reviewed")
 
 
+def _fleet_kpi_marie_ignores_explicit_zero_counted_verb_gh409():
+    """gh#409: the verb-anchored `_MARIE_PATTERNS` entry (shipped for gh#351) had no check for
+    a leading explicit `0` before its own verb, so a QUIET pass's own zero-count boilerplate --
+    "0 claims cleared (gh#98 self-resolved via merged PR#404)" -- got credited as real triage
+    just because a `#NNNN` reference happened to follow in the same clause, named for context
+    rather than as a counted action. Confirmed live against fleet.db: 5/60 (~8%) of marie's
+    counted runs were spurious-credit this way.
+
+    Samples below are the five flagged live outcome strings (fleet.db runs.jsonl,
+    ts=1788384904/1788406720/1788421165/1788518142/1788593826), plus the issue's own two named
+    genuine-nonzero counter-examples that must keep counting.
+    """
+    import fleet_kpi
+
+    zero_credit_samples = [
+        "Re-verified fleet-kit's open backlog (#5-#311, 62 issues) is fully clean — 0 claims "
+        "cleared, 0 cruft closed, 0 label gaps, 0 PRDs owed — via diff-since-20:3xUTC-pass "
+        "(PR #312, issues #160/#151), memory updated at "
+        "project_fleet_kit_backlog_pristine_20260902.md",
+        "Reviewed all 63 open fleet-kit issues (#17–#318) — 0 stale claims cleared (0 "
+        "existed), 0 cruft closed (35 issues #220–#318 freshly evidence-checked, all "
+        "correctly still open), 0 priority/complexity/backlog label gaps found or fixed, 0 new "
+        "PRDs needed (all 25 high-priority issues already have one).",
+        "Reviewed all 65 open fleet-kit issues (#17-#326) for stale claims and cruft — 0 claims "
+        "cleared, 0 cruft closed (all confirmed still-live via grep/git-log/PR-search "
+        "evidence), 1 missing priority-comment added (#326, "
+        "https://github.com/The-Good-Project-Team/fleet-kit/issues/326#issuecomment-552228377",
+        "QUIET — verified fleet-kit backlog (92 open issues, #17-#376) is fully triaged: 0 "
+        "stale claims, 0 cruft closes needed (issue #360 auto-closed correctly via PR#377), 0 "
+        "label gaps of any kind, 0 PRDs owed.",
+        "fleet-kit backlog pass 2026-09-05 ~07:20 UTC — 0 claims cleared (gh#98 self-resolved "
+        "via merged PR#404), 0 cruft closed after depth-verifying #254-#293 (16 issues), 0 "
+        "label gaps found across all 97 open issues (#17-#405), resume point for next pass is "
+        "#308.",
+    ]
+    for outcome in zero_credit_samples:
+        got = fleet_kpi.extract_kpi("marie", outcome)
+        assert got is None or got[0] == 0, (
+            f"gh#409 regression: expected no positive credit, got {got!r} for {outcome!r}"
+        )
+
+    # genuine nonzero triage in the same run must still count -- the issue's own two named
+    # counter-examples.
+    assert fleet_kpi.extract_kpi("marie", "#368/#369 labeled") is None  # no recognized verb form
+    assert fleet_kpi.extract_kpi("marie", "labeled #368/#369") == (1, "issues triaged")
+    assert fleet_kpi.extract_kpi("marie", "Ranked and PRD'd #405") == (1, "issues triaged")
+
+    # the original verb phrasings this pattern was first built for must still match.
+    assert fleet_kpi.extract_kpi(
+        "marie", "Cleared stale fleet:claimed on #2075 and #2759"
+    ) == (1, "issues triaged")
+    assert fleet_kpi.extract_kpi("marie", "Closed #2217 as cruft") == (1, "issues triaged")
+
+    # other members' patterns are untouched by this change.
+    assert fleet_kpi.extract_kpi(
+        "roomba", "Worktree sweep clean (5 evaluated/0 removed)"
+    ) == (5, "worktrees evaluated")
+    assert fleet_kpi.extract_kpi(
+        "judge-judy", "approved PR #4250 and blocked PR #4200"
+    ) == (2, "PRs reviewed")
+
+
 def _fleet_kpi_gru_jefe_minion_ship_a_real_prs_shipped_count():
     """gh#230: `_KPI_TABLE` omitted gru/jefe/minion entirely, so `/api/kpi` returned a null
     total for the fleet's own build-orchestration chain even though their outcome text is
@@ -6412,6 +6474,7 @@ if __name__ == "__main__":
     check("lane_kpi is append-only and distinguishes missing from stale", _lane_kpi_is_append_only_and_distinguishes_missing_from_stale)
     check("fleet_kpi's roomba pattern catches all three real 'evaluated' phrasings", _fleet_kpi_roomba_catches_all_three_real_evaluated_phrasings)
     check("fleet_kpi's marie pattern catches her real triage verb vocabulary", _fleet_kpi_marie_catches_her_real_triage_verb_vocabulary)
+    check("fleet_kpi's marie pattern ignores an explicit-zero-counted verb (gh#409)", _fleet_kpi_marie_ignores_explicit_zero_counted_verb_gh409)
     check("fleet_kpi's gru/jefe/minion ship a real 'PRs shipped' count", _fleet_kpi_gru_jefe_minion_ship_a_real_prs_shipped_count)
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
