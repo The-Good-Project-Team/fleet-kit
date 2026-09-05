@@ -107,7 +107,15 @@ case "${1:-cron-foreground}" in
       echo "PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
       echo "HOME=/root"
       echo
-      echo "*/10 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && cd $FLEET_REPO && git pull --ff-only >> $LOG_DIR/gitpull.log 2>&1"
+      # Canary must record that cron FIRED, independent of whether git had anything to say
+      # (2026-09-04, gh#4340): the old form only touched gitpull.log when git printed output,
+      # so a pull that died early -- e.g. `fatal: Cannot fast-forward to multiple branches.`
+      # after a member left branch.main.merge pointing at a deleted member/* branch -- left the
+      # canary untouched for hours. The watchdog below read that as "cron not firing" and
+      # kill -9'd cron every 5 minutes, killing in-flight member runs with it. `date -u` first,
+      # unconditionally, so the canary means "cron fired"; explicit `origin main` so a dirty
+      # branch.main.merge cannot wedge the pull in the first place.
+      echo "*/10 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE); date -u >> $LOG_DIR/gitpull.log 2>&1; cd $FLEET_REPO && git pull --ff-only origin main >> $LOG_DIR/gitpull.log 2>&1"
       # Backstop poll widened */2 -> hourly (2026-08-22, Reif: "don't want to see it crying so
       # much, costs 20 cents a run") -- every tick spawns a real claude -p turn even on green
       # (check.sh gates the reasoning depth, not the LLM spin-up cost itself), and the webhook
@@ -279,16 +287,23 @@ case "${1:-cron-foreground}" in
     # that cron is actually firing. This loop is that external signal's consumer: if the
     # canary goes stale well past its own 10-minute cadence, restart cron rather than trust a
     # human to notice the whole fleet went quiet.
+    # Every watchdog line is tagged with this container's own hostname (= container id short
+    # form) (2026-09-04, gh#4340): a blue-green deploy left `philanthropy-green`'s entrypoint
+    # alive for 9 days after podman had forgotten the container, still bind-mounted to the LIVE
+    # instance's logs + repo. Because pids are host-global under rootless podman, its watchdog's
+    # `kill -9 $CRON_PID` killed the RUNNING container's cron. Untagged log lines made that
+    # look like one flapping watchdog instead of two fighting.
+    WATCHDOG_TAG="${HOSTNAME:-unknown}"
     cron -f &
     CRON_PID=$!
-    echo "[entrypoint] cron started (pid $CRON_PID)"
+    echo "[entrypoint] cron started (pid $CRON_PID, watchdog $WATCHDOG_TAG)"
     CANARY="$LOG_DIR/gitpull.log"
     STALL_THRESHOLD_S="${FLEET_CRON_STALL_THRESHOLD_S:-1800}"
     WATCHDOG_LOG="$LOG_DIR/cron_watchdog.log"
     while true; do
       sleep 300
       if ! kill -0 "$CRON_PID" 2>/dev/null; then
-        echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] cron pid $CRON_PID gone -- restarting" \
+        echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] [$WATCHDOG_TAG] cron pid $CRON_PID gone -- restarting" \
           | tee -a "$WATCHDOG_LOG"
         cron -f &
         CRON_PID=$!
@@ -297,13 +312,22 @@ case "${1:-cron-foreground}" in
       if [ -f "$CANARY" ]; then
         age=$(( $(date +%s) - $(stat -c %Y "$CANARY") ))
         if [ "$age" -gt "$STALL_THRESHOLD_S" ]; then
-          echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] CRITICAL: $CANARY stale ${age}s (> ${STALL_THRESHOLD_S}s) -- cron pid $CRON_PID alive but not firing jobs, restarting it" \
+          echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] [$WATCHDOG_TAG] CRITICAL: $CANARY stale ${age}s (> ${STALL_THRESHOLD_S}s) -- cron pid $CRON_PID alive but not firing jobs, restarting it" \
             | tee -a "$WATCHDOG_LOG"
-          kill -9 "$CRON_PID" 2>/dev/null || true
-          wait "$CRON_PID" 2>/dev/null || true
+          # Only ever kill a cron that is genuinely our own child. Guards against the
+          # orphaned-watchdog case above, where $CRON_PID may name a pid belonging to a
+          # different (live) container after the original exited and the pid was reused.
+          if [ "$(ps -o ppid= -p "$CRON_PID" 2>/dev/null | tr -d ' ')" = "$$" ]; then
+            kill -9 "$CRON_PID" 2>/dev/null || true
+            wait "$CRON_PID" 2>/dev/null || true
+          else
+            echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] [$WATCHDOG_TAG] refusing to kill pid $CRON_PID -- not our child (orphan watchdog?); exiting" \
+              | tee -a "$WATCHDOG_LOG"
+            exit 0
+          fi
           cron -f &
           CRON_PID=$!
-          echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] cron restarted (pid $CRON_PID)" \
+          echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] [$WATCHDOG_TAG] cron restarted (pid $CRON_PID)" \
             | tee -a "$WATCHDOG_LOG"
         fi
       fi
