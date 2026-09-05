@@ -115,7 +115,10 @@ _REPORT_RE = re.compile(
 
 # An outcome must name something a human can open. "I looked at the dashboard" is not an
 # outcome; "#2771" is. This is the same bar the board already applies to a Vision score.
-_ARTIFACT = re.compile(r"(#\d+|https?://\S+|[\w./-]+\.\w+:\d+)")
+# gh#251: a path/PID/SHA has no GitHub-artifact shape of its own, but this fleet's own
+# convention for "this is the concrete thing" is to wrap it in backticks -- so a non-empty
+# backtick span counts too. A bare `` `` `` (nothing inside) still does not.
+_ARTIFACT = re.compile(r"(#\d+|https?://\S+|[\w./-]+\.\w+:\d+|`[^`]+`)")
 
 STATUS_OK = "ok"
 STATUS_QUIET = "quiet"
