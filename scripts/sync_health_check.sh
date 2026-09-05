@@ -22,8 +22,14 @@
 #
 # STATE: two marker files, same shape as account_health_check.sh -- one remembers when the
 # CURRENT gap was first observed (offset != size), so a momentary gap between two 2-second
-# sync ticks can't false-page; the other remembers whether we already paged for it, so a
-# 5-minute cron doesn't re-page every tick. One page per outage, one recovery notice after.
+# sync ticks can't false-page; the other remembers whether we already paged for it (and, once
+# a re-page has fired, when that was) so a 5-minute cron doesn't re-page every tick.
+#
+# RE-PAGES on a fixed interval while the gap stays open, same fix and same reasoning as
+# account_health_check.sh's own gh#266: paging once and then going silent for the rest of a
+# multi-hour outage is indistinguishable from a dead pager at a glance. SYNC_HEALTH_REPAGE_MINUTES
+# defaults to 120, matching ACCOUNT_HEALTH_REPAGE_MINUTES's own default -- no data in this repo
+# argues for this class of pager needing a different cadence.
 #
 # THRESHOLD: UNKNOWN per this issue's own PRD comment -- "the staleness threshold (minutes)
 # before paging" is an open question marie flagged as unresolved from the repo (the sync loop
@@ -44,6 +50,7 @@ LOG_DIR="${FLEET_LOG_DIR:?set FLEET_LOG_DIR -- same dir fleet_view_server.py wri
 RUNS_FILE="$LOG_DIR/runs.jsonl"
 NTFY_TOPIC="${NTFY_TOPIC:-}"   # optional: fleet_alert.sh emails regardless
 THRESHOLD_MINUTES="${SYNC_HEALTH_THRESHOLD_MINUTES:-15}"
+REPAGE_MINUTES="${SYNC_HEALTH_REPAGE_MINUTES:-120}"
 GAP_STATE_FILE="${SYNC_HEALTH_GAP_STATE_FILE:-$LOG_DIR/.sync_health_gap_since.state}"
 PAGED_STATE_FILE="${SYNC_HEALTH_PAGED_STATE_FILE:-$LOG_DIR/.sync_health_paged.state}"
 
@@ -63,10 +70,26 @@ _ntfy() {
   case "$mode" in
     resolve)
       bash "$KIT_DIR/scripts/fleet_alert.sh" --resolve --check sync_health "$title" "$msg" ;;
+    repage)
+      # Bypasses alert_store's --check/--severity gate on purpose, same as
+      # account_health_check.sh's own "repage" mode: the FIRST page already recorded this
+      # (check, problem) key as an open critical, and alert_store's own dedupe would silently
+      # suppress every later call for that key until it resolves -- which is exactly the
+      # silent-for-the-rest-of-the-outage bug gh#266 fixed for account_health_check.sh.
+      bash "$KIT_DIR/scripts/fleet_alert.sh" "$title" "$msg" ;;
     *)
       bash "$KIT_DIR/scripts/fleet_alert.sh" \
         --check sync_health --problem offset_gap --severity critical "$title" "$msg" ;;
   esac || echo "[alert] fleet_alert.sh failed" >&2
+}
+
+# Same GNU/BSD split account_health_check.sh's own _state_ts_epoch uses, for STATE_FILE's
+# "%Y-%m-%d %H:%M UTC" format.
+_state_ts_epoch() {
+  local ts="$1"
+  [ -z "$ts" ] && return 1
+  date -u -d "$ts" +%s 2>/dev/null \
+    || TZ=UTC date -j -f "%Y-%m-%d %H:%M %Z" "$ts" +%s 2>/dev/null
 }
 
 offset=$(FLEET_LOG_DIR="$LOG_DIR" python3 "$KIT_DIR/scripts/fleet_db.py" offset 2>/dev/null)
@@ -81,8 +104,16 @@ if [ -z "$size" ]; then
   exit 0
 fi
 
+# PAGED_STATE_FILE's first line is the ORIGINAL page time, written once and never touched
+# again; a second line, `last_repage=<timestamp>`, is added/updated only once re-pages start
+# (same shape account_health_check.sh's gh#266 fix uses -- one state file, not a new store).
 already_paged=""
-[ -f "$PAGED_STATE_FILE" ] && already_paged=$(cat "$PAGED_STATE_FILE")
+last_repage_at=""
+if [ -f "$PAGED_STATE_FILE" ]; then
+  _repage_line=""
+  { read -r already_paged; read -r _repage_line; } < "$PAGED_STATE_FILE" || true
+  last_repage_at="${_repage_line#last_repage=}"
+fi
 
 if [ "$offset" -ge "$size" ]; then
   # Caught up. (offset > size only across a rotation the sync loop hasn't noticed yet --
@@ -111,15 +142,33 @@ if [ -z "$gap_since" ]; then
 fi
 
 age_minutes=$(( (now_epoch - gap_since) / 60 ))
+gap_bytes=$(( size - offset ))
 
 if [ "$age_minutes" -ge "$THRESHOLD_MINUTES" ] && [ -z "$already_paged" ]; then
   paged_at="$(date -u '+%Y-%m-%d %H:%M UTC')"
-  gap_bytes=$(( size - offset ))
   _ntfy "🚨 fleet-kit: fleet.db sync stalled" \
     "sync_state.offset ($offset) has trailed runs.jsonl's size ($size, gap ${gap_bytes} bytes) for ${age_minutes}+ minutes (threshold ${THRESHOLD_MINUTES}m). tail_runs_forever likely died -- nerd/gru/dumbledore are all reading a silently-truncated fleet.db. Check fleet_view.log for a logged exception and restart fleet_view_server.py." \
     "urgent"
   echo "$paged_at" > "$PAGED_STATE_FILE"
   echo "[sync_health_check] PAGED -- gap has persisted ${age_minutes}m (offset=$offset size=$size)"
+elif [ "$age_minutes" -ge "$THRESHOLD_MINUTES" ] && [ -n "$already_paged" ]; then
+  # Gap still open and already paged once -- re-page every REPAGE_MINUTES instead of staying
+  # silent for the rest of the outage (gh#266's fix, mirrored here).
+  reference_at="${last_repage_at:-$already_paged}"
+  reference_epoch=$(_state_ts_epoch "$reference_at")
+  since_last_page_minutes=999999
+  [ -n "$reference_epoch" ] && since_last_page_minutes=$(( (now_epoch - reference_epoch) / 60 ))
+
+  if [ "$since_last_page_minutes" -ge "$REPAGE_MINUTES" ]; then
+    repaged_at="$(date -u '+%Y-%m-%d %H:%M UTC')"
+    _ntfy "🚨🚨 fleet-kit: fleet.db sync STILL stalled (re-page)" \
+      "Still stalled, ${age_minutes}m since the gap opened -- sync_state.offset ($offset) trails runs.jsonl's size ($size, gap ${gap_bytes} bytes). tail_runs_forever likely died. Check fleet_view.log and restart fleet_view_server.py." \
+      "repage"
+    printf '%s\nlast_repage=%s\n' "$already_paged" "$repaged_at" > "$PAGED_STATE_FILE"
+    echo "[sync_health_check] RE-PAGED -- gap still open (${age_minutes}m), next re-page in ${REPAGE_MINUTES}m"
+  else
+    echo "[sync_health_check] gap open ${age_minutes}m (threshold ${THRESHOLD_MINUTES}m, offset=$offset size=$size), already paged (next re-page in $(( REPAGE_MINUTES - since_last_page_minutes ))m)"
+  fi
 else
-  echo "[sync_health_check] gap open ${age_minutes}m (threshold ${THRESHOLD_MINUTES}m, offset=$offset size=$size), or already paged"
+  echo "[sync_health_check] gap open ${age_minutes}m (threshold ${THRESHOLD_MINUTES}m, offset=$offset size=$size)"
 fi
