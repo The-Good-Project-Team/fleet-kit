@@ -1682,6 +1682,106 @@ def _status_page_deploy_component_classifies_stale_as_down():
             _il.reload(status_data)
 
 
+def _status_data_members_reads_fleet_db_with_no_podman_on_path():
+    """gh#364: status_data.py's own server (fleet_view_server.py, started by entrypoint.sh)
+    runs INSIDE the container that owns fleet.db, so the old `_sqlite()` shelled out to
+    `podman exec <container> sqlite3 ...` from a vantage point that never has a `podman`
+    binary reachable -- the resulting FileNotFoundError was swallowed by a bare `except
+    Exception: return ""`, so `members()` silently returned [] and the /status page's entire
+    'Fleet members' card never rendered, with no visual trace it was missing.
+
+    RED against the old code: with no `podman` on $PATH (this container's real topology),
+    `_sqlite()` returns "" regardless of what fleet.db holds, so `members(72)` returns [].
+    GREEN after the fix: a direct in-process `sqlite3.connect()` needs no subprocess, no
+    `podman`, and no container boundary at all -- it reads the real rows.
+    """
+    import importlib as _il
+    import os as _os
+    import sqlite3 as _sqlite3
+    import sys as _sys
+    import time as _time
+
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    import status_data
+
+    old_db = _os.environ.get("FLEET_DB")
+    old_path = _os.environ.get("PATH")
+    with tempfile.TemporaryDirectory() as td:
+        db_path = str(Path(td) / "fleet.db")
+        conn = _sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE runs (run_id TEXT, member TEXT, status TEXT, "
+            "recorded_at REAL, cost_usd REAL)")
+        conn.execute(
+            "INSERT INTO runs VALUES (?,?,?,?,?)",
+            ("r1", "minion", "ok", _time.time(), 0.5))
+        conn.commit()
+        conn.close()
+
+        _os.environ["FLEET_DB"] = db_path
+        # The real topology this bug reproduces: no podman binary reachable from in here.
+        _os.environ["PATH"] = td
+        try:
+            _il.reload(status_data)
+            rows = status_data.members(72)
+            assert rows, (
+                "members(72) returned [] against a fleet.db with a real recent row and no "
+                "podman on $PATH -- the Fleet members card would render as if the fleet "
+                "were empty")
+            assert rows[0]["name"] == "minion", f"unexpected row shape: {rows!r}"
+        finally:
+            if old_db is None:
+                _os.environ.pop("FLEET_DB", None)
+            else:
+                _os.environ["FLEET_DB"] = old_db
+            if old_path is None:
+                _os.environ.pop("PATH", None)
+            else:
+                _os.environ["PATH"] = old_path
+            _il.reload(status_data)
+
+
+def _status_data_other_components_unaffected_by_members_fix():
+    """gh#364 AC5: the fix to `_sqlite()`/`members()` must not touch the other four /status
+    components (Account pool, Public path, Tunnel, Budget meter) -- they read log files
+    directly and are unrelated to fleet.db. Pins that COMPONENTS is unchanged in shape and
+    that read_component() still classifies a plain healthy line as OK, for a fixed fixture.
+    """
+    import importlib as _il
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    import status_data
+
+    labels = [label for label, _names, _desc in status_data.COMPONENTS]
+    assert labels == [
+        "Account pool", "Public path", "Tunnel", "Budget meter (tgp)",
+        "Budget meter (gmail)", "Deploy",
+    ], f"COMPONENTS list drifted: {labels!r}"
+
+    old = _os.environ.get("FLEET_LOG_DIR")
+    with tempfile.TemporaryDirectory() as td:
+        _os.environ["FLEET_LOG_DIR"] = td
+        try:
+            _il.reload(status_data)
+            # Real line shape from account_health_check.sh's own healthy branch -- no
+            # timestamp in the bracket, lowercase "healthy" right after it.
+            (Path(td) / "account_health_check.cron.log").write_text(
+                "[account_health_check] healthy -- newest pool-log line is not a failure\n")
+            names = next(n for label, n, _d in status_data.COMPONENTS
+                         if label == "Account pool")
+            cells, pct = status_data.read_component(names)
+            assert cells[-1] == status_data.OK, (
+                f"Account pool must still classify a healthy line as ok, got {cells[-1]!r}")
+        finally:
+            if old is None:
+                _os.environ.pop("FLEET_LOG_DIR", None)
+            else:
+                _os.environ["FLEET_LOG_DIR"] = old
+            _il.reload(status_data)
+
+
 def _status_page_banner_distinguishes_unknown_from_good():
     """gh#358: status_page.py computed the banner box's class as a 2-way `bad`/`good` boolean
     (`bad = overall == "down"`), so an `unknown` overall -- the state that fires right now with
@@ -5705,6 +5805,8 @@ if __name__ == "__main__":
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
     check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
+    check("status_data.members() reads fleet.db in-process, no podman on $PATH needed (gh#364)", _status_data_members_reads_fleet_db_with_no_podman_on_path)
+    check("status_data's other four components are unaffected by the members() fix (gh#364)", _status_data_other_components_unaffected_by_members_fix)
     check("status page banner distinguishes unknown from good and bad (gh#358)", _status_page_banner_distinguishes_unknown_from_good)
 
     for n in ok:
