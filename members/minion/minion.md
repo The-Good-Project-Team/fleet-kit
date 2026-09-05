@@ -110,29 +110,33 @@ claimed for generations was simply wrong, and told every minion it had never onc
    stale and reverting someone else's work — merge the default branch and re-check.
 7. **Open a PR**, referencing your issue number in the body.
 8. **Review your own diff** before pushing, if you have a review tool available.
-9. **Arm auto-merge, always.** `gh pr merge --auto --squash` before you finish — this fleet
-   merges on green gates with no human or orchestrator in the loop by design: GitHub's own
-   auto-merge waits for every required check (CI, the reviewer's status), then merges itself
-   the moment they're all green. You do not merge directly (a check might still be running),
-   and you do not wait for a human to drive it through — arming auto-merge IS finishing the
-   job.
+9. **Arm auto-merge, always**, before you finish — this fleet merges on green gates with no
+   human or orchestrator in the loop by design: GitHub's own auto-merge waits for every
+   required check (CI, the reviewer's status), then merges itself the moment they're all
+   green. You do not merge directly (a check might still be running), and you do not wait for
+   a human to drive it through — arming auto-merge IS finishing the job.
 
-   **Always pass `--squash` explicitly here — do NOT omit it.** fleet-kit's own repo is NOT
-   merge-queue-controlled: `gh api repos/The-Good-Project-Team/fleet-kit/branches/main/protection`
-   shows a plain `required_status_checks` list (`selftest`, `fleet-code-review`) with
-   `strict: true`, no ruleset carries a `merge_queue` rule, and
-   `.../fleet-kit/merge-queue` 404s (all reconfirmed live 2026-09-05). A bare
-   `gh pr merge --auto` with no strategy flag ERRORS outright here —
-   `--merge, --rebase, or --squash required when not running interactively` — it does NOT fall
-   through to a queue path, because there is no queue on this repo. This has cost a wasted
-   tool call on nearly every minion pass since 2026-08-28 (confirmed recurring through
-   2026-09-05, PRs #406/#407/#413/#414/#416/#417 today alone) because an earlier version of
-   this section assumed a merge-queue-controlled `main` — a real, useful pattern, but one
-   borrowed from a DIFFERENT (downstream, product) repo's history, not this repo's own live
-   state. If a downstream product repo you're ever pointed at DOES carry a `merge_queue` rule,
-   the no-strategy-flag form is correct there instead — check that repo's own ruleset detail
-   before assuming either shape. CHECK THE EXIT CODE regardless of shape — a non-zero exit here
-   is not a quiet detail; say so in your report the same way you would any other failed step.
+   **Check whether your target repo's `main` is queue-controlled before picking a strategy
+   flag — a hardcoded guess has broken real PRs both ways, in both directions.** A bare arm
+   with no strategy flag ERRORS outright on a repo with no queue
+   (`--merge, --rebase, or --squash required when not running interactively`) — confirmed live
+   on fleet-kit's own repo (`gh api repos/The-Good-Project-Team/fleet-kit/branches/main/protection`,
+   reconfirmed 2026-09-05: a plain `required_status_checks` list on `selftest` and
+   `fleet-code-review` with `strict: true`, no ruleset carries a `merge_queue` rule, and
+   `.../fleet-kit/merge-queue` 404s), which cost a wasted retry on nearly every minion pass
+   here since 2026-08-28 (PRs #406/#407/#413/#414/#416/#417 in one day alone) — an explicit
+   strategy flag there instead is the correct fast path. But on a repo where `main` genuinely
+   IS queue-controlled (confirmed live on nonprofit-atlas, issue #3108), that same explicit
+   flag is an invalid combination and gh ERRORS instead of enqueueing (`! The merge strategy
+   for main is set by the merge queue`) — there, the bare form is correct, letting `gh` pick
+   the queue path itself. If you don't already know your target repo's shape, check once
+   (`gh api repos/<owner>/<repo>/rulesets` for a `merge_queue` rule, or
+   `gh api repos/<owner>/<repo>/merge-queue` for a non-404) rather than assuming either one.
+   CHECK THE EXIT CODE regardless of shape — issue #3108's root cause was this exact command
+   failing silently, with the failure never mentioned in the final report, leaving
+   fully-green PRs stuck for hours with no human or orchestrator any the wiser. A non-zero
+   exit here is not a quiet detail; say so in your report the same way you would any other
+   failed step.
 10. **Systemic-failure rule**: if a gate fails you with the SAME error line other open PRs are
     also showing (check 2-3 sibling PRs' statuses), that's a broken GATE, not a broken PR.
     Say so in one line of your PR body ("gate <name> failing identically on #N #M —
