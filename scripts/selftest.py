@@ -5130,8 +5130,8 @@ def _sync_health_check_repages_on_a_fixed_interval():
     """Mirrors account_health_check.sh's own gh#266 fix (see
     _account_health_check_repages_on_a_fixed_interval_gh266 below): a long-lived sync-loop
     outage must not page once and then go silent for the rest of it. Exercises PAGED_STATE_FILE
-    directly (no need to re-derive an old gap through the full first-page flow) with its
-    `last_repage=` line already older, or younger, than SYNC_HEALTH_REPAGE_MINUTES.
+    directly (no need to re-derive an old gap through the full first-page flow) with its own
+    (raw-epoch) first line already older, or younger, than SYNC_HEALTH_REPAGE_MINUTES.
     """
     import subprocess
     script_path = ROOT / "scripts" / "sync_health_check.sh"
@@ -5158,9 +5158,8 @@ def _sync_health_check_repages_on_a_fixed_interval():
             old_gap_epoch = int(datetime.datetime.now().timestamp()) - 20 * 60
             (log_dir / ".sync_health_gap_since.state").write_text(str(old_gap_epoch))
 
-            paged_at = (datetime.datetime.now() - datetime.timedelta(minutes=paged_minutes_ago)
-                        ).strftime("%Y-%m-%d %H:%M UTC")
-            (log_dir / ".sync_health_paged.state").write_text(paged_at + "\n")
+            paged_epoch = int(datetime.datetime.now().timestamp()) - paged_minutes_ago * 60
+            (log_dir / ".sync_health_paged.state").write_text(str(paged_epoch) + "\n")
 
             env = {
                 "FLEET_LOG_DIR": str(log_dir),

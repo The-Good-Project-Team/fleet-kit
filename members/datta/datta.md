@@ -73,6 +73,37 @@ Do not pick lanes by intuition. Score each lane on three signals and rank worst-
   existed; it is now populated straight from the `--task "lane=<lane> — ..."` prefix you write
   in step 3, no regex needed.
 
+  **Before scoring UNEXAMINED, check for a structural-N/A streak (gh#339).** A lane gh#143
+  already proved has no lane-specific surface in the current `FLEET_REPO` otherwise keeps
+  winning worst-first purely on staleness, dispatching a nerd pass that cannot produce a lane
+  finding (gh#339's own evidence: 47 of 76 lane-tagged passes, 62%, landed on one of five
+  such lanes in one 44h window). For each lane, before ranking it, read its last 3 nerd runs:
+
+  ```
+  SELECT outcome, self_critique FROM runs WHERE member='nerd' AND lane='<lane>'
+    ORDER BY recorded_at DESC LIMIT 3
+  ```
+
+  If fewer than 3 rows exist for that lane, or the 3 are not unanimous, score its UNEXAMINED
+  exactly as above — the down-rank never fires as a default or on partial evidence. If all 3
+  rows' `outcome`, trimmed, starts with the literal marker `STRUCTURAL-N/A` — a fixed prefix
+  nerd.md's own N/A path is required to emit, never a keyword scan of free-text
+  `outcome`/`self_critique` (the same fragility this section already rejected for lane
+  attribution above) — treat that lane's UNEXAMINED as reset to 0 hours this pass instead of
+  letting pure staleness win it a dispatch. The moment a later pass's 3-row window is no
+  longer unanimous (one fresh non-`STRUCTURAL-N/A` row breaks the streak), the lane returns to
+  normal UNEXAMINED scoring on the very next datta pass automatically — no separate reset step.
+
+  **UNKNOWN, not resolved by this pass — do not loosen this to make it fire sooner.** Checked
+  `fleet.db`'s `runs.outcome`/`self_critique` for every recent growth/revenue/searchquality/ui/
+  datadog row (2026-09-05): zero rows anywhere emit `STRUCTURAL-N/A` today — real N/A passes
+  currently write inconsistent free text (`"growth lane KPI is N/A ..."`,
+  `"QUIET — ... no ... surface exists"`). gh#339's own filing flags the exact literal nerd.md
+  should emit as UNKNOWN pending coordination with whoever picks up gh#143. This rule is
+  written to activate the moment nerd.md's N/A path adopts that marker (out of this pass's
+  scope to add — that is a lane-checklist change, gh#143's, not this file's) and to correctly
+  never fire before then, rather than mis-firing on today's inconsistent free text.
+
 **Spawning fewer nerds than lanes is the normal case, not a failure.** A lane whose KPI is
 fresh, whose guardrail holds, and which was examined recently does not need a pass this hour.
 Say that in your report rather than spawning to look busy — a nerd that finds nothing because
@@ -155,7 +186,8 @@ the nerd examines and files, marie ranks what they file, gru chooses, minion bui
 The coverage you computed (per lane: KPI value, delta, and which of stale/breached/unexamined
 fired), which lanes you spawned nerds for and why, which you deliberately skipped and why, and
 a one-line result per nerd — findings filed, or "found nothing, here is what it examined", or
-"failed: <reason>".
+"failed: <reason>". Name any lane down-ranked this pass via the gh#339 structural-N/A streak
+rule, and any lane whose streak broke this pass — an audit trail, never a silent skip.
 
 **Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus
 `Self-critique:` per §11) — the prose above is what a human reads, these lines are what
