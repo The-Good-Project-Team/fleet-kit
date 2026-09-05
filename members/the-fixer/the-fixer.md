@@ -48,6 +48,14 @@ state file so the same failing SHA never fires twice. It prints one line:
   read logs, do not open a worktree, do not spend more turns. This is the whole reason the check
   is a script and not a prompt: a poll that costs nothing on every green tick is what keeps this
   member cheap to run on any cadence without burning budget.
+  **"Do not spend more turns" means no extra investigation -- it does not mean skip the
+  mandatory `Self-critique:` line.** Confirmed live 2026-09-05: ~40% of green-tick passes over
+  the prior 2 days emitted no `Self-critique:` line at all (`fleet.db`'s `runs.self_critique`
+  NULL), because the two instructions sit far apart in this file and the green path's own
+  emphasis on ending fast reads as license to drop it. On the green path this line costs nothing
+  extra to write -- reuse this exact one: `Self-critique: none — deterministic check.sh output,
+  no ambiguity to critique this pass.` Write it every time, immediately after `Outcome:`, before
+  ending the pass.
 - `FIRE <what> <sha-prefix>` -- proceed to Step 2.
 
 ## Step 2: fix or revert, PR-backed only
