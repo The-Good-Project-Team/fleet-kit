@@ -3142,6 +3142,86 @@ def _every_scheduled_member_is_actually_on_cron():
         "A spec does not schedule a member; entrypoint.sh's crontab does.")
 
 
+def _fleet_cron_members_gates_entrypoint_crontab():
+    """gh#138: fleet.env's own header can declare an instance "judge-judy only", but
+    entrypoint.sh's crontab used to be a single hardcoded list installed unconditionally --
+    the config file and the crontab disagreed about what the instance was, and nothing caught
+    it. FLEET_CRON_MEMBERS is the fix: an optional allowlist entrypoint.sh's crontab builder
+    actually consults.
+
+    Extracts the real crontab-generation block out of entrypoint.sh (not a reimplementation)
+    and runs it under three scenarios:
+      - unset -> falls back to today's full hardcoded list, byte-for-identical
+      - a 2-member subset -> the generated crontab contains lines for exactly those two
+      - an unknown/misspelled name -> boot fails loudly (non-zero exit, names the bad entry)
+    """
+    import os
+    import subprocess
+
+    entry = (ROOT / "entrypoint.sh").read_text()
+    start_marker = "    ALL_CRON_MEMBERS=("
+    end_marker = '\n    } > "$CRONTAB"'
+    assert start_marker in entry, "entrypoint.sh no longer defines ALL_CRON_MEMBERS -- did gh#138's fix regress?"
+    i = entry.index(start_marker)
+    j = entry.index(end_marker, i) + len(end_marker)
+    snippet = entry[i:j]
+
+    def run_block(tmp, fleet_cron_members=None):
+        crontab_path = Path(tmp) / "crontab"
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir(exist_ok=True)
+        header = (
+            f'set -euo pipefail\n'
+            f'FLEET_REPO="{tmp}"\n'
+            f'TOKEN_FILE="{tmp}/token"\n'
+            f'LOG_DIR="{log_dir}"\n'
+            f'FLEET_GRU_CADENCE="*"\n'
+            f'PUBLIC_URL=""\n'
+            f'PUBLIC_PATH_URL=""\n'
+            f'FLEET_VIEW_PORT=8420\n'
+            f'CRONTAB="{crontab_path}"\n'
+        )
+        script = header + snippet.replace('    CRONTAB=/etc/cron.d/fleet-kit\n', '')
+        env = dict(os.environ)
+        if fleet_cron_members is not None:
+            env["FLEET_CRON_MEMBERS"] = fleet_cron_members
+        else:
+            env.pop("FLEET_CRON_MEMBERS", None)
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=30)
+        crontab_text = crontab_path.read_text() if crontab_path.exists() else ""
+        return proc, crontab_text
+
+    known_members = ("the-fixer", "judge-judy", "gru", "jefe", "roomba", "marie", "datta",
+                      "dumbledore", "sentry")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proc, crontab_text = run_block(tmp)
+        assert proc.returncode == 0, f"unset FLEET_CRON_MEMBERS should not fail boot: {proc.stderr[:500]}"
+        for name in known_members:
+            marker = f"run_gru_fanout.sh" if name == "gru" else f"run_member.sh {name}"
+            assert marker in crontab_text, \
+                f"FLEET_CRON_MEMBERS unset dropped {name!r} from the generated crontab -- not byte-identical to today's behavior"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proc, crontab_text = run_block(tmp, fleet_cron_members="judge-judy,jefe")
+        assert proc.returncode == 0, f"a valid 2-member subset should not fail boot: {proc.stderr[:500]}"
+        assert "run_member.sh judge-judy" in crontab_text and "run_member.sh jefe" in crontab_text, \
+            "the named subset's own members are missing from the generated crontab"
+        for name in known_members:
+            if name in ("judge-judy", "jefe"):
+                continue
+            marker = "run_gru_fanout.sh" if name == "gru" else f"run_member.sh {name}"
+            assert marker not in crontab_text, \
+                f"FLEET_CRON_MEMBERS=judge-judy,jefe still scheduled {name!r} -- allowlist not enforced"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proc, crontab_text = run_block(tmp, fleet_cron_members="judge-judy,bogus-name")
+        assert proc.returncode != 0, \
+            "an unknown FLEET_CRON_MEMBERS entry must fail boot loudly, not silently drop it or schedule nothing"
+        assert "bogus-name" in proc.stdout + proc.stderr, \
+            "the boot failure doesn't name the bad entry"
+
+
 # _self_improve_score_is_actually_scheduled and _deploy_staleness_check_is_actually_scheduled
 # (found live by dumbledore 2026-08-28, gh#201) were folded into the table-driven
 # _every_entrypoint_scheduled_script_is_actually_scheduled above (gh#378) alongside
@@ -4630,6 +4710,7 @@ if __name__ == "__main__":
     check("a run records the item it worked", _a_run_records_the_item_it_worked)
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
+    check("FLEET_CRON_MEMBERS gates entrypoint.sh's generated crontab", _fleet_cron_members_gates_entrypoint_crontab)
     check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
     check("every required health-check script in README is actually scheduled", _required_health_check_scripts_in_readme_are_scheduled)
     check("NTFY_TOPIC is deferred to tick-time, not baked in at boot", _ntfy_topic_is_deferred_to_tick_time_not_baked_in_at_boot)
