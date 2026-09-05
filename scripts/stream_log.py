@@ -216,6 +216,19 @@ def _detect_trailing_loss(result_line: str | None, assistant_texts: list[tuple[i
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--result-out", help="write the final result event's raw JSON here")
+    # gh#257 AC2/AC3: a side channel for run_report.py's classify() to learn that
+    # _detect_trailing_loss fired -- deliberately SEPARATE from --result-out, which stays
+    # untouched (see this file's header on why rewriting `result` was BLOCKed three times).
+    # This file carries only a detection SIGNAL, empty when nothing was detected, mirroring
+    # --result-out's own "always write, empty means nothing" shape so run_member.sh can test it
+    # the same way it already tests ACCOUNT_POOL_SELECTED_FILE (`[ -s "$FILE" ]`). The detected
+    # text is included for a human/dumbledore to read alongside the WARNING log line -- but
+    # run_report.py only ever checks this file's non-emptiness as a boolean, never its content,
+    # so no part of the lost text can flow into `outcome`/`evidence` (Non-goal: this issue only
+    # ever adds a STATUS field).
+    ap.add_argument("--trailing-loss-out",
+                    help="write the gh#167 trailing-turn loss text here if detected, "
+                         "empty otherwise")
     args = ap.parse_args()
 
     result_line = None
@@ -252,6 +265,10 @@ def main() -> int:
             # failed pass_accounting.py parse: no usage captured, never a crash. Never rewritten
             # -- see _detect_trailing_loss's docstring for why recovery-by-rewrite was dropped.
             fh.write(result_line or "")
+
+    if args.trailing_loss_out:
+        with open(args.trailing_loss_out, "w") as fh:
+            fh.write(lost or "")
     return 0
 
 
