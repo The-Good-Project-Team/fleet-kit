@@ -18,6 +18,7 @@ Run: python3 scripts/test_settings_wiring.py
 from __future__ import annotations
 
 import http.server
+import json
 import threading
 from pathlib import Path
 from urllib.parse import urlparse
@@ -107,6 +108,10 @@ def main() -> int:
             requests_seen = []
             page.on("request", lambda r: requests_seen.append((r.method, urlparse(r.url).path)))
 
+            post_bodies = []
+            page.on("request", lambda r: post_bodies.append(
+                (r.method, urlparse(r.url).path, r.post_data)) if r.post_data else None)
+
             page.route("**/api/**", _boot_mocks)
             # The page pulls chart.js + its date-fns adapter from a CDN (used by the Stats page,
             # not Settings) -- stub both so this test never depends on live network access in CI.
@@ -158,6 +163,40 @@ def main() -> int:
                     "Save click never POSTed /api/fleet_settings"
 
             check("Save dials click fires /api/fleet_settings and updates #dialsMsg", _save_dials_fires)
+
+            def _untouched_unset_dial_not_sent():
+                # gh#355: /api/fleet_state above returns no dial values at all, so every dial
+                # whose option list has no '' entry (FLEET_SHARE_FRACTION,
+                # FLEET_GRU_ALLOWANCE_FRACTION, FLEET_DATTA_MAX_NERDS_PER_PASS,
+                # FLEET_BUILDER_MODEL, FLEET_CODE_REVIEW_MODEL, FLEET_MAX_BUDGET_USD) rendered
+                # with no <option selected> and would previously read back the browser's first-
+                # option default. Clicking Save without touching any of them must not persist
+                # that fabricated value.
+                bodies = [json.loads(pd) for m, p, pd in post_bodies if p == "/api/fleet_settings"]
+                assert bodies, "no /api/fleet_settings POST captured"
+                last = bodies[-1]
+                for hidden_default_key in ("FLEET_SHARE_FRACTION", "FLEET_GRU_ALLOWANCE_FRACTION",
+                                            "FLEET_DATTA_MAX_NERDS_PER_PASS", "FLEET_BUILDER_MODEL",
+                                            "FLEET_CODE_REVIEW_MODEL", "FLEET_MAX_BUDGET_USD"):
+                    assert hidden_default_key not in last, \
+                        f"{hidden_default_key} was sent though the operator never touched it: {last}"
+
+            check("Save dials does not send untouched unset dials (gh#355)", _untouched_unset_dial_not_sent)
+
+            def _touched_dial_still_sent():
+                # A dial the operator actually picks must still save normally (AC3/AC4).
+                page.select_option('.dial-input[data-key="FLEET_BUILDER_MODEL"]', "opus")
+                with page.expect_response("**/api/fleet_settings"):
+                    page.click("#saveDials")
+                bodies = [json.loads(pd) for m, p, pd in post_bodies if p == "/api/fleet_settings"]
+                last = bodies[-1]
+                assert last.get("FLEET_BUILDER_MODEL") == "opus", \
+                    f"operator-picked dial was not sent: {last}"
+                assert "FLEET_MAX_BUDGET_USD" not in last, \
+                    f"an unrelated untouched unset dial was sent alongside the touched one: {last}"
+
+            check("Touching one dial still saves it without dragging in other unset dials (gh#355)",
+                  _touched_dial_still_sent)
 
             browser.close()
     finally:

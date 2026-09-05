@@ -240,6 +240,7 @@
     <select class="btn small" id="siblingSwitch" style="display:none;"></select>
     <span class="stat" id="repo"></span>
     <span class="spacer"></span>
+    <span class="stat" id="needsHumanOp"></span>
     <span class="stat" id="globalSpend"></span>
   </div>
   <div class="boot-error-banner" id="bootError" style="display:none;">
@@ -280,7 +281,8 @@ let SPECS = [];          // from /api/members -- spec + effective + overrides, p
 let ALL_RUNS = [];        // oldest-first, matches runs.jsonl append order
 let SELECTED = null;      // currently open agent name, or null (only meaningful when PAGE==='agent')
 let PAGE = 'agent';       // 'agent' | 'queue' | 'settings' -- which sidebar item is active
-let GH = { prs: [], issues: [], merged: [], self_evolution: [] };
+let GH = { prs: [], issues: [], merged: [], self_evolution: [],
+           needs_human_op: { count: 0, oldest_age_hours: 0 } };
 let FLEET_STATE = {};
 let NEXT_FIRES = [];
 let KPI_BY_MEMBER = {}; // member name -> /api/kpi row ({total, unit, runs_with_kpi, runs_total})
@@ -426,6 +428,24 @@ function renderSidebar() {
   document.getElementById('navQueueCount').textContent = (GH.prs?.length || 0) + (GH.issues?.length || 0);
   document.getElementById('navMergedCount').textContent = GH.merged?.length || 0;
   document.getElementById('navEvolutionCount').textContent = GH.self_evolution?.length || 0;
+  renderNeedsHumanOp();
+}
+
+// gh#340: fleet:needs-human-op had zero notification surface -- the only consumer was gru's
+// own build-candidate filter, so an issue like gh#278/gh#301 could sit silently for 11h40m+
+// with no human ever seeing it. Always renders SOME text (never toggles display:none) so "0"
+// and "feature not loaded" can't look the same on screen (AC3).
+function renderNeedsHumanOp() {
+  const el = document.getElementById('needsHumanOp');
+  const nho = GH.needs_human_op || { count: 0, oldest_age_hours: 0 };
+  if (!nho.count) {
+    el.innerHTML = `0 <b>needs-human-op</b>`;
+    el.style.color = '';
+    return;
+  }
+  const hours = Math.round(nho.oldest_age_hours);
+  el.innerHTML = `${nho.count} <b>needs-human-op</b> (oldest ${hours}h)`;
+  el.style.color = 'var(--bad)';
 }
 
 agentListEl.addEventListener('click', e => {
@@ -1344,10 +1364,17 @@ function renderSettingsPage() {
       }).join('');
       const custom = o.allowCustom
         ? `<option value="__custom__">other...</option>` : '';
-      field = `<select class="dial-input" data-key="${key}" style="${box}"
-        onchange="if(this.value==='__custom__'){const i=document.createElement('input');
-          i.className='dial-input';i.dataset.key='${key}';i.value='';i.style.cssText='${box}';
-          i.placeholder='type a value';this.replaceWith(i);i.focus();}">${optsHtml}${custom}</select>`;
+      // gh#355: when cur is unset and the option list has no '' entry, no <option> above gets
+      // `selected` -- the browser still defaults the rendered <select>.value to the FIRST
+      // listed option with no visual flag. data-unset marks that case so saveDials (below)
+      // can skip it unless the operator actually touches the control (onchange sets
+      // data-touched on every real interaction, including picking "other...").
+      const unset = !cur && !options.includes('');
+      field = `<select class="dial-input" data-key="${key}"${unset ? ' data-unset="1"' : ''} style="${box}"
+        onchange="this.dataset.touched='1';
+          if(this.value==='__custom__'){const i=document.createElement('input');
+          i.className='dial-input';i.dataset.key='${key}';i.dataset.touched='1';i.value='';
+          i.style.cssText='${box}';i.placeholder='type a value';this.replaceWith(i);i.focus();}">${optsHtml}${custom}</select>`;
     } else {
       field = `<input class="dial-input" data-key="${key}" value="${esc(cur)}" style="${box}">`;
     }
@@ -1439,7 +1466,14 @@ function renderSettingsPage() {
   };
   document.getElementById('saveDials').onclick = async () => {
     const body = {};
-    runListEl.querySelectorAll('.dial-input').forEach(i => { body[i.dataset.key] = i.value; });
+    runListEl.querySelectorAll('.dial-input').forEach(i => {
+      // gh#355: an untouched, unset dial (data-unset, see renderSettingsPage above) reads back
+      // the browser's own first-option default -- send it here and Save would silently write
+      // that fabricated value into fleet.env even though the operator never chose it. Skip it;
+      // any dial the operator actually edits gets data-touched='1' and is still sent normally.
+      if (i.dataset.unset === '1' && i.dataset.touched !== '1') return;
+      body[i.dataset.key] = i.value;
+    });
     const r = await fetch('/api/fleet_settings', { method: 'POST', body: JSON.stringify(body) });
     const resp = await r.json().catch(() => ({}));
     await renderFleetState();

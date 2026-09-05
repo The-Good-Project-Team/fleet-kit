@@ -128,6 +128,17 @@ STATUS_BUDGET_DECLINED = "budget_declined"
 STATUS_TIMED_OUT = "timed_out"
 STATUS_KILLED = "killed"
 STATUS_INCOMPLETE_FANOUT = "incomplete_fanout"
+# gh#257 AC2/AC3: dont-shoot-the-messenger's Case 1 -- a real Report:/Outcome:/Evidence: block
+# composed correctly, then overwritten by one more trailing turn (the stream-json protocol's
+# `result` field is Claude Code's LAST assistant turn only, by design). stream_log.py's own
+# `_detect_trailing_loss` already recognizes this shape from the raw event stream and prints a
+# WARNING log line -- but a log line a human has to go grep for is not a status, and
+# run_report.py's classify() never consulted it, so the run still landed reported_nothing even
+# when the loss was already detected elsewhere in the pipeline. This status is set ONLY when the
+# wrapper (run_member.sh) tells us, via --trailing-loss, that stream_log.py's detector actually
+# fired for this run -- never inferred here from `pass_text` alone, since by the time this
+# module sees `pass_text` the loss has already happened and the real report text is gone.
+STATUS_REPORT_LOST = "report_lost"
 # gh#145: a provisional row written before `claude -p` even runs, NOT a completion status --
 # see build_started_record below. Never returned by classify(), so this is not a new status()
 # a completed run can carry; it exists only to be the "started" leg fleet_stats.lost_passes()
@@ -205,7 +216,8 @@ def parse_report(text: str) -> dict:
     return out
 
 
-def classify(report: dict, *, vision_required: bool, exit_code: int | None = None) -> str:
+def classify(report: dict, *, vision_required: bool, exit_code: int | None = None,
+            trailing_loss: bool = False) -> str:
     """The status that goes on the run record."""
     outcome = (report.get("outcome") or "").strip()
     if not outcome:
@@ -214,6 +226,12 @@ def classify(report: dict, *, vision_required: bool, exit_code: int | None = Non
         # genuinely filed nothing (#3015).
         if exit_code in _EXIT_CODE_STATUS:
             return _EXIT_CODE_STATUS[exit_code]
+        # gh#257 AC2/AC3: the wrapper already confirmed (via stream_log.py's
+        # _detect_trailing_loss) that a real report existed one turn earlier and was overwritten
+        # -- this is real-work loss, distinct from both a genuine "found nothing" pass and from
+        # incomplete_fanout's "never got as far as writing a report at all".
+        if trailing_loss:
+            return STATUS_REPORT_LOST
         # gh#252: exit_code 0 (or unknown) with an empty outcome AND evidence the pass
         # dispatched a background sub-pass it never waited on is a live real-work loss, not a
         # genuine "ran to completion and found nothing" -- distinguish it so the orphaned items
@@ -262,10 +280,11 @@ def build_started_record(*, member: str, run_id: str, kind: str = "llm",
 def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
                  pass_text: str, usage: dict | None, vision_required: bool,
                  item_id: str | None = None, pr: str | None = None,
-                 lane: str | None = None) -> dict:
+                 lane: str | None = None, trailing_loss: bool = False) -> dict:
     """One run = one record. `usage` is pass_accounting's parsed JSON, or None (mechanical)."""
     report = parse_report(pass_text)
-    status = classify(report, vision_required=vision_required, exit_code=exit_code)
+    status = classify(report, vision_required=vision_required, exit_code=exit_code,
+                      trailing_loss=trailing_loss)
     rec = {
         "member": member,
         "run_id": run_id,
@@ -338,6 +357,11 @@ def main(argv=None) -> int:
     ap.add_argument("--item-id", help="board item id this pass worked, if any")
     ap.add_argument("--pr", help="PR number this pass produced, if any")
     ap.add_argument("--lane", help="lane this pass was dispatched for, if any (e.g. nerd's lane=<name> --task prefix)")
+    ap.add_argument("--trailing-loss", action="store_true",
+                    help="gh#257: stream_log.py's _detect_trailing_loss fired for this run -- "
+                         "a real report existed one turn earlier and was overwritten by a "
+                         "trailing turn (gh#167's shape). Set by run_member.sh, never inferred "
+                         "here from pass_text alone.")
     ap.add_argument("--started", action="store_true",
                     help="write a provisional 'started' row (gh#145), before claude -p runs -- "
                          "ignores --exit-code/--pass-file/--usage-file/--vision-required/--pr")
@@ -364,7 +388,7 @@ def main(argv=None) -> int:
 
     rec = build_record(member=a.member, run_id=a.run_id, kind=a.kind, exit_code=a.exit_code,
                        pass_text=text, usage=usage, vision_required=a.vision_required,
-                       item_id=a.item_id, pr=a.pr, lane=a.lane)
+                       item_id=a.item_id, pr=a.pr, lane=a.lane, trailing_loss=a.trailing_loss)
     print(json.dumps(rec))
     return 0
 

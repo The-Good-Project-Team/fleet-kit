@@ -158,6 +158,130 @@ def _incomplete_fanout_matches_task_dispatch_shape():
     assert reported["orphaned_items"] is None, reported["orphaned_items"]
 
 
+def _report_lost_is_not_reported_nothing():
+    """gh#257 AC2/AC3, unit level: dont-shoot-the-messenger's Case 1 -- a real Report:/Outcome:/
+    Evidence: block composed correctly, then overwritten by one more trailing turn (gh#167's
+    shape). stream_log.py's own `_detect_trailing_loss` already recognizes this from the raw
+    event stream and prints a WARNING, but run_report.py's classify() never consulted it, so
+    even a detected loss still landed `reported_nothing` -- no different from a pass that
+    genuinely found nothing. This pins classify()'s new `trailing_loss` param: with the
+    wrapper's signal present, an empty-outcome run reads as the new `report_lost` status
+    (AC2); with the identical input and no signal -- exactly today's pre-fix code path -- it
+    still reads `reported_nothing` (AC3), proving the fix changes real behavior.
+    """
+    import run_report
+    # The trailing wrap-up text itself carries no Outcome:/Evidence: lines -- the real report
+    # was in the turn before it and is gone by the time run_report.py ever sees `pass_text`.
+    lost_wrapup_text = "**Status:** QUIET (no-op) -- nothing to improve, driver absence is by design"
+
+    # AC3: identical input, trailing_loss not signalled -- today's pre-fix behavior, unchanged.
+    pre_fix = run_report.build_record(member="dont-shoot-the-messenger", run_id="r1", kind="llm",
+                                      exit_code=0, pass_text=lost_wrapup_text, usage=None,
+                                      vision_required=False)
+    assert pre_fix["status"] == "reported_nothing", pre_fix["status"]
+
+    # AC2: identical input, trailing_loss signalled by the wrapper -- new, distinct status.
+    post_fix = run_report.build_record(member="dont-shoot-the-messenger", run_id="r2", kind="llm",
+                                       exit_code=0, pass_text=lost_wrapup_text, usage=None,
+                                       vision_required=False, trailing_loss=True)
+    assert post_fix["status"] == "report_lost", post_fix["status"]
+    assert post_fix["status"] not in ("ok", "reported_nothing"), post_fix["status"]
+
+    # AC4-style: neither fix writes/infers the lost Outcome:/Evidence: text anywhere -- only
+    # `status` differs between the two records above.
+    assert post_fix["outcome"] == pre_fix["outcome"] is None, (post_fix["outcome"], pre_fix["outcome"])
+    assert post_fix["evidence"] == pre_fix["evidence"] is None, (post_fix["evidence"], pre_fix["evidence"])
+
+    # A pass that DOES have a real, present outcome is unaffected by the flag even if it were
+    # (wrongly) set -- trailing_loss only ever matters on the already-empty-outcome branch.
+    reported = run_report.build_record(member="t", run_id="r3", kind="llm", exit_code=0,
+                                       pass_text="Outcome: did a thing #12\nEvidence: ran it\n",
+                                       usage=None, vision_required=False, trailing_loss=True)
+    assert reported["status"] == "ok", reported["status"]
+
+
+def _gh167_trailing_loss_flows_end_to_end_through_stream_log_and_run_report():
+    """gh#257 AC2/AC3, sourced end-to-end through stream_log.py -> run_report.py (the same two
+    scripts run_member.sh chains, minus the `claude -p`/timeout wrapper around them): a synthetic
+    stream-json fixture reproducing dont-shoot-the-messenger's real 2026-08-30 06:52:04 UTC shape
+    (a report-shaped assistant text block, one intervening tool round-trip, then a short
+    non-report wrap-up that becomes the actual `result`) run through stream_log.py's REAL
+    `main()` -- not a hand-built dict -- must (AC2) detect the loss and, once run_member.sh's
+    `--trailing-loss` flag carries that signal to run_report.py, classify as neither `ok` nor
+    `reported_nothing`; and (AC3) the identical fixture, run without that flag -- today's
+    pre-fix code path -- must still classify `reported_nothing`, proving the fix changes real
+    behavior rather than adding a dead branch nothing exercises.
+    """
+    import subprocess
+
+    events = [
+        {"type": "system", "subtype": "init", "model": "claude-x", "tools": [], "cwd": "/tmp"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text":
+            "Report:\nBOTTOM LINE: driver absence is by design, 58 consecutive clean runs.\n\n"
+            "Outcome: confirmed FLEET_MESSENGER_DRIVER absence is intentional, no action needed\n"
+            "Evidence: `grep FLEET_MESSENGER_DRIVER entrypoint.sh` shows it unset on purpose\n"
+        }]}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "TaskUpdate",
+            "input": {"description": "closing out checklist"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "is_error": False,
+            "content": "ok"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text":
+            "**Status:** QUIET (no-op) -- nothing to improve, driver absence is by design"}]}},
+        {"type": "result", "subtype": "success", "num_turns": 12, "total_cost_usd": 0.31,
+         "stop_reason": "end_turn",
+         "result": "**Status:** QUIET (no-op) -- nothing to improve, driver absence is by design"},
+    ]
+    stdin_text = "\n".join(json.dumps(e) for e in events) + "\n"
+
+    with tempfile.TemporaryDirectory() as d:
+        result_file = Path(d) / "result.json"
+        loss_file = Path(d) / "loss.txt"
+        p = subprocess.run(
+            [sys.executable, str(HERE / "stream_log.py"),
+             "--result-out", str(result_file), "--trailing-loss-out", str(loss_file)],
+            input=stdin_text, capture_output=True, text=True, timeout=30)
+        assert p.returncode == 0, p.stderr
+        assert "WARNING: gh#167 trailing-turn report loss detected" in p.stdout, p.stdout
+        # AC2 precondition: the detector actually fired for this fixture -- a non-empty file,
+        # mirroring how run_member.sh itself tests it (`[ -s "$TRAILING_LOSS_FILE" ]`).
+        assert loss_file.read_text().strip(), "expected a non-empty trailing-loss-out file"
+
+        raw = result_file.read_text()
+        out = subprocess.run([sys.executable, str(HERE / "pass_accounting.py"), "text"],
+                             input=raw, capture_output=True, text=True, timeout=30).stdout
+
+        def run_report_status(*extra_args):
+            p = subprocess.run(
+                [sys.executable, str(HERE / "run_report.py"),
+                 "--member", "dont-shoot-the-messenger", "--run-id", "r", "--kind", "llm",
+                 "--exit-code", "0", "--pass-file", "-", *extra_args],
+                input=out, capture_output=True, text=True, timeout=30)
+            assert p.returncode == 0, p.stderr
+            return json.loads(p.stdout)["status"]
+
+        # AC3: pre-fix path (no --trailing-loss) -- unchanged, still reported_nothing.
+        assert run_report_status() == "reported_nothing"
+        # AC2: post-fix path -- the wrapper's signal flips this to a new, distinct status.
+        post_fix_status = run_report_status("--trailing-loss")
+        assert post_fix_status not in ("ok", "reported_nothing"), post_fix_status
+        assert post_fix_status == "report_lost", post_fix_status
+
+
+def _run_member_wires_trailing_loss_flag():
+    """gh#257 AC2/AC3: the two pieces above are useless to a live pass unless run_member.sh
+    actually chains them -- source-checked the same way `_run_member_writes_a_started_row_...`
+    checks its own wiring, so a future edit that drops either flag (rather than the logic behind
+    it) fails a test instead of silently going quiet in prod.
+    """
+    src = (ROOT / "scripts" / "run_member.sh").read_text()
+    assert "--trailing-loss-out" in src, "stream_log.py is never told where to write the loss signal"
+    assert "TRAILING_LOSS_FILE" in src, "no side-channel file variable for the loss signal"
+    assert '[ -s "$TRAILING_LOSS_FILE" ]' in src, \
+        "run_member.sh never tests the loss file for non-emptiness before building the flag"
+    assert "--trailing-loss" in re.sub(r"--trailing-loss-out", "", src), \
+        "run_member.sh never forwards --trailing-loss to run_report.py"
+
+
 def _artifact_regex_accepts_backtick_spans():
     """gh#251: roomba/the-fixer's real evidence is a path, PID, or SHA -- none of which has a
     GitHub-artifact shape (`#123`, a URL, `file.ext:123`), so classify() folded genuinely
@@ -1676,6 +1800,106 @@ def _status_page_deploy_component_classifies_stale_as_down():
             assert all(c == status_data.UNKNOWN for c in empty_cells), (
                 "no deploy log file at all must render as unknown, not assumed healthy")
             assert empty_pct is None, "no data yields no uptime percentage, not a fabricated one"
+        finally:
+            if old is None:
+                _os.environ.pop("FLEET_LOG_DIR", None)
+            else:
+                _os.environ["FLEET_LOG_DIR"] = old
+            _il.reload(status_data)
+
+
+def _status_data_members_reads_fleet_db_with_no_podman_on_path():
+    """gh#364: status_data.py's own server (fleet_view_server.py, started by entrypoint.sh)
+    runs INSIDE the container that owns fleet.db, so the old `_sqlite()` shelled out to
+    `podman exec <container> sqlite3 ...` from a vantage point that never has a `podman`
+    binary reachable -- the resulting FileNotFoundError was swallowed by a bare `except
+    Exception: return ""`, so `members()` silently returned [] and the /status page's entire
+    'Fleet members' card never rendered, with no visual trace it was missing.
+
+    RED against the old code: with no `podman` on $PATH (this container's real topology),
+    `_sqlite()` returns "" regardless of what fleet.db holds, so `members(72)` returns [].
+    GREEN after the fix: a direct in-process `sqlite3.connect()` needs no subprocess, no
+    `podman`, and no container boundary at all -- it reads the real rows.
+    """
+    import importlib as _il
+    import os as _os
+    import sqlite3 as _sqlite3
+    import sys as _sys
+    import time as _time
+
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    import status_data
+
+    old_db = _os.environ.get("FLEET_DB")
+    old_path = _os.environ.get("PATH")
+    with tempfile.TemporaryDirectory() as td:
+        db_path = str(Path(td) / "fleet.db")
+        conn = _sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE runs (run_id TEXT, member TEXT, status TEXT, "
+            "recorded_at REAL, cost_usd REAL)")
+        conn.execute(
+            "INSERT INTO runs VALUES (?,?,?,?,?)",
+            ("r1", "minion", "ok", _time.time(), 0.5))
+        conn.commit()
+        conn.close()
+
+        _os.environ["FLEET_DB"] = db_path
+        # The real topology this bug reproduces: no podman binary reachable from in here.
+        _os.environ["PATH"] = td
+        try:
+            _il.reload(status_data)
+            rows = status_data.members(72)
+            assert rows, (
+                "members(72) returned [] against a fleet.db with a real recent row and no "
+                "podman on $PATH -- the Fleet members card would render as if the fleet "
+                "were empty")
+            assert rows[0]["name"] == "minion", f"unexpected row shape: {rows!r}"
+        finally:
+            if old_db is None:
+                _os.environ.pop("FLEET_DB", None)
+            else:
+                _os.environ["FLEET_DB"] = old_db
+            if old_path is None:
+                _os.environ.pop("PATH", None)
+            else:
+                _os.environ["PATH"] = old_path
+            _il.reload(status_data)
+
+
+def _status_data_other_components_unaffected_by_members_fix():
+    """gh#364 AC5: the fix to `_sqlite()`/`members()` must not touch the other four /status
+    components (Account pool, Public path, Tunnel, Budget meter) -- they read log files
+    directly and are unrelated to fleet.db. Pins that COMPONENTS is unchanged in shape and
+    that read_component() still classifies a plain healthy line as OK, for a fixed fixture.
+    """
+    import importlib as _il
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    import status_data
+
+    labels = [label for label, _names, _desc in status_data.COMPONENTS]
+    assert labels == [
+        "Account pool", "Public path", "Tunnel", "Budget meter (tgp)",
+        "Budget meter (gmail)", "Deploy",
+    ], f"COMPONENTS list drifted: {labels!r}"
+
+    old = _os.environ.get("FLEET_LOG_DIR")
+    with tempfile.TemporaryDirectory() as td:
+        _os.environ["FLEET_LOG_DIR"] = td
+        try:
+            _il.reload(status_data)
+            # Real line shape from account_health_check.sh's own healthy branch -- no
+            # timestamp in the bracket, lowercase "healthy" right after it.
+            (Path(td) / "account_health_check.cron.log").write_text(
+                "[account_health_check] healthy -- newest pool-log line is not a failure\n")
+            names = next(n for label, n, _d in status_data.COMPONENTS
+                         if label == "Account pool")
+            cells, pct = status_data.read_component(names)
+            assert cells[-1] == status_data.OK, (
+                f"Account pool must still classify a healthy line as ok, got {cells[-1]!r}")
         finally:
             if old is None:
                 _os.environ.pop("FLEET_LOG_DIR", None)
@@ -4413,6 +4637,80 @@ def _fixer_sees_a_green_but_parked_pr():
         "a PR that went green seconds ago was called parked -- the arming sweep has not run yet"
 
 
+def _fixer_does_not_fire_on_a_parked_pr_already_in_the_merge_queue():
+    """gh#4305: on a merge-queue-controlled repo, autoMergeRequest stays null for a PR that is
+    already enqueued -- the queue entry isn't reflected in that field, so check.sh's original
+    `$parked` condition (keyed only on autoMergeRequest) misclassified an already-armed,
+    mid-queue PR as green-but-parked. Live case: PR #4285, this repo, 2026-09-04 -- the-fixer
+    spawned a sub-pass to "arm" a PR that was already mid-queue, wasting a turn budget.
+
+    `gh pr list --json`/`gh pr view --json` have no `mergeQueueEntry` field at all, so the fix
+    is a follow-up `gh api graphql` call (`queued_prs()`) for any green-but-parked candidate.
+    This stubs `gh` end to end -- including `repo view` and `api graphql` -- so the real
+    exclusion path runs, not just the jq expression `_fixer_sees_a_green_but_parked_pr` covers.
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("jq"):
+        return  # jq absent here; the exclusion path needs it same as check.sh itself does
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        repo = Path(tmp) / "repo"
+        repo.mkdir(parents=True, exist_ok=True)
+        bin_dir = Path(tmp) / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+
+        # #100 is green-but-parked per the pr-list stub, and IS already in the merge queue --
+        # must be excluded. #300 is green-but-parked and NOT in the queue -- must still fire.
+        (bin_dir / "gh").write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, subprocess, sys\n"
+            "args = sys.argv[1:]\n"
+            "if args[:1] == ['run']:\n"
+            "    print('success abc123'); sys.exit(0)\n"
+            "if args[:1] == ['pr']:\n"
+            "    sys.stdout.write('100:' + 'a'*40 + ':green-but-parked '\n"
+            "                     '300:' + 'b'*40 + ':green-but-parked ')\n"
+            "    sys.exit(0)\n"
+            "if args[:2] == ['repo', 'view']:\n"
+            "    print('acme testrepo'); sys.exit(0)\n"
+            "if args[:2] == ['api', 'graphql']:\n"
+            "    query = next((a[len('query='):] for a in args if a.startswith('query=')), '')\n"
+            "    jqf = args[args.index('-q') + 1]\n"
+            "    data = {}\n"
+            "    if 'pr100:' in query:\n"
+            "        data['pr100'] = {'pullRequest': {'mergeQueueEntry': {'state': 'QUEUED'}}}\n"
+            "    if 'pr300:' in query:\n"
+            "        data['pr300'] = {'pullRequest': {'mergeQueueEntry': None}}\n"
+            "    proc = subprocess.run(['jq', '-r', jqf], input=json.dumps({'data': data}),\n"
+            "                          capture_output=True, text=True)\n"
+            "    sys.stdout.write(proc.stdout)\n"
+            "    sys.exit(0)\n"
+            "sys.exit(0)\n"
+        )
+        (bin_dir / "gh").chmod(0o755)
+
+        env = {
+            "FLEET_REPO": str(repo),
+            "FLEET_LOG_DIR": str(log_dir),
+            "FIXER_STATE_FILE": str(log_dir / "the-fixer.state"),
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+        }
+        proc = subprocess.run(
+            ["bash", str(ROOT / "members" / "the-fixer" / "check.sh")],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        assert proc.returncode == 0, f"check.sh failed: {proc.stderr.strip()[:300]}"
+        out = proc.stdout.strip()
+        assert "300" in out, f"a genuinely parked PR (not queued) was dropped: {out!r}"
+        assert "100" not in out, (
+            f"a PR already enqueued in the merge queue was still fired on as parked: {out!r}"
+        )
+
+
 def _green_pr_with_no_auto_merge_gets_armed():
     """A PR nothing armed must not be able to sit green forever.
 
@@ -4737,6 +5035,85 @@ def _oversubscribed_shares_are_caught():
         bad = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env)
         assert bad.returncode == 1, "0.60+0.60 = 1.2 was not flagged as oversubscribed"
         assert "OVERSUBSCRIBED" in bad.stdout
+
+
+def _check_share_sum_sees_siblings_from_inside_a_container_via_published_shares():
+    """gh#293: the ROOT scan above can never fire inside a real container -- findmnt there
+    shows only single files bind-mounted from the host, never the `instances/` PARENT tree
+    `${FLEET_INSTANCES_ROOT:-$HOME/fleet-kit/instances}` needs (that tree also carries every
+    sibling's live CLAUDE_CODE_OAUTH_TOKEN/FLEET_MAXX_KEY, so mounting it wholesale would leak
+    credentials across instances). This is the REAL deployed shape: FLEET_INSTANCES_ROOT points
+    nowhere (unset, or -- as here -- pointed at a path that simply does not exist), so the old
+    scan matches zero directories and total stays 0 no matter how oversubscribed the fleet
+    really is.
+
+    FLEET_SHARE_DIR is the fix: a small, purpose-built, non-secret shared directory (same shape
+    as FLEET_LEASE_DIR/maxx_lease.py's already-shipped fix for the identical problem) that each
+    instance publishes just {instance, fraction, published_at} into. Pre-populates two
+    "siblings'" published files by hand (standing in for their own earlier check_share_sum.sh
+    runs) and runs the script as a THIRD instance to prove it sees all three, not just itself.
+    """
+    import os, subprocess, time
+    script = ROOT / "scripts" / "check_share_sum.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        share_dir = Path(tmp) / "shares"
+        share_dir.mkdir()
+        now = int(time.time())
+        (share_dir / "a.json").write_text(json.dumps({"instance": "a", "fraction": 0.3, "published_at": now}))
+        (share_dir / "b.json").write_text(json.dumps({"instance": "b", "fraction": 0.2, "published_at": now}))
+
+        base_env = {**os.environ, "FLEET_INSTANCES_ROOT": str(Path(tmp) / "no-such-instances-tree"),
+                    "FLEET_SHARE_DIR": str(share_dir), "FLEET_INSTANCE_NAME": "c"}
+
+        ok = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                             env={**base_env, "FLEET_SHARE_FRACTION": "0.4"})
+        assert ok.returncode == 0, f"a(0.3)+b(0.2)+c(0.4)=0.9 wrongly flagged: {ok.stdout}{ok.stderr}"
+        assert "a: 0.3" in ok.stdout and "b: 0.2" in ok.stdout and "c: 0.4" in ok.stdout, (
+            f"did not see every sibling's published share: {ok.stdout}"
+        )
+
+        bad = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                              env={**base_env, "FLEET_SHARE_FRACTION": "0.6"})
+        assert bad.returncode == 1, f"a(0.3)+b(0.2)+c(0.6)=1.1 was not flagged as oversubscribed: {bad.stdout}"
+        assert "OVERSUBSCRIBED" in bad.stdout
+
+
+def _check_share_sum_never_reports_ok_on_stale_or_missing_shares():
+    """AC4: a stale or unreadable sibling must never be silently folded into a passing "ok" --
+    that is the exact "dial that looks set but does nothing" failure this whole issue is about,
+    just one layer down (a sibling's PUBLISH went stale instead of the mount never existing).
+    """
+    import os, subprocess
+    script = ROOT / "scripts" / "check_share_sum.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        share_dir = Path(tmp) / "shares"
+        share_dir.mkdir()
+        # Ancient published_at -- long past any sane staleness window.
+        (share_dir / "old.json").write_text(json.dumps({"instance": "old", "fraction": 0.9, "published_at": 1}))
+        env = {**os.environ, "FLEET_INSTANCES_ROOT": str(Path(tmp) / "no-such-instances-tree"),
+               "FLEET_SHARE_DIR": str(share_dir), "FLEET_INSTANCE_NAME": "c", "FLEET_SHARE_FRACTION": "0.1"}
+        stale = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env)
+        assert stale.returncode != 0, (
+            f"a stale sibling share was silently accepted as ok: {stale.stdout}"
+        )
+        assert "STALE" in stale.stdout, f"stale share was not called out in the report: {stale.stdout}"
+        assert "shares total 0.1" in stale.stdout, (
+            f"stale sibling's 0.9 leaked into the total instead of being excluded: {stale.stdout}"
+        )
+
+    # The mount/publish path itself is broken (FLEET_SHARE_DIR points at something that is not
+    # a usable directory) -- zero fresh shares found, must not read as "ok: shares total 0".
+    with tempfile.TemporaryDirectory() as tmp:
+        not_a_dir = Path(tmp) / "not-a-dir"
+        not_a_dir.write_text("")  # a FILE, so publish_share.sh's mkdir/write both fail
+        env = {**os.environ, "FLEET_INSTANCES_ROOT": str(Path(tmp) / "no-such-instances-tree"),
+               "FLEET_SHARE_DIR": str(not_a_dir), "FLEET_INSTANCE_NAME": "c", "FLEET_SHARE_FRACTION": "0.6"}
+        broken = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env)
+        assert broken.returncode != 0 and "ok:" not in broken.stdout, (
+            f"an unusable FLEET_SHARE_DIR still reported ok: {broken.stdout}"
+        )
+        assert "UNKNOWN" in broken.stdout
 
 
 def _jefe_owns_the_fleet_wide_token_budget():
@@ -5631,6 +6008,9 @@ if __name__ == "__main__":
     check("report contract: ok + silence is recorded", _report_contract)
     check("a fan-out parent that never reports is incomplete_fanout, not reported_nothing", _incomplete_fanout_is_not_reported_nothing)
     check("datta's --task \"lane=<lane>\" dispatch shape also reads as incomplete_fanout (gh#257)", _incomplete_fanout_matches_task_dispatch_shape)
+    check("a detected gh#167 trailing-turn loss is report_lost, not reported_nothing (gh#257 AC2/AC3)", _report_lost_is_not_reported_nothing)
+    check("gh#167 trailing-loss signal flows end-to-end, stream_log.py -> run_report.py (gh#257 AC2/AC3)", _gh167_trailing_loss_flows_end_to_end_through_stream_log_and_run_report)
+    check("run_member.sh wires --trailing-loss-out/--trailing-loss between the two scripts (gh#257)", _run_member_wires_trailing_loss_flag)
     check("_ARTIFACT accepts a backtick-wrapped path/PID/SHA (#251)", _artifact_regex_accepts_backtick_spans)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
     check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
@@ -5715,8 +6095,14 @@ if __name__ == "__main__":
     check("an instance cannot spend past its own slice", _an_instance_cannot_spend_past_its_own_slice)
     check("share ceiling is a slice of the hour, not the leftovers", _share_ceiling_is_a_slice_of_the_hour_not_the_leftovers)
     check("oversubscribed instance shares are caught", _oversubscribed_shares_are_caught)
+    check("check_share_sum sees siblings from inside a container via published shares",
+          _check_share_sum_sees_siblings_from_inside_a_container_via_published_shares)
+    check("check_share_sum never reports ok on stale or missing published shares",
+          _check_share_sum_never_reports_ok_on_stale_or_missing_shares)
     check("jefe owns the fleet-wide token budget", _jefe_owns_the_fleet_wide_token_budget)
     check("the-fixer sees a green-but-parked PR", _fixer_sees_a_green_but_parked_pr)
+    check("the-fixer does not fire on a parked PR already in the merge queue",
+          _fixer_does_not_fire_on_a_parked_pr_already_in_the_merge_queue)
     check("a green PR with no auto-merge gets armed", _green_pr_with_no_auto_merge_gets_armed)
     check("fleet-view reads FLEET_API_KEY from fleet.env", _fleet_view_reads_the_api_key_from_the_env_file)
     check("FLEET_API_KEY never reaches an LLM pass", _api_key_never_reaches_an_llm)
@@ -5752,6 +6138,8 @@ if __name__ == "__main__":
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
     check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
+    check("status_data.members() reads fleet.db in-process, no podman on $PATH needed (gh#364)", _status_data_members_reads_fleet_db_with_no_podman_on_path)
+    check("status_data's other four components are unaffected by the members() fix (gh#364)", _status_data_other_components_unaffected_by_members_fix)
     check("status page banner distinguishes unknown from good and bad (gh#358)", _status_page_banner_distinguishes_unknown_from_good)
 
     for n in ok:

@@ -161,7 +161,6 @@ def snapshot(hours: int = 72) -> dict:
 # ---------------------------------------------------------------------------
 
 DB_PATH = os.environ.get("FLEET_DB", "/var/log/fleet-kit/fleet.db")
-CONTAINER = os.environ.get("FLEET_CONTAINER_NAME", "philanthropy")
 
 # A member's run status is NOT a health verdict and must not be rendered as one.
 # `budget_declined` is the single most common outcome for several members (46 of gru's
@@ -181,13 +180,20 @@ RUN_STATE = {
 
 
 def _sqlite(query: str) -> str:
-    """Query fleet.db. Runs through the container because the DB lives inside it."""
-    import subprocess
+    """Query fleet.db in-process. status_data.py is served by fleet_view_server.py, which
+    entrypoint.sh starts INSIDE the container that owns fleet.db (gh#364) -- there is no
+    podman binary reachable from in here to exec into, so a direct read-only connection
+    (mirroring fleet_db.py's connect()) is the only path, not a subprocess exec at all.
+    """
+    import sqlite3
     try:
-        r = subprocess.run(
-            ["podman", "exec", CONTAINER, "sqlite3", DB_PATH, query],
-            capture_output=True, text=True, timeout=20)
-        return r.stdout if r.returncode == 0 else ""
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = conn.execute(query).fetchall()
+        finally:
+            conn.close()
+        return "\n".join(
+            "|".join("" if v is None else str(v) for v in row) for row in rows)
     except Exception:
         return ""
 
