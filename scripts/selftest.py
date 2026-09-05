@@ -123,6 +123,33 @@ def _incomplete_fanout_is_not_reported_nothing():
     assert plain_quiet["orphaned_items"] is None, plain_quiet["orphaned_items"]
 
 
+def _artifact_regex_accepts_backtick_spans():
+    """gh#251: roomba/the-fixer's real evidence is a path, PID, or SHA -- none of which has a
+    GitHub-artifact shape (`#123`, a URL, `file.ext:123`), so classify() folded genuinely
+    evidenced passes into `reported_nothing`. This fleet's own convention for "this is the
+    concrete thing" is a backtick span, so _ARTIFACT now accepts a non-empty one too.
+    """
+    import run_report
+
+    def status(outcome, evidence="ran it"):
+        rec = {"outcome": outcome, "evidence": evidence}
+        return run_report.classify(rec, vision_required=False, exit_code=0)
+
+    # AC1: backtick-wrapped path.
+    assert status("Swept `/tmp/fleet-run-nerd-43503`") == "ok"
+    # AC2: backtick-wrapped PID reference, in evidence rather than outcome.
+    assert status("swept a stale worktree", "confirmed via `ps -p 43503`") == "ok"
+    # AC3: backtick-wrapped git SHA.
+    assert status("already-fighting `91eb91a9`") == "ok"
+    # AC4: the pre-existing shapes are unchanged -- no regression.
+    assert status("did a thing #12") == "ok"
+    assert status("did a thing https://github.com/x/y/issues/12") == "ok"
+    assert status("did a thing app.py:41") == "ok"
+    # AC5: no artifact of any shape, no backtick span -- still reported_nothing. The widening
+    # must not make the check vacuous.
+    assert status("did stuff, all good") == "reported_nothing"
+
+
 def _rsi_lines_survive_to_the_next_pass():
     """#83: the compounding chain needs a data plane, not a log grep.
 
@@ -4832,6 +4859,7 @@ if __name__ == "__main__":
     check("member_spec's OWN default MEMBERS_DIR resolves (not just an explicit path)", _members_dir_default_is_right)
     check("report contract: ok + silence is recorded", _report_contract)
     check("a fan-out parent that never reports is incomplete_fanout, not reported_nothing", _incomplete_fanout_is_not_reported_nothing)
+    check("_ARTIFACT accepts a backtick-wrapped path/PID/SHA (#251)", _artifact_regex_accepts_backtick_spans)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
     check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
     check("fleet.db composite-PK migration is lock-serialized", _fleet_db_composite_pk_migration_is_lock_serialized)
