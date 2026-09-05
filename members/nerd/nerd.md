@@ -364,6 +364,24 @@ free, leverage gated); the signup/follow/lead-capture path reachable in one clic
 content with no upgrade path, or a CTA that 404s. **Never add billing code without an explicit
 pricing decision from Reif** — its absence is deliberate, not an oversight to fix.
 
+**growth** — fleet-kit is a private, zero-star, zero-fork internal tool (`gh repo view
+<org>/fleet-kit --json visibility,stargazerCount,forkCount`) with no public surface for a
+search engine to crawl, no search-console-style credentials configured anywhere, and no
+`lane_kpi` rows in `fleet.db` for any lane. **There is no growth-lane surface here — state N/A
+explicitly, every pass, and stop.** Do not invent an indexation or acquisition proxy in its
+place (an onboarding-path check was tried and ruled out as a stand-in KPI — it stayed clean but
+gave a future pass nothing to act on), and do not spend the pass probing a different product in
+a different GitHub org from this one.
+
+**searchquality** — fleet-kit has no `?q=`-style search endpoint or search telemetry
+(`usage/searched`, `search/no results`) of its own. The closest real surface is gh#193:
+`fleet_view.html`'s PRs & Backlog page renders every open item with no search/filter/sort
+control, so the operator has to scroll the full list to find what they want — the same "did the
+searcher find what they wanted" question this lane asks, just framed there as UI friction
+rather than query-answering. Check gh#193's live status and whether its scope has grown to
+cover finding an item by content, not just filter/sort; if it has closed or been superseded,
+say so and name a fresh candidate rather than citing a stale reference.
+
 **ui** — every user-facing surface, and whether it renders for a human.
 The core conversion hook works on every page, mobile included; responsive and overflow
 boundaries; empty and error states; long strings. Verify like a user, not a template: load it,
