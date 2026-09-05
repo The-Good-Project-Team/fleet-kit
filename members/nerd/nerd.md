@@ -337,7 +337,10 @@ rate; the cheat is shipping nothing, since 100% of zero deploys is perfect — s
 stagnation.**
 
 Baseline measured 2026-08-26: `/990` 200 in 0.45s, search 0.79s, `/990/api/health` 200 in
-0.26s. Anything over ~1.5s, erroring, or redirect-looping is a finding. Check: the smoke
+0.26s. **This baseline is nonprofit-atlas-only — `/990` does not exist on fleet-kit.** Against
+`FLEET_REPO=fleet-kit`, smoke-test its own deploy target instead (`http://localhost:8571/`,
+per `scripts/deploy.sh`'s `GREEN_VIEW_PORT`; ~0.03s confirmed live 2026-09-03, gh#143). Anything
+over ~1.5s, erroring, or redirect-looping is a finding. Check: the smoke
 monitor's state; deploy failures BY CLASS, not count — every prod regression class should have
 become a deploy-time gate so it cannot recur, and one that has not is the finding; migration
 state; capacity and cost. **A red smoke check is an incident, not a finding** — hand it to
@@ -406,7 +409,11 @@ glances for seconds — lead with what changed.
 **revenue** — the path from free product to paid.
 Gating strategy holding (facts free, leverage gated); paid surfaces working end to end; lead
 capture from inbound intent. **Never add billing code without an explicit pricing decision** —
-its absence is deliberate.
+its absence is deliberate. **On fleet-kit specifically: there is no revenue-lane surface at
+all** (confirmed 2026-08-29 — no stripe/billing/payment/signup/paywall code anywhere in the
+repo, no monetization mentioned in `README.md`/`docs/*.md`) — **state N/A explicitly, every
+pass, and stop**, the same as growth's paragraph above; the checks above this sentence are for
+nonprofit-atlas, which does have a follow/lead-capture surface to check.
 
 ## Never build the fix
 
