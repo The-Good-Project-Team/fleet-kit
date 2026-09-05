@@ -2063,6 +2063,108 @@ def _status_page_banner_distinguishes_unknown_from_good():
     assert unknown != bad, ".banner.unknown must not render identically to .banner.bad"
 
 
+def _status_data_live_alerts_proxies_alert_store_without_touching_overall():
+    """gh#399 AC7: status_data.snapshot()'s `live_alerts` key must carry alert_store.py's
+    (PR#397) live severity feed verbatim, and must NEVER change `overall` -- that field is the
+    older, separate log-derived component-uptime rollup (status_data.py:130-141) and merging
+    the two concepts is explicitly out of scope."""
+    import status_data
+    import alert_store
+
+    fake = {"worst": "critical", "budget_safe": False,
+            "counts": {"transient": 0, "degraded": 0, "critical": 1},
+            "open": [{"check": "probe_token", "problem": "token rejected", "handles": ["reif"]}]}
+    real_alert_snapshot = alert_store.snapshot
+    try:
+        alert_store.snapshot = lambda *a, **k: fake
+        snap = status_data.snapshot()
+        assert snap["live_alerts"] == fake, f"live_alerts did not proxy alert_store: {snap.get('live_alerts')}"
+        assert snap["overall"] in (status_data.OK, status_data.BAD, status_data.UNKNOWN), (
+            "overall must still be one of the log-derived states, untouched by live_alerts")
+    finally:
+        alert_store.snapshot = real_alert_snapshot
+
+
+def _status_data_live_alerts_fails_open_on_a_broken_store():
+    """A live_alerts() that raised would take status_data.snapshot() down with it -- the exact
+    silent-failure class alert_store.snapshot() itself already refuses to produce. Mirror its
+    fail-open contract: an exception must still read as unsafe/unknown, never as no-alerts."""
+    import status_data
+    import alert_store
+
+    real_alert_snapshot = alert_store.snapshot
+    try:
+        def _boom(*a, **k):
+            raise RuntimeError("state file corrupt")
+        alert_store.snapshot = _boom
+        result = status_data.live_alerts()
+        assert result["worst"] == "unknown", f"a broken store must read as unknown, got {result}"
+        assert result["budget_safe"] is False, "a broken store must never read as budget_safe"
+    finally:
+        alert_store.snapshot = real_alert_snapshot
+
+
+def _status_page_transient_alert_does_not_render_as_a_confirmed_fault():
+    """gh#399: alert_store.py's own severity doc says transient "is NOT evidence the watched
+    thing is broken; it is evidence we are blind. NEVER pages on its own." A worst=="transient"
+    response (e.g. a container mid-restart) must still be visible per AC2's literal "worst !=
+    ok", but must never render with the same class as a confirmed critical fault -- that would
+    reintroduce, at the display layer, exactly the false-alarm noise this whole feed exists to
+    eliminate."""
+    import status_page
+
+    html = status_page._live_alert_html(
+        {"worst": "transient", "budget_safe": True, "counts": {"transient": 1},
+         "open": [{"check": "budget_read", "problem": "meter unreadable", "handles": []}]})
+    assert html, "worst=transient must still render something (AC2's literal worst != ok)"
+    assert "class='live-alert critical" not in html, (
+        "a transient (unconfirmed) condition must not render with the critical class")
+    assert "transient" in html
+
+
+def _status_page_renders_live_alert_banner_distinct_from_component_grid():
+    """gh#399 AC7/AC8: when live_alerts.worst != "ok", /status must show a banner distinct
+    from the existing per-component uptime grid; when worst == "ok", neither the live-alert
+    block nor the component banner's own text should claim a live alert is open."""
+    import status_data
+    import status_page
+
+    real_snapshot = status_data.snapshot
+
+    def _fake(live_alerts, overall="ok"):
+        def _snap(hours=72):
+            return {"overall": overall, "components": [], "hours": hours, "members": [],
+                     "live_alerts": live_alerts, "generated_at": "2026-09-05 00:00 UTC"}
+        return _snap
+
+    try:
+        status_data.snapshot = _fake({"worst": "ok", "budget_safe": True, "counts": {}, "open": []})
+        html_ok = status_page.render()
+        assert "class='live-alert" not in html_ok, "worst=ok must render no live-alert block (AC8)"
+
+        # overall="down" here, deliberately DIFFERENT from live_alerts' own worst -- if
+        # rendering live_alerts ever clobbered or was driven by `overall` (the thing AC7
+        # forbids), this would catch it, unlike pinning both to "ok"/"critical" together.
+        status_data.snapshot = _fake({
+            "worst": "critical", "budget_safe": False,
+            "counts": {"critical": 2, "degraded": 1},
+            "open": [{"check": "probe_token", "problem": "token rejected", "handles": ["reif"]}],
+        }, overall="down")
+        html_bad = status_page.render()
+        assert "class='live-alert" in html_bad, "worst=critical must render the live-alert block"
+        assert "2 critical" in html_bad and "1 degraded" in html_bad, (
+            "banner must name the actual counts (AC3-equivalent for /status)")
+        assert "probe_token" in html_bad and "token rejected" in html_bad, (
+            "banner must list the specific open condition, not a generic message (AC4-equivalent)")
+        # AC7: the pre-existing component banner must reflect ITS OWN `overall` ("down" here),
+        # not be overwritten or dragged along by live_alerts' independent "critical".
+        assert "banner bad" in html_bad, (
+            "the older per-component banner must still render its own overall=down state "
+            "independently of live_alerts")
+    finally:
+        status_data.snapshot = real_snapshot
+
+
 def _postflight_dirty_check_catches_a_leaked_absolute_path_write():
     """fleet-kit#78 / nonprofit-atlas#3113 (15+ recurrences): worktree isolation is a `cd`, not
     a sandbox -- it does not stop a tool call that names the shared checkout by its absolute
@@ -6475,6 +6577,10 @@ if __name__ == "__main__":
     check("status page's hourly-cadence log is not flattened to a 5-minute back-fill (gh#387)", _status_page_hourly_log_cadence_not_flattened_to_5min)
     check("status page banner distinguishes unknown from good and bad (gh#358)", _status_page_banner_distinguishes_unknown_from_good)
     check("up.sh never emits the shared 'fleet-kit:latest' tag into a generated fleet.env (gh#395)", _up_sh_never_emits_the_shared_image_tag_into_a_generated_fleet_env)
+    check("status_data.live_alerts() proxies alert_store without touching overall (gh#399)", _status_data_live_alerts_proxies_alert_store_without_touching_overall)
+    check("status_data.live_alerts() fails open on a broken store (gh#399)", _status_data_live_alerts_fails_open_on_a_broken_store)
+    check("status page renders a live-alert banner distinct from the component grid (gh#399)", _status_page_renders_live_alert_banner_distinct_from_component_grid)
+    check("status page's transient alert does not render as a confirmed fault (gh#399)", _status_page_transient_alert_does_not_render_as_a_confirmed_fault)
 
     for n in ok:
         print(f"  ok    {n}")
