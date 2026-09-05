@@ -476,6 +476,51 @@ def _fleet_db_run_id_collisions_dont_lose_a_verdict():
         assert expected <= idx_names, idx_names
 
 
+def _fleet_db_query_runs_item_id_matches_free_text_mentions():
+    """gh#405 AC1/AC4: `query_runs(item_id=...)` used to exact-match the `item_id` column
+    alone -- a column only ever written by a `--item N` build-claim pass, 3.9% of rows
+    fleet-wide. A pass that only DISCUSSED an issue in free text (marie/nerd/dumbledore/...)
+    was invisible to it, so "what has the fleet said about #143" came back a confident,
+    wrong `[]`. AC1: exact match is now an OR with a `#N` mention in outcome/evidence/
+    self_critique. AC4: a free-text-only row (no item_id set at all) is still returned.
+    """
+    import fleet_db
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        runs = d / "runs.jsonl"
+        claimed = {"run_id": "minion-item143-1", "member": "minion", "item_id": "143",
+                   "outcome": "built the fix", "_recorded_at": 300.0}
+        # AC4: free-text-only mention, item_id column never set on this row.
+        discussed = {"run_id": "marie-1", "member": "marie",
+                     "outcome": "reconfirmed #143 still open", "_recorded_at": 200.0}
+        evidence_only = {"run_id": "nerd-1", "member": "nerd", "outcome": "filed a finding",
+                          "evidence": "live-checked against #143's own AC", "_recorded_at": 100.0}
+        # A DIFFERENT issue whose number merely contains "143" as a substring must not
+        # false-positive -- the PRD's own open question about #143 vs #1430 boundary-anchoring.
+        decoy = {"run_id": "marie-2", "member": "marie", "outcome": "closed #1430",
+                 "_recorded_at": 50.0}
+        runs.write_text("\n".join(json.dumps(r) for r in
+                                   (claimed, discussed, evidence_only, decoy)) + "\n")
+        conn = fleet_db.connect(d / "fleet.db")
+        fleet_db.sync(conn, runs_file=runs)
+
+        rows = fleet_db.query_runs(conn, item_id="143")
+        ids = {r["run_id"] for r in rows}
+        assert ids == {"minion-item143-1", "marie-1", "nerd-1"}, ids
+
+        # Old exact-match behavior stays a strict subset (AC4's "not replaced").
+        exact_only = [r for r in rows if r["item_id"] == "143"]
+        assert {r["run_id"] for r in exact_only} == {"minion-item143-1"}, exact_only
+
+        # #1430's mention must not leak into a #143 lookup.
+        assert "marie-2" not in ids, ids
+
+        # limit is honored AFTER the free-text narrowing, not applied to the raw LIKE superset.
+        limited = fleet_db.query_runs(conn, item_id="143", limit=2)
+        assert len(limited) == 2, limited
+
+
 def _fleet_db_composite_pk_migration_is_lock_serialized():
     """#212: fleet_view_server.py calls `fleet_db.connect()` from several independent
     threads -- the background tail thread and per-request handlers -- and
@@ -6444,6 +6489,7 @@ if __name__ == "__main__":
     check("_ARTIFACT accepts a backtick-wrapped path/PID/SHA (#251)", _artifact_regex_accepts_backtick_spans)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
     check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
+    check("query_runs(item_id=) matches free-text #N mentions, not just the build-claim column (gh#405)", _fleet_db_query_runs_item_id_matches_free_text_mentions)
     check("fleet.db composite-PK migration is lock-serialized", _fleet_db_composite_pk_migration_is_lock_serialized)
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("cost_bridge converts real spend into fanout's --observed shape", _cost_bridge_converts_real_spend_into_fanouts_observed_shape)

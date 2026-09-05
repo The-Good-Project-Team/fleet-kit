@@ -24,6 +24,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -325,6 +326,12 @@ def spend(conn: sqlite3.Connection, member: str | None = None, hours: float = 24
 
 def query_runs(conn: sqlite3.Connection, *, member: str | None = None, status: str | None = None,
                item_id: str | None = None, limit: int = 100) -> list[dict]:
+    """gh#405: `item_id` is only ever written by a `--item N` build-claim pass -- 67/1720 rows
+    fleet-wide (3.9%). Every marie/nerd/dumbledore/... pass that merely DISCUSSES issue N does
+    so in free text only, so an exact-match filter told 96% of callers "nothing" when the fleet
+    had plenty to say. Widen to an OR: the exact build-claim column, or a `#N` mention in
+    outcome/evidence/self_critique -- the exact match stays a strict subset of this result.
+    """
     q = "SELECT * FROM runs WHERE 1=1"
     params: list = []
     if member:
@@ -332,12 +339,27 @@ def query_runs(conn: sqlite3.Connection, *, member: str | None = None, status: s
     if status:
         q += " AND status = ?"; params.append(status)
     if item_id:
-        q += " AND item_id = ?"; params.append(item_id)
-    q += " ORDER BY recorded_at DESC LIMIT ?"
-    params.append(limit)
+        like = f"%#{item_id}%"
+        q += " AND (item_id = ? OR outcome LIKE ? OR evidence LIKE ? OR self_critique LIKE ?)"
+        params.extend([item_id, like, like, like])
+    q += " ORDER BY recorded_at DESC"
+    if item_id is None:
+        q += " LIMIT ?"; params.append(limit)
     cur = conn.execute(q, params)
     cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+    if item_id:
+        # The LIKE above is a superset -- it also matches "#1430" while looking for "#143" --
+        # so the real match is re-checked here, word-boundary anchored (`#` already pins the
+        # left edge; the negative lookahead pins the right). LIMIT is applied AFTER this
+        # narrowing, not in the SQL above: pushing it into the query would risk truncating the
+        # result to false positives before they get filtered back out.
+        pattern = re.compile(r"#" + re.escape(item_id) + r"(?!\d)")
+        rows = [r for r in rows
+                if r.get("item_id") == item_id
+                or any(pattern.search(r.get(f) or "") for f in ("outcome", "evidence", "self_critique"))]
+        rows = rows[:limit]
+    return rows
 
 
 def main(argv=None) -> int:
