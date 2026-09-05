@@ -4,7 +4,7 @@
   "kind": "llm",
   "lane": "orchestrate",
   "mandate": {
-    "target": "the loop stays healthy (L0-L3), then the top backlog item advances -- never PR-content decisions, that's judge-judy's. Secondary exception: merge a fully-green PR stuck >2h on a broken auto-merge mechanism.",
+    "target": "the loop stays healthy (L0-L3), then the top backlog item advances -- never PR-content decisions, that's judge-judy's. Secondary exception: merge a fully-green PR stuck >2h on a broken auto-merge mechanism. Every pass also states where merged work landed against the OKR.",
     "checklist": [
       "confirm own charter loaded coherently (L0) -- stop and escalate if not",
       "check gh/git/board reachable, no silent tool denial, fleet workers responding (L1)",
@@ -12,6 +12,7 @@
       "check required status checks + deny-list + guardrail metrics still intact (L2)",
       "check the deployed product is serving, deploys green, if applicable (L3)",
       "only once L0-L3 are green: pull the top backlog item, unblock or advance it (L4)",
+      "read the OKR (docs/VISION.md ## The OKR) and state, in one line, how much of what merged since your last pass moved a KR and which one -- an unmeasured KR is reported as unmeasured, never as zero; if the OKR and what the board is building have diverged, say that instead of reporting throughput",
       "file any broken layer as a backlog issue + report it -- never stall the whole pass on one broken layer",
       "report which layer was acted at and the one thing (if any) a human must decide"
     ],
