@@ -1682,6 +1682,59 @@ def _status_page_deploy_component_classifies_stale_as_down():
             _il.reload(status_data)
 
 
+def _status_page_banner_distinguishes_unknown_from_good():
+    """gh#358: status_page.py computed the banner box's class as a 2-way `bad`/`good` boolean
+    (`bad = overall == "down"`), so an `unknown` overall -- the state that fires right now with
+    the tgp/gmail budget meters at zero data for 72h -- fell through to `good`, the identical
+    class used when every component is actually healthy. The headline text and dot already
+    handled all three states correctly; only the surrounding box lied.
+
+    This pins all three `_BANNER_CLASS` branches directly against a monkeypatched
+    `status_data.snapshot`, plus the CSS itself carrying a `.banner.unknown` rule whose values
+    don't just alias `.banner.good` or `.banner.bad` (PRD AC2) -- a class name alone would pass
+    even if it rendered identically.
+    """
+    import status_data
+    import status_page
+
+    def _fake_snapshot(overall):
+        def _snap(hours=72):
+            return {
+                "overall": overall,
+                "components": [],
+                "hours": hours,
+                "members": [],
+                "generated_at": "2026-09-05 00:00 UTC",
+            }
+        return _snap
+
+    real_snapshot = status_data.snapshot
+    try:
+        for overall, want_class in (("ok", "good"), ("down", "bad"), ("unknown", "unknown")):
+            status_data.snapshot = _fake_snapshot(overall)
+            html = status_page.render()
+            assert f"banner {want_class}" in html, (
+                f"overall={overall!r} must render 'banner {want_class}', got: "
+                + next((l for l in html.splitlines() if "class='banner" in l), "<no banner line>")
+            )
+    finally:
+        status_data.snapshot = real_snapshot
+
+    # AC2: `.banner.unknown` must be visually distinct from BOTH `.banner.good` and
+    # `.banner.bad` -- a different border-color and/or header background, not reusing either.
+    def _decls(selector):
+        border = re.search(re.escape(selector) + r"\{([^}]*)\}", status_page.CSS)
+        head = re.search(re.escape(selector) + r" \.banner-head\{([^}]*)\}", status_page.CSS)
+        return (border.group(1) if border else "", head.group(1) if head else "")
+
+    good = _decls(".banner.good")
+    bad = _decls(".banner.bad")
+    unknown = _decls(".banner.unknown")
+    assert unknown != ("", ""), ".banner.unknown must have its own CSS rule"
+    assert unknown != good, ".banner.unknown must not render identically to .banner.good"
+    assert unknown != bad, ".banner.unknown must not render identically to .banner.bad"
+
+
 def _postflight_dirty_check_catches_a_leaked_absolute_path_write():
     """fleet-kit#78 / nonprofit-atlas#3113 (15+ recurrences): worktree isolation is a `cd`, not
     a sandbox -- it does not stop a tool call that names the shared checkout by its absolute
@@ -5652,6 +5705,7 @@ if __name__ == "__main__":
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
     check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
+    check("status page banner distinguishes unknown from good and bad (gh#358)", _status_page_banner_distinguishes_unknown_from_good)
 
     for n in ok:
         print(f"  ok    {n}")
