@@ -224,6 +224,72 @@ Captured but never enforced: a missing report does not change `status`. A pass t
 work and skipped the prose is still a successful pass — making the memo load-bearing would turn
 a formatting slip into a false failure, the exact bug §10b exists to prevent.
 
+## 10d. Every PR opens in plain language, and names its OKR link
+
+Reif, 2026-09-05: *"id like all prs to be written in plain language - user focused, so that a
+non technical person can read it - and show each time how it fits into the okr."*
+
+A PR body is read by a person deciding whether to merge it, not only by the agent that wrote it.
+Today's bodies open with a file path and a symbol name, which means the one reader who has to
+approve 30 a day cannot tell what any of them DO without reading a diff. That is a failure of
+the report, not of the reader.
+
+**The title is 50 characters or fewer, and reads as an outcome.** Measured 2026-09-05: 40 of the
+last 40 merged PR titles were over 50, median 76, longest 95 — so the list a human scans is a
+column of truncated file paths. Fifty is the same limit git itself uses for a subject line, and
+it is enough for the answer if the answer is what a person can now do.
+
+```
+BAD  (87)  fix(search): add YMCA to _QUERY_SYNONYMS so the national HQ outranks chapters (gh#4298)
+GOOD (44)  Searching YMCA finds the national office first
+
+BAD  (95)  fix(devops): build_and_promote.sh fails loudly instead of resurrecting deleted 990.db (gh#4303)
+GOOD (46)  Deploys stop bringing back deleted org data
+
+BAD  (72)  feat(hq): /network/hq — the person's workspace, app-store shaped
+GOOD (38)  Your workspace, with apps you can add
+```
+
+Drop the `type(scope):` prefix, the file name, the symbol name and the trailing issue number —
+the issue link belongs in the body (`Fixes #NNNN`), where it is clickable and does not spend
+characters a person is trying to read. Keep a conventional-commit prefix ONLY where a repo's own
+tooling parses it; this fleet's does not.
+
+**Every PR body opens with these two blocks, before any technical detail:**
+
+```
+## What this does
+<2-4 sentences, plain language, from the user's side of the screen. What can a person
+DO now that they could not do before, or what stops going wrong for them? Name the
+person (a nonprofit that wants to claim its page, a funder searching for a cause, an
+operator reviewing claims) — never "the user" in the abstract.>
+
+## How this fits the OKR
+<One or two sentences naming which key result this moves and how. KR1 supply
+(entities verified), KR2 the objective (entities with >= 1 interaction), KR3 the rate
+(sign-up to first interaction). See docs/VISION.md ## The OKR.>
+```
+
+**Write the first block as if the reader has never seen the codebase.** No file paths, no
+function names, no `snake_case`, no framework nouns. "A nonprofit that clicks Subscribe now
+reaches a real checkout page instead of a broken link" — not "adds a GET route for
+`/network/hq/atlas/subscribe` with `Depends(auth.require_user)`." The technical account still
+belongs in the PR; it belongs BELOW these two blocks, under `## What changed`, where the person
+reviewing the code will look for it. Nothing in this section removes that detail or lowers the
+evidence bar in §3 and §5.
+
+**Not everything moves a KR, and pretending otherwise is the failure mode.** Infrastructure,
+test fixtures, dependency bumps and cleanup usually move none. `Moves no KR — <one line on why
+this was worth doing anyway>` is a complete and honest answer, and it costs nothing. Inventing a
+link is the only wrong answer here — the same rule `Vision-link:` already carries in
+`docs/VISION.md`, which rejects second-order claims like "this makes the fleet ship faster,
+which serves the vision."
+
+**A PR that only a machine can evaluate has not been reported, only filed.** If the plain
+block cannot be written because the change genuinely has no user-visible effect, say that in one
+sentence — "no user-visible change; this keeps X from breaking silently" — rather than
+paraphrasing the diff back in slightly longer words.
+
 ## 11. Every run ends with a self-critique — a post-mortem on yourself, not just the work
 
 Reif, 2026-08-21: "it should be inherent in every member to log its findings — like having a
