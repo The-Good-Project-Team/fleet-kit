@@ -1480,6 +1480,87 @@ def _dormant_flags_an_enabled_member_with_zero_runs_in_window():
         "with no roster passed, a zero-run member must not be flagged (safe default)")
 
 
+def _status_page_deploy_component_classifies_stale_as_down():
+    """gh#367: /status had 5 COMPONENTS rows and no Deploy row, so the fleet's own worst-
+    performing pipeline (deploy_success_rate=8-9% at filing) had zero representation on the
+    page built specifically so an operator doesn't have to log-dive during an incident.
+
+    Fixed by adding a 6th COMPONENTS tuple pointed at deploy_staleness_check's own log --
+    STALE is already a BAD_WORDS entry (no new classify() logic needed). This pins the two
+    load-bearing cases from the PRD's acceptance criteria: a STALE line in the window resolves
+    to "down" (AC3), and a fresh box with no log file at all resolves to "unknown"/None rather
+    than crashing (AC4) -- the same "no file -> all unknown" contract every other row gets.
+
+    The synthetic log line below uses deploy_staleness_check.sh's REAL line shape --
+    "[deploy-staleness <ts> UTC] ..." (a check-name prefix ahead of the date, inside the same
+    bracket) -- not a bare "[<ts> UTC]". fleet-code-review BLOCKed the first cut of this fix
+    (gh#367) because the original test used the bare form, which _TS's old regex matched by
+    accident; the real line never matched, silently falling through to the mtime/5-min-cadence
+    fallback and misdating every line but the newest across a sustained, multi-tick incident.
+    """
+    import importlib as _il
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    import status_data
+
+    names = next(names for label, names, _desc in status_data.COMPONENTS if label == "Deploy")
+    assert names == ["deploy_staleness_check.cron.log", "deploy_staleness_check.log"], (
+        f"Deploy COMPONENTS candidate list drifted from the PRD's spec: {names!r}")
+
+    old = _os.environ.get("FLEET_LOG_DIR")
+    with tempfile.TemporaryDirectory() as td:
+        _os.environ["FLEET_LOG_DIR"] = td
+        try:
+            _il.reload(status_data)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            ts = now.strftime("%Y-%m-%d %H:%M:%S")
+            (Path(td) / "deploy_staleness_check.log").write_text(
+                f"[deploy-staleness {ts} UTC] STALE: local HEAD is 6 commits behind origin/main\n")
+
+            cells, pct = status_data.read_component(names)
+            assert cells[-1] == status_data.BAD, (
+                f"a STALE line inside the 72h window must classify as down, got {cells[-1]!r}")
+
+            snap = status_data.snapshot()
+            deploy = next(c for c in snap["components"] if c["label"] == "Deploy")
+            assert deploy["current"] == status_data.BAD, (
+                f"snapshot()'s Deploy entry must surface the STALE incident, got {deploy!r}")
+
+            # Sustained incident: deploy_staleness_check.sh ticks hourly, not every 5 minutes
+            # like the other checks read_component's fallback was calibrated for. A 6-hour-long
+            # outage writes 6 real-timestamped STALE lines, one per hour. Every line must land
+            # in its OWN hour bucket via its real timestamp, not get compressed into the last
+            # few minutes before mtime by the 5-min-cadence fallback (the exact bug this PR's
+            # fleet-code-review BLOCK identified).
+            lines = []
+            for hours_ago in range(6):
+                line_ts = (now - datetime.timedelta(hours=hours_ago)).strftime(
+                    "%Y-%m-%d %H:%M:%S")
+                lines.append(
+                    f"[deploy-staleness {line_ts} UTC] STALE: local HEAD is behind origin/main")
+            (Path(td) / "deploy_staleness_check.log").write_text("\n".join(lines) + "\n")
+            incident_cells, incident_pct = status_data.read_component(names)
+            down_count = sum(1 for c in incident_cells if c == status_data.BAD)
+            assert down_count >= 6, (
+                f"a 6-hour sustained incident (6 real-timestamped STALE lines) must occupy "
+                f"6 distinct down hour-buckets, got {down_count}: {incident_cells!r}")
+
+            # AC4: fresh box, check never ran -- no file at all, not a crash or all-good.
+            (Path(td) / "deploy_staleness_check.log").unlink()
+            empty_cells, empty_pct = status_data.read_component(names)
+            assert all(c == status_data.UNKNOWN for c in empty_cells), (
+                "no deploy log file at all must render as unknown, not assumed healthy")
+            assert empty_pct is None, "no data yields no uptime percentage, not a fabricated one"
+        finally:
+            if old is None:
+                _os.environ.pop("FLEET_LOG_DIR", None)
+            else:
+                _os.environ["FLEET_LOG_DIR"] = old
+            _il.reload(status_data)
+
+
 def _postflight_dirty_check_catches_a_leaked_absolute_path_write():
     """fleet-kit#78 / nonprofit-atlas#3113 (15+ recurrences): worktree isolation is a `cd`, not
     a sandbox -- it does not stop a tool call that names the shared checkout by its absolute
@@ -5106,6 +5187,7 @@ if __name__ == "__main__":
     check("fleet_kpi's gru/jefe/minion ship a real 'PRs shipped' count", _fleet_kpi_gru_jefe_minion_ship_a_real_prs_shipped_count)
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
+    check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
 
     for n in ok:
         print(f"  ok    {n}")
