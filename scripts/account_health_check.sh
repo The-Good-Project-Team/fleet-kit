@@ -66,7 +66,13 @@ _ntfy() {
   # exactly how the suite emailed a human on 2026-09-04. The test still observes a real call
   # (it asserts on NTFY_CALLS_FILE), it just cannot escape to Resend.
   if [ -n "${NTFY_CALLS_FILE:-}" ]; then
-    curl -s -H "Title: $title" -d "$msg" "https://ntfy.sh/${NTFY_TOPIC:-selftest}" >/dev/null 2>&1
+    # Mirror fleet_alert.sh's own gate: its ntfy leg is conditional on a non-empty
+    # NTFY_TOPIC, so with the topic unset NOTHING may reach ntfy. Defaulting the topic here
+    # would fire the leg fleet_alert.sh would have skipped, which is the difference between
+    # standing in for the helper and quietly routing around it.
+    if [ -n "${NTFY_TOPIC:-}" ]; then
+      curl -s -H "Title: $title" -d "$msg" "https://ntfy.sh/$NTFY_TOPIC" >/dev/null 2>&1
+    fi
     return 0
   fi
   bash "$KIT_DIR/scripts/fleet_alert.sh" \
