@@ -3803,6 +3803,57 @@ def _write_routes_are_authenticated():
     assert "compare_digest" in auth, "key compared without hmac.compare_digest (timing leak)"
 
 
+def _fleet_settings_rejects_unsafe_or_malformed_dial_values():
+    """gh#233: /api/fleet_settings wrote any DIAL_FIELDS value straight to fleet.env with zero
+    validation. Two confirmed-live consequences: (1) fleet.env is bash-sourced as root by both
+    entrypoint.sh and run_member.sh, so an unescaped shell metacharacter in ANY field is root
+    command execution on the next cron tick; (2) FLEET_GRU_CADENCE=0,30 (set via this exact
+    endpoint) fed cron's hour field, and Vixie cron rejected the whole crontab file, silencing
+    every scheduled member for ~40h (2026-09-03 21:00 -> 09-05 12:45).
+
+    One deliberately malformed value per field family, per gh#233's own AC5, plus the proven
+    real-world value that caused the outage.
+    """
+    import fleet_view_server as fvs
+
+    malformed = [
+        ("FLEET_GRU_CADENCE", "0,30"),          # the value that actually broke cron
+        ("FLEET_GRU_CADENCE", "$(rm -rf /)"),   # shell metachar via the cron-hour family
+        ("FLEET_SHARE_FRACTION", "1.5"),        # out-of-range fraction
+        ("FLEET_GRU_ALLOWANCE_FRACTION", "nope"),
+        ("FLEET_QUEUE_CAP", "-1"),               # negative int
+        ("FLEET_CADENCE_BUILD", "3;rm -rf /"),   # shell metachar via a seconds field
+        ("FLEET_MAX_BUDGET_USD", "-5"),          # negative float
+        ("FLEET_BUILDER_MODEL", "claude`id`"),   # shell metachar via a free-text field
+        ("FLEET_CODE_REVIEW_MODEL", "a\nFLEET_ENABLED=false"),  # newline line-injection
+    ]
+    for key, value in malformed:
+        err = fvs._validate_dial_value(key, value)
+        assert err, f"{key}={value!r} should have been rejected but validated clean"
+
+    valid = [
+        ("FLEET_GRU_CADENCE", "*/2"), ("FLEET_GRU_CADENCE", ""), ("FLEET_GRU_CADENCE", "3"),
+        ("FLEET_SHARE_FRACTION", "0.25"), ("FLEET_QUEUE_CAP", "10"),
+        ("FLEET_CADENCE_BUILD", "3600"), ("FLEET_MAX_BUDGET_USD", "5"),
+        ("FLEET_BUILDER_MODEL", "claude-sonnet-5"),
+    ]
+    for key, value in valid:
+        err = fvs._validate_dial_value(key, value)
+        assert err is None, f"{key}={value!r} should have validated clean, got: {err}"
+
+    # All-or-nothing at the handler: the errors pass must complete (and gate the response)
+    # before the write loop's first write_env_field call, in source order, so one bad field
+    # in a multi-field request can never leave fleet.env partially written.
+    src = (ROOT / "scripts" / "fleet_view_server.py").read_text()
+    handler = src.split('if path == "/api/fleet_settings"', 1)[1].split('\n        if path ==', 1)[0]
+    first_error_check = handler.find("_validate_dial_value")
+    first_write = handler.find("write_env_field(")
+    assert first_error_check != -1, "/api/fleet_settings no longer calls _validate_dial_value"
+    assert first_write != -1, "/api/fleet_settings no longer writes via write_env_field"
+    assert first_error_check < first_write, \
+        "/api/fleet_settings writes before validating -- not all-or-nothing"
+
+
 def _fleet_view_ui_can_actually_authenticate_a_write():
     """The Settings dials (and every other write button) could never save from a browser.
 
@@ -4853,6 +4904,7 @@ if __name__ == "__main__":
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)
     check("fleet-view write routes are authenticated and fail closed", _write_routes_are_authenticated)
+    check("fleet_settings rejects unsafe or malformed dial values (gh#233)", _fleet_settings_rejects_unsafe_or_malformed_dial_values)
     check("fleet-view UI can actually authenticate a write", _fleet_view_ui_can_actually_authenticate_a_write)
     check("fleet-view login is still fail-closed", _fleet_view_login_is_still_fail_closed)
     check("gru allowance dial actually changes the number", _gru_allowance_dial_actually_changes_the_number)

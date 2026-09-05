@@ -239,6 +239,104 @@ DIAL_FIELDS = [
     "FLEET_QUEUE_CAP", "FLEET_MAX_BUDGET_USD", "FLEET_DATTA_MAX_NERDS_PER_PASS",
 ]
 
+# gh#233: /api/fleet_settings wrote any DIAL_FIELDS value straight to fleet.env with zero
+# validation. Two distinct blast radii, both closed here:
+#   (1) fleet.env is bash-sourced as root by entrypoint.sh (container boot) AND run_member.sh
+#       (every single member's cron tick) -- an unescaped shell metacharacter in ANY field
+#       is root command execution on the next tick, minutes away, not just a bad setting.
+#   (2) FLEET_GRU_CADENCE is spliced unvalidated into entrypoint.sh's cron *hour* field; Vixie
+#       cron rejects the WHOLE crontab file on one malformed field, silently stopping every
+#       scheduled member. Confirmed live 2026-09-03/09-05: an operator set
+#       FLEET_GRU_CADENCE=0,30 via this exact endpoint (meant as "every 30 min", but this dial
+#       feeds the hour field) and the fleet went dark for ~40h on the next container restart.
+#       PR#418 added a pre-cron validation pass in entrypoint.sh (defense at read time); this
+#       is the matching defense at write time, so a bad value never reaches fleet.env at all.
+# Deny-listing shell metacharacters applies to EVERY field regardless of its own shape check --
+# per-field regexes can have bugs, the metachar gate cannot let RCE through even if one does.
+# Deliberately excludes '*', '?', '[', ']' -- bash's simple `KEY=value` assignment form does
+# NOT glob-expand or word-split its right-hand side, so those are inert here, and FLEET_GRU_
+# CADENCE needs '*' to express its own default/every-hour value. `; & | ( ) < >` are always
+# separate tokens to the shell even with no surrounding whitespace (the actual injection
+# vector), '$'/backtick are substitution, quotes/backslash can smuggle an unterminated string
+# across the rest of the file, and a literal newline turns one KEY=value line into two.
+_SHELL_METACHARS = set("$`;&|\n\r\\\"'<>(){}")
+
+# FLEET_GRU_CADENCE is the only DIAL_FIELDS entry actually spliced into a cron field
+# (entrypoint.sh:203, `3 ${FLEET_GRU_CADENCE:-*} * * *` -- the HOUR position). The three
+# FLEET_CADENCE_* siblings look like the same family but are NOT: they're seconds-based
+# intervals for the bare-host systemd/launchd scheduler templates only (fleet.env.example:
+# "scheduler cadences (seconds, for systemd timer / launchd StartInterval templates)"),
+# never read by entrypoint.sh or any container cron line. Validating them as a cron hour
+# field (0-23) would reject their own documented default of 3600. Validate each family by
+# what actually consumes it, not by name resemblance.
+_CRON_HOUR_FIELDS = {"FLEET_GRU_CADENCE"}
+_NONNEG_INT_FIELDS = {
+    "FLEET_QUEUE_CAP", "FLEET_DATTA_MAX_NERDS_PER_PASS",
+    "FLEET_CADENCE_BUILD", "FLEET_CADENCE_REVIEW", "FLEET_CADENCE_GITPULL",
+}
+_FRACTION_FIELDS = {"FLEET_SHARE_FRACTION", "FLEET_GRU_ALLOWANCE_FRACTION"}
+_NONNEG_FLOAT_FIELDS = {"FLEET_MAX_BUDGET_USD"}
+_MODEL_FIELDS = {"FLEET_BUILDER_MODEL", "FLEET_CODE_REVIEW_MODEL"}
+
+
+def _valid_cron_hour_field(value: str) -> bool:
+    """Accepts the shapes entrypoint.sh's `${FLEET_GRU_CADENCE:-*}` splice can actually
+    produce: blank/'*' (every hour), 'N', 'N-M', '*/N', or a comma list of those, each N in
+    0-23. Deliberately not a full crontab(5) parser (out of scope per gh#233's own PRD) --
+    just enough to reject gh#380's proven-fatal '0,30' before it reaches fleet.env."""
+    if value == "" or value == "*":
+        return True
+    for part in value.split(","):
+        if not part:
+            return False
+        base, _, step = part.partition("/")
+        if step and not (step.isdigit() and int(step) >= 1):
+            return False
+        if base == "*":
+            continue
+        lo, _, hi = base.partition("-")
+        for bound in (lo, hi) if hi else (lo,):
+            if not bound.isdigit() or not (0 <= int(bound) <= 23):
+                return False
+    return True
+
+
+def _validate_dial_value(key: str, value: str) -> str | None:
+    """Return an error string if `value` is unsafe/malformed for `key`, else None. Called for
+    every field in an /api/fleet_settings request BEFORE any write -- see that handler for the
+    all-or-nothing contract this enables."""
+    bad_chars = _SHELL_METACHARS & set(value)
+    if bad_chars:
+        return f"contains disallowed character(s): {''.join(sorted(bad_chars))!r}"
+    if "\x00" in value:
+        return "contains a NUL byte"
+    if key in _CRON_HOUR_FIELDS:
+        if not _valid_cron_hour_field(value):
+            return "not a valid cron hour field (expected '*', 'N', 'N-M', '*/N', or a comma list, N in 0-23)"
+    elif key in _NONNEG_INT_FIELDS:
+        if value != "" and not (value.isdigit()):
+            return "must be a non-negative integer"
+    elif key in _FRACTION_FIELDS:
+        if value != "":
+            try:
+                f = float(value)
+            except ValueError:
+                return "must be a number"
+            if not (0.0 <= f <= 1.0):
+                return "must be between 0 and 1"
+    elif key in _NONNEG_FLOAT_FIELDS:
+        if value != "":
+            try:
+                f = float(value)
+            except ValueError:
+                return "must be a number"
+            if f < 0:
+                return "must be non-negative"
+    elif key in _MODEL_FIELDS:
+        if value != "" and ("=" in value or "\n" in value):
+            return "must not contain '=' or a newline"
+    return None
+
 
 def read_env_flags() -> dict:
     """FLEET_ENABLED from fleet.env text (not this process's environment, which was only a
@@ -1296,6 +1394,22 @@ class Handler(BaseHTTPRequestHandler):
             # DIAL_FIELDS only -- server-side allow-list, same spirit as fleet_toggle's
             # MEMBERS check. Silently ignores any key not on the list rather than writing
             # it; never trust client-submitted field names.
+            #
+            # gh#233: validate every submitted value BEFORE writing any of them. fleet.env is
+            # bash-sourced as root on every member's cron tick (run_member.sh) and at container
+            # boot (entrypoint.sh) -- an unescaped value here is root command execution minutes
+            # later, not just a bad setting. All-or-nothing so a request with one bad field
+            # can't leave fleet.env in a mixed valid/invalid state.
+            errors = {}
+            for key, value in body.items():
+                if key not in DIAL_FIELDS:
+                    continue
+                err = _validate_dial_value(key, str(value))
+                if err:
+                    errors[key] = err
+            if errors:
+                self._json({"ok": False, "errors": errors}, 400)
+                return
             written = []
             for key, value in body.items():
                 if key in DIAL_FIELDS:
