@@ -152,14 +152,32 @@ DEP_CONC="${DEPLOY_STATE%% *}"; DEP_SHA="${DEPLOY_STATE#* }"
 # alongside CLEAN because a non-required check being red still leaves a PR mergeable -- required
 # checks are what gate the merge, and a genuinely failing required check is already shape 1.
 STALE_PENDING_HOURS="${FIXER_STALE_PENDING_HOURS:-2}"
+# `gh pr list --json`/`gh pr view --json` have no `mergeQueueEntry` field at all (confirmed
+# live, fleet-kit gh#4305) -- autoMergeRequest alone can't tell "never armed" from "already
+# enqueued", since a queue entry doesn't populate it. Fetching mergeQueueEntry needs a raw
+# GraphQL call, aliased per PR number so a batch of candidates costs one round trip, not N.
+queued_prs() { # <space-separated pr numbers> -> the subset that already has a mergeQueueEntry
+  local nums="$1" owner name query n
+  [ -z "$nums" ] && return
+  read -r owner name < <(gh repo view --json owner,name -q '.owner.login + " " + .name' 2>>"$LOG")
+  [ -z "$owner" ] && return
+  query="query {"
+  for n in $nums; do
+    query+=" pr$n: repository(owner: \"$owner\", name: \"$name\") { pullRequest(number: $n) { mergeQueueEntry { state } } }"
+  done
+  query+=" }"
+  timeout 25s gh api graphql -f query="$query" \
+    -q '.data | to_entries[] | select(.value.pullRequest.mergeQueueEntry != null) | .key | ltrimstr("pr")' \
+    2>>"$LOG"
+}
 read_stale_prs() { # -> space-separated "num:sha:reason" triples, oldest first, or nothing
   # `gh ... -q/--jq` is a plain expression string, NOT the real jq CLI -- it has no --arg flag
   # to bind the cutoff safely, so it's computed here and interpolated as a quoted ISO-8601
   # literal into the expression itself (a timestamp string, not attacker-controlled input).
-  local cutoff
+  local cutoff raw candidates queued entry num reason filtered=()
   cutoff=$(date -u -d "-${STALE_PENDING_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
            || date -u -v-"${STALE_PENDING_HOURS}"H +%Y-%m-%dT%H:%M:%SZ)
-  gh pr list --state open --limit 30 \
+  raw=$(gh pr list --state open --limit 30 \
     --json number,headRefOid,mergeStateStatus,statusCheckRollup,isDraft,autoMergeRequest,updatedAt \
     -q '
       sort_by(.number) | .[] |
@@ -181,7 +199,22 @@ read_stale_prs() { # -> space-separated "num:sha:reason" triples, oldest first, 
         and .updatedAt < "'"$cutoff"'" ) as $parked |
       select($failed or $conflict or $wedged or $noanswer or $noran or $parked) |
       "\(.number):\(.headRefOid):\(if $failed then "check-failed" elif $conflict then "merge-conflict" elif $wedged then "wedged-check" elif $noran then "check-never-ran" elif $parked then "green-but-parked" else "no-checks-at-all" end)"
-    ' 2>>"$LOG" | tr '\n' ' '
+    ' 2>>"$LOG")
+
+  candidates=""
+  for entry in $raw; do
+    [ "${entry##*:}" = "green-but-parked" ] && candidates="$candidates ${entry%%:*}"
+  done
+  queued=$(queued_prs "$candidates")
+
+  for entry in $raw; do
+    num="${entry%%:*}"; reason="${entry##*:}"
+    if [ "$reason" = "green-but-parked" ] && grep -qx "$num" <<<"$queued"; then
+      continue  # already enqueued -- not parked, regardless of autoMergeRequest (gh#4305)
+    fi
+    filtered+=("$entry")
+  done
+  [ "${#filtered[@]}" -gt 0 ] && printf '%s ' "${filtered[@]}"
 }
 STALE_PRS=$(read_stale_prs)
 # The dedup key for a stale-PR fire is the WHOLE batch, not the oldest PR's sha.

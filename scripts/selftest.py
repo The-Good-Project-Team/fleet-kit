@@ -4513,6 +4513,80 @@ def _fixer_sees_a_green_but_parked_pr():
         "a PR that went green seconds ago was called parked -- the arming sweep has not run yet"
 
 
+def _fixer_does_not_fire_on_a_parked_pr_already_in_the_merge_queue():
+    """gh#4305: on a merge-queue-controlled repo, autoMergeRequest stays null for a PR that is
+    already enqueued -- the queue entry isn't reflected in that field, so check.sh's original
+    `$parked` condition (keyed only on autoMergeRequest) misclassified an already-armed,
+    mid-queue PR as green-but-parked. Live case: PR #4285, this repo, 2026-09-04 -- the-fixer
+    spawned a sub-pass to "arm" a PR that was already mid-queue, wasting a turn budget.
+
+    `gh pr list --json`/`gh pr view --json` have no `mergeQueueEntry` field at all, so the fix
+    is a follow-up `gh api graphql` call (`queued_prs()`) for any green-but-parked candidate.
+    This stubs `gh` end to end -- including `repo view` and `api graphql` -- so the real
+    exclusion path runs, not just the jq expression `_fixer_sees_a_green_but_parked_pr` covers.
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("jq"):
+        return  # jq absent here; the exclusion path needs it same as check.sh itself does
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        repo = Path(tmp) / "repo"
+        repo.mkdir(parents=True, exist_ok=True)
+        bin_dir = Path(tmp) / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+
+        # #100 is green-but-parked per the pr-list stub, and IS already in the merge queue --
+        # must be excluded. #300 is green-but-parked and NOT in the queue -- must still fire.
+        (bin_dir / "gh").write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, subprocess, sys\n"
+            "args = sys.argv[1:]\n"
+            "if args[:1] == ['run']:\n"
+            "    print('success abc123'); sys.exit(0)\n"
+            "if args[:1] == ['pr']:\n"
+            "    sys.stdout.write('100:' + 'a'*40 + ':green-but-parked '\n"
+            "                     '300:' + 'b'*40 + ':green-but-parked ')\n"
+            "    sys.exit(0)\n"
+            "if args[:2] == ['repo', 'view']:\n"
+            "    print('acme testrepo'); sys.exit(0)\n"
+            "if args[:2] == ['api', 'graphql']:\n"
+            "    query = next((a[len('query='):] for a in args if a.startswith('query=')), '')\n"
+            "    jqf = args[args.index('-q') + 1]\n"
+            "    data = {}\n"
+            "    if 'pr100:' in query:\n"
+            "        data['pr100'] = {'pullRequest': {'mergeQueueEntry': {'state': 'QUEUED'}}}\n"
+            "    if 'pr300:' in query:\n"
+            "        data['pr300'] = {'pullRequest': {'mergeQueueEntry': None}}\n"
+            "    proc = subprocess.run(['jq', '-r', jqf], input=json.dumps({'data': data}),\n"
+            "                          capture_output=True, text=True)\n"
+            "    sys.stdout.write(proc.stdout)\n"
+            "    sys.exit(0)\n"
+            "sys.exit(0)\n"
+        )
+        (bin_dir / "gh").chmod(0o755)
+
+        env = {
+            "FLEET_REPO": str(repo),
+            "FLEET_LOG_DIR": str(log_dir),
+            "FIXER_STATE_FILE": str(log_dir / "the-fixer.state"),
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+        }
+        proc = subprocess.run(
+            ["bash", str(ROOT / "members" / "the-fixer" / "check.sh")],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        assert proc.returncode == 0, f"check.sh failed: {proc.stderr.strip()[:300]}"
+        out = proc.stdout.strip()
+        assert "300" in out, f"a genuinely parked PR (not queued) was dropped: {out!r}"
+        assert "100" not in out, (
+            f"a PR already enqueued in the merge queue was still fired on as parked: {out!r}"
+        )
+
+
 def _green_pr_with_no_auto_merge_gets_armed():
     """A PR nothing armed must not be able to sit green forever.
 
@@ -5900,6 +5974,8 @@ if __name__ == "__main__":
           _check_share_sum_never_reports_ok_on_stale_or_missing_shares)
     check("jefe owns the fleet-wide token budget", _jefe_owns_the_fleet_wide_token_budget)
     check("the-fixer sees a green-but-parked PR", _fixer_sees_a_green_but_parked_pr)
+    check("the-fixer does not fire on a parked PR already in the merge queue",
+          _fixer_does_not_fire_on_a_parked_pr_already_in_the_merge_queue)
     check("a green PR with no auto-merge gets armed", _green_pr_with_no_auto_merge_gets_armed)
     check("fleet-view reads FLEET_API_KEY from fleet.env", _fleet_view_reads_the_api_key_from_the_env_file)
     check("FLEET_API_KEY never reaches an LLM pass", _api_key_never_reaches_an_llm)
