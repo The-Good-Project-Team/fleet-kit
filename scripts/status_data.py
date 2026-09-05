@@ -67,7 +67,14 @@ def _resolve(names) -> Path | None:
 GOOD_WORDS = ("healthy", "fresh", "ok")
 BAD_WORDS = ("STALE", "ALARM", "DOWN", "FAILED", "unhealthy", "WARNING", "unreachable")
 
-_TS = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC\]")
+
+# The bracket isn't always the timestamp alone -- deploy_staleness_check.sh's log() writes
+# "[deploy-staleness 2026-09-05 12:34:56 UTC] ..." (a check-name prefix ahead of the date,
+# inside the same bracket), so the date is matched anywhere inside `[...]`, not only right
+# after the opening bracket. Without this, a real per-line timestamp on an hourly check falls
+# through to the 5-minute-cadence mtime fallback below and misplaces every line but the newest
+# (gh#367 fleet-code-review BLOCK).
+_TS = re.compile(r"\[[^\[\]]*?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC\]")
 
 
 def classify(line: str) -> str:

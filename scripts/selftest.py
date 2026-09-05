@@ -1463,6 +1463,13 @@ def _status_page_deploy_component_classifies_stale_as_down():
     load-bearing cases from the PRD's acceptance criteria: a STALE line in the window resolves
     to "down" (AC3), and a fresh box with no log file at all resolves to "unknown"/None rather
     than crashing (AC4) -- the same "no file -> all unknown" contract every other row gets.
+
+    The synthetic log line below uses deploy_staleness_check.sh's REAL line shape --
+    "[deploy-staleness <ts> UTC] ..." (a check-name prefix ahead of the date, inside the same
+    bracket) -- not a bare "[<ts> UTC]". fleet-code-review BLOCKed the first cut of this fix
+    (gh#367) because the original test used the bare form, which _TS's old regex matched by
+    accident; the real line never matched, silently falling through to the mtime/5-min-cadence
+    fallback and misdating every line but the newest across a sustained, multi-tick incident.
     """
     import importlib as _il
     import os as _os
@@ -1483,7 +1490,7 @@ def _status_page_deploy_component_classifies_stale_as_down():
             now = datetime.datetime.now(datetime.timezone.utc)
             ts = now.strftime("%Y-%m-%d %H:%M:%S")
             (Path(td) / "deploy_staleness_check.log").write_text(
-                f"[{ts} UTC] STALE: local HEAD is 6 commits behind origin/main\n")
+                f"[deploy-staleness {ts} UTC] STALE: local HEAD is 6 commits behind origin/main\n")
 
             cells, pct = status_data.read_component(names)
             assert cells[-1] == status_data.BAD, (
@@ -1493,6 +1500,25 @@ def _status_page_deploy_component_classifies_stale_as_down():
             deploy = next(c for c in snap["components"] if c["label"] == "Deploy")
             assert deploy["current"] == status_data.BAD, (
                 f"snapshot()'s Deploy entry must surface the STALE incident, got {deploy!r}")
+
+            # Sustained incident: deploy_staleness_check.sh ticks hourly, not every 5 minutes
+            # like the other checks read_component's fallback was calibrated for. A 6-hour-long
+            # outage writes 6 real-timestamped STALE lines, one per hour. Every line must land
+            # in its OWN hour bucket via its real timestamp, not get compressed into the last
+            # few minutes before mtime by the 5-min-cadence fallback (the exact bug this PR's
+            # fleet-code-review BLOCK identified).
+            lines = []
+            for hours_ago in range(6):
+                line_ts = (now - datetime.timedelta(hours=hours_ago)).strftime(
+                    "%Y-%m-%d %H:%M:%S")
+                lines.append(
+                    f"[deploy-staleness {line_ts} UTC] STALE: local HEAD is behind origin/main")
+            (Path(td) / "deploy_staleness_check.log").write_text("\n".join(lines) + "\n")
+            incident_cells, incident_pct = status_data.read_component(names)
+            down_count = sum(1 for c in incident_cells if c == status_data.BAD)
+            assert down_count >= 6, (
+                f"a 6-hour sustained incident (6 real-timestamped STALE lines) must occupy "
+                f"6 distinct down hour-buckets, got {down_count}: {incident_cells!r}")
 
             # AC4: fresh box, check never ran -- no file at all, not a crash or all-good.
             (Path(td) / "deploy_staleness_check.log").unlink()
