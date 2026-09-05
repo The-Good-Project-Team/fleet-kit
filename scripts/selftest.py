@@ -1335,6 +1335,50 @@ def _signal_rate_excludes_all_never_executed_statuses():
     assert "b" not in summary["dormant"], "member 'b' (has real runs) wrongly marked dormant"
 
 
+def _dormant_flags_an_enabled_member_with_zero_runs_in_window():
+    """gh#190: `dormant` was built by iterating `by_member`, which only ever contains members
+    that appear in the windowed runs -- a member with ZERO rows in the window (the single
+    worst case: it stopped firing entirely) could never enter `by_member` and so could never
+    be flagged, the one failure mode this tile exists to catch. Fixed by taking the full
+    roster (`member_spec.load_all()`) as an optional parameter and adding any `enabled: true`
+    member missing from the window entirely. `enabled: false` members (nerd/minion, #166) must
+    never be flagged dormant solely for having zero rows -- that's intentional non-scheduling,
+    not a silent failure.
+    """
+    import fleet_stats
+    now = fleet_stats._now_epoch()
+
+    def run(member, status, ts_offset=0):
+        return {"member": member, "status": status, "ts": now - ts_offset}
+
+    runs = [
+        run("has_runs", "ok"),
+        run("all_declined", "budget_declined"),
+    ]
+    roster = [
+        {"name": "has_runs", "enabled": True},
+        {"name": "all_declined", "enabled": True},
+        {"name": "zero_runs_enabled", "enabled": True},
+        {"name": "zero_runs_disabled", "enabled": False},
+    ]
+    summary = fleet_stats.runs_summary(runs, hours=24.0, roster=roster)
+    assert "zero_runs_enabled" in summary["dormant"], (
+        "an enabled roster member absent from the window entirely must be flagged dormant")
+    assert "zero_runs_disabled" not in summary["dormant"], (
+        "an enabled:false roster member must never be flagged dormant for zero runs (#166)")
+    assert "all_declined" in summary["dormant"], (
+        "a member whose in-window runs are all non-executed must still be dormant (regression)")
+    assert "has_runs" not in summary["dormant"], (
+        "a member with an executed run must never be dormant (regression)")
+
+    # No roster passed at all: today's behavior is unchanged, no zero-run member is ever
+    # flagged -- this is what keeps this file's OWN prior runs_summary(runs, hours=24.0) call
+    # (no roster arg) passing unmodified.
+    summary_no_roster = fleet_stats.runs_summary(runs, hours=24.0)
+    assert "zero_runs_enabled" not in summary_no_roster["dormant"], (
+        "with no roster passed, a zero-run member must not be flagged (safe default)")
+
+
 def _postflight_dirty_check_catches_a_leaked_absolute_path_write():
     """fleet-kit#78 / nonprofit-atlas#3113 (15+ recurrences): worktree isolation is a `cd`, not
     a sandbox -- it does not stop a tool call that names the shared checkout by its absolute
@@ -4389,6 +4433,7 @@ if __name__ == "__main__":
     check("lane_kpi is append-only and distinguishes missing from stale", _lane_kpi_is_append_only_and_distinguishes_missing_from_stale)
     check("fleet_kpi's roomba pattern catches all three real 'evaluated' phrasings", _fleet_kpi_roomba_catches_all_three_real_evaluated_phrasings)
     check("fleet_kpi's marie pattern catches her real triage verb vocabulary", _fleet_kpi_marie_catches_her_real_triage_verb_vocabulary)
+    check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
 
     for n in ok:
         print(f"  ok    {n}")

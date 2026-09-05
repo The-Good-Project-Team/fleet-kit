@@ -924,7 +924,11 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             hours = float(qs.get("hours", ["24"])[0])
             snap = STATE.snapshot()
-            self._json(fleet_stats.runs_summary(snap["runs"], hours=hours))
+            try:
+                roster = member_spec.load_all()
+            except Exception:
+                roster = None
+            self._json(fleet_stats.runs_summary(snap["runs"], hours=hours, roster=roster))
             return
         if path == "/api/stats/token_usage":
             qs = parse_qs(urlparse(self.path).query)

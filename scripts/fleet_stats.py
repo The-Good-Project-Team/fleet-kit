@@ -49,13 +49,21 @@ _NOT_EXECUTED_STATUSES = {"budget_declined", "timed_out", "killed"}
 _OK_STATUSES = {"ok"}
 
 
-def runs_summary(runs: list[dict], hours: float = 24.0) -> dict:
+def runs_summary(runs: list[dict], hours: float = 24.0, roster: list[dict] | None = None) -> dict:
     """One payload for the whole Recent Runs card: headline KPIs (signal rate, budget-wall rate,
     total runs, dormant-agent count), an hourly stacked-bar of run outcomes, and per-agent signal
     rate over executed runs. Replaces the old per-run scatter (member x time), which answered
     "when did each agent run" -- a question nobody was asking -- with "is the fleet's output any
     good," which is the one that matters. One endpoint, one fetch, since all of it is the same
     windowed pass over `runs` (STATE.runs, already in memory).
+
+    `roster` (gh#190) is the full member list from `member_spec.load_all()`, optional so
+    existing callers (selftest.py) that don't have it keep today's behavior: with no roster, a
+    member absent entirely from the window can never be flagged dormant, only members with
+    in-window runs that are all budget_declined/timed_out/killed. Passed a roster, any
+    `enabled: true` member missing from the window entirely -- the single worst case this tile
+    exists to catch -- is added too. `enabled: false` members (nerd/minion, #166) are excluded
+    the same way the sidebar dot excludes them: intentional non-scheduling is not dormancy.
     """
     cutoff = _now_epoch() - hours * 3600
     windowed = [r for r in runs if r.get("ts") is not None and r.get("ts") >= cutoff]
@@ -75,6 +83,9 @@ def runs_summary(runs: list[dict], hours: float = 24.0) -> dict:
         by_member.setdefault(r.get("member") or "unknown", []).append(r)
     dormant = [m for m, rs in by_member.items()
                if rs and all((r.get("status") or "") in _NOT_EXECUTED_STATUSES for r in rs)]
+    if roster:
+        dormant += [spec["name"] for spec in roster
+                    if spec.get("enabled") and spec["name"] not in by_member]
 
     # hourly stacked-bar: count per (hour, status)
     hour_buckets: dict[int, dict[str, int]] = {}
