@@ -383,7 +383,7 @@ def read_pass_block(member: str, n: int) -> list[str]:
 
 def poll_gh_state() -> dict:
     prs_raw = _gh("pr", "list", "--state", "open", "--json",
-                   "number,title,isDraft,headRefName,url,statusCheckRollup,updatedAt")
+                   "number,title,isDraft,headRefName,url,statusCheckRollup,mergeStateStatus,updatedAt")
     issues_raw = _gh("issue", "list", "--state", "open", "--label", "fleet:backlog", "--json",
                       "number,title,labels,updatedAt", "--limit", "100")
     # Recently merged: plain feed, whatever's most recent -- what just shipped, any branch.
@@ -439,7 +439,15 @@ def poll_gh_state() -> dict:
     for pr in prs:
         checks = pr.get("statusCheckRollup") or []
         states = {c.get("state") or c.get("conclusion") for c in checks}
+        # mergeStateStatus is GitHub's own mergeability verdict, independent of CI. A PR stuck
+        # BEHIND (needs a merge/rebase) or BLOCKED (branch protection unsatisfied) is not
+        # mergeable no matter how green its checks are -- #179: the badge was CI-only and
+        # showed green for 7/7 open PRs that were genuinely unmergeable. Ranked below "failing"
+        # (a red check is a worse signal than a stale-but-fixable branch) and above
+        # "pending"/"green" so a clean, all-green PR is unaffected (AC3).
+        blocked = (pr.get("mergeStateStatus") or "").upper() in {"BEHIND", "BLOCKED"}
         pr["_rollup"] = ("failing" if states & {"FAILURE", "ERROR", "failure"} else
+                          "blocked" if blocked else
                           "pending" if states & {"PENDING", "IN_PROGRESS", None} else
                           "green" if checks else "none")
     for issue in issues:
