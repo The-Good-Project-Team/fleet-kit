@@ -1455,7 +1455,7 @@ def _dormant_flags_an_enabled_member_with_zero_runs_in_window():
 
 def _status_page_deploy_component_classifies_stale_as_down():
     """gh#367: /status had 5 COMPONENTS rows and no Deploy row, so the fleet's own worst-
-    performing pipeline (deploy_success_rate=8-9%% at filing) had zero representation on the
+    performing pipeline (deploy_success_rate=8-9% at filing) had zero representation on the
     page built specifically so an operator doesn't have to log-dive during an incident.
 
     Fixed by adding a 6th COMPONENTS tuple pointed at deploy_staleness_check's own log --
