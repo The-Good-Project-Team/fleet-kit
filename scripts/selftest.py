@@ -1453,6 +1453,61 @@ def _dormant_flags_an_enabled_member_with_zero_runs_in_window():
         "with no roster passed, a zero-run member must not be flagged (safe default)")
 
 
+def _status_page_deploy_component_classifies_stale_as_down():
+    """gh#367: /status had 5 COMPONENTS rows and no Deploy row, so the fleet's own worst-
+    performing pipeline (deploy_success_rate=8-9%% at filing) had zero representation on the
+    page built specifically so an operator doesn't have to log-dive during an incident.
+
+    Fixed by adding a 6th COMPONENTS tuple pointed at deploy_staleness_check's own log --
+    STALE is already a BAD_WORDS entry (no new classify() logic needed). This pins the two
+    load-bearing cases from the PRD's acceptance criteria: a STALE line in the window resolves
+    to "down" (AC3), and a fresh box with no log file at all resolves to "unknown"/None rather
+    than crashing (AC4) -- the same "no file -> all unknown" contract every other row gets.
+    """
+    import importlib as _il
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    import status_data
+
+    names = next(names for label, names, _desc in status_data.COMPONENTS if label == "Deploy")
+    assert names == ["deploy_staleness_check.cron.log", "deploy_staleness_check.log"], (
+        f"Deploy COMPONENTS candidate list drifted from the PRD's spec: {names!r}")
+
+    old = _os.environ.get("FLEET_LOG_DIR")
+    with tempfile.TemporaryDirectory() as td:
+        _os.environ["FLEET_LOG_DIR"] = td
+        try:
+            _il.reload(status_data)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            ts = now.strftime("%Y-%m-%d %H:%M:%S")
+            (Path(td) / "deploy_staleness_check.log").write_text(
+                f"[{ts} UTC] STALE: local HEAD is 6 commits behind origin/main\n")
+
+            cells, pct = status_data.read_component(names)
+            assert cells[-1] == status_data.BAD, (
+                f"a STALE line inside the 72h window must classify as down, got {cells[-1]!r}")
+
+            snap = status_data.snapshot()
+            deploy = next(c for c in snap["components"] if c["label"] == "Deploy")
+            assert deploy["current"] == status_data.BAD, (
+                f"snapshot()'s Deploy entry must surface the STALE incident, got {deploy!r}")
+
+            # AC4: fresh box, check never ran -- no file at all, not a crash or all-good.
+            (Path(td) / "deploy_staleness_check.log").unlink()
+            empty_cells, empty_pct = status_data.read_component(names)
+            assert all(c == status_data.UNKNOWN for c in empty_cells), (
+                "no deploy log file at all must render as unknown, not assumed healthy")
+            assert empty_pct is None, "no data yields no uptime percentage, not a fabricated one"
+        finally:
+            if old is None:
+                _os.environ.pop("FLEET_LOG_DIR", None)
+            else:
+                _os.environ["FLEET_LOG_DIR"] = old
+            _il.reload(status_data)
+
+
 def _postflight_dirty_check_catches_a_leaked_absolute_path_write():
     """fleet-kit#78 / nonprofit-atlas#3113 (15+ recurrences): worktree isolation is a `cd`, not
     a sandbox -- it does not stop a tool call that names the shared checkout by its absolute
@@ -4940,6 +4995,7 @@ if __name__ == "__main__":
     check("fleet_kpi's roomba pattern catches all three real 'evaluated' phrasings", _fleet_kpi_roomba_catches_all_three_real_evaluated_phrasings)
     check("fleet_kpi's marie pattern catches her real triage verb vocabulary", _fleet_kpi_marie_catches_her_real_triage_verb_vocabulary)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
+    check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
 
     for n in ok:
         print(f"  ok    {n}")

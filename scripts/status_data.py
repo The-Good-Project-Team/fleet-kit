@@ -48,6 +48,9 @@ COMPONENTS = [
     ("Budget meter (gmail)",
      ["anchor_staleness.reif.cron.log", "anchor_staleness.cron.log"],
      "maxx anchor freshness for reif"),
+    ("Deploy",
+     ["deploy_staleness_check.cron.log", "deploy_staleness_check.log"],
+     "fleet-kit's own deploy pipeline"),
 ]
 
 
