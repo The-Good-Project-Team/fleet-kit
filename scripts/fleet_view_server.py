@@ -440,12 +440,15 @@ def poll_gh_state() -> dict:
         checks = pr.get("statusCheckRollup") or []
         states = {c.get("state") or c.get("conclusion") for c in checks}
         # mergeStateStatus is GitHub's own mergeability verdict, independent of CI. A PR stuck
-        # BEHIND (needs a merge/rebase) or BLOCKED (branch protection unsatisfied) is not
-        # mergeable no matter how green its checks are -- #179: the badge was CI-only and
-        # showed green for 7/7 open PRs that were genuinely unmergeable. Ranked below "failing"
-        # (a red check is a worse signal than a stale-but-fixable branch) and above
-        # "pending"/"green" so a clean, all-green PR is unaffected (AC3).
-        blocked = (pr.get("mergeStateStatus") or "").upper() in {"BEHIND", "BLOCKED"}
+        # BEHIND (needs a merge/rebase), BLOCKED (branch protection unsatisfied), or DIRTY (real
+        # merge conflicts) is not mergeable no matter how green its checks are -- #179: the badge
+        # was CI-only and showed green for 7/7 open PRs that were genuinely unmergeable. Ranked
+        # below "failing" (a red check is a worse signal than a stale-but-fixable branch) and
+        # above "pending"/"green" so a clean, all-green PR is unaffected (AC3). DRAFT/HAS_HOOKS/
+        # UNSTABLE/UNKNOWN are left alone: draft already has its own badge, UNSTABLE means only a
+        # non-required check failed (still mergeable), and HAS_HOOKS/UNKNOWN are benign or
+        # transient rather than a real "don't merge this" signal.
+        blocked = (pr.get("mergeStateStatus") or "").upper() in {"BEHIND", "BLOCKED", "DIRTY"}
         pr["_rollup"] = ("failing" if states & {"FAILURE", "ERROR", "failure"} else
                           "blocked" if blocked else
                           "pending" if states & {"PENDING", "IN_PROGRESS", None} else

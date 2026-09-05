@@ -4730,32 +4730,31 @@ def _pr_tile_rollup_reflects_mergeability_not_just_ci():
     long as its checks were green. Confirmed live 2026-08-29: 7/7 open PRs were BEHIND/BLOCKED
     while the dashboard showed passing/green for every one with green CI.
 
-    Three fixtures, one call: a BEHIND PR with all-green checks must NOT roll up to "green"
-    (AC2); a CLEAN PR with all-green checks must still roll up to "green" -- no regression to
+    Four fixtures, one call: a BEHIND PR and a DIRTY (real merge conflict) PR, both with
+    all-green checks, must NOT roll up to "green" (AC2, and the PRD's own "dirty-or-other"
+    bucket); a CLEAN PR with all-green checks must still roll up to "green" -- no regression to
     the healthy case (AC3); a BLOCKED PR with a FAILING check keeps "failing", the worse of the
     two signals, rather than being masked by the newer "blocked" bucket.
     """
     import fleet_view_server as fvs
 
+    def _pr(number, merge_state, checks):
+        return {"number": number, "title": f"{merge_state} fixture", "isDraft": False,
+                "headRefName": f"x/{number}", "url": f"https://github.com/x/y/pull/{number}",
+                "statusCheckRollup": checks, "mergeStateStatus": merge_state,
+                "updatedAt": "2026-08-29T00:00:00Z"}
+
     green_check = [{"state": "SUCCESS"}]
     failing_check = [{"state": "FAILURE"}]
 
-    behind_green_pr = {"number": 301, "title": "behind but green", "isDraft": False,
-                        "headRefName": "x/1", "url": "https://github.com/x/y/pull/301",
-                        "statusCheckRollup": green_check, "mergeStateStatus": "BEHIND",
-                        "updatedAt": "2026-08-29T00:00:00Z"}
-    clean_green_pr = {"number": 302, "title": "clean and green", "isDraft": False,
-                       "headRefName": "x/2", "url": "https://github.com/x/y/pull/302",
-                       "statusCheckRollup": green_check, "mergeStateStatus": "CLEAN",
-                       "updatedAt": "2026-08-29T00:00:00Z"}
-    blocked_failing_pr = {"number": 303, "title": "blocked and failing", "isDraft": False,
-                           "headRefName": "x/3", "url": "https://github.com/x/y/pull/303",
-                           "statusCheckRollup": failing_check, "mergeStateStatus": "BLOCKED",
-                           "updatedAt": "2026-08-29T00:00:00Z"}
+    behind_green_pr = _pr(301, "BEHIND", green_check)
+    clean_green_pr = _pr(302, "CLEAN", green_check)
+    blocked_failing_pr = _pr(303, "BLOCKED", failing_check)
+    dirty_green_pr = _pr(304, "DIRTY", green_check)
 
     def fake_gh(*args, timeout=15):
         if args[:2] == ("pr", "list") and "open" in args:
-            return json.dumps([behind_green_pr, clean_green_pr, blocked_failing_pr])
+            return json.dumps([behind_green_pr, clean_green_pr, blocked_failing_pr, dirty_green_pr])
         return "[]"
 
     orig_gh = fvs._gh
@@ -4772,8 +4771,8 @@ def _pr_tile_rollup_reflects_mergeability_not_just_ci():
         f"CLEAN PR with green checks regressed off green: {by_number[302]['_rollup']}"
     assert by_number[303]["_rollup"] == "failing", \
         f"BLOCKED+FAILING PR should keep the worse 'failing' signal: {by_number[303]['_rollup']}"
-    assert all("mergeStateStatus" in pr for pr in state["prs"]), \
-        "mergeStateStatus missing from a PR-list entry"
+    assert by_number[304]["_rollup"] != "green", \
+        f"DIRTY PR with green checks rolled up green: {by_number[304]['_rollup']}"
 
 
 if __name__ == "__main__":
