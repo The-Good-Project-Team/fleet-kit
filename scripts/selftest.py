@@ -4861,6 +4861,85 @@ def _oversubscribed_shares_are_caught():
         assert "OVERSUBSCRIBED" in bad.stdout
 
 
+def _check_share_sum_sees_siblings_from_inside_a_container_via_published_shares():
+    """gh#293: the ROOT scan above can never fire inside a real container -- findmnt there
+    shows only single files bind-mounted from the host, never the `instances/` PARENT tree
+    `${FLEET_INSTANCES_ROOT:-$HOME/fleet-kit/instances}` needs (that tree also carries every
+    sibling's live CLAUDE_CODE_OAUTH_TOKEN/FLEET_MAXX_KEY, so mounting it wholesale would leak
+    credentials across instances). This is the REAL deployed shape: FLEET_INSTANCES_ROOT points
+    nowhere (unset, or -- as here -- pointed at a path that simply does not exist), so the old
+    scan matches zero directories and total stays 0 no matter how oversubscribed the fleet
+    really is.
+
+    FLEET_SHARE_DIR is the fix: a small, purpose-built, non-secret shared directory (same shape
+    as FLEET_LEASE_DIR/maxx_lease.py's already-shipped fix for the identical problem) that each
+    instance publishes just {instance, fraction, published_at} into. Pre-populates two
+    "siblings'" published files by hand (standing in for their own earlier check_share_sum.sh
+    runs) and runs the script as a THIRD instance to prove it sees all three, not just itself.
+    """
+    import os, subprocess, time
+    script = ROOT / "scripts" / "check_share_sum.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        share_dir = Path(tmp) / "shares"
+        share_dir.mkdir()
+        now = int(time.time())
+        (share_dir / "a.json").write_text(json.dumps({"instance": "a", "fraction": 0.3, "published_at": now}))
+        (share_dir / "b.json").write_text(json.dumps({"instance": "b", "fraction": 0.2, "published_at": now}))
+
+        base_env = {**os.environ, "FLEET_INSTANCES_ROOT": str(Path(tmp) / "no-such-instances-tree"),
+                    "FLEET_SHARE_DIR": str(share_dir), "FLEET_INSTANCE_NAME": "c"}
+
+        ok = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                             env={**base_env, "FLEET_SHARE_FRACTION": "0.4"})
+        assert ok.returncode == 0, f"a(0.3)+b(0.2)+c(0.4)=0.9 wrongly flagged: {ok.stdout}{ok.stderr}"
+        assert "a: 0.3" in ok.stdout and "b: 0.2" in ok.stdout and "c: 0.4" in ok.stdout, (
+            f"did not see every sibling's published share: {ok.stdout}"
+        )
+
+        bad = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                              env={**base_env, "FLEET_SHARE_FRACTION": "0.6"})
+        assert bad.returncode == 1, f"a(0.3)+b(0.2)+c(0.6)=1.1 was not flagged as oversubscribed: {bad.stdout}"
+        assert "OVERSUBSCRIBED" in bad.stdout
+
+
+def _check_share_sum_never_reports_ok_on_stale_or_missing_shares():
+    """AC4: a stale or unreadable sibling must never be silently folded into a passing "ok" --
+    that is the exact "dial that looks set but does nothing" failure this whole issue is about,
+    just one layer down (a sibling's PUBLISH went stale instead of the mount never existing).
+    """
+    import os, subprocess
+    script = ROOT / "scripts" / "check_share_sum.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        share_dir = Path(tmp) / "shares"
+        share_dir.mkdir()
+        # Ancient published_at -- long past any sane staleness window.
+        (share_dir / "old.json").write_text(json.dumps({"instance": "old", "fraction": 0.9, "published_at": 1}))
+        env = {**os.environ, "FLEET_INSTANCES_ROOT": str(Path(tmp) / "no-such-instances-tree"),
+               "FLEET_SHARE_DIR": str(share_dir), "FLEET_INSTANCE_NAME": "c", "FLEET_SHARE_FRACTION": "0.1"}
+        stale = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env)
+        assert stale.returncode != 0, (
+            f"a stale sibling share was silently accepted as ok: {stale.stdout}"
+        )
+        assert "STALE" in stale.stdout, f"stale share was not called out in the report: {stale.stdout}"
+        assert "shares total 0.1" in stale.stdout, (
+            f"stale sibling's 0.9 leaked into the total instead of being excluded: {stale.stdout}"
+        )
+
+    # The mount/publish path itself is broken (FLEET_SHARE_DIR points at something that is not
+    # a usable directory) -- zero fresh shares found, must not read as "ok: shares total 0".
+    with tempfile.TemporaryDirectory() as tmp:
+        not_a_dir = Path(tmp) / "not-a-dir"
+        not_a_dir.write_text("")  # a FILE, so publish_share.sh's mkdir/write both fail
+        env = {**os.environ, "FLEET_INSTANCES_ROOT": str(Path(tmp) / "no-such-instances-tree"),
+               "FLEET_SHARE_DIR": str(not_a_dir), "FLEET_INSTANCE_NAME": "c", "FLEET_SHARE_FRACTION": "0.6"}
+        broken = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env)
+        assert broken.returncode != 0 and "ok:" not in broken.stdout, (
+            f"an unusable FLEET_SHARE_DIR still reported ok: {broken.stdout}"
+        )
+        assert "UNKNOWN" in broken.stdout
+
+
 def _jefe_owns_the_fleet_wide_token_budget():
     """jefe is the always-on health pass, so cross-instance spend is its layer.
 
@@ -5717,6 +5796,10 @@ if __name__ == "__main__":
     check("an instance cannot spend past its own slice", _an_instance_cannot_spend_past_its_own_slice)
     check("share ceiling is a slice of the hour, not the leftovers", _share_ceiling_is_a_slice_of_the_hour_not_the_leftovers)
     check("oversubscribed instance shares are caught", _oversubscribed_shares_are_caught)
+    check("check_share_sum sees siblings from inside a container via published shares",
+          _check_share_sum_sees_siblings_from_inside_a_container_via_published_shares)
+    check("check_share_sum never reports ok on stale or missing published shares",
+          _check_share_sum_never_reports_ok_on_stale_or_missing_shares)
     check("jefe owns the fleet-wide token budget", _jefe_owns_the_fleet_wide_token_budget)
     check("the-fixer sees a green-but-parked PR", _fixer_sees_a_green_but_parked_pr)
     check("a green PR with no auto-merge gets armed", _green_pr_with_no_auto_merge_gets_armed)
