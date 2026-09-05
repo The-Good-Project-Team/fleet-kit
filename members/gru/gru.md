@@ -258,9 +258,17 @@ spawns exactly one). Your job, in order:
    what `#225` didn't.
 
    Check: is the first entry in THIS pass's `skipped` list the same issue number as the first
-   `skipped` entry in each of your previous 2 passes (grep your own `gru.log`)? If so, it has
-   now starved 3 consecutive hours on a wallet technicality alone, not on priority or claim
-   history — re-invoke `fanout.py` once more this pass with `--min-items` set to
+   `skipped` entry in each of your previous 2 passes? Read those from `runs.jsonl`, not
+   `gru.log` — `gru.log` renders every line through `_text_preview()` (`scripts/stream_log.py`),
+   which truncates to 500 characters, and `pack()` serializes `chosen` before `skipped`, so on a
+   busy hour the `chosen` array alone can eat the whole budget before `skipped[0]` is even
+   written. `runs.jsonl` stores each pass's full report text untruncated, so the JSON you quoted
+   verbatim above (per this step's own rule) survives intact there — same mechanism gru already
+   uses to read minions back in step 7: `grep '"member": "gru"' runs.jsonl`, take your last 2
+   own records by timestamp, and read each one's `report` field for that pass's first-`skipped`
+   entry. If the same issue number is first in `skipped` all 3 times (this pass plus those 2),
+   it has now starved 3 consecutive hours on a wallet technicality alone, not on priority or
+   claim history — re-invoke `fanout.py` once more this pass with `--min-items` set to
    `len(chosen)+1`. The forcing mechanism already exists (`min_items` pulls oldest-first off the
    front of `skipped`); nothing before this told gru to use it. Bound this tightly: never force
    more than one extra item per pass, never force an item that hasn't been front-of-skipped for
