@@ -64,6 +64,16 @@ font-variant-numeric:tabular-nums}
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]) .mem-bar i.spare{background:#39424b}}
 @media(max-width:640px){.mem-cost,.mem-bar{display:none}}
 footer{color:var(--muted);font-size:12px;text-align:center;margin-top:26px;line-height:1.7}
+/* gh#399: the live alert_store.py feed (/api/alerts), separate from the .banner above --
+that banner is the OLD log-derived per-component uptime rollup (status_data's own `overall`),
+this is the live, deduped severity state. Kept visually distinct (own icon, own border color,
+a bullet list of the actual open conditions) so the two are never mistaken for one signal. */
+.live-alert{border:1px solid var(--warn);border-radius:10px;padding:14px 18px;
+margin-bottom:24px;background:var(--warnbg)}
+.live-alert.critical{border-color:var(--down);background:rgba(229,72,77,.08)}
+.live-alert.transient{border-color:var(--unknownbd);background:var(--unknownbg)}
+.live-alert-head{font-weight:600;display:flex;align-items:center;gap:8px}
+.live-alert ul{margin:10px 0 0;padding-left:20px;font-size:13px;color:var(--muted)}
 """
 
 _LABEL = {"ok": "Operational", "down": "Degraded", "unknown": "No data"}
@@ -72,6 +82,39 @@ _LABEL = {"ok": "Operational", "down": "Degraded", "unknown": "No data"}
 # a status page that grays out only the headline text while the surrounding box still reads
 # green is the exact lie its own module docstring warns against.
 _BANNER_CLASS = {"down": "bad", "ok": "good", "unknown": "unknown"}
+
+
+def _live_alert_html(live_alerts: dict) -> str:
+    """Render the live /api/alerts feed as its own block, or "" when there is nothing open --
+    AC8 requires a `worst: "ok"` response to show neither this nor the fleet_view.html banner."""
+    worst = live_alerts.get("worst", "unknown")
+    if worst == "ok":
+        return ""
+    counts = live_alerts.get("counts") or {}
+    head = []
+    if counts.get("critical"):
+        head.append("%d critical" % counts["critical"])
+    if counts.get("degraded"):
+        head.append("%d degraded" % counts["degraded"])
+    # transient means the check could not observe its target (e.g. a container mid restart) --
+    # alert_store.py's own severity doc says it "NEVER pages on its own", so it is named
+    # separately here rather than folded into the same wording/color as a confirmed fault.
+    if counts.get("transient"):
+        head.append("%d transient (unconfirmed)" % counts["transient"])
+    if not head:
+        head.append("alerts feed unreachable" if worst == "unknown" else worst)
+    items = "".join(
+        "<li>%s: %s%s</li>" % (
+            escape(a.get("check", "")), escape(a.get("problem", "")),
+            " (%s)" % escape(",".join(a.get("handles", []))) if a.get("handles") else "",
+        )
+        for a in live_alerts.get("open", [])
+    )
+    cls = "critical" if worst == "critical" else "transient" if worst == "transient" else ""
+    return (
+        "<div class='live-alert %s'><div class=live-alert-head>&#9888; %s alert(s) open</div>"
+        "%s</div>" % (cls, escape(", ".join(head)), ("<ul>%s</ul>" % items if items else ""))
+    )
 
 
 def render(hours: int = 72) -> str:
@@ -131,6 +174,7 @@ def render(hours: int = 72) -> str:
     headline = ("Some components are degraded" if bad
                 else "All systems operational" if overall == "ok"
                 else "Status partially unknown")
+    live_alert_html = _live_alert_html(d.get("live_alerts") or {})
 
     return (
         "<!doctype html><html><head><meta charset=utf-8>"
@@ -139,14 +183,14 @@ def render(hours: int = 72) -> str:
         "<header><div><h1>Fleet status</h1>"
         "<div class=sub>philanthropy &middot; dino</div></div></header>"
         "<div class='banner %s'><div class=banner-head>"
-        "<span class='dot %s'></span>%s</div></div>"
+        "<span class='dot %s'></span>%s</div></div>%s"
         "<div class=card><h2>System status &mdash; last %d hours</h2>%s"
         "<div class=axis><span>%dh ago</span><span>now</span></div></div>%s"
         "<footer>Rolled up from the health checks that run every 5 minutes.<br>"
         "Grey means no check ran in that hour, never &ldquo;healthy&rdquo;. "
         "Generated %s.</footer>"
         "</div></body></html>"
-        % (CSS, banner_class, overall, escape(headline),
+        % (CSS, banner_class, overall, escape(headline), live_alert_html,
            d["hours"], "".join(rows), d["hours"], members_card, d["generated_at"])
     )
 
