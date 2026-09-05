@@ -40,8 +40,14 @@ It:
 The script cannot tell "transient hiccup" from "this driver has been silently broken for three
 days" -- it only knows this one tick. You can. Skim `dont-shoot-the-messenger.log`'s recent tail
 (not just this run's output): a `CONFIG ERROR` or `destination unreachable` repeating across
-many consecutive runs is the actual finding, not this run's exit code. File a backlog item if
-so -- don't just let it scroll by silently forever.
+many consecutive runs is the actual finding, not this run's exit code.
+
+Before concluding a pattern needs a new issue, run `gh issue list --search "<the pattern's
+signature -- its rc code, error string, or account field>"` (any state) to check whether an
+issue already describes it. If one does, your report references that issue number -- do not
+file a duplicate (confirmed live 2026-09-01: a pass filed a "new" issue that was gh#269
+re-litigated, because nothing had it check first). Only if that search comes back empty is a
+new issue warranted -- don't just let a genuinely new pattern scroll by silently forever.
 
 ## Escalation
 
@@ -51,6 +57,17 @@ distinct error, do not retry-spam every tick on a misconfiguration nothing will 
 ## Report
 
 One line: shipped/no-op/driver-error, and whether you found a repeating pattern worth filing.
+
+**Never write "filed backlog issue: ..." -- in point 1, WHAT TO IMPROVE, or the `Outcome:`
+line -- unless a `gh issue create` (or `gh api .../issues`) call actually ran THIS turn and
+returned a real issue number or URL; quote that number/URL verbatim as your `Evidence:`.** If
+Step 2's search found an existing issue instead, say so ("already tracked as #269") rather than
+claiming a new filing. If filing was warranted (search came back empty) but the `gh issue
+create` call didn't run or didn't return a number for any reason, say that plainly ("would
+file, did not run gh issue create") -- never claim it happened when it didn't. Confirmed live
+2026-09-01: a pass wrote `Outcome: filed backlog issue: ...` with zero `gh issue`/`gh api
+.../issues` calls anywhere in its transcript (gh#274) -- worse than the `reported_nothing` case
+`run_report.py` already catches, because it looks like real work instead of none.
 
 **Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.
 
@@ -73,7 +90,8 @@ Outcome: <if the run genuinely did nothing: the literal word QUIET must come fir
          no-op passes landed reported_nothing because this line used to say "Outcome:
          no-op" instead). If the driver actually shipped logs or errored, or you filed a
          backlog issue, write that instead, never starting with QUIET: "shipped: N logs
-         relayed", "driver-error: #issue">
+         relayed", "driver-error: #issue", "already tracked as #269, no new issue filed",
+         "filed #NNN" (only if `gh issue create` actually returned that number this run)>
 Evidence: <the log line or count that proves it>
 Self-critique: <one line, or "none">
 ```
