@@ -113,9 +113,15 @@ case "${1:-cron-foreground}" in
       # after a member left branch.main.merge pointing at a deleted member/* branch -- left the
       # canary untouched for hours. The watchdog below read that as "cron not firing" and
       # kill -9'd cron every 5 minutes, killing in-flight member runs with it. `date -u` first,
-      # unconditionally, so the canary means "cron fired"; explicit `origin main` so a dirty
-      # branch.main.merge cannot wedge the pull in the first place.
-      echo "*/10 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE); date -u >> $LOG_DIR/gitpull.log 2>&1; cd $FLEET_REPO && git pull --ff-only origin main >> $LOG_DIR/gitpull.log 2>&1"
+      # unconditionally, so the canary means "cron fired".
+      #
+      # git_pull_guard.sh (gh#68), not a bare `git pull --ff-only`: fetches `origin main`
+      # directly (same reasoning as the old explicit `origin main` above -- a dirty
+      # branch.main.merge cannot wedge it), and when $FLEET_REPO's checked-out branch can never
+      # fast-forward onto it (nonprofit-atlas#3130: a squash-merged branch deleted upstream),
+      # self-heals onto main instead of spinning on the same dead ref every 10 minutes. Still
+      # writes to gitpull.log either way, so the canary above stays meaningful.
+      echo "*/10 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE); date -u >> $LOG_DIR/gitpull.log 2>&1; cd $FLEET_REPO && bash /fleet-kit/scripts/git_pull_guard.sh >> $LOG_DIR/gitpull.log 2>&1"
       # Backstop poll widened */2 -> hourly (2026-08-22, Reif: "don't want to see it crying so
       # much, costs 20 cents a run") -- every tick spawns a real claude -p turn even on green
       # (check.sh gates the reasoning depth, not the LLM spin-up cost itself), and the webhook
