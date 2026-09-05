@@ -8,11 +8,14 @@ report format. A member's KPI is domain knowledge (what does THIS member's job a
 not a string-shape you can infer generically. See each pattern's own comment for the real
 outcome strings it was built against.
 
-Members whose job isn't count-shaped (the-fixer: did a fire happen y/n; jefe/gru: orchestration
-verdicts; minion: one item worked or blocked; dumbledore/dont-shoot-the-messenger: poll-and-
-report) get no pattern and correctly return None -- the dashboard shows a pass/fail ratio for
-those instead of a fabricated number, per the same "don't fake it" reasoning `/api/spend`
-already applies to zero-cost runs elsewhere in this kit.
+gh#230: gru/jefe/minion DO have a count-shaped headline after all -- "PRs shipped," read off
+the same `PR #<n>` / `pull/<n>` mentions their own outcome prose already names -- so they're in
+`_KPI_TABLE` below like everyone else. Members that still get no pattern and correctly return
+None are the-fixer (its own PR-mention hit rate doesn't fit a "shipped" headline, see gh#230's
+non-goals) and dumbledore/dont-shoot-the-messenger (poll-and-report, nothing to count). There is
+no pass/fail-ratio dashboard fallback for those -- none exists anywhere in this kit (checked:
+neither `fleet_view.html` nor `fleet_view_server.py` render one) -- they simply have no KPI slot
+today.
 """
 from __future__ import annotations
 
@@ -84,12 +87,32 @@ _JUDGE_JUDY_PATTERNS = [
     (re.compile(r"(?:blocked|rejected) PR #\d+"), "PRs reviewed"),
 ]
 
+# gru/jefe/minion's real outcome prose is heavily PR-shaped ("Shipped PR #226 ... and PR #227
+# ... both auto-merge armed") -- one occurrence per PR mention, not the PR NUMBER itself, so
+# (unlike roomba/marie's explicit "N <thing>" patterns) these carry no capturing group: each
+# match of the whole pattern is one shipped PR, same shape as `_JUDGE_JUDY_PATTERNS` above.
+_PR_SHIPPED_PATTERNS = [
+    (re.compile(r"PR #\d+", re.I), "PRs shipped"),
+    (re.compile(r"pull/\d+", re.I), "PRs shipped"),
+]
+
 # member name -> (pattern list, fallback unit label if any pattern matches with no explicit unit)
 _KPI_TABLE: dict[str, list[tuple[re.Pattern, str]]] = {
     "roomba": _ROOMBA_PATTERNS,
     "marie": _MARIE_PATTERNS,
     "judge-judy": _JUDGE_JUDY_PATTERNS,
+    "gru": _PR_SHIPPED_PATTERNS,
+    "jefe": _PR_SHIPPED_PATTERNS,
+    "minion": _PR_SHIPPED_PATTERNS,
 }
+
+# gh#230 AC3: these three must report a real (0, "PRs shipped") -- not None -- on a pass that
+# shipped nothing, since a build-loop run genuinely CAN complete with no PR (blocked, already
+# fixed, QUIET). roomba/marie/judge-judy don't need this: roomba's "N evaluated" phrasing is
+# present on every one of its passes by convention, and marie/judge-judy's None-on-no-match is
+# their own already-tested, intentional behavior (a pass that named no issue/PR really did
+# nothing triage/review-shaped) -- not something this issue's scope touches.
+_REAL_ZERO_MEMBERS = {"gru", "jefe", "minion"}
 
 
 def extract_kpi(member: str, outcome: str | None) -> tuple[int, str] | None:
@@ -120,6 +143,8 @@ def extract_kpi(member: str, outcome: str | None) -> tuple[int, str] | None:
                 total += int(g) if g.isdigit() else max(1, _count_issue_refs(g))
             unit = label
     if not matched_any_pattern:
+        if member in _REAL_ZERO_MEMBERS:
+            return (0, patterns[0][1])
         return None
     return (total, unit or "")
 
