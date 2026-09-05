@@ -1,0 +1,13 @@
+[Unit]
+Description=fleet-kit fleet.db sync-lag pager — pages when tail_runs_forever has fallen behind runs.jsonl for a sustained stretch (scripts/sync_health_check.sh)
+
+[Service]
+Type=oneshot
+# sync_health_check.sh reads these directly (it does not source fleet.env like the view/build
+# jobs in this directory -- same reasoning account_health_check.sh's own unit documents: it
+# must stay a plain host process, zero Claude Code dependency) -- Environment= here, not
+# FLEET_ENV_FILE.
+Environment=FLEET_LOG_DIR={{LOG_DIR}}
+Environment=NTFY_TOPIC={{NTFY_TOPIC}}
+ExecStart={{KIT_PATH}}/scripts/sync_health_check.sh
+User={{USER}}

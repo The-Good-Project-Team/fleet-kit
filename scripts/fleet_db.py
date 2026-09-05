@@ -234,6 +234,14 @@ def _row_from_record(rec: dict) -> tuple:
     )
 
 
+def sync_offset(conn: sqlite3.Connection) -> int:
+    """Current sync_state.offset, with no sync() call. For a caller that needs to MEASURE
+    drift against runs.jsonl (gh#273's staleness watchdog) rather than close it -- calling
+    sync() first would mask exactly the gap the watchdog exists to detect.
+    """
+    return conn.execute("SELECT offset FROM sync_state WHERE id = 0").fetchone()[0]
+
+
 def sync(conn: sqlite3.Connection, runs_file: Path | None = None) -> int:
     """Read new lines since the last sync, upsert them. Returns rows synced."""
     import time
@@ -339,6 +347,8 @@ def main(argv=None) -> int:
 
     sub.add_parser("sync", help="read new runs.jsonl lines into fleet.db")
 
+    sub.add_parser("offset", help="print sync_state.offset without syncing (for staleness checks)")
+
     p_rebuild = sub.add_parser("rebuild", help="drop + rebuild fleet.db from runs.jsonl entirely")
 
     p_spend = sub.add_parser("spend", help="trailing spend, grouped by member")
@@ -361,6 +371,9 @@ def main(argv=None) -> int:
         return 0
 
     conn = connect()
+    if a.cmd == "offset":
+        print(sync_offset(conn))
+        return 0
     if a.cmd == "sync" or a.cmd is None:
         n = sync(conn)
         print(f"synced {n} new runs")
