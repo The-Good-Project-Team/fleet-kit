@@ -49,17 +49,30 @@ _ROOMBA_PATTERNS = [
 # Two families of pattern: an explicit "N <thing>" count where one exists, PLUS an
 # issue-reference counter (count how many #NNNN's appear after a triage verb) for the
 # common case where marie names issues instead of counting them. The issue-reference family
-# only fires on triage VERBS (cleared/closed/ranked), never on issues merely mentioned for
-# context (e.g. "confirmed 65 open issues", "5 newly-merged PRs") -- those aren't marie's own
-# actions taken.
+# only fires on triage VERBS, never on issues merely mentioned for context (e.g. "confirmed 65
+# open issues", "5 newly-merged PRs") -- those aren't marie's own actions taken.
+#
+# gh#351: the original verb list (cleared/closed/ranked) missed the rest of marie's actual
+# triage vocabulary -- "triaged", "corrected priority on", "backfilled complexity on", "bumped
+# ... complexity", "scored complexity on", "wrote/posted a PRD for", "labeled" -- silently
+# ZERO-counting those runs (same failure class as gh#343's `_ROOMBA_PATTERNS` gap, one file
+# over). Also missing: the explicit-count phrasing "N new ranking(s)", which named no issue
+# numbers at all so neither existing family could ever catch it.
 _MARIE_PATTERNS = [
     (re.compile(r"(\d+)\s*(?:×|x)\s*`?gh issue", re.I), "issues triaged"),
     (re.compile(r"(\d+)\s+(?:previously-unranked|priority-labeled|new issues?)", re.I), "issues triaged"),
+    (re.compile(r"(\d+)\s+new\s+rankings?", re.I), "issues triaged"),
     # verb-anchored issue-number counting: "cleared stale ... on #A and #B" -> 2, "closed #X as
-    # cruft" -> 1, "ranked #A ... and #B" -> 2. Anchored to the verb + the reference LIST that
-    # immediately follows it (stops at the next `;` clause boundary), so it never counts issue
-    # numbers mentioned later in the sentence for unrelated context.
-    (re.compile(r"\b(?:cleared|closed|ranked)\b[^;.]*?((?:#\d+\D{0,6}){1,10})", re.I), "issues triaged"),
+    # cruft" -> 1, "ranked #A ... and #B" -> 2, "triaged #A", "corrected priority on #A",
+    # "backfilled complexity on #A and #B", "bumped #A's complexity", "scored complexity on
+    # #A", "wrote/posted a PRD for #A", "labeled #A". Anchored to the verb + the reference LIST
+    # that immediately follows it (stops at the next `;`/`.` clause boundary), so it never
+    # counts issue numbers mentioned later in the sentence for unrelated context.
+    (re.compile(
+        r"\b(?:cleared|closed|ranked|triaged|corrected|backfilled|bumped|scored|wrote|posted|"
+        r"labeled)\b[^;.]*?((?:#\d+\D{0,6}){1,10})",
+        re.I,
+    ), "issues triaged"),
 ]
 
 
