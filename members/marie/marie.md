@@ -367,7 +367,10 @@ verified true, the epic is not done — leave it open and say in your report whi
 failed and why, same as an `UNKNOWN` in the PRD itself.
 
 Post it as an issue comment (never edit the body — that is the author's record) and label the
-issue `fleet:prd` so no pass writes a second one:
+issue `fleet:prd` so no pass writes a second one. If the issue already carries a `fleet:prd`
+label and you are re-ranking or re-scoping it, your new comment supersedes the earlier PRD
+comment (still never the body) — say so explicitly in the new comment (e.g. "supersedes the
+PRD posted 2026-09-05") so minion, or a human, doesn't have to reconstruct the timeline:
 
 ```
 gh label create "fleet:prd" --color 0e8a16 --description "marie wrote a build-ready spec" || true
