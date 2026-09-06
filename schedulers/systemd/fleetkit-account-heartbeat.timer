@@ -1,0 +1,16 @@
+[Unit]
+Description=Run fleetkit-account-heartbeat hourly
+
+[Timer]
+# Hourly, not the 5-minute cadence account-health/sync-health/tunnel-health use: this tick
+# costs one real `claude -p` call per pool account (account_heartbeat.sh's own header), not a
+# free log-read or curl. The incident this guards against is measured in TENS of hours (a
+# 60.2h-stale account, per the script's header), so hourly leaves wide margin while keeping
+# per-tick cost bounded. UNKNOWN (gh#376): the exact right interval was flagged as needing a
+# human call against real per-tick cost once this runs for real -- tune OnUnitActiveSec here
+# if that turns out wrong, this is a starting default, not a measured optimum.
+OnBootSec=15min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target

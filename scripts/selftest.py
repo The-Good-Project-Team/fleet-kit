@@ -4194,6 +4194,43 @@ def _required_health_check_scripts_in_readme_are_scheduled():
         "row) but never actually fires is worse than one never attempted.")
 
 
+def _account_heartbeat_and_budget_read_have_host_only_schedulers():
+    """gh#376: account_heartbeat.sh and budget_read_check.sh (both shipped in PR#338) sat
+    completely unscheduled for two days -- the 5th/6th recurrence of the pager-wiring-gap
+    class this file's other `_is_actually_scheduled` checks close. This one is deliberately
+    NOT folded into `_every_entrypoint_scheduled_script_is_actually_scheduled`'s table: both
+    scripts `podman exec` into the fleet's own container, which entrypoint.sh's in-container
+    crontab cannot do to itself (no podman socket is bind-mounted there) -- a live rot-hunt
+    finding on this issue caught an earlier attempt that would have added them to entrypoint.sh
+    and shipped a check that lies (green "scheduled", broken every real tick). The correct,
+    and only working, target is a host-side scheduler, so this checks THAT shape instead:
+    both scripts have a systemd unit+timer and a launchd plist, and -- the regression this
+    docstring's "earlier attempt" refers to -- neither ever gains an entrypoint.sh cron line.
+    """
+    root = Path(__file__).parent.parent
+    entry = (root / "entrypoint.sh").read_text()
+    scripts = ("account_heartbeat.sh", "budget_read_check.sh")
+    problems = []
+    for script in scripts:
+        if f"bash /fleet-kit/scripts/{script}" in entry:
+            problems.append(
+                f"{script} has a cron line in entrypoint.sh -- it `podman exec`s into its own "
+                "container and cannot run there; this looks scheduled but fails every tick")
+    stem = {"account_heartbeat.sh": "account-heartbeat", "budget_read_check.sh": "budget-read"}
+    for script in scripts:
+        unit = stem[script]
+        service = root / "schedulers" / "systemd" / f"fleetkit-{unit}.service"
+        timer = root / "schedulers" / "systemd" / f"fleetkit-{unit}.timer"
+        plist = root / "schedulers" / "launchd" / f"com.fleetkit.{unit}.plist"
+        if not service.exists() or script not in service.read_text():
+            problems.append(f"{service} missing or does not reference {script}")
+        if not timer.exists():
+            problems.append(f"{timer} missing")
+        if not plist.exists() or script not in plist.read_text():
+            problems.append(f"{plist} missing or does not reference {script}")
+    assert not problems, "\n".join(problems)
+
+
 def _ntfy_topic_is_deferred_to_tick_time_not_baked_in_at_boot():
     """gh#279: entrypoint.sh's cron lines for the three health-check pagers used to interpolate
     `NTFY_TOPIC=${NTFY_TOPIC:-}` at boot time -- a literal value (or empty string) frozen into
@@ -6551,6 +6588,7 @@ if __name__ == "__main__":
     check("FLEET_CRON_MEMBERS gates entrypoint.sh's generated crontab", _fleet_cron_members_gates_entrypoint_crontab)
     check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
     check("every required health-check script in README is actually scheduled", _required_health_check_scripts_in_readme_are_scheduled)
+    check("account-heartbeat + budget-read have host-only schedulers, never an entrypoint.sh line (gh#376)", _account_heartbeat_and_budget_read_have_host_only_schedulers)
     check("NTFY_TOPIC is deferred to tick-time, not baked in at boot", _ntfy_topic_is_deferred_to_tick_time_not_baked_in_at_boot)
     check("every gh api call in a shell script is timeout-guarded", _every_gh_api_call_is_timeout_guarded)
     check("deploy staleness check reads a baked SHA and only alerts past budget", _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget)

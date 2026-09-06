@@ -1,0 +1,17 @@
+[Unit]
+Description=fleet-kit account heartbeat — proves each pool account is alive on a schedule instead of waiting for real fleet work to reveal a stale one (scripts/account_heartbeat.sh)
+
+[Service]
+Type=oneshot
+# UNLIKE fleetkit-account-health.service, this script `podman exec`s into the fleet's own
+# container to run `claude -p` -- it cannot be scheduled inside entrypoint.sh's in-container
+# crontab (gh#376: no podman socket is bind-mounted there, so a container cannot podman-exec
+# itself). It must run HOST-side, same as this unit. It also needs FLEET_INSTANCE_DIR (to
+# source that instance's fleet.env for FLEET_ACCOUNTS) and FLEET_CONTAINER_NAME (to target the
+# right container on a multi-instance box) -- neither of which account-health/sync-health need.
+Environment=FLEET_INSTANCE_DIR={{INSTANCE_DIR}}
+Environment=FLEET_CONTAINER_NAME={{CONTAINER_NAME}}
+Environment=FLEET_LOG_DIR={{LOG_DIR}}
+Environment=NTFY_TOPIC={{NTFY_TOPIC}}
+ExecStart=/bin/bash {{KIT_PATH}}/scripts/account_heartbeat.sh
+User={{USER}}

@@ -1,0 +1,14 @@
+[Unit]
+Description=Run fleetkit-budget-read every 15 minutes
+
+[Timer]
+# 15 min, not the 5-minute cadence account-health/sync-health/tunnel-health use: each tick is
+# several `podman exec` round-trips (resolve handle, read meter, read full budget row), heavier
+# than a log grep or a curl. Still comfortably inside the script's own MAX_ANCHOR_AGE default
+# (3600s) -- a stale anchor gets caught with multiple ticks of margin before crossing it. Same
+# UNKNOWN as fleetkit-account-heartbeat.timer (gh#376): a starting default, tune if wrong.
+OnBootSec=10min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target
