@@ -99,8 +99,11 @@ def runs_summary(runs: list[dict], hours: float = 24.0, roster: list[dict] | Non
     budget_declined_count = declined - interrupted_count
     ok = sum(1 for r in executed if (r.get("status") or "") in _OK_STATUSES)
 
-    signal_rate = round(100 * ok / len(executed)) if executed else 0
-    budget_wall = round(100 * declined / total) if total else 0
+    # gh#153: `None` here (not `0`) when the denominator is empty -- a real 0% (every executed
+    # run failed, or every run got budget-declined) is a different diagnosis from "nothing ran
+    # in this window at all," and the two must not render as the same number downstream.
+    signal_rate = round(100 * ok / len(executed)) if executed else None
+    budget_wall = round(100 * declined / total) if total else None
 
     # dormant: members with runs in the window whose most recent run was budget_declined AND
     # who logged nothing else -- i.e. every attempt in-window got walled off, not just the last one

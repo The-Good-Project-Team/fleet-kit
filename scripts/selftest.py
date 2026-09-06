@@ -603,6 +603,42 @@ def _fleet_db_query_runs_empty_item_id_is_treated_like_none():
         assert {r["run_id"] for r in none_rows} == {r["run_id"] for r in empty_rows}
 
 
+def _fleet_db_spend_ok_runs_unaffected_by_never_executed_statuses():
+    """gh#185: fleet_db.py's `spend()` never adopted #150/PR#156's `_NOT_EXECUTED_STATUSES`
+    taxonomy for its own `ok_runs` field -- a member hit by an infra kill (container restart,
+    OOM, deploy cutover) risked reading as less successful than one that genuinely failed.
+    AC1/AC2: `ok_runs` counts only 'ok'+'quiet' rows, no matter how many
+    budget_declined/timed_out/killed rows are also present in the window. AC3: `runs` (the
+    total count) and every other field stay exactly what they'd be without this fix -- this is
+    an `ok_runs` numerator fix only, not a redefinition of the shared denominator.
+    """
+    import time
+
+    import fleet_db
+    now = time.time()
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        runs = d / "runs.jsonl"
+        rows_in = [
+            {"run_id": "a-ok", "member": "a", "status": "ok", "_recorded_at": now},
+            {"run_id": "a-quiet", "member": "a", "status": "quiet", "_recorded_at": now},
+            {"run_id": "a-budget", "member": "a", "status": "budget_declined", "_recorded_at": now},
+            {"run_id": "a-timedout", "member": "a", "status": "timed_out", "_recorded_at": now},
+            {"run_id": "a-killed", "member": "a", "status": "killed", "_recorded_at": now},
+        ]
+        runs.write_text("\n".join(json.dumps(r) for r in rows_in) + "\n")
+        conn = fleet_db.connect(d / "fleet.db")
+        fleet_db.sync(conn, runs_file=runs)
+
+        rows = fleet_db.spend(conn, member="a", hours=24.0)
+        assert len(rows) == 1, rows
+        row = rows[0]
+        assert row["ok_runs"] == 2, f"ok_runs = {row['ok_runs']}, want 2 (ok+quiet only)"
+        # AC3: `runs` (the total count) is untouched -- all 5 rows, never-executed or not.
+        assert row["runs"] == 5, f"runs = {row['runs']}, want 5 -- this fix must not touch it"
+
+
 def _fleet_db_composite_pk_migration_is_lock_serialized():
     """#212: fleet_view_server.py calls `fleet_db.connect()` from several independent
     threads -- the background tail thread and per-request handlers -- and
@@ -866,6 +902,23 @@ def _claim_history_blocks_an_item_that_keeps_dead_ending():
             capture_output=True, text=True)
         assert out_clean.returncode == 0, (out_clean.returncode, out_clean.stdout, out_clean.stderr)
         assert "ok" in out_clean.stdout, out_clean.stdout
+
+
+def _gru_md_gates_candidates_on_vision_link():
+    """fleet-kit#523: Reif, 2026-09-06 -- "I don't care about the number of PRs we hit ... I
+    just want to make autonomous progress on agreed upon goals." Measured the same night:
+    12 of 12 minion PRs in one hour were `fix(...)` inward spend; gru picked from marie's
+    tier order by createdAt and never read whether an item named the number. The gate is a
+    step in gru.md between 2b (marie's ranking) and 2c (dead-end drop): a candidate is
+    eligible only if its body carries a `Vision-link:` naming the number, guardrail or
+    channel from the header; `none (maintenance)` fills an empty hour, never displaces."""
+    text = (HERE.parent / "members" / "gru" / "gru.md").read_text()
+    b = text.index("2b. **Otherwise, marie's normal ranking.**")
+    c = text.index("2c. **Drop any candidate that has already dead-ended")
+    gate = text[b:c]
+    assert "fleet-kit#523" in gate and "Vision-link" in gate, \
+        "gru.md has no Vision-link eligibility gate between 2b and 2c -- the fleet builds whatever is oldest"
+    assert "none (maintenance)" in gate, "the gate must say what happens to maintenance items"
 
 
 def _gru_md_checks_claim_history_before_claiming():
@@ -1931,6 +1984,37 @@ def _runs_summary_splits_declined_into_budget_declined_and_interrupted():
     assert summary["declined"] == 4, f"declined = {summary['declined']}, want 4"
     assert (summary["budget_declined_count"] + summary["interrupted_count"]
             == summary["declined"]), "budget_declined_count + interrupted_count must equal declined"
+
+
+def _runs_summary_signal_rate_and_budget_wall_are_none_not_zero_when_no_data():
+    """gh#153: `signal_rate`/`budget_wall` fell back to the literal int `0` whenever their
+    denominator (`executed`/`total`) was empty -- indistinguishable, on the Stats page's KPI
+    strip, from a real 0% (every executed run failed, or every run got budget-declined). An
+    empty window (nothing ran at all, e.g. the box was down) must report `None` for both instead,
+    so `fleet_view.html` can render a distinct "no data" dash rather than a confident, wrong 0%.
+    """
+    import fleet_stats
+
+    empty_summary = fleet_stats.runs_summary([], hours=24.0)
+    assert empty_summary["total"] == 0, f"total = {empty_summary['total']}, want 0"
+    assert empty_summary["signal_rate"] is None, (
+        f"signal_rate = {empty_summary['signal_rate']!r}, want None for an empty window")
+    assert empty_summary["budget_wall"] is None, (
+        f"budget_wall = {empty_summary['budget_wall']!r}, want None for an empty window")
+
+    # A real total failure (executed runs exist, all failed) must still read a real 0%, not None
+    # -- the fix distinguishes "no data" from "all failed," it must not blur them the other way.
+    now = fleet_stats._now_epoch()
+    all_failed = [{"member": "a", "status": "reported_nothing", "ts": now}]
+    failed_summary = fleet_stats.runs_summary(all_failed, hours=24.0)
+    assert failed_summary["signal_rate"] == 0, (
+        f"signal_rate = {failed_summary['signal_rate']!r}, want a real 0 (executed, all failed)")
+
+    # budget_wall alone at 0 (some runs executed, none declined) must also stay a real 0, not None.
+    all_executed = [{"member": "a", "status": "ok", "ts": now}]
+    executed_summary = fleet_stats.runs_summary(all_executed, hours=24.0)
+    assert executed_summary["budget_wall"] == 0, (
+        f"budget_wall = {executed_summary['budget_wall']!r}, want a real 0 (no declines, but total>0)")
 
 
 def _status_page_deploy_component_classifies_stale_as_down():
@@ -3639,6 +3723,43 @@ def _judge_judy_files_a_fix_item_on_block():
         "fix-item filing has no || WARN fallback -- a filing failure would crash the tick instead of logging"
 
 
+def _judge_judy_skips_an_empty_diff_instead_of_blocking():
+    """gh#531: `gh pr diff` can exit 0 with EMPTY output even though the PR has real commits --
+    live-confirmed on PR #505, whose diff against the CURRENT base had already been fully
+    absorbed into main by a sibling PR (#504) fixing the same issue (gh#448), so gh's
+    three-dot compare legitimately had nothing left to show. The exit-code check alone never
+    caught this: an empty $DIFF_FILE sailed straight into the review prompt, the model
+    (correctly, given an empty DIFF: section) said it couldn't review anything and blocked, and
+    that block then filed this exact issue via board_github.py -- a confusing, spurious escalation
+    for what was actually "nothing left to review", not a code defect.
+
+    Static assertions, same style as this file's other judge-judy checks: an empty-diff check
+    must exist, must run AFTER the `gh pr diff` fetch but BEFORE the review PROMPT is built (so
+    an empty diff can never reach the model), and must skip via the same
+    SKIPPED_THIS_TICK/cleanup_pass/continue shape as a hard `gh pr diff` failure -- never a
+    VERDICT: block.
+    """
+    src = (Path(__file__).parent.parent / "members" / "judge-judy" / "judge-judy.sh").read_text()
+
+    fetch_i = src.index('gh pr diff "$PR" > "$DIFF_FILE"')
+    prompt_i = src.index('PROMPT="You are the merge-blocking code reviewer')
+    window = src[fetch_i:prompt_i]
+
+    assert "tr -d '[:space:]' < \"$DIFF_FILE\"" in window, \
+        "no empty-diff check on $DIFF_FILE between the gh pr diff fetch and the review prompt"
+
+    empty_i = src.index("tr -d '[:space:]' < \"$DIFF_FILE\"", fetch_i)
+    assert empty_i < prompt_i, "empty-diff check runs after the review prompt is already built"
+
+    empty_branch = src[empty_i:empty_i + 400]
+    assert 'SKIPPED_THIS_TICK="$SKIPPED_THIS_TICK $PR"' in empty_branch, \
+        "an empty diff must skip via SKIPPED_THIS_TICK, same as a hard gh pr diff failure"
+    assert "cleanup_pass" in empty_branch, "an empty diff must still release the diff/lease temp state via cleanup_pass"
+    assert "continue" in empty_branch, "an empty diff must continue the tick loop, not fall through into a verdict"
+    assert "VERDICT" not in empty_branch, \
+        "an empty diff must never reach a VERDICT -- it should skip before the model is ever called"
+
+
 def _marie_sweeps_the_whole_backlog_not_just_the_new():
     """marie must re-judge the OLD backlog, not only what changed since last pass.
 
@@ -4435,6 +4556,28 @@ def _fleet_cron_members_gates_entrypoint_crontab():
             "an unknown FLEET_CRON_MEMBERS entry must fail boot loudly, not silently drop it or schedule nothing"
         assert "bogus-name" in proc.stdout + proc.stderr, \
             "the boot failure doesn't name the bad entry"
+
+
+def _gru_cron_line_redirects_to_its_own_log_file():
+    """gh#511: judge-judy BLOCKed PR#503 (a since-superseded liveness-pager design, closed and
+    replaced by PR#515) because entrypoint.sh's gru cron line was the only one of the 9
+    ALL_CRON_MEMBERS entries with no `>> $LOG_DIR/<member>.log 2>&1` redirect -- a fallback
+    that would key off log mtime, per member, could never see gru.
+
+    PR#515's merged member_liveness_check.sh doesn't use that design (it reads fleet.db's
+    `runs` table directly, and gru's own passes land rows there via run_report.py exactly like
+    every other member, since run_gru_fanout.sh execs straight into `run_member.sh gru`) -- so
+    the specific false-positive scenario gh#511 named no longer exists. But the underlying
+    inconsistency the finding pointed at was real regardless of which pager design is live: gru
+    was the one scheduled member with nowhere for a human (or some future log-mtime-based
+    signal) to see its cron output. This guards that gru stays in step with every other member
+    now that it has its own log file, so the gap can't quietly reopen.
+    """
+    entry = (ROOT / "entrypoint.sh").read_text()
+    assert "run_gru_fanout.sh >> $LOG_DIR/gru.log 2>&1" in entry, (
+        "entrypoint.sh's gru cron line lost its log redirect -- gru is once again the only "
+        "one of the 9 ALL_CRON_MEMBERS entries with no $LOG_DIR/<member>.log of its own "
+        "(gh#511)")
 
 
 # _self_improve_score_is_actually_scheduled and _deploy_staleness_check_is_actually_scheduled
@@ -7203,6 +7346,7 @@ if __name__ == "__main__":
     check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
     check("query_runs(item_id=) matches free-text #N mentions, not just the build-claim column (gh#405)", _fleet_db_query_runs_item_id_matches_free_text_mentions)
     check("query_runs(item_id=\"\") behaves like item_id=None, not an unlimited full-table scan (gh#484)", _fleet_db_query_runs_empty_item_id_is_treated_like_none)
+    check("spend()'s ok_runs excludes never-executed statuses, runs stays untouched (gh#185)", _fleet_db_spend_ok_runs_unaffected_by_never_executed_statuses)
     check("fleet.db composite-PK migration is lock-serialized", _fleet_db_composite_pk_migration_is_lock_serialized)
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("cost_bridge converts real spend into fanout's --observed shape", _cost_bridge_converts_real_spend_into_fanouts_observed_shape)
@@ -7255,6 +7399,7 @@ if __name__ == "__main__":
     check("judge-judy strikes are head-scoped and leave diagnosable evidence", _judge_judy_strikes_are_scoped_by_head_and_leave_diagnosable_evidence)
     check("board_github file_item can add a priority label alongside backlog/lane", _board_github_file_item_can_add_a_priority_label)
     check("judge-judy files a priority-high fix item when it blocks a PR", _judge_judy_files_a_fix_item_on_block)
+    check("judge-judy skips an empty diff instead of blocking (gh#531)", _judge_judy_skips_an_empty_diff_instead_of_blocking)
     check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
@@ -7266,6 +7411,7 @@ if __name__ == "__main__":
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
     check("FLEET_CRON_MEMBERS gates entrypoint.sh's generated crontab", _fleet_cron_members_gates_entrypoint_crontab)
+    check("gru's cron line redirects to its own log file (gh#511)", _gru_cron_line_redirects_to_its_own_log_file)
     check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
     check("every required health-check script in README is actually scheduled", _required_health_check_scripts_in_readme_are_scheduled)
     check("account-heartbeat + budget-read have host-only schedulers, never an entrypoint.sh line (gh#376)", _account_heartbeat_and_budget_read_have_host_only_schedulers)
@@ -7349,6 +7495,7 @@ if __name__ == "__main__":
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
     check("runs_summary() excludes provisional started rows from total/signal_rate/agent_rates (gh#437)", _runs_summary_excludes_started_rows_from_total_and_signal_rate)
     check("runs_summary() splits declined into budget_declined_count/interrupted_count (gh#186)", _runs_summary_splits_declined_into_budget_declined_and_interrupted)
+    check("runs_summary()'s signal_rate/budget_wall are None (not 0) for an empty window (gh#153)", _runs_summary_signal_rate_and_budget_wall_are_none_not_zero_when_no_data)
     check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
     check("status_data.members() reads fleet.db in-process, no podman on $PATH needed (gh#364)", _status_data_members_reads_fleet_db_with_no_podman_on_path)
     check("status_data's other four components are unaffected by the members() fix (gh#364)", _status_data_other_components_unaffected_by_members_fix)
