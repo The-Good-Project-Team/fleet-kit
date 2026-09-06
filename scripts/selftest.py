@@ -1772,6 +1772,51 @@ def _dormant_flags_an_enabled_member_with_zero_runs_in_window():
         "with no roster passed, a zero-run member must not be flagged (safe default)")
 
 
+def _runs_summary_excludes_started_rows_from_total_and_signal_rate():
+    """gh#437: run_report.py's provisional "started" row (gh#145) was never added to either
+    `_NOT_EXECUTED_STATUSES` or `_OK_STATUSES` in `runs_summary()`, so it was double-counted --
+    once as an extra `total` run, and once as an executed-but-not-ok failure (the same bucket as
+    a real crash), deflating `signal_rate` and inflating `total`. 3rd instance of the same
+    "a new run_report.py status doesn't reach fleet_stats.py's classification sets" bug class
+    as gh#150 (killed/timed_out) and gh#254 (incomplete_fanout).
+
+    Mixed window: a matched started+completion pair (must contribute exactly one count, the
+    completion's), an unmatched started row still mid-run (must contribute zero), plus plain
+    ok/quiet rows to give signal_rate a real denominator to get right or wrong.
+    """
+    import fleet_stats
+    now = fleet_stats._now_epoch()
+
+    def run(member, status, run_id=None, ts_offset=0):
+        return {"member": member, "status": status, "run_id": run_id, "ts": now - ts_offset}
+
+    runs = [
+        run("a", "started", run_id="paired-1", ts_offset=10 * 60),
+        run("a", "ok", run_id="paired-1", ts_offset=9 * 60),   # same pass's completion
+        run("b", "started", run_id="unmatched-1", ts_offset=1 * 60),  # still running, no completion
+        run("a", "ok"),
+        run("a", "quiet"),
+    ]
+    summary = fleet_stats.runs_summary(runs, hours=24.0)
+
+    # 3 real runs (2 ok + 1 quiet) -- the started rows contribute nothing to total/executed.
+    assert summary["total"] == 3, f"total = {summary['total']}, want 3 (started rows excluded)"
+    assert summary["executed"] == 3, f"executed = {summary['executed']}, want 3"
+    assert summary["signal_rate"] == round(100 * 2 / 3), (
+        f"signal_rate = {summary['signal_rate']}, want {round(100 * 2 / 3)} (2 ok / 3 executed)")
+
+    # per-member breakdown must apply the same exclusion: member "a" has 3 real rows (paired-1's
+    # completion + the standalone ok + quiet), never 4 (its started row must not also count).
+    rates = {r["member"]: r for r in summary["agent_rates"]}
+    assert rates["a"]["executed"] == 3, (
+        f"member a executed = {rates['a']['executed']}, want 3 (paired-1's started row excluded)")
+    assert "b" not in rates, "member b has only a started row -- must not appear in agent_rates"
+
+    # "started" must never render as a status/outcome on the hourly chart.
+    assert "started" not in summary["statuses"], (
+        "'started' leaked into the hourly chart's status vocabulary")
+
+
 def _status_page_deploy_component_classifies_stale_as_down():
     """gh#367: /status had 5 COMPONENTS rows and no Deploy row, so the fleet's own worst-
     performing pipeline (deploy_success_rate=8-9% at filing) had zero representation on the
@@ -5745,13 +5790,8 @@ def _unknown_reset_keeps_configured_order():
     This is the normal steady state: both accounts healthy, nothing gated, so nothing has ever
     reported a reset time. The feature must be a NO-OP here rather than inventing an order.
     """
-    now = int(time.time())
     assert _pool_order([]) == ["tgp", "gmail"], "empty state file changed the order"
-    # A PAST epoch is not a pending reset -- it is a gate that already expired, so the account
-    # is 'unknown' again and keeps configured order.
-    assert _pool_order([f"gmail {now - 5000}"]) == ["tgp", "gmail"], \
-        "an expired gate was treated as a pending reset"
-    # A malformed epoch must degrade to unknown, never sort as garbage.
+    # A malformed epoch must degrade to never-gated, never sort as garbage.
     assert _pool_order(["gmail notanumber"]) == ["tgp", "gmail"], \
         "unreadable state file reordered the pool"
 
@@ -5765,6 +5805,43 @@ def _known_reset_outranks_unknown():
     now = int(time.time())
     got = _pool_order([f"gmail {now + 600}"])
     assert got == ["gmail", "tgp"], f"known reset did not outrank unknown: {got}"
+
+
+def _lapsed_reset_outranks_never_gated():
+    """gh#462: a gate whose reset epoch has already PASSED ("lapsed") sorts ahead of an account
+    that was never gated at all -- the exact case the original PR claimed to fix and didn't.
+
+    Before the fix, _account_pool_order only split "known future reset" from "everything else",
+    which silently merged a just-lapsed account into the same bucket as a never-gated one and
+    left both in unmodified FLEET_ACCOUNTS order -- so this assertion FAILS against the pre-fix
+    code (gmail would come out second, identical to no ordering at all) and passes after it.
+    The old test here asserted the opposite (that a lapsed gate keeps configured order), which
+    was itself asserting the no-op bug as correct behavior -- see _unknown_reset_keeps_configured_order.
+    """
+    now = int(time.time())
+    # gmail was gated but its reset has already passed; tgp was never gated. gmail's quota just
+    # refreshed and is the most perishable in the pool, so it must be tried first.
+    got = _pool_order([f"gmail {now - 5000}"])
+    assert got == ["gmail", "tgp"], \
+        f"lapsed-but-now-eligible account did not outrank never-gated: {got}"
+
+    # ...and the reverse seeding must NOT invert, or the test would pass on any reordering.
+    got = _pool_order([f"tgp {now - 5000}"])
+    assert got == ["tgp", "gmail"], f"ordering ignored which account actually lapsed: {got}"
+
+
+def _lapsed_reset_sorts_ahead_of_known_future_gate_too():
+    """A three-way mix: a lapsed reset must still outrank a never-gated account even when a
+    THIRD, still-gated account is also present -- the known-future bucket must not swallow or
+    reorder the lapsed one.
+    """
+    now = int(time.time())
+    got = _pool_order([f"tgp {now + 86400}", f"gmail {now - 5000}"],
+                       accounts="tgp gmail primary")
+    assert got == ["tgp", "gmail", "primary"], (
+        f"three-bucket ordering wrong: {got} "
+        "(want known-future 'tgp' first, lapsed 'gmail' second, never-gated 'primary' last)"
+    )
 
 
 def _every_configured_account_survives_ordering():
@@ -6685,6 +6762,8 @@ if __name__ == "__main__":
     check("soonest-reset account is tried first", _soonest_reset_account_is_tried_first)
     check("no known reset keeps configured order", _unknown_reset_keeps_configured_order)
     check("known reset outranks unknown reset", _known_reset_outranks_unknown)
+    check("lapsed reset outranks never-gated (gh#462)", _lapsed_reset_outranks_never_gated)
+    check("lapsed reset still outranks never-gated alongside a known-future gate", _lapsed_reset_sorts_ahead_of_known_future_gate_too)
     check("ordering never drops an account", _every_configured_account_survives_ordering)
     check("run loop actually uses the ordering", _run_loop_actually_uses_the_ordering)
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)
@@ -6713,6 +6792,7 @@ if __name__ == "__main__":
     check("fleet_kpi's gru/jefe/minion ship a real 'PRs shipped' count", _fleet_kpi_gru_jefe_minion_ship_a_real_prs_shipped_count)
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
+    check("runs_summary() excludes provisional started rows from total/signal_rate/agent_rates (gh#437)", _runs_summary_excludes_started_rows_from_total_and_signal_rate)
     check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
     check("status_data.members() reads fleet.db in-process, no podman on $PATH needed (gh#364)", _status_data_members_reads_fleet_db_with_no_podman_on_path)
     check("status_data's other four components are unaffected by the members() fix (gh#364)", _status_data_other_components_unaffected_by_members_fix)
