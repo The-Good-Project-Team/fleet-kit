@@ -1013,6 +1013,15 @@ async function renderStatsPage() {
       </div>`;
   }
 
+  // Cron cadence is 3h; anything older than 2 missed runs reads as "stopped", not "lagging" --
+  // gh#141: the empty-state copy below used to render identically whether the pipeline was
+  // minutes old or had never run at all. `latest` now always carries the true last-ever score
+  // (see the server's days-window comment), so a genuinely stale-but-real score and a
+  // never-written one are distinguishable here instead of both falling through to one string.
+  const SI_CADENCE_MS = 3 * 3600 * 1000;
+  const siStaleMs = siLatest ? Date.now() - Date.parse(siLatest.date) : null;
+  const siStale = siStaleMs !== null && siStaleMs > SI_CADENCE_MS * 2;
+
   if (siCard) {
     if (!siLatest) {
       siCard.innerHTML = '<div class="run-empty">no score yet -- self_improve_score.sh runs every 3h</div>';
@@ -1060,13 +1069,17 @@ async function renderStatsPage() {
           </details>`;
       }).join('');
 
+      const staleBadge = siStale
+        ? `<span class="badge quiet" title="expected every 3h -- last score ${esc(ago(siLatest.date))}, this may have stopped running">stale</span>`
+        : '';
       siCard.innerHTML = `
         <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;">
           ${magikarpArt(siLatest.score)}
           <div class="kpi-cell" style="flex:1;min-width:240px;">
-            <div class="kpi-label">${esc(humanDate(siLatest.date))} &middot; ${quip}</div>
+            <div class="kpi-label">${esc(humanDate(siLatest.date))} &middot; ${quip} ${staleBadge}</div>
             <div class="kpi-value" style="color:${color};">${siLatest.score}<span style="font-size:14px;color:var(--dimmer);">/100</span></div>
             <div class="kpi-sub">${esc(siLatest.reasoning || '')}</div>
+            ${siStale ? `<div class="kpi-sub" style="color:var(--warn);">last score ${esc(ago(siLatest.date))} -- expected every 3h, this pipeline may have stopped</div>` : ''}
           </div>
         </div>
         <div style="margin-top:14px;">
