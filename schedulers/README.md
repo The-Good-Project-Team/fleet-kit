@@ -8,7 +8,7 @@ topic the health pagers below page to), `{{PUBLIC_URL}}` (the public tunnel URL
 tunnel-health checks, e.g. `https://your-fleet.example.com/`), `{{VIEW_PORT}}` (your
 `FLEET_VIEW_PORT`, e.g. `8420`), `{{INSTANCE_DIR}}` (this instance's state dir, e.g.
 `instances/<name>` under `up.sh`'s own layout — where its `fleet.env` lives), and
-`{{CONTAINER_NAME}}` (the podman container this instance runs as, e.g. `fleet-kit-<name>`) —
+`{{CONTAINER_NAME}}` (the podman container this instance runs as, e.g. `fleet-kit-<name>`), and `{{INSTANCE_NAME}}` (the label the member-liveness pager names in its page) —
 then install per your platform's normal mechanism.
 
 | Job | Cadence | Script | Required? |
@@ -20,6 +20,7 @@ then install per your platform's normal mechanism.
 | ceo | hourly | your `agents/ceo.md`-driven pass | optional; the fleet still runs without one, just with no self-healing |
 | architect | daily | your `agents/architect.md`-driven pass | optional; without it the fleet only ever ships PR-sized increments, never features |
 | account-health | 5 min | `scripts/account_health_check.sh` | **required** — pages when every fleet account has failed for a sustained stretch; the only thing watching for a fully-dead account pool |
+| member-liveness | 5 min | `scripts/member_liveness_check.sh` | **required** — the dead man's switch: pages when no member has landed an `ok` run in `LIVENESS_MAX_AGE_S` (default 3h), names the pool's reset time when that silence is genuine exhaustion. Host-side, per instance (`FLEET_LOG_DIR=instances/<name>/logs`). The only check that asserts the fleet did WORK, not that a process is alive (fleet-kit#512) |
 | tunnel-health | 5 min | `scripts/tunnel_health_check.sh` | **required** if you expose the fleet through a public tunnel — self-heals ingress drift, pages when the public URL is not serving |
 | path-health | hourly | `scripts/path_health_check.sh` | **required** if you route instances by path behind a reverse proxy (e.g. Caddy `/fleet/<name>`) — pages when an instance's own dashboard path stops returning 200, the one thing tunnel-health's root-hostname check can't see |
 | sync-health | 5 min | `scripts/sync_health_check.sh` | **required** — pages when `fleet_view_server.py`'s `tail_runs_forever` thread has fallen behind `runs.jsonl`, the only thing keeping `fleet.db` in sync for nerd/gru/dumbledore's direct reads |
