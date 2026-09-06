@@ -4404,6 +4404,28 @@ def _fleet_cron_members_gates_entrypoint_crontab():
             "the boot failure doesn't name the bad entry"
 
 
+def _gru_cron_line_redirects_to_its_own_log_file():
+    """gh#511: judge-judy BLOCKed PR#503 (a since-superseded liveness-pager design, closed and
+    replaced by PR#515) because entrypoint.sh's gru cron line was the only one of the 9
+    ALL_CRON_MEMBERS entries with no `>> $LOG_DIR/<member>.log 2>&1` redirect -- a fallback
+    that would key off log mtime, per member, could never see gru.
+
+    PR#515's merged member_liveness_check.sh doesn't use that design (it reads fleet.db's
+    `runs` table directly, and gru's own passes land rows there via run_report.py exactly like
+    every other member, since run_gru_fanout.sh execs straight into `run_member.sh gru`) -- so
+    the specific false-positive scenario gh#511 named no longer exists. But the underlying
+    inconsistency the finding pointed at was real regardless of which pager design is live: gru
+    was the one scheduled member with nowhere for a human (or some future log-mtime-based
+    signal) to see its cron output. This guards that gru stays in step with every other member
+    now that it has its own log file, so the gap can't quietly reopen.
+    """
+    entry = (ROOT / "entrypoint.sh").read_text()
+    assert "run_gru_fanout.sh >> $LOG_DIR/gru.log 2>&1" in entry, (
+        "entrypoint.sh's gru cron line lost its log redirect -- gru is once again the only "
+        "one of the 9 ALL_CRON_MEMBERS entries with no $LOG_DIR/<member>.log of its own "
+        "(gh#511)")
+
+
 # _self_improve_score_is_actually_scheduled and _deploy_staleness_check_is_actually_scheduled
 # (found live by dumbledore 2026-08-28, gh#201) were folded into the table-driven
 # _every_entrypoint_scheduled_script_is_actually_scheduled above (gh#378) alongside
@@ -7233,6 +7255,7 @@ if __name__ == "__main__":
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
     check("FLEET_CRON_MEMBERS gates entrypoint.sh's generated crontab", _fleet_cron_members_gates_entrypoint_crontab)
+    check("gru's cron line redirects to its own log file (gh#511)", _gru_cron_line_redirects_to_its_own_log_file)
     check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
     check("every required health-check script in README is actually scheduled", _required_health_check_scripts_in_readme_are_scheduled)
     check("account-heartbeat + budget-read have host-only schedulers, never an entrypoint.sh line (gh#376)", _account_heartbeat_and_budget_read_have_host_only_schedulers)
