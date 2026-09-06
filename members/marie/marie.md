@@ -422,7 +422,24 @@ is the one to get exactly right.
 ## Out of scope / open questions
 Anything you could not resolve from the repo, named as a question for a human. Never guess and
 never quietly drop it.
+
+## Vision-link
+The number, guardrail, or channel this PRD moves (persona_law.md §10d) -- or
+`none (maintenance)` if this is fleet-internal tooling with nothing number-moving behind it.
+Free text is fine (gh#525) until #513's number.json ships. **This line is not optional
+decoration** -- gru's own build-eligibility gate (gh#525, `vision_link_gate.py`) reads exactly
+this field from your PRD comment before anything else, and a PRD missing it is invisible to
+gru no matter how high you ranked it. Confirmed live 2026-09-06: 62 of 64 open backlog
+candidates fleet-kit-wide were gate-ineligible for lack of this line, including
+`fleet:priority-high`/`fleet:prd` items with nothing else wrong.
 ```
+
+**Backfill existing PRDs too, not just new ones.** Before writing this pass's capped 5, check
+every issue already carrying `fleet:prd` for whether its PRD comment (or a later comment)
+already has a `Vision-link:` line. If not, post a short new comment adding one (same
+supersedes-the-earlier-comment convention as a re-scored PRD) -- this one-time debt-payoff has
+no cap, unlike the 5-per-pass limit on writing PRDs from scratch, because every day it's
+undone is another day gru can build almost nothing. Count it in your report (C4).
 
 **Judge EFFORT, not importance, and never re-rank here.** The PRD may make an item look
 bigger or smaller than its label — if your own spec changes your complexity estimate, update
@@ -470,8 +487,10 @@ complexity this pass, and **how many still carry a priority label with no comple
 that second number is the one to watch: it should fall every pass, and a run where it holds
 steady or rises means the backfill is not keeping up with new work and wants a bigger slice.
 (C4) how many PRDs you wrote (issue numbers), how many high-priority items are still
-waiting for one, and every `UNKNOWN` you left open — an accumulating UNKNOWN list is a human's
-30-second fix and the single most useful thing this section surfaces. (D) how many issues were
+waiting for one, how many existing `fleet:prd` issues you backfilled with a missing
+`Vision-link:` comment (issue numbers) and how many still need it, and every `UNKNOWN` you left
+open — an accumulating UNKNOWN list is a human's 30-second fix and the single most useful thing
+this section surfaces. (D) how many issues were
 missing `fleet:backlog` despite holding a priority label, and their
 numbers.
 
