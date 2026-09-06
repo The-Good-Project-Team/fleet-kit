@@ -54,6 +54,18 @@ claimed for generations was simply wrong, and told every minion it had never onc
    pass ships something confidently wrong.
 
    No `fleet:prd` label? The body is your spec, as before.
+1c. **Confirm you're in YOUR worktree, not `/repo`, before your first `Edit`/`Write` or
+   git-mutating command — `pwd` and `git worktree list`.** Five separate minion self-critiques
+   hit this exact failure in one 24h window (2026-09-05/06): editing `/repo/pyproject.toml`,
+   running `git commit` or `git checkout --` from `/repo`, editing `pgsearch.py` in `/repo` —
+   each one caught only AFTER the mistake, via `git status` or the harness's own dirty-file
+   notice, costing a wasted round-trip (and once, an accidental revert of uncommitted work)
+   every time. `/repo` is the shared checkout other concurrent sessions use; gh#78/#183 added a
+   post-flight dirty-check as the safety net for when this slips through, but that only cleans
+   up after the fact — it does not give you back the turns. Reading from `/repo` is fine (e.g.
+   `git show origin/main:<path>` to see upstream state without touching your own tree); writing
+   to it is not. Re-run the same check any time a command's output looks unexpectedly large or
+   unfamiliar — that is usually the first sign you are not where you think you are.
 2. **Build.** Tests first when practical. Follow the codebase's existing style. Reuse before
    you build — check for an existing utility or pattern before writing a new one.
 3. **Test locally** before you push — run whatever this repo's test command is. **You are a
@@ -131,16 +143,17 @@ claimed for generations was simply wrong, and told every minion it had never onc
    flag — a hardcoded guess has broken real PRs both ways, in both directions.** A bare arm
    with no strategy flag ERRORS outright on a repo with no queue
    (`--merge, --rebase, or --squash required when not running interactively`) — confirmed live
-   on fleet-kit's own repo (`gh api repos/The-Good-Project-Team/fleet-kit/branches/main/protection`,
-   reconfirmed 2026-09-05: a plain `required_status_checks` list on `selftest` and
-   `fleet-code-review` with `strict: true`, no ruleset carries a `merge_queue` rule, and
-   `.../fleet-kit/merge-queue` 404s), which cost a wasted retry on nearly every minion pass
-   here since 2026-08-28 (PRs #406/#407/#413/#414/#416/#417 in one day alone) — an explicit
-   strategy flag there instead is the correct fast path. But on a repo where `main` genuinely
-   IS queue-controlled (confirmed live on nonprofit-atlas, issue #3108), that same explicit
+   on fleet-kit's own repo (`gh api repos/The-Good-Project-Team/fleet-kit/branches/main/protection`)
+   as of 2026-08-28 through 2026-09-05, which cost a wasted retry on nearly every minion pass in
+   that window (PRs #406/#407/#413/#414/#416/#417 in one day alone). **That has since flipped**:
+   reconfirmed live 2026-09-06, fleet-kit's `main` now carries a ruleset with a `merge_queue`
+   rule, so the bare form is now correct there too — the shape changes over time, not just
+   between repos. On a repo where `main` IS queue-controlled (confirmed live on both
+   nonprofit-atlas, issue #3108, and fleet-kit as of 2026-09-06), an explicit strategy
    flag is an invalid combination and gh ERRORS instead of enqueueing (`! The merge strategy
    for main is set by the merge queue`) — there, the bare form is correct, letting `gh` pick
-   the queue path itself. If you don't already know your target repo's shape, check once
+   the queue path itself. Don't trust either example above as still true by the time you read
+   this — check once
    (`gh api repos/<owner>/<repo>/rulesets` for a `merge_queue` rule, or
    `gh api repos/<owner>/<repo>/merge-queue` for a non-404) rather than assuming either one.
    CHECK THE EXIT CODE regardless of shape — issue #3108's root cause was this exact command
