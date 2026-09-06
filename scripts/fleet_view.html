@@ -408,6 +408,17 @@ function statusClass(status) {
   return 'bad'; // no_vision_link, fail, etc.
 }
 
+// gh#166: enabled:false is a legitimate permanent throttle for a dispatch-only member (nerd,
+// minion -- they only ever run via another member's task-override, never self-fire), not proof
+// the member is dead. Only treat "disabled" as "actually off" when there's also no run inside
+// the same 24h lookback window the rest of this dashboard already uses (spend/turns labels).
+const RECENT_RUN_WINDOW_MS = 24 * 3600 * 1000;
+function hasRecentRun(last) {
+  if (!last) return false;
+  const tsMs = typeof last.ts === 'number' ? last.ts * 1000 : Date.parse(last.ts);
+  return (Date.now() - tsMs) < RECENT_RUN_WINDOW_MS;
+}
+
 let SIDEBAR_ORDER = null; // cached agent-name order -- computed once per resort, not per render
 
 function resortSidebar() {
@@ -434,12 +445,13 @@ function renderSidebar() {
     const name = m.spec.name;
     const enabled = !!m.effective.enabled;
     const last = lastRunFor(name);
-    const cls = !enabled ? 'off' : statusClass(last?.status);
+    const off = !enabled && !hasRecentRun(last);
+    const cls = off ? 'off' : statusClass(last?.status);
     const active = PAGE === 'agent' && name === SELECTED;
     const k = KPI_BY_MEMBER[name];
     const kpiLine = (k && k.total !== null && k.total !== undefined && k.unit)
       ? `<div class="akpi">${k.total} ${esc(k.unit)}</div>` : '';
-    return `<div class="agent-item ${active ? 'active' : ''} ${!enabled ? 'disabled-agent' : ''}"
+    return `<div class="agent-item ${active ? 'active' : ''} ${off ? 'disabled-agent' : ''}"
         data-agent="${esc(name)}">
       <span class="astatus ${cls}"></span>
       <div class="atext">
@@ -528,7 +540,9 @@ function renderDetailHead() {
     return `<button class="dial" data-act="edit-dial" data-member="${esc(name)}" data-key="${key}">${key}=${esc(JSON.stringify(v))}</button>`;
   }).join('');
   const next = NEXT_FIRES.find(f => f.member === name);
-  const nextLine = next && next.enabled ? `next run in ${fmtIn(next.in_s)}` : (enabled ? '' : 'disabled — not scheduled');
+  const dispatchedOnly = !enabled && hasRecentRun(lastRunFor(name));
+  const nextLine = next && next.enabled ? `next run in ${fmtIn(next.in_s)}`
+    : (enabled ? '' : (dispatchedOnly ? 'dispatched only (no self-schedule)' : 'disabled — not scheduled'));
 
   detailHeadEl.innerHTML = `
     <div class="title-row">
@@ -709,7 +723,10 @@ function renderUpcomingCard() {
   const m = SPECS.find(s => s.spec.name === SELECTED);
   const next = NEXT_FIRES.find(f => f.member === SELECTED);
   if (!next || !next.enabled) {
-    runListEl.innerHTML = `<div class="run-empty">${m && !m.effective.enabled ? 'disabled — not scheduled' : 'no upcoming run scheduled'}</div>`;
+    const label = m && !m.effective.enabled
+      ? (hasRecentRun(lastRunFor(SELECTED)) ? 'dispatched only (no self-schedule)' : 'disabled — not scheduled')
+      : 'no upcoming run scheduled';
+    runListEl.innerHTML = `<div class="run-empty">${label}</div>`;
     return;
   }
   const sched = (m?.spec?.schedule && JSON.stringify(m.spec.schedule)) || '';
