@@ -103,6 +103,12 @@ def _boot_mocks(route):
         # this route falling through to the unmocked-404 branch below.
         route.fulfill(json=({"open": [], "recently_resolved": [], "counts": {},
                               "budget_safe": True, "worst": "ok"}))
+    elif path == "/api/number":
+        # gh#513: {"configured": false} is number_read.read_current()'s own shape for an
+        # instance with no FLEET_NUMBER_URL -- renderTheNumber() hides the tile on this and
+        # never fetches again outside boot()'s own Promise.all, so this one mock is enough
+        # (same reasoning as /api/alerts above for the "zero console errors" assertion).
+        route.fulfill(json=({"configured": False}))
     elif path == "/api/stream":
         # EventSource: an empty event-stream body it can hang onto quietly. es.onerror doesn't
         # log to console, so this never trips the "zero console errors" assertion below.

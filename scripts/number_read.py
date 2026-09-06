@@ -115,6 +115,27 @@ def render(payload: dict, now: float | None = None) -> str:
     return "\n".join(lines)
 
 
+def read_current() -> dict:
+    """Everything a dashboard tile needs, in one call: whether this instance has a number
+    configured, whether it's ever been fetched, and -- if so -- the raw payload plus the same
+    STALE-past-NUMBER_STALE_S verdict `render()` uses for the prompt header (KPI doctrine rule
+    5). /status (status_data.py) and fleet_view.html's own tile (fleet_view_server.py's
+    /api/number) both call this rather than re-deriving staleness themselves, so a dashboard
+    can never quietly disagree with the header about whether a reading is current.
+    """
+    if not os.environ.get("FLEET_NUMBER_URL", "").strip():
+        return {"configured": False}
+    current, _ = _paths()
+    if not current.exists():
+        return {"configured": True, "present": False}
+    try:
+        payload = json.loads(current.read_text())
+    except Exception:  # noqa: BLE001
+        return {"configured": True, "present": False}
+    age = time.time() - int(payload.get("fetched_at") or 0)
+    return {"configured": True, "present": True, "stale": age > STALE_S, "payload": payload}
+
+
 def do_render() -> int:
     if not os.environ.get("FLEET_NUMBER_URL", "").strip():
         return 0

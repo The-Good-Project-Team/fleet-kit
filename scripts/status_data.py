@@ -174,6 +174,21 @@ def live_alerts() -> dict:
                 "error": f"{type(exc).__name__}: {exc}"}
 
 
+def number_snapshot() -> dict:
+    """gh#513: the venture's number, for the status page's own tile. Delegates the actual read
+    and staleness verdict to number_read.read_current() -- that module owns the STALE-past-48h
+    rule (KPI doctrine rule 5), and a status page re-deriving it independently could drift out
+    of sync with the same reading in every member's prompt header. `{"configured": False}`
+    (no tile at all, not a placeholder) when this instance has no FLEET_NUMBER_URL, same law
+    number_read.py's own header follows.
+    """
+    try:
+        import number_read
+        return number_read.read_current()
+    except Exception:  # noqa: BLE001 -- a status page must never 500 on this one tile
+        return {"configured": False}
+
+
 def snapshot(hours: int = 72) -> dict:
     comps = []
     worst = OK
@@ -192,6 +207,7 @@ def snapshot(hours: int = 72) -> dict:
         "hours": hours,
         "members": members(hours),
         "live_alerts": live_alerts(),
+        "number": number_snapshot(),
         "generated_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     }
 
