@@ -1772,6 +1772,51 @@ def _dormant_flags_an_enabled_member_with_zero_runs_in_window():
         "with no roster passed, a zero-run member must not be flagged (safe default)")
 
 
+def _runs_summary_excludes_started_rows_from_total_and_signal_rate():
+    """gh#437: run_report.py's provisional "started" row (gh#145) was never added to either
+    `_NOT_EXECUTED_STATUSES` or `_OK_STATUSES` in `runs_summary()`, so it was double-counted --
+    once as an extra `total` run, and once as an executed-but-not-ok failure (the same bucket as
+    a real crash), deflating `signal_rate` and inflating `total`. 3rd instance of the same
+    "a new run_report.py status doesn't reach fleet_stats.py's classification sets" bug class
+    as gh#150 (killed/timed_out) and gh#254 (incomplete_fanout).
+
+    Mixed window: a matched started+completion pair (must contribute exactly one count, the
+    completion's), an unmatched started row still mid-run (must contribute zero), plus plain
+    ok/quiet rows to give signal_rate a real denominator to get right or wrong.
+    """
+    import fleet_stats
+    now = fleet_stats._now_epoch()
+
+    def run(member, status, run_id=None, ts_offset=0):
+        return {"member": member, "status": status, "run_id": run_id, "ts": now - ts_offset}
+
+    runs = [
+        run("a", "started", run_id="paired-1", ts_offset=10 * 60),
+        run("a", "ok", run_id="paired-1", ts_offset=9 * 60),   # same pass's completion
+        run("b", "started", run_id="unmatched-1", ts_offset=1 * 60),  # still running, no completion
+        run("a", "ok"),
+        run("a", "quiet"),
+    ]
+    summary = fleet_stats.runs_summary(runs, hours=24.0)
+
+    # 3 real runs (2 ok + 1 quiet) -- the started rows contribute nothing to total/executed.
+    assert summary["total"] == 3, f"total = {summary['total']}, want 3 (started rows excluded)"
+    assert summary["executed"] == 3, f"executed = {summary['executed']}, want 3"
+    assert summary["signal_rate"] == round(100 * 2 / 3), (
+        f"signal_rate = {summary['signal_rate']}, want {round(100 * 2 / 3)} (2 ok / 3 executed)")
+
+    # per-member breakdown must apply the same exclusion: member "a" has 3 real rows (paired-1's
+    # completion + the standalone ok + quiet), never 4 (its started row must not also count).
+    rates = {r["member"]: r for r in summary["agent_rates"]}
+    assert rates["a"]["executed"] == 3, (
+        f"member a executed = {rates['a']['executed']}, want 3 (paired-1's started row excluded)")
+    assert "b" not in rates, "member b has only a started row -- must not appear in agent_rates"
+
+    # "started" must never render as a status/outcome on the hourly chart.
+    assert "started" not in summary["statuses"], (
+        "'started' leaked into the hourly chart's status vocabulary")
+
+
 def _status_page_deploy_component_classifies_stale_as_down():
     """gh#367: /status had 5 COMPONENTS rows and no Deploy row, so the fleet's own worst-
     performing pipeline (deploy_success_rate=8-9% at filing) had zero representation on the
@@ -3885,6 +3930,64 @@ def _datta_dispatches_and_nerds_analyse():
     assert minion_spec.get("schedule"), "empty schedule fails member_spec validation (found live)"
 
 
+def _nerd_structural_na_marker_wires_to_datta_downrank():
+    """gh#451: `datta.md`'s down-rank rule (`datta.md:76-99`, gh#339/PR#441) resets a lane's
+    UNEXAMINED score to 0 only if its last 3 `nerd` runs all have an `outcome` starting with the
+    literal marker `STRUCTURAL-N/A`. Before this fix, `nerd.md`'s N/A paragraphs (growth,
+    searchquality, revenue) only said "state N/A explicitly" in free prose and never told a pass
+    to emit that literal marker, so the rule was 100% dormant (confirmed live: `fleet.db` had
+    zero `STRUCTURAL-N/A` rows despite 15+ consecutive N/A passes).
+
+    Two halves, since the marker and the rule that consumes it live in different files with no
+    shared code path (this is prose read by two different LLM passes, not a function call):
+
+    1. Each of nerd.md's three current N/A paragraphs now instructs emitting the marker.
+    2. A synthetic 3-row sequence that matches the marker datta.md's own rule is written
+       against (a small model of `datta.md:87-95`'s spec, since that logic has no Python
+       module of its own to import) actually resets UNEXAMINED to 0, and a non-unanimous or
+       short sequence does not -- the down-rank must never fire as a default or on partial
+       evidence, per datta.md's own text.
+    """
+    root = Path(__file__).parent.parent
+    nerd = (root / "members" / "nerd" / "nerd.md").read_text()
+    datta = (root / "members" / "datta" / "datta.md").read_text()
+
+    for lane in ("growth", "searchquality", "revenue"):
+        # Each of these three lanes has TWO headings: the generic source-fleet checklist
+        # (nonprofit-atlas-shaped) earlier in the file, and fleet-kit's own N/A override
+        # paragraph later -- rfind gets the fleet-kit-specific one this issue targets.
+        heading = nerd.rfind(f"**{lane}** —")
+        assert heading != -1, f"{lane} lost its fleet-kit-native N/A paragraph"
+        body = nerd[heading:heading + 1600]
+        assert "STRUCTURAL-N/A" in body, \
+            f"{lane}'s N/A paragraph never tells nerd to emit the marker datta.md keys on (gh#451)"
+    assert "startswith(\"STRUCTURAL-N/A\")" in datta or "starts with the literal marker" in datta, \
+        "datta.md's down-rank rule text moved/changed -- re-check gh#451's wiring still matches"
+
+    # A minimal model of datta.md:87-95's specified rule: fewer than 3 rows, or the 3 not
+    # unanimous, means score UNEXAMINED as normal; only a unanimous 3-row STRUCTURAL-N/A streak
+    # resets it to 0. This is the "Python equivalent under test" of a rule that otherwise only
+    # exists as prose an LLM dispatcher reads.
+    def down_ranked_unexamined(last_3_outcomes, raw_hours):
+        if len(last_3_outcomes) < 3:
+            return raw_hours
+        if all(o.strip().startswith("STRUCTURAL-N/A") for o in last_3_outcomes):
+            return 0.0
+        return raw_hours
+
+    unanimous = ["STRUCTURAL-N/A: no revenue surface on fleet-kit"] * 3
+    assert down_ranked_unexamined(unanimous, 47.0) == 0.0, \
+        "3 unanimous STRUCTURAL-N/A rows must reset UNEXAMINED to 0"
+
+    too_few = unanimous[:2]
+    assert down_ranked_unexamined(too_few, 47.0) == 47.0, \
+        "fewer than 3 rows must never trigger the down-rank"
+
+    broken_streak = ["STRUCTURAL-N/A: still N/A"] * 2 + ["QUIET -- found nothing this pass"]
+    assert down_ranked_unexamined(broken_streak, 47.0) == 47.0, \
+        "one non-marker row must break the streak, never a partial down-rank"
+
+
 def _nerd_invalid_lane_rejected_before_lane_work():
     """gh#374: a `lane=<name>` dispatch outside the canonical seven must be rejected BEFORE any
     lane-specific work begins, not discovered only after a full pass ran.
@@ -5720,13 +5823,8 @@ def _unknown_reset_keeps_configured_order():
     This is the normal steady state: both accounts healthy, nothing gated, so nothing has ever
     reported a reset time. The feature must be a NO-OP here rather than inventing an order.
     """
-    now = int(time.time())
     assert _pool_order([]) == ["tgp", "gmail"], "empty state file changed the order"
-    # A PAST epoch is not a pending reset -- it is a gate that already expired, so the account
-    # is 'unknown' again and keeps configured order.
-    assert _pool_order([f"gmail {now - 5000}"]) == ["tgp", "gmail"], \
-        "an expired gate was treated as a pending reset"
-    # A malformed epoch must degrade to unknown, never sort as garbage.
+    # A malformed epoch must degrade to never-gated, never sort as garbage.
     assert _pool_order(["gmail notanumber"]) == ["tgp", "gmail"], \
         "unreadable state file reordered the pool"
 
@@ -5740,6 +5838,43 @@ def _known_reset_outranks_unknown():
     now = int(time.time())
     got = _pool_order([f"gmail {now + 600}"])
     assert got == ["gmail", "tgp"], f"known reset did not outrank unknown: {got}"
+
+
+def _lapsed_reset_outranks_never_gated():
+    """gh#462: a gate whose reset epoch has already PASSED ("lapsed") sorts ahead of an account
+    that was never gated at all -- the exact case the original PR claimed to fix and didn't.
+
+    Before the fix, _account_pool_order only split "known future reset" from "everything else",
+    which silently merged a just-lapsed account into the same bucket as a never-gated one and
+    left both in unmodified FLEET_ACCOUNTS order -- so this assertion FAILS against the pre-fix
+    code (gmail would come out second, identical to no ordering at all) and passes after it.
+    The old test here asserted the opposite (that a lapsed gate keeps configured order), which
+    was itself asserting the no-op bug as correct behavior -- see _unknown_reset_keeps_configured_order.
+    """
+    now = int(time.time())
+    # gmail was gated but its reset has already passed; tgp was never gated. gmail's quota just
+    # refreshed and is the most perishable in the pool, so it must be tried first.
+    got = _pool_order([f"gmail {now - 5000}"])
+    assert got == ["gmail", "tgp"], \
+        f"lapsed-but-now-eligible account did not outrank never-gated: {got}"
+
+    # ...and the reverse seeding must NOT invert, or the test would pass on any reordering.
+    got = _pool_order([f"tgp {now - 5000}"])
+    assert got == ["tgp", "gmail"], f"ordering ignored which account actually lapsed: {got}"
+
+
+def _lapsed_reset_sorts_ahead_of_known_future_gate_too():
+    """A three-way mix: a lapsed reset must still outrank a never-gated account even when a
+    THIRD, still-gated account is also present -- the known-future bucket must not swallow or
+    reorder the lapsed one.
+    """
+    now = int(time.time())
+    got = _pool_order([f"tgp {now + 86400}", f"gmail {now - 5000}"],
+                       accounts="tgp gmail primary")
+    assert got == ["tgp", "gmail", "primary"], (
+        f"three-bucket ordering wrong: {got} "
+        "(want known-future 'tgp' first, lapsed 'gmail' second, never-gated 'primary' last)"
+    )
 
 
 def _every_configured_account_survives_ordering():
@@ -6615,6 +6750,7 @@ if __name__ == "__main__":
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
     check("datta dispatches by coverage, nerds analyse one lane", _datta_dispatches_and_nerds_analyse)
     check("nerd rejects an invalid lane before any lane-specific work (gh#374)", _nerd_invalid_lane_rejected_before_lane_work)
+    check("nerd's STRUCTURAL-N/A marker wires to datta's down-rank rule (gh#451)", _nerd_structural_na_marker_wires_to_datta_downrank)
     check("a run records the item it worked", _a_run_records_the_item_it_worked)
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
@@ -6659,6 +6795,8 @@ if __name__ == "__main__":
     check("soonest-reset account is tried first", _soonest_reset_account_is_tried_first)
     check("no known reset keeps configured order", _unknown_reset_keeps_configured_order)
     check("known reset outranks unknown reset", _known_reset_outranks_unknown)
+    check("lapsed reset outranks never-gated (gh#462)", _lapsed_reset_outranks_never_gated)
+    check("lapsed reset still outranks never-gated alongside a known-future gate", _lapsed_reset_sorts_ahead_of_known_future_gate_too)
     check("ordering never drops an account", _every_configured_account_survives_ordering)
     check("run loop actually uses the ordering", _run_loop_actually_uses_the_ordering)
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)
@@ -6688,6 +6826,7 @@ if __name__ == "__main__":
     check("fleet_kpi's PR ref catches no-space 'PR#N' and plural shared-prefix forms (gh#448)", _fleet_kpi_pr_ref_no_space_and_plural_shared_prefix_gh448)
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
+    check("runs_summary() excludes provisional started rows from total/signal_rate/agent_rates (gh#437)", _runs_summary_excludes_started_rows_from_total_and_signal_rate)
     check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
     check("status_data.members() reads fleet.db in-process, no podman on $PATH needed (gh#364)", _status_data_members_reads_fleet_db_with_no_podman_on_path)
     check("status_data's other four components are unaffected by the members() fix (gh#364)", _status_data_other_components_unaffected_by_members_fix)
