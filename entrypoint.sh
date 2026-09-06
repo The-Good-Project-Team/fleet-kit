@@ -262,6 +262,13 @@ case "${1:-cron-foreground}" in
       # (00/03/06...) within an hour of it opening; the script's own SLOT idempotency guard
       # makes every other tick inside the same window a fast, cheap no-op.
       echo "7 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/self_improve_score.sh >> $LOG_DIR/self_improve_score_cron.log 2>&1"
+      # number_read.py --fetch (fleet-kit#513): pulls the venture's number from FLEET_NUMBER_URL
+      # into $LOG_DIR/number.json so run_member.sh can put it above every charter. Every 6h at
+      # :29 (unclaimed on the minute map above); the endpoint caches 6h itself. Sources
+      # fleet.env at tick time (FLEET_ENV_FILE is in the crontab env) so a URL added after boot
+      # takes effect on the next tick, same reasoning as gh#279. Not a member: a member must
+      # never compute its own number (KPI doctrine rule 1).
+      echo "29 */6 * * * root set -a; . \$FLEET_ENV_FILE; set +a; FLEET_LOG_DIR=$LOG_DIR python3 /fleet-kit/scripts/number_read.py --fetch >> $LOG_DIR/number_read.log 2>&1"
       # deploy_staleness_check.sh (gh#201): independent of deploy.sh/auto_deploy.sh, so it can
       # catch the case where NEITHER ran in a window -- both delivery paths (#140 poll, #189
       # push) were found down simultaneously with nothing noticing until a human-triggered

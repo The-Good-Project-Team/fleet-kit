@@ -4260,6 +4260,19 @@ def _account_and_tunnel_health_checks_are_actually_scheduled():
     )
 
 
+def _has_host_only_scheduler(root, script_name: str) -> bool:
+    """True when schedulers/ carries the full host-side trio for this script."""
+    sd = root / "schedulers" / "systemd"
+    ld = root / "schedulers" / "launchd"
+    services = [f for f in sd.glob("fleetkit-*.service") if script_name in f.read_text()]
+    if not services:
+        return False
+    timers = [sd / (f.stem + ".timer") for f in services]
+    if not all(t.exists() for t in timers):
+        return False
+    return any(script_name in f.read_text() for f in ld.glob("com.fleetkit.*.plist"))
+
+
 def _required_health_check_scripts_in_readme_are_scheduled():
     """Closes the FAILURE CLASS, not just one instance of it (gh#249).
 
@@ -4289,8 +4302,15 @@ def _required_health_check_scripts_in_readme_are_scheduled():
         if not m:
             continue
         script_path, script_name = m.group(1), m.group(2)
-        if f"bash /fleet-kit/{script_path}" not in entry:
-            missing.append(script_name)
+        if f"bash /fleet-kit/{script_path}" in entry:
+            continue
+        # Host-only pagers (fleet-kit#512): a check whose whole point is "the container's
+        # cron is dead" cannot live in that container's crontab. Its scheduled shape is the
+        # one _account_heartbeat_and_budget_read_have_host_only_schedulers pins -- a systemd
+        # unit that names the script, its timer, and a launchd plist that names it.
+        if _has_host_only_scheduler(root, script_name):
+            continue
+        missing.append(script_name)
     assert not missing, (
         f"{missing} are marked required in schedulers/README.md but have no cron line in "
         "entrypoint.sh -- a required outage pager that looks shipped (merged PR, a README "
@@ -4312,14 +4332,16 @@ def _account_heartbeat_and_budget_read_have_host_only_schedulers():
     """
     root = Path(__file__).parent.parent
     entry = (root / "entrypoint.sh").read_text()
-    scripts = ("account_heartbeat.sh", "budget_read_check.sh")
+    scripts = ("account_heartbeat.sh", "budget_read_check.sh", "member_liveness_check.sh")
     problems = []
     for script in scripts:
         if f"bash /fleet-kit/scripts/{script}" in entry:
             problems.append(
-                f"{script} has a cron line in entrypoint.sh -- it `podman exec`s into its own "
-                "container and cannot run there; this looks scheduled but fails every tick")
-    stem = {"account_heartbeat.sh": "account-heartbeat", "budget_read_check.sh": "budget-read"}
+                f"{script} has a cron line in entrypoint.sh -- it cannot run inside the fleet's "
+                "own container (podman exec into itself / watching that container's own dead "
+                "cron); this looks scheduled but fails every tick")
+    stem = {"account_heartbeat.sh": "account-heartbeat", "budget_read_check.sh": "budget-read",
+            "member_liveness_check.sh": "member-liveness"}
     for script in scripts:
         unit = stem[script]
         service = root / "schedulers" / "systemd" / f"fleetkit-{unit}.service"
@@ -6228,6 +6250,196 @@ def _account_health_check_actually_pages_when_configured():
         assert not ntfy_calls.exists(), "an unset NTFY_TOPIC must never reach the ntfy leg"
 
 
+def _liveness_fixture(tmp, newest_ok_age_s, exhausted_reset_in_s=None):
+    """A fleet.db with one ok run at the given age, plus the selftest alert sandbox."""
+    import sqlite3
+    log_dir = tmp / "logs"; log_dir.mkdir(exist_ok=True)
+    db = sqlite3.connect(str(log_dir / "fleet.db"))
+    db.execute("create table runs (run_id text, member text, status text, recorded_at real, primary key (run_id, recorded_at))")
+    now = time.time()
+    db.execute("insert into runs values ('jefe-1', 'jefe', 'ok', ?)", (now - newest_ok_age_s,))
+    db.execute("insert into runs values ('minion-2', 'minion', 'started', ?)", (now - 60,))
+    db.commit(); db.close()
+    if exhausted_reset_in_s is not None:
+        (log_dir / "account-pool-exhausted.state").write_text(
+            f"tgp {int(now + exhausted_reset_in_s)}\ngmail {int(now + exhausted_reset_in_s)}\n")
+    calls = tmp / "calls.log"
+    env = {"FLEET_LOG_DIR": str(log_dir), "FLEET_INSTANCE_NAME": "selftest-inst",
+           "NTFY_CALLS_FILE": str(calls), "SELFTEST": "1", "PATH": "/usr/bin:/bin"}
+    return env, calls
+
+
+def _run_liveness(env):
+    import subprocess
+    return subprocess.run(["bash", str(ROOT / "scripts" / "member_liveness_check.sh")],
+                          capture_output=True, text=True, timeout=30, env=env)
+
+
+def _member_liveness_pages_critical_when_no_member_has_done_work():
+    """fleet-kit#512: the dead man's switch. Sep 3-5 the crontab was discarded and no member
+    ran for 40h while every probe stayed green. Newest `ok` in fleet.db older than the window,
+    with no exhaustion state, must page critical with problem=silent on the FIRST tick."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        env, calls = _liveness_fixture(tmp, newest_ok_age_s=5 * 3600)
+        proc = _run_liveness(env)
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        assert "PAGED silent" in proc.stdout, f"stdout: {proc.stdout!r} stderr: {proc.stderr[:300]!r}"
+        text = calls.read_text() if calls.exists() else ""
+        assert "problem=silent severity=critical" in text, f"calls: {text!r}"
+        assert "silent for 5h" in text, f"page must carry the silence length: {text!r}"
+
+
+def _member_liveness_is_quiet_and_resolves_when_a_member_worked_recently():
+    """A recent `ok` is a heartbeat: no page, and the check closes any alarm it opened before
+    (fleet_alert.sh itself drops a recovery nobody was paged for, so this is safe every tick)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        env, calls = _liveness_fixture(tmp, newest_ok_age_s=10 * 60)
+        proc = _run_liveness(env)
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        assert proc.stdout.strip().endswith("OK"), f"stdout: {proc.stdout!r}"
+        text = calls.read_text() if calls.exists() else ""
+        assert "page " not in text, f"a 10-minute-old ok run must never page: {text!r}"
+        assert "resolve " in text, f"a healthy tick must resolve the check: {text!r}"
+
+
+def _member_liveness_names_the_reset_when_the_pool_is_exhausted():
+    """Aug 30 - Sep 1: 25h of budget_declined runs, no page. Genuinely out of tokens is a
+    STATE, paged once, degraded not critical, and the page carries the pool's own reset time
+    -- so a human knows nothing is broken and when it resumes."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        env, calls = _liveness_fixture(tmp, newest_ok_age_s=6 * 3600, exhausted_reset_in_s=20 * 3600)
+        proc = _run_liveness(env)
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        assert "PAGED out_of_tokens" in proc.stdout, f"stdout: {proc.stdout!r} stderr: {proc.stderr[:300]!r}"
+        text = calls.read_text() if calls.exists() else ""
+        assert "problem=out_of_tokens severity=degraded" in text, f"calls: {text!r}"
+        assert "out of tokens until" in text and "UTC" in text, f"page must name the reset: {text!r}"
+        # A reset already in the PAST is not exhaustion -- that pool should be working again.
+        (tmp / "logs" / "account-pool-exhausted.state").write_text(f"tgp {int(time.time()) - 3600}\n")
+        calls.unlink(missing_ok=True)
+        proc = _run_liveness(env)
+        assert "PAGED silent" in proc.stdout, f"a stale reset must fall through to silent: {proc.stdout!r}"
+
+
+def _fleet_alert_queues_an_undelivered_alarm_and_retries_it_next_call():
+    """fleet-kit#512: on 2026-09-04 both legs failed and the log said ALARM UNDELIVERED -- and
+    that was the end of it. Now an alarm neither channel took waits in a queue and is retried
+    at the front of the next call, so a mail-provider blip delays a page instead of eating it.
+    Exercises the real script: no alert.env in the sandbox (email leg skips), NTFY_TOPIC set,
+    curl stubbed to fail then succeed."""
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        bin_dir = tmp / "bin"; bin_dir.mkdir()
+        calls = tmp / "curl_calls.log"
+        (bin_dir / "curl").write_text('#!/bin/bash\necho "$@" >> "$CURL_CALLS"\nexit "${CURL_RC:-0}"\n')
+        (bin_dir / "curl").chmod(0o755)
+        log = tmp / "fleet_alert.log"; queue = tmp / "alerts_undelivered.jsonl"
+        env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "NTFY_TOPIC": "selftest-fake-topic",
+               "FLEET_ALERT_LOG": str(log), "FLEET_ALERT_QUEUE": str(queue),
+               "CURL_CALLS": str(calls), "SELFTEST": "1"}
+        script = str(ROOT / "scripts" / "fleet_alert.sh")
+
+        proc = subprocess.run(["bash", script, "first title", "first body"], capture_output=True,
+                              text=True, timeout=30, env={**env, "CURL_RC": "22"})
+        assert proc.returncode == 0, f"helper must never exit non-zero: {proc.stderr[:300]}"
+        assert queue.exists() and queue.read_text().count("\n") == 1, \
+            f"an alarm both legs dropped must be queued, got: {queue.read_text() if queue.exists() else None!r}"
+        assert "first title" in queue.read_text()
+        assert "UNDELIVERED (queued" in log.read_text(), log.read_text()
+
+        calls.unlink(missing_ok=True)
+        proc = subprocess.run(["bash", script, "second title", "second body"], capture_output=True,
+                              text=True, timeout=30, env={**env, "CURL_RC": "0"})
+        assert proc.returncode == 0, proc.stderr[:300]
+        sent = calls.read_text()
+        assert "[retry] first title" in sent, f"queued alarm must be retried first: {sent!r}"
+        assert "second title" in sent, sent
+        assert sent.index("[retry] first title") < sent.index("second title"), "retry goes before the new alarm"
+        assert queue.read_text().strip() == "", f"delivered retry must leave the queue: {queue.read_text()!r}"
+
+
+def _number_read_fetches_from_a_url_and_renders_five_lines():
+    """fleet-kit#513: the venture's number goes above every charter. --fetch reads the URL
+    (file:// here, so the suite touches no network) and writes number.json + a history line;
+    --render prints the header with values and 7d deltas; a stale read says STALE up front."""
+    import subprocess, json as _json
+    script = ROOT / "scripts" / "number_read.py"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        src = tmp / "number.json.src"
+        src.write_text(_json.dumps({
+            "as_of": "2026-09-05T23:00:00Z",
+            "number": {"name": "Stripe MRR", "value": 10.83, "unit": "$/mo", "delta_7d": 0.83},
+            "guardrail": {"name": "entities with >=1 attributable interaction", "value": 572, "unit": "entities", "delta_7d": 181},
+            "channel": {"name": "sessions, last full week", "value": 108849, "unit": "sessions/wk", "delta_7d": 12470},
+            "errors": [],
+        }))
+        env = {"PATH": "/usr/bin:/bin", "FLEET_LOG_DIR": str(tmp / "logs"),
+               "FLEET_NUMBER_URL": src.as_uri(), "FLEET_NUMBER_TOKEN": "t"}
+        proc = subprocess.run(["python3", str(script), "--fetch"], capture_output=True, text=True, timeout=30, env=env)
+        assert proc.returncode == 0, proc.stderr[:300]
+        assert (tmp / "logs" / "number.json").exists(), "fetch must write number.json"
+        assert (tmp / "logs" / "number_history.jsonl").read_text().count("\n") == 1, "fetch must append one history line"
+
+        proc = subprocess.run(["python3", str(script), "--render"], capture_output=True, text=True, timeout=30, env=env)
+        out = proc.stdout
+        lines = [l for l in out.splitlines() if l.strip()]
+        assert len(lines) == 5, f"header must be five lines, got {len(lines)}: {out!r}"
+        assert "Stripe MRR = 10.83 $/mo (+0.83 in 7d)" in out, out
+        assert "572 entities (+181 in 7d)" in out, out
+        assert "108,849 sessions/wk (+12,470 in 7d)" in out, out
+        assert "STALE" not in out, "a fresh read must not say STALE"
+
+        data = _json.loads((tmp / "logs" / "number.json").read_text())
+        data["fetched_at"] -= 3 * 86400
+        (tmp / "logs" / "number.json").write_text(_json.dumps(data))
+        proc = subprocess.run(["python3", str(script), "--render"], capture_output=True, text=True, timeout=30, env=env)
+        assert proc.stdout.splitlines()[0].startswith("THE NUMBER") and "STALE" in proc.stdout.splitlines()[0], proc.stdout
+
+        proc = subprocess.run(["python3", str(script), "--render"], capture_output=True, text=True, timeout=30,
+                              env={**env, "FLEET_NUMBER_URL": ""})
+        assert proc.stdout.strip() == "", f"no URL must render nothing: {proc.stdout!r}"
+
+        before = (tmp / "logs" / "number.json").read_text()
+        proc = subprocess.run(["python3", str(script), "--fetch"], capture_output=True, text=True, timeout=30,
+                              env={**env, "FLEET_NUMBER_URL": (tmp / "missing.json").as_uri()})
+        assert proc.returncode == 0 and "keeping previous" in proc.stderr, proc.stderr
+        assert (tmp / "logs" / "number.json").read_text() == before
+
+
+def _number_read_never_renders_zero_for_an_unmeasured_reading():
+    """KPI doctrine rule 5 at the prompt: a reading the endpoint could not take is 'unmeasured',
+    never 0 -- a zero here would tell every member the business has no revenue."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import importlib
+    nr = importlib.import_module("number_read")
+    out = nr.render({"fetched_at": int(time.time()), "as_of": "x",
+                     "number": None, "guardrail": {"name": "g", "value": 0, "unit": "entities", "delta_7d": None},
+                     "channel": None, "errors": ["number: credential_missing: STRIPE_API_KEY"]})
+    assert "Number: unmeasured" in out, out
+    assert "g = 0 entities (delta unmeasured)" in out, out
+    assert "credential_missing" in out, out
+    assert " 0 $/mo" not in out
+
+
+def _run_member_puts_the_number_header_above_item_and_task():
+    """The header must be the FIRST thing a member reads -- above --item and --task -- and its
+    absence must be silent (no URL, no header, no failure)."""
+    src = (ROOT / "scripts" / "run_member.sh").read_text()
+    hook = src.index('number_read.py" --render')
+    item = src.index('if [ -n "$ITEM" ]; then')
+    task = src.index('if [ -n "$TASK" ]; then')
+    assert hook < item < task, "number header must be composed before --item and --task"
+    assert "|| true" in src[hook:hook + 200], "a failed render must never kill the member run"
+    entry = (ROOT / "entrypoint.sh").read_text()
+    assert "number_read.py --fetch" in entry, "nothing schedules the fetch -- the header would be STALE forever"
+    assert "FLEET_NUMBER_URL" in (ROOT / "fleet.env.example").read_text()
+
+
 def _sync_health_check_pages_on_a_real_stalled_offset_not_on_a_caught_up_one():
     """gh#273: tail_runs_forever is the only thing keeping fleet.db in sync with runs.jsonl,
     and nothing watched whether it was still alive -- account_health_check.sh,
@@ -6812,6 +7024,13 @@ if __name__ == "__main__":
     check("pool logs successes so outage length is measurable", _pool_logs_successes_so_downtime_is_measurable)
     check("account health check actually pages when configured (and never claims to when it isn't)", _account_health_check_actually_pages_when_configured)
     check("account health check re-pages on a fixed interval instead of once (gh#266)", _account_health_check_repages_on_a_fixed_interval_gh266)
+    check("number_read fetches from a URL and renders the five-line header (fleet-kit#513)", _number_read_fetches_from_a_url_and_renders_five_lines)
+    check("number_read never renders zero for an unmeasured reading (fleet-kit#513)", _number_read_never_renders_zero_for_an_unmeasured_reading)
+    check("run_member puts the number header above --item and --task (fleet-kit#513)", _run_member_puts_the_number_header_above_item_and_task)
+    check("member liveness pages critical when no member has done work (fleet-kit#512)", _member_liveness_pages_critical_when_no_member_has_done_work)
+    check("member liveness is quiet and resolves after a recent ok run (fleet-kit#512)", _member_liveness_is_quiet_and_resolves_when_a_member_worked_recently)
+    check("member liveness names the reset time when the pool is exhausted (fleet-kit#512)", _member_liveness_names_the_reset_when_the_pool_is_exhausted)
+    check("fleet_alert queues an undelivered alarm and retries it next call (fleet-kit#512)", _fleet_alert_queues_an_undelivered_alarm_and_retries_it_next_call)
     check("sync health check pages on a real stalled offset, not on a caught-up one (gh#273)", _sync_health_check_pages_on_a_real_stalled_offset_not_on_a_caught_up_one)
     check("sync health check re-pages on a fixed interval instead of once", _sync_health_check_repages_on_a_fixed_interval)
     check("nothing hardcodes a read of the frozen instances/*/logs mirror", _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror)

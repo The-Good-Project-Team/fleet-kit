@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- fleet-kit dead man's switch — pages when no member has completed work recently,
+     scripts/member_liveness_check.sh. Host-side by design: it watches for the container's
+     own cron being dead. Required. One plist per instance. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fleetkit.member-liveness</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>exec "{{KIT_PATH}}/scripts/member_liveness_check.sh"</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/{{USER}}</string>
+    <key>FLEET_LOG_DIR</key>
+    <string>{{LOG_DIR}}</string>
+    <key>FLEET_INSTANCE_NAME</key>
+    <string>{{INSTANCE_NAME}}</string>
+    <key>NTFY_TOPIC</key>
+    <string>{{NTFY_TOPIC}}</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/{{USER}}/Library/Logs/fleet-kit/member-liveness.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/{{USER}}/Library/Logs/fleet-kit/member-liveness.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
