@@ -1,0 +1,14 @@
+[Unit]
+Description=fleet-kit dead man's switch — pages when no member has completed work in LIVENESS_MAX_AGE_S (scripts/member_liveness_check.sh)
+
+[Service]
+Type=oneshot
+# member_liveness_check.sh is a plain host process by design: the failure it watches for is
+# "the container's cron is dead", and a check inside that container dies with it. It reads
+# the instance's log dir (the host mount of the container's /var/log/fleet-kit) directly --
+# Environment= here, not FLEET_ENV_FILE. One unit per instance.
+Environment=FLEET_LOG_DIR={{LOG_DIR}}
+Environment=FLEET_INSTANCE_NAME={{INSTANCE_NAME}}
+Environment=NTFY_TOPIC={{NTFY_TOPIC}}
+ExecStart={{KIT_PATH}}/scripts/member_liveness_check.sh
+User={{USER}}
