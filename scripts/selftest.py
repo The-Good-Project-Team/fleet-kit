@@ -6922,6 +6922,25 @@ def _number_read_fetches_from_a_url_and_renders_five_lines():
         assert (tmp / "logs" / "number.json").read_text() == before
 
 
+def _number_read_shows_the_target_and_distance_to_it():
+    """Reif, 2026-09-06: "$25k mrr, that would be a great number" -- by year end. A target
+    without a date is a wish; with one, gru can rank by distance-to-target. The endpoint
+    (philanthropy#4480) carries `target`; the header line for the number must show it, and
+    a payload without one must render exactly as before (older ventures)."""
+    import importlib, sys as _sys
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    nr = importlib.import_module("number_read")
+    base = {"fetched_at": int(time.time()), "as_of": "2026-09-06T02:00:00Z", "errors": [],
+            "number": {"name": "Stripe MRR", "value": 10.83, "unit": "$/mo", "delta_7d": 0.0}}
+    plain = nr.render(base)
+    assert "target" not in plain.lower(), plain
+    with_t = nr.render({**base, "target": {"value": 25000, "unit": "$/mo", "by": "2026-12-31"}})
+    line = [l for l in with_t.splitlines() if l.startswith("Number:")][0]
+    assert "of 25,000 $/mo by 2026-12-31" in line and "0.04%" in line, line
+    no_num = nr.render({**base, "number": None, "target": {"value": 25000, "unit": "$/mo", "by": "2026-12-31"}})
+    assert "unmeasured" in no_num and "25,000" in no_num, no_num
+
+
 def _number_read_never_renders_zero_for_an_unmeasured_reading():
     """KPI doctrine rule 5 at the prompt: a reading the endpoint could not take is 'unmeasured',
     never 0 -- a zero here would tell every member the business has no revenue."""
