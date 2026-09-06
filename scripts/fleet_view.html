@@ -314,7 +314,11 @@ let REPO_URL = '';
 let SPECS = [];          // from /api/members -- spec + effective + overrides, per agent
 let ALL_RUNS = [];        // oldest-first, matches runs.jsonl append order
 let SELECTED = null;      // currently open agent name, or null (only meaningful when PAGE==='agent')
-let PAGE = 'agent';       // 'agent' | 'queue' | 'settings' -- which sidebar item is active
+// gh#228: fire-first default. A fresh load (no prior click yet) lands on PRs & Backlog --
+// open-PR/failing-check status the operator's charter asks for -- not an arbitrary
+// alphabetically-first agent's raw run log. Only switches to 'agent' once the operator
+// actually clicks one, via selectAgent().
+let PAGE = 'queue';       // 'agent' | 'queue' | 'settings' -- which sidebar item is active
 let GH = { prs: [], issues: [], merged: [], self_evolution: [],
            needs_human_op: { count: 0, oldest_age_hours: 0 } };
 let FLEET_STATE = {};
@@ -1879,7 +1883,12 @@ async function boot() {
       return;
     }
     clearBootError();
-    selectAgent(SELECTED);
+    // gh#228: boot() used to call selectAgent(SELECTED) unconditionally here, which forces
+    // PAGE = 'agent' regardless of the fire-first default set above -- respect PAGE instead,
+    // so a fresh load actually lands on 'queue' rather than being immediately overridden back
+    // to whichever agent loadMembers() picked first.
+    if (PAGE === 'agent') selectAgent(SELECTED);
+    else selectPage(PAGE);
     // Same PAGE guard as renderQueue() above -- loadMembers() itself is page-agnostic (spend/KPI
     // data every page's sidebar KPI line needs), but renderDetailHead() is agent-page-only. A
     // failure here (gh#262) is a background poll, not the initial boot -- the page already has
