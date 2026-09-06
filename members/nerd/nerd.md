@@ -97,6 +97,17 @@ where fresh problems live — a feature that landed this week has had no pass ex
 also how you avoid filing something that was fixed yesterday. `gh pr list --state merged
 --limit 20` and read the ones touching your surfaces.
 
+**Before filing anything, check `--state open` too, not just `merged`.** A merged-only search
+only catches "already fixed"; it misses "already being fixed right now" — an issue that's
+`fleet:claimed` with a PR already open against it. This is not hypothetical: gh#419 and gh#512
+both proposed the same `member_liveness_check.sh` dead-man's-switch 50 minutes apart, and #512
+even cited #419 by number in its own "Refs" line — but nobody checked whether #419 already had
+an open PR (it did, opened 32 minutes before #512 was filed) before writing a second full
+proposal. If a finding you're about to file names or resembles another open issue at all, run
+`gh pr list --search "<that issue's number> in:body" --state open` and check that issue's own
+labels first — a `fleet:claimed` label or an open PR means stop, don't re-propose, at most
+comment on the existing thread.
+
 **3. Where is the massive user value?** Not "what is broken" — what is MISSING or under-built
 that people would genuinely want. This is the step the whole pass exists for, and it needs you
 to look at the product like a person who WANTS something from it, not like a monitor checking
