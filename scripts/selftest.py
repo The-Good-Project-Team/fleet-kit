@@ -603,6 +603,42 @@ def _fleet_db_query_runs_empty_item_id_is_treated_like_none():
         assert {r["run_id"] for r in none_rows} == {r["run_id"] for r in empty_rows}
 
 
+def _fleet_db_spend_ok_runs_unaffected_by_never_executed_statuses():
+    """gh#185: fleet_db.py's `spend()` never adopted #150/PR#156's `_NOT_EXECUTED_STATUSES`
+    taxonomy for its own `ok_runs` field -- a member hit by an infra kill (container restart,
+    OOM, deploy cutover) risked reading as less successful than one that genuinely failed.
+    AC1/AC2: `ok_runs` counts only 'ok'+'quiet' rows, no matter how many
+    budget_declined/timed_out/killed rows are also present in the window. AC3: `runs` (the
+    total count) and every other field stay exactly what they'd be without this fix -- this is
+    an `ok_runs` numerator fix only, not a redefinition of the shared denominator.
+    """
+    import time
+
+    import fleet_db
+    now = time.time()
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        runs = d / "runs.jsonl"
+        rows_in = [
+            {"run_id": "a-ok", "member": "a", "status": "ok", "_recorded_at": now},
+            {"run_id": "a-quiet", "member": "a", "status": "quiet", "_recorded_at": now},
+            {"run_id": "a-budget", "member": "a", "status": "budget_declined", "_recorded_at": now},
+            {"run_id": "a-timedout", "member": "a", "status": "timed_out", "_recorded_at": now},
+            {"run_id": "a-killed", "member": "a", "status": "killed", "_recorded_at": now},
+        ]
+        runs.write_text("\n".join(json.dumps(r) for r in rows_in) + "\n")
+        conn = fleet_db.connect(d / "fleet.db")
+        fleet_db.sync(conn, runs_file=runs)
+
+        rows = fleet_db.spend(conn, member="a", hours=24.0)
+        assert len(rows) == 1, rows
+        row = rows[0]
+        assert row["ok_runs"] == 2, f"ok_runs = {row['ok_runs']}, want 2 (ok+quiet only)"
+        # AC3: `runs` (the total count) is untouched -- all 5 rows, never-executed or not.
+        assert row["runs"] == 5, f"runs = {row['runs']}, want 5 -- this fix must not touch it"
+
+
 def _fleet_db_composite_pk_migration_is_lock_serialized():
     """#212: fleet_view_server.py calls `fleet_db.connect()` from several independent
     threads -- the background tail thread and per-request handlers -- and
@@ -7246,6 +7282,7 @@ if __name__ == "__main__":
     check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
     check("query_runs(item_id=) matches free-text #N mentions, not just the build-claim column (gh#405)", _fleet_db_query_runs_item_id_matches_free_text_mentions)
     check("query_runs(item_id=\"\") behaves like item_id=None, not an unlimited full-table scan (gh#484)", _fleet_db_query_runs_empty_item_id_is_treated_like_none)
+    check("spend()'s ok_runs excludes never-executed statuses, runs stays untouched (gh#185)", _fleet_db_spend_ok_runs_unaffected_by_never_executed_statuses)
     check("fleet.db composite-PK migration is lock-serialized", _fleet_db_composite_pk_migration_is_lock_serialized)
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("cost_bridge converts real spend into fanout's --observed shape", _cost_bridge_converts_real_spend_into_fanouts_observed_shape)
