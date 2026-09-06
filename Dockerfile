@@ -76,6 +76,15 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update -qq && apt-get install -y -qq gh && rm -rf /var/lib/apt/lists/*
 
+# node — gh#126: without it, `which node` fails and any downstream repo's tests that shell out
+# to node (nonprofit-atlas's dock-inbox.js reconnect/PostHog coverage, for one) silently SKIP
+# instead of running, so no pass in this sandbox ever exercises that real client-side behavior.
+# NodeSource's setup script, not `apt-get install nodejs`: 22.04's own repo carries v12, long
+# EOL; NodeSource's is the standard way to get a current LTS on Ubuntu without building from
+# source.
+RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+    && apt-get install -y -qq nodejs && rm -rf /var/lib/apt/lists/*
+
 # Claude Code CLI. The installer writes to $HOME/.local/bin under whatever HOME it sees at
 # build time (root here) -- confirmed on the live box this lands at /root/.local/bin/claude.
 RUN curl -fsSL https://claude.ai/install.sh | bash
