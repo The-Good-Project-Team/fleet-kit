@@ -373,8 +373,10 @@ spawns exactly one). Your job, in order:
    run_id is `minion-item<n>-<pid>-<timestamp>`, so `grep "minion-item<n>-" runs.jsonl` finds
    it directly). If that comes up empty, do NOT fall back to `gh pr list --search "<n> in:body"`
    — GitHub's search is not selective for short issue numbers and returns majority noise
-   (gh#425). Instead pull merged PRs locally and regex-match a word-bounded token:
-   `gh pr list --state merged --json number,title,body --limit 1000 | jq -r --arg n "<n>" '.[] | select((.title + "\n" + (.body // "")) | test("(?i)(gh)?#0*" + $n + "\\b")) | .number'` —
+   (gh#425). Instead pull the minion's own still-open PR locally and regex-match a word-bounded
+   token — this fallback runs right after step 6's wait, before the PR has gone through this
+   repo's merge gate, so it is almost always still open, not merged:
+   `gh pr list --state open --json number,title,body --limit 1000 | jq -r --arg n "<n>" '.[] | select((.title + "\n" + (.body // "")) | test("(?i)(gh)?#0*" + $n + "\\b")) | .number'` —
    and write ONE combined report as your own final output: the runway you computed, the
    priority call you made and why, and a one-line result per minion (PR #, or "found already
    fixed", or "failed: <reason>"). A minion that never reports back (crashed, hung) is a
