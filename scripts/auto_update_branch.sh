@@ -34,6 +34,9 @@ log() { echo "[$(ts)] $*" >> "$LOG"; }
 [ -f "$KIT_DIR/scripts/fleet_enabled.sh" ] && . "$KIT_DIR/scripts/fleet_enabled.sh"
 fleet_enabled_or_exit "auto_update_branch"
 
+# shellcheck source=/dev/null
+. "$KIT_DIR/scripts/merge_arm.sh"
+
 cd "$REPO" 2>/dev/null || { log "FATAL: repo missing at $REPO"; exit 1; }
 
 REPO_SLUG=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null || echo "")
@@ -208,7 +211,7 @@ for pr in $(gh pr list --state open --json number,isDraft,autoMergeRequest \
     log "PR #$pr: not armed -- judge-judy blocked this head (${head:0:12})"
     continue
   fi
-  if arm_err="$(gh pr merge "$pr" --auto 2>&1 >/dev/null)"; then
+  if arm_err="$(arm_pr_auto_merge "$pr")"; then
     log "PR #$pr: auto-merge armed (was unarmed -- it could have sat green forever)"
     ARMED=$((ARMED+1))
   else

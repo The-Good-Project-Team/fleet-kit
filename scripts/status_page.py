@@ -74,6 +74,16 @@ margin-bottom:24px;background:var(--warnbg)}
 .live-alert.transient{border-color:var(--unknownbd);background:var(--unknownbg)}
 .live-alert-head{font-weight:600;display:flex;align-items:center;gap:8px}
 .live-alert ul{margin:10px 0 0;padding-left:20px;font-size:13px;color:var(--muted)}
+/* gh#513: "the number" card -- the same three readings (number, guardrail, channel)
+run_member.sh puts above every member's charter, mirrored here for a human watching the
+dashboard instead of a member reading a prompt. */
+.numrow{display:flex;gap:24px;flex-wrap:wrap}
+.numcell{flex:1 1 140px;min-width:140px}
+.numlabel{color:var(--muted);font-size:12px}
+.numval{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:2px}
+.numdelta{color:var(--muted);font-size:12.5px;margin-top:1px}
+.numcard.stale .numval{color:var(--warn)}
+.numfoot{color:var(--muted);font-size:12px;margin-top:14px}
 """
 
 _LABEL = {"ok": "Operational", "down": "Degraded", "unknown": "No data"}
@@ -114,6 +124,63 @@ def _live_alert_html(live_alerts: dict) -> str:
     return (
         "<div class='live-alert %s'><div class=live-alert-head>&#9888; %s alert(s) open</div>"
         "%s</div>" % (cls, escape(", ".join(head)), ("<ul>%s</ul>" % items if items else ""))
+    )
+
+
+def _num_fmt(v) -> str:
+    if v is None:
+        return "unmeasured"
+    if isinstance(v, float):
+        return "%s" % format(v, ",.2f")
+    if isinstance(v, int):
+        return format(v, ",")
+    return str(v)
+
+
+def _num_delta(v) -> str:
+    if v is None:
+        return "delta unmeasured"
+    return "%s%s in 7d" % ("+" if v >= 0 else "", _num_fmt(v))
+
+
+def _number_html(data: dict) -> str:
+    """gh#513: renders "" (no card at all) when this instance has no FLEET_NUMBER_URL --
+    number_read.py's own law is that an unconfigured venture gets no header, not a fake one,
+    and the status page follows the same rule rather than showing an empty card."""
+    if not data or not data.get("configured"):
+        return ""
+    if not data.get("present"):
+        return (
+            "<div class=card><h2>The number</h2>"
+            "<div class=numfoot>Not yet read for this instance (number.json missing) "
+            "&mdash; unmeasured, not zero.</div></div>"
+        )
+    payload = data.get("payload") or {}
+    stale = data.get("stale", False)
+    cells = []
+    for key, label in (("number", "Number"), ("guardrail", "Guardrail"), ("channel", "Channel")):
+        block = payload.get(key)
+        if not block:
+            cells.append(
+                '<div class=numcell><div class=numlabel>%s</div>'
+                '<div class=numval>unmeasured</div></div>' % escape(label)
+            )
+            continue
+        unit = block.get("unit", "")
+        cells.append(
+            '<div class=numcell><div class=numlabel>%s</div>'
+            '<div class=numval>%s %s</div>'
+            '<div class=numdelta>%s</div></div>'
+            % (escape(block.get("name", label)), escape(_num_fmt(block.get("value"))),
+               escape(unit), escape(_num_delta(block.get("delta_7d"))))
+        )
+    foot = "as of %s." % escape(str(payload.get("as_of", "?")))
+    if stale:
+        foot = "STALE &mdash; treat every figure below as unverified. " + foot
+    return (
+        '<div class="card numcard%s"><h2>The number</h2><div class=numrow>%s</div>'
+        '<div class=numfoot>%s</div></div>'
+        % (" stale" if stale else "", "".join(cells), foot)
     )
 
 
@@ -175,6 +242,9 @@ def render(hours: int = 72) -> str:
                 else "All systems operational" if overall == "ok"
                 else "Status partially unknown")
     live_alert_html = _live_alert_html(d.get("live_alerts") or {})
+    number_html = _number_html(d.get("number") or {})
+    if number_html:
+        number_html = '<div style="margin-bottom:24px">%s</div>' % number_html
 
     return (
         "<!doctype html><html><head><meta charset=utf-8>"
@@ -183,14 +253,14 @@ def render(hours: int = 72) -> str:
         "<header><div><h1>Fleet status</h1>"
         "<div class=sub>philanthropy &middot; dino</div></div></header>"
         "<div class='banner %s'><div class=banner-head>"
-        "<span class='dot %s'></span>%s</div></div>%s"
+        "<span class='dot %s'></span>%s</div></div>%s%s"
         "<div class=card><h2>System status &mdash; last %d hours</h2>%s"
         "<div class=axis><span>%dh ago</span><span>now</span></div></div>%s"
         "<footer>Rolled up from the health checks that run every 5 minutes.<br>"
         "Grey means no check ran in that hour, never &ldquo;healthy&rdquo;. "
         "Generated %s.</footer>"
         "</div></body></html>"
-        % (CSS, banner_class, overall, escape(headline), live_alert_html,
+        % (CSS, banner_class, overall, escape(headline), live_alert_html, number_html,
            d["hours"], "".join(rows), d["hours"], members_card, d["generated_at"])
     )
 

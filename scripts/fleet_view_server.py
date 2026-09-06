@@ -1087,6 +1087,14 @@ class Handler(BaseHTTPRequestHandler):
             fleet_db.sync(db)
             self._json({"spend": fleet_db.spend(db, member=member, hours=hours), "hours": hours})
             return
+        if path == "/api/number":
+            # gh#513: the same reading number_read.py puts above every member's charter,
+            # mirrored for a human watching the dashboard. {"configured": false} when this
+            # instance has no FLEET_NUMBER_URL -- the frontend hides the tile entirely rather
+            # than rendering a placeholder (the header's own law: no URL, no header).
+            import number_read
+            self._json(number_read.read_current())
+            return
         if path == "/api/kpi":
             # Per-member headline count (fleet_kpi.py), summed over a time window -- reuses
             # STATE.runs (already in memory, already the live source for the run feed) rather

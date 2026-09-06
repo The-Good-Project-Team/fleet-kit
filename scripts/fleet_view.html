@@ -62,6 +62,9 @@
   .boot-error-banner.degraded { background: var(--warn); }
   .boot-error-banner.transient { background: var(--dim); }
   .topbar .stat.bad { color: var(--bad); font-weight: 600; }
+  /* gh#513: "the number" -- three stat spans grouped so they never wrap apart from each
+     other, same gap the topbar itself uses between its own direct children. */
+  .topbar .numgrp { display: flex; gap: 14px; }
 
   .body { display: grid; grid-template-columns: 220px 1fr; min-height: 0; }
 
@@ -195,6 +198,13 @@
   .checks-green { color: var(--ok); } .checks-pending { color: var(--warn); } .checks-failing { color: var(--bad); }
   .checks-blocked { color: var(--bad); }
 
+  /* ---------- Backlog filter bar: priority-tier toggle + title search (gh#193) ---------- */
+  .queue-filter-bar { display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+    border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .queue-filter-bar .hist-toggle { margin-top: 0; }
+  .queue-filter-bar input[type="search"] { flex: 1; min-width: 140px; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 12px; color: var(--text); }
+
   /* ---------- sidebar nav items: PRs/Backlog + Settings, same list as agents, separated ---------- */
   .side-nav-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer;
     border-left: 2px solid transparent; color: var(--text); }
@@ -259,6 +269,11 @@
     <span class="brand">fleet-kit</span>
     <select class="btn small" id="siblingSwitch" style="display:none;"></select>
     <span class="stat" id="repo"></span>
+    <span class="numgrp" id="theNumber" style="display:none;">
+      <span class="stat" id="numNumber"></span>
+      <span class="stat" id="numGuardrail"></span>
+      <span class="stat" id="numChannel"></span>
+    </span>
     <span class="spacer"></span>
     <span class="stat" id="needsHumanOp"></span>
     <span class="stat" id="globalSpend"></span>
@@ -307,7 +322,11 @@ let REPO_URL = '';
 let SPECS = [];          // from /api/members -- spec + effective + overrides, per agent
 let ALL_RUNS = [];        // oldest-first, matches runs.jsonl append order
 let SELECTED = null;      // currently open agent name, or null (only meaningful when PAGE==='agent')
-let PAGE = 'agent';       // 'agent' | 'queue' | 'settings' -- which sidebar item is active
+// gh#228: fire-first default. A fresh load (no prior click yet) lands on PRs & Backlog --
+// open-PR/failing-check status the operator's charter asks for -- not an arbitrary
+// alphabetically-first agent's raw run log. Only switches to 'agent' once the operator
+// actually clicks one, via selectAgent().
+let PAGE = 'queue';       // 'agent' | 'queue' | 'settings' -- which sidebar item is active
 let GH = { prs: [], issues: [], merged: [], self_evolution: [],
            needs_human_op: { count: 0, oldest_age_hours: 0 } };
 let FLEET_STATE = {};
@@ -408,6 +427,17 @@ function statusClass(status) {
   return 'bad'; // no_vision_link, fail, etc.
 }
 
+// gh#166: enabled:false is a legitimate permanent throttle for a dispatch-only member (nerd,
+// minion -- they only ever run via another member's task-override, never self-fire), not proof
+// the member is dead. Only treat "disabled" as "actually off" when there's also no run inside
+// the same 24h lookback window the rest of this dashboard already uses (spend/turns labels).
+const RECENT_RUN_WINDOW_MS = 24 * 3600 * 1000;
+function hasRecentRun(last) {
+  if (!last) return false;
+  const tsMs = typeof last.ts === 'number' ? last.ts * 1000 : Date.parse(last.ts);
+  return (Date.now() - tsMs) < RECENT_RUN_WINDOW_MS;
+}
+
 let SIDEBAR_ORDER = null; // cached agent-name order -- computed once per resort, not per render
 
 function resortSidebar() {
@@ -434,12 +464,13 @@ function renderSidebar() {
     const name = m.spec.name;
     const enabled = !!m.effective.enabled;
     const last = lastRunFor(name);
-    const cls = !enabled ? 'off' : statusClass(last?.status);
+    const off = !enabled && !hasRecentRun(last);
+    const cls = off ? 'off' : statusClass(last?.status);
     const active = PAGE === 'agent' && name === SELECTED;
     const k = KPI_BY_MEMBER[name];
     const kpiLine = (k && k.total !== null && k.total !== undefined && k.unit)
       ? `<div class="akpi">${k.total} ${esc(k.unit)}</div>` : '';
-    return `<div class="agent-item ${active ? 'active' : ''} ${!enabled ? 'disabled-agent' : ''}"
+    return `<div class="agent-item ${active ? 'active' : ''} ${off ? 'disabled-agent' : ''}"
         data-agent="${esc(name)}">
       <span class="astatus ${cls}"></span>
       <div class="atext">
@@ -528,7 +559,9 @@ function renderDetailHead() {
     return `<button class="dial" data-act="edit-dial" data-member="${esc(name)}" data-key="${key}">${key}=${esc(JSON.stringify(v))}</button>`;
   }).join('');
   const next = NEXT_FIRES.find(f => f.member === name);
-  const nextLine = next && next.enabled ? `next run in ${fmtIn(next.in_s)}` : (enabled ? '' : 'disabled — not scheduled');
+  const dispatchedOnly = !enabled && hasRecentRun(lastRunFor(name));
+  const nextLine = next && next.enabled ? `next run in ${fmtIn(next.in_s)}`
+    : (enabled ? '' : (dispatchedOnly ? 'dispatched only (no self-schedule)' : 'disabled — not scheduled'));
 
   detailHeadEl.innerHTML = `
     <div class="title-row">
@@ -709,7 +742,10 @@ function renderUpcomingCard() {
   const m = SPECS.find(s => s.spec.name === SELECTED);
   const next = NEXT_FIRES.find(f => f.member === SELECTED);
   if (!next || !next.enabled) {
-    runListEl.innerHTML = `<div class="run-empty">${m && !m.effective.enabled ? 'disabled — not scheduled' : 'no upcoming run scheduled'}</div>`;
+    const label = m && !m.effective.enabled
+      ? (hasRecentRun(lastRunFor(SELECTED)) ? 'dispatched only (no self-schedule)' : 'disabled — not scheduled')
+      : 'no upcoming run scheduled';
+    runListEl.innerHTML = `<div class="run-empty">${label}</div>`;
     return;
   }
   const sched = (m?.spec?.schedule && JSON.stringify(m.spec.schedule)) || '';
@@ -838,11 +874,26 @@ function renderEvolutionPage() {
 // Queue page (sidebar item): PRs + backlog, now a full page instead of an always-visible rail --
 // it's reference material you check, not something that should compete for space every screen.
 // ---------------------------------------------------------------------------------------------
+// Backlog filter/sort state (gh#193) -- module-level so it survives the SSE-driven re-renders
+// renderQueuePage() gets on every 'gh' event, not just the one the operator triggered.
+let QUEUE_FILTER = { tier: 'all', text: '' };
+const PRIORITY_TIER_LABEL = ['fleet:priority-high', 'fleet:priority-medium', 'fleet:priority-low'];
+function issueTier(i) {
+  const names = (i.labels || []).map(l => l.name);
+  const idx = PRIORITY_TIER_LABEL.findIndex(t => names.includes(t));
+  return idx === -1 ? 3 : idx; // unlabeled issues sort after low, but still show under "all"
+}
+
 function renderQueuePage() {
   if (PAGE !== 'queue') return;
   const prs = GH.prs || [];
   const issues = GH.issues || [];
   detailHeadEl.innerHTML = `<div class="title-row"><h2>PRs &amp; Backlog</h2></div>`;
+
+  // The filter text input gets rebuilt below along with the rest of the page -- capture focus
+  // and cursor position first so a keystroke doesn't visibly steal focus from itself.
+  const filterHadFocus = document.activeElement?.id === 'queueFilterText';
+  const filterSelStart = filterHadFocus ? document.activeElement.selectionStart : null;
 
   const prsHtml = prs.map(pr => {
     const cls = pr._rollup === 'green' ? 'checks-green' : pr._rollup === 'failing' ? 'checks-failing' :
@@ -864,6 +915,19 @@ function renderQueuePage() {
   const epics = issues.filter(isEpic);
   const rest = issues.filter(i => !isEpic(i));
 
+  // Default order is priority tier (high -> medium -> low -> unlabeled), not the recency order
+  // GH.issues arrives in -- that recency order is exactly what buried 18 high-priority items
+  // across 36 unsorted rows in gh#193's evidence. Array.sort is stable, so issues within the
+  // same tier keep their incoming (recency) relative order.
+  const tierCounts = [0, 0, 0, 0];
+  rest.forEach(i => tierCounts[issueTier(i)]++);
+  const filterText = QUEUE_FILTER.text.trim().toLowerCase();
+  const visible = rest
+    .filter(i => QUEUE_FILTER.tier === 'all' || issueTier(i) === QUEUE_FILTER.tier)
+    .filter(i => !filterText || i.title.toLowerCase().includes(filterText))
+    .slice()
+    .sort((a, b) => issueTier(a) - issueTier(b));
+
   const renderIssueRow = i => {
     const labels = (i.labels || []).map(l =>
       `<span class="tag" style="--tag-color:#${esc(l.color || '888')}">${esc(l.name)}</span>`).join('');
@@ -880,7 +944,18 @@ function renderQueuePage() {
     </div>`;
   };
   const epicsHtml = epics.map(renderIssueRow).join('');
-  const issuesHtml = rest.map(renderIssueRow).join('') || '<div class="run-empty">backlog empty</div>';
+  const issuesHtml = visible.map(renderIssueRow).join('') ||
+    `<div class="run-empty">${rest.length ? 'no backlog items match this filter' : 'backlog empty'}</div>`;
+
+  const tierBtn = (tier, label) => `<button data-tier="${tier}" class="${QUEUE_FILTER.tier === tier ? 'active' : ''}">
+      ${label} <span class="count-badge">${tier === 'all' ? rest.length : tierCounts[tier]}</span></button>`;
+  const filterBarHtml = `
+    <div class="queue-filter-bar">
+      <div class="hist-toggle" id="queueTierFilter">
+        ${tierBtn('all', 'all')}${tierBtn(0, 'high')}${tierBtn(1, 'medium')}${tierBtn(2, 'low')}
+      </div>
+      <input type="search" id="queueFilterText" placeholder="filter by title…" value="${esc(QUEUE_FILTER.text)}">
+    </div>`;
 
   runListEl.innerHTML = `
     <div class="rail-section">
@@ -893,11 +968,30 @@ function renderQueuePage() {
       ${epicsHtml}
     </div>` : ''}
     <div class="rail-section">
-      <div class="rail-head">Backlog <span class="count-badge">${rest.length}</span>
+      <div class="rail-head">Backlog <span class="count-badge">${visible.length}${visible.length !== rest.length ? '/' + rest.length : ''}</span>
         <button class="btn small" id="newPriority" style="margin-left:auto">🔥 priority</button>
         <button class="btn small" id="newIssue">+ new</button></div>
+      ${filterBarHtml}
       ${issuesHtml}
     </div>`;
+
+  document.getElementById('queueTierFilter')?.addEventListener('click', e => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    const t = btn.dataset.tier;
+    QUEUE_FILTER.tier = t === 'all' ? 'all' : Number(t);
+    renderQueuePage();
+  });
+  const filterInput = document.getElementById('queueFilterText');
+  filterInput?.addEventListener('input', () => {
+    QUEUE_FILTER.text = filterInput.value;
+    renderQueuePage();
+  });
+  if (filterHadFocus && filterInput) {
+    filterInput.focus();
+    filterInput.setSelectionRange(filterSelStart, filterSelStart);
+  }
+
   document.getElementById('newIssue')?.addEventListener('click', async () => {
     const title = prompt('issue title:');
     if (!title) return;
@@ -1138,20 +1232,25 @@ async function renderStatsPage() {
   // good" -- signal rate (ok / executed), budget-wall rate (declined before running / total),
   // total runs, and which agents are fully walled off (dormant).
   const STATUS_COLOR = { ok: '#1f8b4c', quiet: '#a6720f', reported_nothing: '#c13a2e', budget_declined: '#9a9ea6' };
-  const rs = runsSummary || { signal_rate: 0, executed: 0, total: 0, budget_wall: 0, declined: 0,
+  // gh#153: `null` (not `0`) is the "no data" sentinel for these two -- a real 0% (everyone
+  // failed, or everyone got budget-walled) is a different diagnosis from "nothing ran in this
+  // window," and pctOrDash below is what keeps the two from rendering as the same digit.
+  const rs = runsSummary || { signal_rate: null, executed: 0, total: 0, budget_wall: null, declined: 0,
+                               budget_declined_count: 0, interrupted_count: 0,
                                dormant: [], hourly: [], statuses: [], agent_rates: [] };
+  const pctOrDash = v => (v === null || v === undefined) ? '—' : v + '%';
   const kpiRow = document.getElementById('runsKpiRow');
   if (kpiRow) {
     kpiRow.innerHTML = `
       <div class="kpi-cell">
         <div class="kpi-label">Signal rate</div>
-        <div class="kpi-value">${rs.signal_rate}%</div>
+        <div class="kpi-value">${pctOrDash(rs.signal_rate)}</div>
         <div class="kpi-sub">${rs.executed} of ${rs.total} executed</div>
       </div>
       <div class="kpi-cell">
         <div class="kpi-label">Budget wall</div>
-        <div class="kpi-value">${rs.budget_wall}%</div>
-        <div class="kpi-sub">${rs.declined} runs declined</div>
+        <div class="kpi-value">${pctOrDash(rs.budget_wall)}</div>
+        <div class="kpi-sub">${rs.budget_declined_count} declined, ${rs.interrupted_count} interrupted</div>
       </div>
       <div class="kpi-cell">
         <div class="kpi-label">Total runs</div>
@@ -1692,6 +1791,52 @@ async function renderAlerts() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// gh#513: "the number" -- the same three readings (number, guardrail, channel) run_member.sh
+// puts above every member's charter, mirrored here so a human watching the dashboard sees the
+// business move or not move too. Hidden entirely when this instance has no FLEET_NUMBER_URL
+// configured (number_read.py's own law: no URL means no header, not a placeholder) -- never
+// rendered as zero.
+// ---------------------------------------------------------------------------------------------
+function numFmt(v) {
+  if (v === null || v === undefined) return 'unmeasured';
+  return typeof v === 'number' ? v.toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(v);
+}
+function numDelta(v) {
+  if (v === null || v === undefined) return '';
+  const sign = v >= 0 ? '+' : '';
+  return ` (${sign}${numFmt(v)}/7d)`;
+}
+function renderTheNumber(data) {
+  const grp = document.getElementById('theNumber');
+  if (!data || !data.configured) { grp.style.display = 'none'; return; }
+  grp.style.display = '';
+  const stale = !!data.stale;
+  const cells = [
+    ['numNumber', 'Number', data.payload && data.payload.number],
+    ['numGuardrail', 'Guardrail', data.payload && data.payload.guardrail],
+    ['numChannel', 'Channel', data.payload && data.payload.channel],
+  ];
+  for (const [id, label, block] of cells) {
+    const el = document.getElementById(id);
+    el.classList.toggle('bad', stale);
+    if (!data.present || !block) {
+      el.innerHTML = `<b>${esc(label)}</b> ${data.present ? 'unmeasured' : 'not yet read'}`;
+      continue;
+    }
+    el.innerHTML = `<b>${esc(block.name || label)}</b> ${esc(numFmt(block.value))} ${esc(block.unit || '')}${esc(numDelta(block.delta_7d))}`;
+    el.title = stale ? `STALE -- as of ${data.payload.as_of || '?'}` : `as of ${data.payload.as_of || '?'}`;
+  }
+}
+async function renderTheNumberTile() {
+  try {
+    const data = await fetchJSON('/api/number');
+    renderTheNumber(data);
+  } catch (err) {
+    console.error('renderTheNumberTile() failed:', err);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Fleet state (master toggle) + members (spec/effective/overrides/spend) + queue (next fires)
 // ---------------------------------------------------------------------------------------------
 async function renderFleetState() {
@@ -1782,6 +1927,7 @@ async function boot() {
         renderFleetState(),
         loadMembers(),
         renderAlerts(),
+        renderTheNumberTile(),
       ]);
       ALL_RUNS = snap.runs || [];
       GH = snap.gh || { prs: [], issues: [], merged: [], self_evolution: [] };
@@ -1793,7 +1939,12 @@ async function boot() {
       return;
     }
     clearBootError();
-    selectAgent(SELECTED);
+    // gh#228: boot() used to call selectAgent(SELECTED) unconditionally here, which forces
+    // PAGE = 'agent' regardless of the fire-first default set above -- respect PAGE instead,
+    // so a fresh load actually lands on 'queue' rather than being immediately overridden back
+    // to whichever agent loadMembers() picked first.
+    if (PAGE === 'agent') selectAgent(SELECTED);
+    else selectPage(PAGE);
     // Same PAGE guard as renderQueue() above -- loadMembers() itself is page-agnostic (spend/KPI
     // data every page's sidebar KPI line needs), but renderDetailHead() is agent-page-only. A
     // failure here (gh#262) is a background poll, not the initial boot -- the page already has
@@ -1802,8 +1953,10 @@ async function boot() {
       try { await loadMembers(); renderSidebar(); if (PAGE === 'agent') renderDetailHead(); }
       catch (err) { console.error('periodic loadMembers() failed:', err); }
       // gh#399 AC1: /api/alerts rides this same 30s "other live tiles" interval rather than
-      // a new setInterval of its own.
+      // a new setInterval of its own. gh#513's number tile does the same -- it changes at
+      // most once a night (number_read.py's cron), so there is no case for its own timer.
       renderAlerts();
+      renderTheNumberTile();
     }, 30000);
     setInterval(renderQueue, 15000);
 

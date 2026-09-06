@@ -603,6 +603,42 @@ def _fleet_db_query_runs_empty_item_id_is_treated_like_none():
         assert {r["run_id"] for r in none_rows} == {r["run_id"] for r in empty_rows}
 
 
+def _fleet_db_spend_ok_runs_unaffected_by_never_executed_statuses():
+    """gh#185: fleet_db.py's `spend()` never adopted #150/PR#156's `_NOT_EXECUTED_STATUSES`
+    taxonomy for its own `ok_runs` field -- a member hit by an infra kill (container restart,
+    OOM, deploy cutover) risked reading as less successful than one that genuinely failed.
+    AC1/AC2: `ok_runs` counts only 'ok'+'quiet' rows, no matter how many
+    budget_declined/timed_out/killed rows are also present in the window. AC3: `runs` (the
+    total count) and every other field stay exactly what they'd be without this fix -- this is
+    an `ok_runs` numerator fix only, not a redefinition of the shared denominator.
+    """
+    import time
+
+    import fleet_db
+    now = time.time()
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        runs = d / "runs.jsonl"
+        rows_in = [
+            {"run_id": "a-ok", "member": "a", "status": "ok", "_recorded_at": now},
+            {"run_id": "a-quiet", "member": "a", "status": "quiet", "_recorded_at": now},
+            {"run_id": "a-budget", "member": "a", "status": "budget_declined", "_recorded_at": now},
+            {"run_id": "a-timedout", "member": "a", "status": "timed_out", "_recorded_at": now},
+            {"run_id": "a-killed", "member": "a", "status": "killed", "_recorded_at": now},
+        ]
+        runs.write_text("\n".join(json.dumps(r) for r in rows_in) + "\n")
+        conn = fleet_db.connect(d / "fleet.db")
+        fleet_db.sync(conn, runs_file=runs)
+
+        rows = fleet_db.spend(conn, member="a", hours=24.0)
+        assert len(rows) == 1, rows
+        row = rows[0]
+        assert row["ok_runs"] == 2, f"ok_runs = {row['ok_runs']}, want 2 (ok+quiet only)"
+        # AC3: `runs` (the total count) is untouched -- all 5 rows, never-executed or not.
+        assert row["runs"] == 5, f"runs = {row['runs']}, want 5 -- this fix must not touch it"
+
+
 def _fleet_db_composite_pk_migration_is_lock_serialized():
     """#212: fleet_view_server.py calls `fleet_db.connect()` from several independent
     threads -- the background tail thread and per-request handlers -- and
@@ -866,6 +902,23 @@ def _claim_history_blocks_an_item_that_keeps_dead_ending():
             capture_output=True, text=True)
         assert out_clean.returncode == 0, (out_clean.returncode, out_clean.stdout, out_clean.stderr)
         assert "ok" in out_clean.stdout, out_clean.stdout
+
+
+def _gru_md_gates_candidates_on_vision_link():
+    """fleet-kit#523: Reif, 2026-09-06 -- "I don't care about the number of PRs we hit ... I
+    just want to make autonomous progress on agreed upon goals." Measured the same night:
+    12 of 12 minion PRs in one hour were `fix(...)` inward spend; gru picked from marie's
+    tier order by createdAt and never read whether an item named the number. The gate is a
+    step in gru.md between 2b (marie's ranking) and 2c (dead-end drop): a candidate is
+    eligible only if its body carries a `Vision-link:` naming the number, guardrail or
+    channel from the header; `none (maintenance)` fills an empty hour, never displaces."""
+    text = (HERE.parent / "members" / "gru" / "gru.md").read_text()
+    b = text.index("2b. **Otherwise, marie's normal ranking.**")
+    c = text.index("2c. **Drop any candidate that has already dead-ended")
+    gate = text[b:c]
+    assert "fleet-kit#523" in gate and "Vision-link" in gate, \
+        "gru.md has no Vision-link eligibility gate between 2b and 2c -- the fleet builds whatever is oldest"
+    assert "none (maintenance)" in gate, "the gate must say what happens to maintenance items"
 
 
 def _gru_md_checks_claim_history_before_claiming():
@@ -1225,7 +1278,8 @@ def _maxx_share_ceiling_respects_a_real_over_verdict_not_just_unreadable_meters(
 
 
 def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
-    """Arming auto-merge must not pass --squash/--merge/--rebase, and must not eat the error.
+    """Neither caller may hardcode --squash/--merge/--rebase; only merge_arm.sh's own guarded
+    fallback may, and it must not eat the error.
 
     `main` on nonprofit-atlas is merge-queue-controlled (a `merge_queue` ruleset, SQUASH,
     grouping ALLGREEN). Passing an explicit strategy to `gh pr merge` on a queue-controlled
@@ -1234,13 +1288,18 @@ def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
         ! The merge strategy for main is set by the merge queue
 
     Confirmed live twice: issue #3108, and again 2026-08-26 on nonprofit-atlas#3307, which sat
-    MERGEABLE with statusCheckRollup=SUCCESS and autoMergeRequest=null for hours. minion.md
-    step 9 already documents the bare form and says CHECK THE EXIT CODE; these two callers
-    shipped the broken one anyway.
+    MERGEABLE with statusCheckRollup=SUCCESS and autoMergeRequest=null for hours.
 
-    The second half is why nobody noticed: worktree_builder.sh redirected the failure to
-    /dev/null and logged "auto-merge armed" on the very next line, so the log asserted success
-    for a command that had just failed. Silence reads as health.
+    But a plain (non-queue) repo needs the opposite: fleet-kit's own repo REQUIRES an explicit
+    strategy, since gh refuses to guess one non-interactively (see gh#524, PR history
+    #406/#407/#413/#414/#416/#417). Neither caller script may hardcode either shape -- only
+    scripts/merge_arm.sh's arm_pr_auto_merge may pass --squash, and only inside its own
+    fallback branch, gated on the specific non-queue rejection string; see
+    _merge_arm_falls_back_only_on_the_right_error for that guarantee.
+
+    The exit-code half is why nobody noticed #3108 for as long as they didn't: worktree_builder.sh
+    used to redirect the failure to /dev/null and log "auto-merge armed" on the very next line,
+    so the log asserted success for a command that had just failed. Silence reads as health.
     """
     import re as _re
     # Only a flag attached to the command itself -- prose explaining WHY --squash is wrong
@@ -1261,12 +1320,84 @@ def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
                     f"{rel}:{i} arms auto-merge with a strategy flag -- errors under the "
                     f"merge queue instead of enqueueing: {line.strip()[:90]}")
 
-    # The builder must not claim it armed auto-merge without checking the exit code.
-    src = (ROOT / "scripts/worktree_builder.sh").read_text()
-    arm = [l for l in src.splitlines() if "gh pr merge" in l and "--auto" in l]
-    assert arm, "worktree_builder.sh no longer arms auto-merge at all"
-    assert not any(_re.search(r">/dev/null 2>&1\s*$", l) for l in arm), \
-        "the arming call still discards its error; a failed arm would log as armed"
+    # Both callers must arm through the shared helper, not a raw `gh pr merge`, and must not
+    # discard its error -- a failed arm must not be able to log as armed.
+    for rel in ("scripts/worktree_builder.sh", "scripts/auto_update_branch.sh"):
+        src = (ROOT / rel).read_text()
+        assert "arm_pr_auto_merge" in src, f"{rel} no longer arms auto-merge through the shared helper"
+        arm = [l for l in src.splitlines() if "arm_pr_auto_merge" in l and "=" in l]
+        assert arm, f"{rel} calls arm_pr_auto_merge but never captures its result"
+        assert not any(_re.search(r">/dev/null 2>&1\s*$", l) for l in arm), \
+            f"{rel}: the arming call still discards its error; a failed arm would log as armed"
+
+
+def _merge_arm_falls_back_only_on_the_right_error():
+    """merge_arm.sh's --squash fallback must be gated on the specific non-queue rejection
+    string, not on any failure -- otherwise a queue repo's real rejection ("The merge strategy
+    for main is set by the merge queue") would be retried with the very flag that caused it, or
+    a genuinely different failure (permissions, already merged) would be masked.
+
+    gh#524 acceptance criterion 2: exercise both failure-string branches without hitting the
+    real GitHub API -- so this stubs `gh` itself rather than calling out.
+    """
+    src = (ROOT / "scripts/merge_arm.sh").read_text()
+    assert "arm_pr_auto_merge" in src, "merge_arm.sh no longer defines arm_pr_auto_merge"
+    assert "required when not running interactively" in src, \
+        "merge_arm.sh's fallback is no longer gated on the non-queue rejection string"
+
+    import subprocess
+
+    def run_with_stub_gh(stub_body: str, pr: str = "42") -> tuple[int, str]:
+        script = f"""
+set -uo pipefail
+gh() {{
+{stub_body}
+}}
+. "{ROOT / 'scripts/merge_arm.sh'}"
+out="$(arm_pr_auto_merge {pr})"
+rc=$?
+printf '%s' "$out"
+exit $rc
+"""
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        return proc.returncode, proc.stdout
+
+    # Branch 1: a plain repo. The bare `--auto` call fails with the non-interactive string;
+    # the fallback retries with --squash, which succeeds -- no real GitHub API involved.
+    plain_repo_stub = """
+  if [[ "$*" == *--squash* ]]; then
+    exit 0
+  fi
+  echo "! --merge, --rebase, or --squash required when not running interactively" >&2
+  exit 1
+"""
+    rc, out = run_with_stub_gh(plain_repo_stub)
+    assert rc == 0, f"plain-repo branch should succeed via the --squash fallback, got rc={rc} out={out!r}"
+    assert out == "", f"a successful fallback must not surface a stale error, got {out!r}"
+
+    # Branch 2: a merge-queue repo. The bare `--auto` call itself succeeds -- the fallback must
+    # never even be attempted (an explicit --squash there is the OTHER invalid combination).
+    queue_repo_stub = """
+  if [[ "$*" == *--squash* ]]; then
+    echo "! The merge strategy for main is set by the merge queue" >&2
+    exit 1
+  fi
+  exit 0
+"""
+    rc, out = run_with_stub_gh(queue_repo_stub)
+    assert rc == 0, f"queue-repo branch should succeed on the bare form alone, got rc={rc} out={out!r}"
+    assert out == "", f"a successful bare arm must not surface anything, got {out!r}"
+
+    # A failure unrelated to either shape (already merged, no permission) must not be retried
+    # into --squash, and must surface as-is rather than being swallowed.
+    unrelated_failure_stub = """
+  echo "! pull request #42 is already merged" >&2
+  exit 1
+"""
+    rc, out = run_with_stub_gh(unrelated_failure_stub)
+    assert rc != 0, "an unrelated failure must still fail, not be silently treated as armed"
+    assert "already merged" in out, \
+        f"an unrelated failure must surface its real message, not be masked by the fallback: {out!r}"
 
 
 def _minion_knows_the_browser_exists():
@@ -1898,6 +2029,70 @@ def _runs_summary_excludes_started_rows_from_total_and_signal_rate():
     # "started" must never render as a status/outcome on the hourly chart.
     assert "started" not in summary["statuses"], (
         "'started' leaked into the hourly chart's status vocabulary")
+
+
+def _runs_summary_splits_declined_into_budget_declined_and_interrupted():
+    """gh#186: #150 widened `_NOT_EXECUTED_STATUSES` to `budget_declined`/`timed_out`/`killed`
+    so signal_rate/dormant treat all three as "never got the chance to do real work", but
+    `declined` (rendered on the Stats page as "Budget wall") stayed a single combined count.
+    A `timed_out`/`killed` run may have spent real tokens before being cut short (a deploy
+    cutover SIGKILLing a pass mid-run) -- lumping it under "declined" told the operator every
+    one of those runs was walled off before spending anything, which is only true for
+    `budget_declined`. `budget_declined_count` + `interrupted_count` must sum back to
+    `declined` (no run double-counted or dropped) and must classify each status correctly.
+    """
+    import fleet_stats
+    now = fleet_stats._now_epoch()
+
+    def run(member, status, ts_offset=0):
+        return {"member": member, "status": status, "ts": now - ts_offset}
+
+    runs = [
+        run("a", "budget_declined"),
+        run("a", "budget_declined"),
+        run("a", "timed_out"),
+        run("b", "killed"),
+        run("b", "ok"),
+    ]
+    summary = fleet_stats.runs_summary(runs, hours=24.0)
+    assert summary["budget_declined_count"] == 2, (
+        f"budget_declined_count = {summary['budget_declined_count']}, want 2")
+    assert summary["interrupted_count"] == 2, (
+        f"interrupted_count = {summary['interrupted_count']}, want 2 (1 timed_out + 1 killed)")
+    assert summary["declined"] == 4, f"declined = {summary['declined']}, want 4"
+    assert (summary["budget_declined_count"] + summary["interrupted_count"]
+            == summary["declined"]), "budget_declined_count + interrupted_count must equal declined"
+
+
+def _runs_summary_signal_rate_and_budget_wall_are_none_not_zero_when_no_data():
+    """gh#153: `signal_rate`/`budget_wall` fell back to the literal int `0` whenever their
+    denominator (`executed`/`total`) was empty -- indistinguishable, on the Stats page's KPI
+    strip, from a real 0% (every executed run failed, or every run got budget-declined). An
+    empty window (nothing ran at all, e.g. the box was down) must report `None` for both instead,
+    so `fleet_view.html` can render a distinct "no data" dash rather than a confident, wrong 0%.
+    """
+    import fleet_stats
+
+    empty_summary = fleet_stats.runs_summary([], hours=24.0)
+    assert empty_summary["total"] == 0, f"total = {empty_summary['total']}, want 0"
+    assert empty_summary["signal_rate"] is None, (
+        f"signal_rate = {empty_summary['signal_rate']!r}, want None for an empty window")
+    assert empty_summary["budget_wall"] is None, (
+        f"budget_wall = {empty_summary['budget_wall']!r}, want None for an empty window")
+
+    # A real total failure (executed runs exist, all failed) must still read a real 0%, not None
+    # -- the fix distinguishes "no data" from "all failed," it must not blur them the other way.
+    now = fleet_stats._now_epoch()
+    all_failed = [{"member": "a", "status": "reported_nothing", "ts": now}]
+    failed_summary = fleet_stats.runs_summary(all_failed, hours=24.0)
+    assert failed_summary["signal_rate"] == 0, (
+        f"signal_rate = {failed_summary['signal_rate']!r}, want a real 0 (executed, all failed)")
+
+    # budget_wall alone at 0 (some runs executed, none declined) must also stay a real 0, not None.
+    all_executed = [{"member": "a", "status": "ok", "ts": now}]
+    executed_summary = fleet_stats.runs_summary(all_executed, hours=24.0)
+    assert executed_summary["budget_wall"] == 0, (
+        f"budget_wall = {executed_summary['budget_wall']!r}, want a real 0 (no declines, but total>0)")
 
 
 def _status_page_deploy_component_classifies_stale_as_down():
@@ -4198,6 +4393,47 @@ def _nerd_structural_na_marker_wires_to_datta_downrank():
     broken_streak = ["STRUCTURAL-N/A: still N/A"] * 2 + ["QUIET -- found nothing this pass"]
     assert down_ranked_unexamined(broken_streak, 47.0) == 47.0, \
         "one non-marker row must break the streak, never a partial down-rank"
+
+
+def _datta_gh392_hold_never_suppresses_stale_or_breached():
+    """gh#497 (PR #470 review finding): datta.md's gh#392 reconfirmation-only hold (step 5)
+    stated in prose that it "must never suppress a STALE or BREACHED verdict for the same
+    lane", but no step in the block (1 through 4) actually checked whether the lane was
+    currently STALE or BREACHED before the hold applied -- step 4 only tested a zero KPI/
+    guardrail delta since the lane's last `recorded_at`. A lane whose `lane_kpis_snapshot.py`
+    job stopped writing rows shows an unchanged KPI (read by step 4 as "not material") while
+    no issue moved either (step 3), so step 5's old condition was satisfied and the hold fired
+    -- silently suppressing exactly the STALE verdict its own text promised never to suppress.
+
+    The fix threads an explicit non-STALE/non-BREACHED check (reusing section 2's own STALE/
+    BREACHED definitions, not inventing a new one) into step 5's hold condition itself.
+    """
+    root = Path(__file__).parent.parent
+    datta = (root / "members" / "datta" / "datta.md").read_text()
+
+    section_start = datta.find("Separately, also check for reconfirmation-only staleness")
+    section_end = datta.find("**Spawning fewer nerds than lanes is the normal case")
+    assert 0 <= section_start < section_end, "gh#392 hold section markers not found"
+    section = datta[section_start:section_end]
+
+    step5_start = section.find("5. Zero referenced issues moved")
+    assert step5_start != -1, "step 5's hold condition text not found"
+    step5 = section[step5_start:step5_start + 700]
+    assert "STALE and BREACHED signals" in step5 and "section 2 above" in step5, \
+        "gh#497: step 5's hold condition doesn't itself gate on STALE/BREACHED -- the " \
+        "'never suppress a STALE or BREACHED verdict' promise is still only prose, not a check"
+
+    # A minimal model of the corrected rule: the hold only ever fires when the lane is
+    # confirmed non-STALE and non-BREACHED, in addition to the pre-existing two conditions.
+    def holds_flat(issues_moved, kpi_material, is_stale, is_breached):
+        return (not issues_moved) and (not kpi_material) and (not is_stale) and (not is_breached)
+
+    assert holds_flat(False, False, False, False) is True, \
+        "an ordinary reconfirmation-only lane (non-stale, non-breached) must still hold flat"
+    assert holds_flat(False, False, True, False) is False, \
+        "gh#497: a currently STALE lane must never be held flat by this hold"
+    assert holds_flat(False, False, False, True) is False, \
+        "gh#497: a currently BREACHED lane must never be held flat by this hold"
 
 
 def _nerd_invalid_lane_rejected_before_lane_work():
@@ -7345,6 +7581,80 @@ def _up_sh_never_emits_the_shared_image_tag_into_a_generated_fleet_env():
         "a generated fleet.env's FLEET_IMAGE_NAME still fell through to the shared 'fleet-kit:latest' tag"
 
 
+def _overrides_set_rejects_a_malformed_dial_value():
+    """gh#208: a human typo on the dashboard's schedule/max_turns/enabled dial used to sail
+    straight into the override store with no error, then misbehave hours later far from the
+    click that caused it. set_override() must now refuse it in place, using the same schema
+    member_spec.validate() already enforces for a git-committed spec."""
+    import overrides
+
+    with tempfile.TemporaryDirectory() as d:
+        store = Path(d) / "overrides.jsonl"
+
+        # The issue's own repro: a typo'd minute (99 for 09).
+        try:
+            overrides.set_override("gru", "schedule", {"hourly_at_minute": 99},
+                                    by="test", why="repro", store=store)
+            raise AssertionError("a schedule.hourly_at_minute of 99 was accepted")
+        except overrides.OverrideError:
+            pass
+
+        # An unquoted dashboard edit that JSON.parse falls back to as a raw string.
+        try:
+            overrides.set_override("gru", "schedule", "not-a-schedule",
+                                    by="test", why="repro", store=store)
+            raise AssertionError("a non-object schedule value was accepted")
+        except overrides.OverrideError:
+            pass
+
+        try:
+            overrides.set_override("gru", "max_turns", -1, by="test", why="repro", store=store)
+            raise AssertionError("a non-positive max_turns was accepted")
+        except overrides.OverrideError:
+            pass
+
+        try:
+            overrides.set_override("gru", "enabled", "yes", by="test", why="repro", store=store)
+            raise AssertionError("a non-bool enabled was accepted")
+        except overrides.OverrideError:
+            pass
+
+        # A well-formed value of each shape still goes through -- this must refuse the bad
+        # shape, not tighten the dial shut.
+        overrides.set_override("gru", "schedule", {"hourly_at_minute": 9},
+                                by="test", why="repro", store=store)
+        overrides.set_override("gru", "max_turns", 40, by="test", why="repro", store=store)
+        overrides.set_override("gru", "enabled", False, by="test", why="repro", store=store)
+        overrides.set_override("gru", "model", "claude-sonnet-5", by="test", why="repro", store=store)
+        live = overrides.live_overrides("gru", store=store)
+        assert live["schedule"]["value"] == {"hourly_at_minute": 9}
+        assert live["max_turns"]["value"] == 40
+        assert live["enabled"]["value"] is False
+        assert live["model"]["value"] == "claude-sonnet-5"
+
+
+def _overrides_apply_skips_a_legacy_malformed_row_instead_of_crashing():
+    """A row written before gh#208's set_override() check existed (or hand-edited into the
+    jsonl) can still be sitting in the store. apply() must skip it like live_overrides()
+    already skips a torn line, not hand a member's run a schedule it can't trust."""
+    import overrides
+
+    with tempfile.TemporaryDirectory() as d:
+        store = Path(d) / "overrides.jsonl"
+        bad_row = {"member": "gru", "key": "schedule", "value": {"hourly_at_minute": 99},
+                   "by": "legacy", "why": "typo", "set_at": time.time(),
+                   "expires_at": time.time() + 3600}
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_text(json.dumps(bad_row) + "\n")
+
+        spec = {"name": "gru", "llm": {"max_turns": 40, "model": "x"},
+                "schedule": {"hourly_at_minute": 0}, "enabled": True}
+        eff, applied = overrides.apply(spec, store=store)
+        assert applied == [], f"a malformed legacy row was applied instead of skipped: {applied}"
+        assert eff["schedule"] == {"hourly_at_minute": 0}, \
+            f"effective schedule should have fallen back to the spec default, got {eff['schedule']}"
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -7361,6 +7671,7 @@ if __name__ == "__main__":
     check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
     check("query_runs(item_id=) matches free-text #N mentions, not just the build-claim column (gh#405)", _fleet_db_query_runs_item_id_matches_free_text_mentions)
     check("query_runs(item_id=\"\") behaves like item_id=None, not an unlimited full-table scan (gh#484)", _fleet_db_query_runs_empty_item_id_is_treated_like_none)
+    check("spend()'s ok_runs excludes never-executed statuses, runs stays untouched (gh#185)", _fleet_db_spend_ok_runs_unaffected_by_never_executed_statuses)
     check("fleet.db composite-PK migration is lock-serialized", _fleet_db_composite_pk_migration_is_lock_serialized)
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("cost_bridge converts real spend into fanout's --observed shape", _cost_bridge_converts_real_spend_into_fanouts_observed_shape)
@@ -7381,6 +7692,7 @@ if __name__ == "__main__":
     check("jefe can unstick a PR that is merely behind its base", _jefe_can_unstick_a_pr_that_is_merely_behind)
     check("jefe.md's precedent citations are repo-qualified, and the verify-before-you-cite guard is present", _jefe_precedent_citations_are_repo_qualified)
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
+    check("merge_arm.sh falls back to --squash only on the non-queue rejection string (gh#524)", _merge_arm_falls_back_only_on_the_right_error)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
     check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)
     check("run_member.sh writes a started row before claude -p and before the SIGTERM trap arms", _run_member_writes_a_started_row_before_claude_p)
@@ -7421,6 +7733,7 @@ if __name__ == "__main__":
     check("datta's structural-N/A streak has a reset path independent of ranking (gh#447)", _datta_structural_na_streak_has_a_reset_path)
     check("nerd rejects an invalid lane before any lane-specific work (gh#374)", _nerd_invalid_lane_rejected_before_lane_work)
     check("nerd's STRUCTURAL-N/A marker wires to datta's down-rank rule (gh#451)", _nerd_structural_na_marker_wires_to_datta_downrank)
+    check("datta's gh#392 hold never suppresses a STALE or BREACHED verdict (gh#497)", _datta_gh392_hold_never_suppresses_stale_or_breached)
     check("a run records the item it worked", _a_run_records_the_item_it_worked)
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
@@ -7512,6 +7825,8 @@ if __name__ == "__main__":
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
     check("runs_summary() excludes provisional started rows from total/signal_rate/agent_rates (gh#437)", _runs_summary_excludes_started_rows_from_total_and_signal_rate)
+    check("runs_summary() splits declined into budget_declined_count/interrupted_count (gh#186)", _runs_summary_splits_declined_into_budget_declined_and_interrupted)
+    check("runs_summary()'s signal_rate/budget_wall are None (not 0) for an empty window (gh#153)", _runs_summary_signal_rate_and_budget_wall_are_none_not_zero_when_no_data)
     check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
     check("status_data.members() reads fleet.db in-process, no podman on $PATH needed (gh#364)", _status_data_members_reads_fleet_db_with_no_podman_on_path)
     check("status_data's other four components are unaffected by the members() fix (gh#364)", _status_data_other_components_unaffected_by_members_fix)
@@ -7523,6 +7838,8 @@ if __name__ == "__main__":
     check("status_data.live_alerts() fails open on a broken store (gh#399)", _status_data_live_alerts_fails_open_on_a_broken_store)
     check("status page renders a live-alert banner distinct from the component grid (gh#399)", _status_page_renders_live_alert_banner_distinct_from_component_grid)
     check("status page's transient alert does not render as a confirmed fault (gh#399)", _status_page_transient_alert_does_not_render_as_a_confirmed_fault)
+    check("overrides.set_override() rejects a malformed schedule/max_turns/enabled/model dial value (gh#208)", _overrides_set_rejects_a_malformed_dial_value)
+    check("overrides.apply() skips a legacy malformed row instead of crashing a member's run (gh#208)", _overrides_apply_skips_a_legacy_malformed_row_instead_of_crashing)
 
     for n in ok:
         print(f"  ok    {n}")
