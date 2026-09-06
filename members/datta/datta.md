@@ -89,10 +89,29 @@ Do not pick lanes by intuition. Score each lane on three signals and rank worst-
   rows' `outcome`, trimmed, starts with the literal marker `STRUCTURAL-N/A` — a fixed prefix
   nerd.md's own N/A path is required to emit, never a keyword scan of free-text
   `outcome`/`self_critique` (the same fragility this section already rejected for lane
-  attribution above) — treat that lane's UNEXAMINED as reset to 0 hours this pass instead of
-  letting pure staleness win it a dispatch. The moment a later pass's 3-row window is no
-  longer unanimous (one fresh non-`STRUCTURAL-N/A` row breaks the streak), the lane returns to
-  normal UNEXAMINED scoring on the very next datta pass automatically — no separate reset step.
+  attribution above) — treat that lane's UNEXAMINED as reset to 0 hours *for worst-first
+  ranking against other lanes* instead of letting pure staleness win it a dispatch every pass.
+
+  **The down-rank needs a reset path that does not depend on ranking (gh#447).** Zeroing
+  UNEXAMINED for ranking is exactly what stops a frozen lane winning worst-first every pass —
+  but it also means no *new* nerd run for that lane is ever recorded by ranking alone, so the
+  3-row window above never changes and the down-rank can never lift itself: gh#447 found all
+  three signals hit zero together and stay there forever once this rule first fires. Ranking is
+  not the only path to a dispatch: **once per `FLEET_DATTA_FROZEN_PROBE_HOURS` hours (env var,
+  default 168 = 7 days) since a frozen lane's last nerd run, spawn it a probe this pass
+  regardless of where it ranks**, on top of (not instead of) the lanes ranking already selected,
+  before applying the `FLEET_DATTA_MAX_NERDS_PER_PASS` cap to the combined set. This cadence is
+  deliberately far longer than any normal UNEXAMINED threshold, so it costs at most one extra
+  pass per frozen lane per week rather than reverting to polling it every hour. Name which
+  lane(s) this override fired for in your report — it is a deliberate exception to worst-first
+  ranking, not a silent extra dispatch.
+
+  This override is the streak's only way back: if the resulting probe's outcome does not start
+  with `STRUCTURAL-N/A`, the streak breaks and the lane returns to normal UNEXAMINED scoring on
+  the datta pass *after* that probe lands (once the new row is inside the last-3 window) — it
+  does not "self-reverse ... on the very next datta pass automatically" with no dispatch in
+  between, which was gh#447's finding about this same paragraph in an earlier version of this
+  file: absent this override, nothing ever produced the new row that claim depended on.
 
   **UNKNOWN, not resolved by this pass — do not loosen this to make it fire sooner.** Checked
   `fleet.db`'s `runs.outcome`/`self_critique` for every recent growth/revenue/searchquality/ui/
@@ -187,7 +206,8 @@ The coverage you computed (per lane: KPI value, delta, and which of stale/breach
 fired), which lanes you spawned nerds for and why, which you deliberately skipped and why, and
 a one-line result per nerd — findings filed, or "found nothing, here is what it examined", or
 "failed: <reason>". Name any lane down-ranked this pass via the gh#339 structural-N/A streak
-rule, and any lane whose streak broke this pass — an audit trail, never a silent skip.
+rule, any lane probed this pass via the gh#447 frozen-lane override rather than ranking, and
+any lane whose streak broke this pass — an audit trail, never a silent skip.
 
 **Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus
 `Self-critique:` per §11) — the prose above is what a human reads, these lines are what

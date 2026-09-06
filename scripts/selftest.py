@@ -3885,6 +3885,55 @@ def _datta_dispatches_and_nerds_analyse():
     assert minion_spec.get("schedule"), "empty schedule fails member_spec validation (found live)"
 
 
+def _datta_structural_na_streak_has_a_reset_path():
+    """gh#447: PR #441's structural-N/A down-rank (gh#339) zeroed a frozen lane's UNEXAMINED
+    signal to stop it winning worst-first ranking every pass -- but that same zeroing also
+    starves the lane of the one thing that could ever change its last-3-rows window, since
+    ranking was the ONLY path to a new nerd run. Once STALE/BREACHED/UNEXAMINED all hit zero
+    together, the lane can never win ranking again, no new run is ever recorded, and the
+    3-row window this rule reads is frozen forever -- while datta.md kept asserting the
+    down-rank "self-reverses ... on the very next datta pass automatically", a claim with no
+    mechanism behind it. judge-judy blocked PR #441 on exactly this at commit 3d18d463e82b.
+
+    The fix must give the streak a reset path that does NOT depend on ranking: a periodic
+    override that probes a frozen lane on a long fixed cadence regardless of where it ranks,
+    and the doc's self-reversal claim must describe that real path rather than the false one.
+    """
+    root = Path(__file__).parent.parent
+    datta = (root / "members" / "datta" / "datta.md").read_text()
+
+    assert "STRUCTURAL-N/A" in datta, "gh#339's down-rank itself got lost"
+
+    # The old, disproven claim ("self-reverses ... on the very next datta pass automatically",
+    # with nothing before it ever producing a new row) must not still be asserted as fact.
+    assert "no separate reset step" not in datta, \
+        "gh#447: false self-reversal claim (no mechanism ever produces a new row) still present"
+
+    # A reset path that does not route back through worst-first ranking: a cadence-based
+    # override, independent of STALE/BREACHED/UNEXAMINED all being zero.
+    assert "FLEET_DATTA_FROZEN_PROBE_HOURS" in datta, \
+        "no override dial -- a frozen lane still has no path back once ranking excludes it"
+    i = datta.find("FLEET_DATTA_FROZEN_PROBE_HOURS")
+    override = datta[max(0, i - 400):i + 800]
+    assert "regardless of where it ranks" in override, \
+        "override still gated on ranking -- does not actually break the freeze"
+    assert "gh#447" in override, "override doesn't cite the finding it fixes"
+
+    # The corrected claim must name the real mechanism instead of the disproven one.
+    j = datta.find("This override is the streak's only way back")
+    assert j != -1, "no corrected self-reversal explanation found"
+    corrected = datta[j:j + 700]
+    assert "STRUCTURAL-N/A" in corrected, "corrected claim doesn't tie back to the streak marker"
+    assert "does not" in corrected and "self-reverse" in corrected, \
+        "corrected text doesn't actually retract the old false claim"
+
+    # Report contract: a lane probed by the override must be named, same as a down-rank/reset.
+    report_i = datta.find("## Report")
+    report = datta[report_i:report_i + 800]
+    assert "gh#447" in report and "override" in report, \
+        "report section never asks datta to name a lane probed via the override"
+
+
 def _nerd_invalid_lane_rejected_before_lane_work():
     """gh#374: a `lane=<name>` dispatch outside the canonical seven must be rejected BEFORE any
     lane-specific work begins, not discovered only after a full pass ran.
@@ -6581,6 +6630,7 @@ if __name__ == "__main__":
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
     check("datta dispatches by coverage, nerds analyse one lane", _datta_dispatches_and_nerds_analyse)
+    check("datta's structural-N/A streak has a reset path independent of ranking (gh#447)", _datta_structural_na_streak_has_a_reset_path)
     check("nerd rejects an invalid lane before any lane-specific work (gh#374)", _nerd_invalid_lane_rejected_before_lane_work)
     check("a run records the item it worked", _a_run_records_the_item_it_worked)
     check("every pass files a written report", _every_pass_files_a_written_report)
