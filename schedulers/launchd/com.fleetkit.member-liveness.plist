@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- fleet-kit member-liveness pager — pages when NO fleet member has done any work within a
+     tolerance derived from the slowest scheduled member's own cadence,
+     scripts/member_liveness_check.sh (gh#419). MUST run host-side, never added to
+     entrypoint.sh's in-container crontab -- that container crontab is the exact file the
+     2026-09-05 outage this issue documents got discarded, so a copy of this check living
+     inside it would go dark in precisely the scenario it exists to catch. Required. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fleetkit.member-liveness</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>exec "{{KIT_PATH}}/scripts/member_liveness_check.sh"</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/{{USER}}</string>
+    <key>FLEET_LOG_DIR</key>
+    <string>{{LOG_DIR}}</string>
+    <key>NTFY_TOPIC</key>
+    <string>{{NTFY_TOPIC}}</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/{{USER}}/Library/Logs/fleet-kit/member-liveness.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/{{USER}}/Library/Logs/fleet-kit/member-liveness.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

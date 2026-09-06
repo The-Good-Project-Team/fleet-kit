@@ -4173,10 +4173,23 @@ def _required_health_check_scripts_in_readme_are_scheduled():
     health) rather than every required row, because build/review are wired through
     run_member.sh/worktree_builder.sh, not a bare script invocation -- a blanket check would
     false-positive on those.
+
+    Stops at the first "## Host-only jobs" section heading: those rows are a DIFFERENT job
+    class (gh#376's podman-exec jobs, gh#419's member-liveness) that must NEVER get an
+    entrypoint.sh line by design -- each has its own dedicated selftest check asserting host
+    units exist AND entrypoint.sh stays clean (see
+    _account_heartbeat_and_budget_read_have_host_only_schedulers and
+    _member_liveness_check_has_host_only_scheduler_and_no_entrypoint_line below). Scanning past
+    this heading would make this check demand the exact opposite of what those checks require.
     """
     import re
     root = Path(__file__).parent.parent
-    readme = (root / "schedulers" / "README.md").read_text()
+    readme_text = (root / "schedulers" / "README.md").read_text()
+    readme_lines = readme_text.splitlines()
+    host_only_idx = next(
+        (i for i, l in enumerate(readme_lines) if l.startswith("## Host-only jobs")),
+        len(readme_lines))
+    readme = "\n".join(readme_lines[:host_only_idx])
     entry = (root / "entrypoint.sh").read_text()
     missing = []
     for line in readme.splitlines():
@@ -4229,6 +4242,291 @@ def _account_heartbeat_and_budget_read_have_host_only_schedulers():
         if not plist.exists() or script not in plist.read_text():
             problems.append(f"{plist} missing or does not reference {script}")
     assert not problems, "\n".join(problems)
+
+
+def _member_liveness_check_has_host_only_scheduler_and_no_entrypoint_line():
+    """gh#419: member_liveness_check.sh's entire purpose is surviving the failure mode where
+    entrypoint.sh's OWN in-container crontab gets discarded (the 2026-09-05 outage this issue
+    documents). A copy of this check scheduled inside that same crontab would go dark in
+    exactly the scenario it exists to catch -- the "check that lies" trap gh#376's own rot-hunt
+    caught for account_heartbeat.sh/budget_read_check.sh, here for a different underlying
+    reason (crontab survivability, not podman-socket availability) but the identical shape of
+    mistake. Asserts the opposite pairing of _every_scheduled_member_is_actually_on_cron: this
+    script must have host units AND must never gain an entrypoint.sh cron line.
+    """
+    root = Path(__file__).parent.parent
+    entry = (root / "entrypoint.sh").read_text()
+    script = "member_liveness_check.sh"
+    problems = []
+    if f"bash /fleet-kit/scripts/{script}" in entry:
+        problems.append(
+            f"{script} has a cron line in entrypoint.sh -- that is the exact crontab this "
+            "check exists to detect getting discarded; scheduling it there means it goes dark "
+            "in precisely the outage it is supposed to catch")
+    service = root / "schedulers" / "systemd" / "fleetkit-member-liveness.service"
+    timer = root / "schedulers" / "systemd" / "fleetkit-member-liveness.timer"
+    plist = root / "schedulers" / "launchd" / "com.fleetkit.member-liveness.plist"
+    if not service.exists() or script not in service.read_text():
+        problems.append(f"{service} missing or does not reference {script}")
+    if not timer.exists():
+        problems.append(f"{timer} missing")
+    if not plist.exists() or script not in plist.read_text():
+        problems.append(f"{plist} missing or does not reference {script}")
+    assert not problems, "\n".join(problems)
+
+
+def _member_liveness_tolerance_covers_the_slowest_scheduled_member_cadence():
+    """gh#419 AC2: MEMBER_LIVENESS_TOLERANCE_MINUTES must stay >= 2x the slowest configured
+    member's own cron cadence, or a healthy slow-cadence member (dumbledore, currently every
+    7h) on its own normal schedule would false-page long before anything is actually wrong.
+    That relationship is exactly the "hardcoded constant that silently drifts out of sync with
+    entrypoint.sh's crontab generation" this issue's own AC2 warns against -- so this re-derives
+    the slowest cadence FROM entrypoint.sh's real generated crontab (the same
+    ALL_CRON_MEMBERS-driven heredoc _fleet_cron_members_gates_entrypoint_crontab already
+    extracts and runs) rather than trusting a comment to stay accurate.
+
+    Deliberately loose (>=, not ==): a human is free to widen the tolerance for margin; only
+    shrinking it below the safe floor is a bug.
+    """
+    import os
+    import re
+    import subprocess
+
+    root = Path(__file__).parent.parent
+    entry = (root / "entrypoint.sh").read_text()
+    start_marker = "    ALL_CRON_MEMBERS=("
+    end_marker = '\n    } > "$CRONTAB"'
+    i = entry.index(start_marker)
+    j = entry.index(end_marker, i) + len(end_marker)
+    snippet = entry[i:j]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        crontab_path = Path(tmp) / "crontab"
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        header = (
+            f'set -euo pipefail\n'
+            f'FLEET_REPO="{tmp}"\n'
+            f'TOKEN_FILE="{tmp}/token"\n'
+            f'LOG_DIR="{log_dir}"\n'
+            f'FLEET_GRU_CADENCE="*"\n'
+            f'PUBLIC_URL=""\n'
+            f'PUBLIC_PATH_URL=""\n'
+            f'FLEET_VIEW_PORT=8420\n'
+            f'CRONTAB="{crontab_path}"\n'
+        )
+        script = header + snippet.replace('    CRONTAB=/etc/cron.d/fleet-kit\n', '')
+        env = dict(os.environ)
+        env.pop("FLEET_CRON_MEMBERS", None)
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=30)
+        assert proc.returncode == 0, f"failed to generate entrypoint.sh's crontab block: {proc.stderr[:500]}"
+        crontab_text = crontab_path.read_text()
+
+    all_cron_members = ("the-fixer", "judge-judy", "gru", "jefe", "roomba", "marie", "datta",
+                         "dumbledore", "sentry")
+
+    def _period_minutes(minute_field, hour_field):
+        """Max gap (minutes) between successive firings of a `minute hour * * *` cron field,
+        assuming day/month/dow are always `*` -- true for every ALL_CRON_MEMBERS line today."""
+        if hour_field == "*":
+            m = re.match(r"^\*/(\d+)$", minute_field)
+            if m:
+                return int(m.group(1))
+            minutes = sorted(int(x) for x in minute_field.split(","))
+            if len(minutes) == 1:
+                return 60
+            gaps = [b - a for a, b in zip(minutes, minutes[1:])]
+            gaps.append(minutes[0] + 60 - minutes[-1])
+            return max(gaps)
+        m = re.match(r"^\*/(\d+)$", hour_field)
+        if m:
+            return int(m.group(1)) * 60
+        hours = sorted(int(x) for x in hour_field.split(","))
+        if len(hours) == 1:
+            return 24 * 60
+        gaps = [b - a for a, b in zip(hours, hours[1:])]
+        gaps.append(hours[0] + 24 - hours[-1])
+        return max(gaps) * 60
+
+    slowest_minutes = 0
+    slowest_member = None
+    for line in crontab_text.splitlines():
+        m = re.match(r"^(\S+)\s+(\S+)\s+\S+\s+\S+\s+\S+\s+root\s", line)
+        if not m:
+            continue
+        marker = "run_gru_fanout.sh" if "run_gru_fanout.sh" in line else None
+        member = None
+        for candidate in all_cron_members:
+            if marker == "run_gru_fanout.sh" and candidate == "gru":
+                member = "gru"
+                break
+            if f"run_member.sh {candidate}" in line:
+                member = candidate
+                break
+        if member is None:
+            continue
+        period = _period_minutes(m.group(1), m.group(2))
+        if period > slowest_minutes:
+            slowest_minutes, slowest_member = period, member
+
+    assert slowest_member is not None, \
+        "could not find any ALL_CRON_MEMBERS cron line in the generated crontab -- did entrypoint.sh's shape change?"
+
+    src = (root / "scripts" / "member_liveness_check.sh").read_text()
+    m = re.search(r"MEMBER_LIVENESS_TOLERANCE_MINUTES:-(\d+)\}", src)
+    assert m, "member_liveness_check.sh has no MEMBER_LIVENESS_TOLERANCE_MINUTES default to check"
+    default_tolerance = int(m.group(1))
+
+    required_floor = 2 * slowest_minutes
+    assert default_tolerance >= required_floor, (
+        f"MEMBER_LIVENESS_TOLERANCE_MINUTES default ({default_tolerance}m) is below 2x the "
+        f"slowest scheduled member's real cadence -- {slowest_member} fires every "
+        f"{slowest_minutes}m per entrypoint.sh's own generated crontab, so the floor is "
+        f"{required_floor}m. A healthy {slowest_member} on its normal schedule would false-page."
+    )
+
+
+def _member_liveness_check_pages_on_stale_activity_not_fresh():
+    """gh#419 AC3/AC4: exercises the real script end to end (same style as
+    _sync_health_check_pages_on_a_real_stalled_offset_not_on_a_caught_up_one), curl stubbed via
+    NTFY_CALLS_FILE so nothing reaches the real network.
+
+    (a) A runs.jsonl whose newest "ts" is older than MEMBER_LIVENESS_TOLERANCE_MINUTES must
+        page, and write a state file so a 5-minute cron doesn't re-page every tick.
+    (b) A fresh "ts" must NOT page, and must clear any prior paged state (recovery).
+    """
+    import subprocess
+    script_path = ROOT / "scripts" / "member_liveness_check.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        log_dir = tmp / "logs"
+        log_dir.mkdir()
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        ntfy_calls = tmp / "ntfy_calls.log"
+        runs_file = log_dir / "runs.jsonl"
+
+        (bin_dir / "curl").write_text('#!/bin/bash\necho "$@" >> "$NTFY_CALLS_FILE"\nexit 0\n')
+        (bin_dir / "curl").chmod(0o755)
+
+        base_env = {
+            "FLEET_LOG_DIR": str(log_dir),
+            "MEMBER_LIVENESS_TOLERANCE_MINUTES": "840",
+            "NTFY_CALLS_FILE": str(ntfy_calls),
+            "NTFY_TOPIC": "selftest-fake-topic",
+            "SELFTEST": "1",
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+        }
+
+        def _run():
+            return subprocess.run(
+                ["bash", str(script_path)], capture_output=True, text=True, timeout=30, env=base_env,
+            )
+
+        # (a) newest ts is 900 minutes old, past the 840-minute tolerance -- must page.
+        old_ts = datetime.datetime.now().timestamp() - 900 * 60
+        runs_file.write_text(json.dumps({
+            "member": "dumbledore", "run_id": "r1", "kind": "build",
+            "ts": old_ts, "status": "ok", "outcome": "x", "evidence": "y",
+        }) + "\n")
+
+        proc = _run()
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        assert "PAGED" in proc.stdout, (
+            f"a 900-minute-old runs.jsonl (tolerance 840m) never printed PAGED -- "
+            f"stdout: {proc.stdout[:500]!r} stderr: {proc.stderr[:500]!r}"
+        )
+        assert (log_dir / ".member_liveness_paged.state").exists(), \
+            "PAGED but no state file written -- a 5-minute cron would re-page every tick"
+        assert ntfy_calls.exists() and "NO member has done any work" in ntfy_calls.read_text(), \
+            "PAGED but the ntfy call itself never fired (or fired with the wrong message)"
+
+        # (b) recovery: a fresh runs.jsonl line must clear paged state and stop paging.
+        ntfy_calls.unlink(missing_ok=True)
+        runs_file.write_text(runs_file.read_text() + json.dumps({
+            "member": "dumbledore", "run_id": "r2", "kind": "build",
+            "ts": datetime.datetime.now().timestamp(), "status": "ok", "outcome": "x", "evidence": "y",
+        }) + "\n")
+        proc = _run()
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        assert "healthy" in proc.stdout, f"did not recover after fresh activity -- stdout: {proc.stdout[:400]!r}"
+        assert "PAGED" not in proc.stdout, "a fresh runs.jsonl entry must never page"
+        assert not (log_dir / ".member_liveness_paged.state").exists(), "paged marker survived recovery"
+        assert ntfy_calls.exists() and "recovered" in ntfy_calls.read_text(), \
+            "recovery must send its own resolve notification"
+
+
+def _member_liveness_check_repages_on_a_fixed_interval():
+    """Mirrors sync_health_check.sh's/account_health_check.sh's own gh#266 fix: a long-lived
+    fleet-silent outage must not page once and go silent for the rest of it. Exercises
+    STATE_FILE directly (no need to re-derive an old outage through the full first-page flow)
+    with its own (raw-epoch) first line already older, or younger, than
+    MEMBER_LIVENESS_REPAGE_MINUTES.
+    """
+    import subprocess
+    script_path = ROOT / "scripts" / "member_liveness_check.sh"
+
+    def _run(paged_minutes_ago):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            log_dir = tmp / "logs"
+            log_dir.mkdir()
+            bin_dir = tmp / "bin"
+            bin_dir.mkdir()
+            ntfy_calls = tmp / "ntfy_calls.log"
+            runs_file = log_dir / "runs.jsonl"
+
+            (bin_dir / "curl").write_text('#!/bin/bash\necho "$@" >> "$NTFY_CALLS_FILE"\nexit 0\n')
+            (bin_dir / "curl").chmod(0o755)
+
+            old_ts = datetime.datetime.now().timestamp() - 900 * 60
+            runs_file.write_text(json.dumps({
+                "member": "dumbledore", "run_id": "r1", "kind": "build",
+                "ts": old_ts, "status": "ok", "outcome": "x", "evidence": "y",
+            }) + "\n")
+
+            paged_epoch = int(datetime.datetime.now().timestamp()) - paged_minutes_ago * 60
+            (log_dir / ".member_liveness_paged.state").write_text(str(paged_epoch) + "\n")
+
+            env = {
+                "FLEET_LOG_DIR": str(log_dir),
+                "MEMBER_LIVENESS_TOLERANCE_MINUTES": "840",
+                "MEMBER_LIVENESS_REPAGE_MINUTES": "60",
+                "NTFY_CALLS_FILE": str(ntfy_calls),
+                "NTFY_TOPIC": "selftest-fake-topic",
+                "SELFTEST": "1",
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+            }
+            proc = subprocess.run(
+                ["bash", str(script_path)], capture_output=True, text=True, timeout=30, env=env,
+            )
+            assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+            calls = ntfy_calls.read_text() if ntfy_calls.exists() else ""
+            state = (log_dir / ".member_liveness_paged.state").read_text() \
+                if (log_dir / ".member_liveness_paged.state").exists() else ""
+            return proc.stdout, calls, state
+
+    # STATE_FILE's timestamp is 90 minutes old, past the 60-minute repage interval.
+    stdout_old, calls_old, state_old = _run(90)
+    assert "STILL" in calls_old, (
+        "a STATE_FILE timestamp older than MEMBER_LIVENESS_REPAGE_MINUTES did not re-page -- "
+        f"stdout: {stdout_old[:400]!r} ntfy calls: {calls_old[:400]!r}"
+    )
+    assert "last_repage=" in state_old, (
+        f"a re-page fired but STATE_FILE was not updated with the new repage timestamp: {state_old!r}"
+    )
+
+    # STATE_FILE's timestamp is 10 minutes old, well inside the 60-minute repage interval.
+    stdout_young, calls_young, _state_young = _run(10)
+    assert calls_young == "", (
+        "a STATE_FILE timestamp younger than MEMBER_LIVENESS_REPAGE_MINUTES wrongly re-paged: "
+        f"{calls_young[:400]!r}"
+    )
+    assert "already paged" in stdout_young, (
+        "between re-page intervals the existing 'already paged' tick line must still print: "
+        f"{stdout_young[:400]!r}"
+    )
 
 
 def _ntfy_topic_is_deferred_to_tick_time_not_baked_in_at_boot():
@@ -6589,6 +6887,10 @@ if __name__ == "__main__":
     check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
     check("every required health-check script in README is actually scheduled", _required_health_check_scripts_in_readme_are_scheduled)
     check("account-heartbeat + budget-read have host-only schedulers, never an entrypoint.sh line (gh#376)", _account_heartbeat_and_budget_read_have_host_only_schedulers)
+    check("member-liveness check has a host-only scheduler, never an entrypoint.sh line (gh#419)", _member_liveness_check_has_host_only_scheduler_and_no_entrypoint_line)
+    check("member-liveness tolerance covers the slowest scheduled member's real cadence (gh#419)", _member_liveness_tolerance_covers_the_slowest_scheduled_member_cadence)
+    check("member liveness check pages when no member has done work within tolerance, not on fresh activity (gh#419)", _member_liveness_check_pages_on_stale_activity_not_fresh)
+    check("member liveness check re-pages on a fixed interval instead of once (gh#419)", _member_liveness_check_repages_on_a_fixed_interval)
     check("NTFY_TOPIC is deferred to tick-time, not baked in at boot", _ntfy_topic_is_deferred_to_tick_time_not_baked_in_at_boot)
     check("every gh api call in a shell script is timeout-guarded", _every_gh_api_call_is_timeout_guarded)
     check("deploy staleness check reads a baked SHA and only alerts past budget", _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget)

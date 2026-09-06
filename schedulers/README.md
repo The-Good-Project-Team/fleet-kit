@@ -54,3 +54,20 @@ confirm against real per-tick cost.
 Both template families set `PATH`/environment explicitly — neither launchd nor a systemd
 timer gives a job a login shell, so `gh`/`git`/`claude` are not guaranteed to be found
 otherwise. Adjust the PATH entries to wherever those binaries actually live on your box.
+
+## Host-only jobs: pagers that must outlive the container's own crontab
+
+A third reason a job must live host-side, distinct from the podman-exec case above: the
+2026-09-05 outage (gh#418/gh#419) ran for ~40 hours with every existing pager green because an
+invalid cron field made Vixie cron discard `/etc/cron.d/fleet-kit` — the container's own
+crontab — whole. Any check whose job is "did the fleet do anything at all" is useless if it
+lives inside the exact file that failure discards. This job must be scheduled host-side only,
+same as the podman-exec jobs above, but never for the podman reason — it never touches podman:
+
+| Job | Cadence | Script | Required? |
+|---|---|---|---|
+| member-liveness | 5 min | `scripts/member_liveness_check.sh` | **required** — pages when no scheduled member (`runs.jsonl`, falling back to per-member log mtime) has done any work within 2x the slowest scheduled member's own cron cadence; the only pager that watches "did work happen" rather than "does a component still respond" |
+
+Needs `FLEET_LOG_DIR`/`NTFY_TOPIC` only, same plain host-read shape as
+account-health/tunnel-health/sync-health above — see `fleetkit-member-liveness.service`/`.timer`
+or `com.fleetkit.member-liveness.plist` for the exact shape.

@@ -1,0 +1,13 @@
+[Unit]
+Description=Run fleetkit-member-liveness every 5 minutes
+
+[Timer]
+# Same 5-minute cadence as account-health/sync-health -- this is a cheap log-read/mtime-stat
+# pager, not a claude -p spawn, so there's no per-tick cost argument for anything slower. The
+# check's own TOLERANCE_MINUTES (840 = 14h default) is what bounds how long an outage can run
+# before paging, not this cadence.
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

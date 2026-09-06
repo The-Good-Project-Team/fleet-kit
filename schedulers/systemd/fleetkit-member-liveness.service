@@ -1,0 +1,12 @@
+[Unit]
+Description=fleet-kit member-liveness pager — pages when NO fleet member has done any work within a tolerance derived from the slowest scheduled member's own cadence (scripts/member_liveness_check.sh)
+
+[Service]
+Type=oneshot
+# member_liveness_check.sh reads these directly (it does not source fleet.env, same reasoning
+# account_health_check.sh's own unit documents: it must stay a plain host process, zero Claude
+# Code dependency) -- Environment= here, not FLEET_ENV_FILE.
+Environment=FLEET_LOG_DIR={{LOG_DIR}}
+Environment=NTFY_TOPIC={{NTFY_TOPIC}}
+ExecStart={{KIT_PATH}}/scripts/member_liveness_check.sh
+User={{USER}}
