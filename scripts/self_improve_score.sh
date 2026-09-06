@@ -186,6 +186,14 @@ now = datetime.datetime.now(datetime.timezone.utc)
 today = now.date().isoformat()
 cutoff = now.timestamp() - 7*86400
 by_day = {}
+# gh#576: 'started' is run_report.py's provisional row, written the instant a pass launches,
+# before its real terminal row -- counting it verbatim double-counts every healthy run (once as
+# 'started', once under its real terminal status) and inflates 'unfinished' volume for every
+# pass that crashed before writing one. Same class as gh#150/#254/#437 (fleet_stats.py's fix,
+# _PROVISIONAL_STATUSES); this digest was never updated to match. Excluded unconditionally, same
+# as fleet_stats.py's non_provisional filter -- a completion row with the real terminal status
+# still gets counted, so a matched started+completion pair naturally lands as exactly one count.
+_PROVISIONAL_STATUSES = {'started'}
 for line in sys.stdin:
     try:
         r = json.loads(line)
@@ -194,8 +202,10 @@ for line in sys.stdin:
     ts = r.get('ts') or 0
     if ts < cutoff:
         continue
-    day = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).date().isoformat()
     s = r.get('status', 'unknown')
+    if s in _PROVISIONAL_STATUSES:
+        continue
+    day = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).date().isoformat()
     d = by_day.setdefault(day, {})
     d[s] = d.get(s, 0) + 1
 # gh#263: every day's object also carries how much of that UTC day had elapsed at digest
