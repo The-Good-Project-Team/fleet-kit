@@ -76,7 +76,18 @@ a wrong close destroys signal a human has not seen yet.
 
 For each remaining open issue, look for real evidence it's dead:
 
-- **Already fixed** — a merged or closed PR actually resolved it. Check: `gh pr list --search "<issue number> in:body" --state merged`, or grep the repo for whether the described bug/gap still exists.
+- **Already fixed** — a merged PR actually resolved it. Do NOT use `gh pr list --search "<n>
+  in:body"` — GitHub's search tokenizes short digit strings as ordinary tokens, so for any
+  1-3 digit (and often low-hundreds) issue number it returns majority noise instead of real
+  references (`"13 in:body"` matched 25 unrelated merged PRs, none referencing issue #13;
+  gh#425). Check locally instead — pull merged PR bodies once and regex-match for a
+  word-bounded `#<n>`/`gh#<n>` token, not a substring:
+  ```
+  gh pr list --state merged --json number,title,body --limit 1000 \
+    | jq -r --arg n "<issue number>" \
+      '.[] | select((.title + "\n" + (.body // "")) | test("(?i)(gh)?#0*" + $n + "\\b")) | .number'
+  ```
+  Or grep the repo for whether the described bug/gap still exists.
 - **Duplicate** — another still-open issue describes the same problem. Prefer keeping whichever has more detail/discussion; close the thinner one, pointing at the survivor.
 - **Obsolete** — the file/feature/route it describes was renamed, deleted, or retired since filing. Verify with a real `grep`/`git log` check, not a guess from the title alone.
 - **Superseded** — a newer, more specific issue replaced it on the same topic.

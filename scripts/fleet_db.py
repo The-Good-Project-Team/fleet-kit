@@ -343,7 +343,7 @@ def query_runs(conn: sqlite3.Connection, *, member: str | None = None, status: s
         q += " AND (item_id = ? OR outcome LIKE ? OR evidence LIKE ? OR self_critique LIKE ?)"
         params.extend([item_id, like, like, like])
     q += " ORDER BY recorded_at DESC"
-    if item_id is None:
+    if not item_id:
         q += " LIMIT ?"; params.append(limit)
     cur = conn.execute(q, params)
     cols = [d[0] for d in cur.description]

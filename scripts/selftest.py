@@ -200,6 +200,45 @@ def _report_lost_is_not_reported_nothing():
     assert reported["status"] == "ok", reported["status"]
 
 
+def _incomplete_fanout_outranks_trailing_loss_on_overlap():
+    """gh#461 AC2/AC3: a run can satisfy BOTH `_detect_trailing_loss` (a real report existed
+    one turn earlier and was overwritten) AND `dispatched_items` (the same pass fanned out a
+    background sub-pass it never waited on) -- the-fixer/datta's exact shape of report, then
+    keep working, then dispatch. Before this fix classify() checked `trailing_loss` first, so
+    this overlap silently read as `report_lost` and gh#252's `orphaned_items` tracking (the
+    actionable list of what's still out there unresolved) vanished for that case. Red before
+    the reorder in classify(), green after.
+    """
+    import run_report
+    text = ("Report:\nBOTTOM LINE: found the regression, dispatching parallel fixes.\n\n"
+            "bash scripts/run_member.sh the-fixer --item 224\n"
+            "bash scripts/run_member.sh the-fixer --item 229\n"
+            "Waiting for both sub-passes before the final wrap-up.\n")
+    # No Outcome:/Evidence: lines -- empty outcome is the precondition for either branch.
+    overlap = run_report.build_record(member="the-fixer", run_id="r1", kind="llm", exit_code=0,
+                                      pass_text=text, usage=None, vision_required=False,
+                                      trailing_loss=True)
+    assert overlap["status"] == "incomplete_fanout", overlap["status"]
+    assert overlap["status"] != "report_lost", overlap["status"]
+    assert overlap["orphaned_items"] == ["224", "229"], overlap["orphaned_items"]
+
+    # AC3-style control: identical dispatch text, trailing_loss NOT signalled -- unaffected,
+    # already incomplete_fanout before this fix and must stay so.
+    no_overlap = run_report.build_record(member="the-fixer", run_id="r2", kind="llm",
+                                         exit_code=0, pass_text=text, usage=None,
+                                         vision_required=False, trailing_loss=False)
+    assert no_overlap["status"] == "incomplete_fanout", no_overlap["status"]
+    assert no_overlap["orphaned_items"] == ["224", "229"], no_overlap["orphaned_items"]
+
+    # Control: trailing_loss signalled with NO dispatch evidence at all -- still report_lost,
+    # proving the reorder didn't just delete the trailing_loss branch outright.
+    plain_loss = run_report.build_record(member="t", run_id="r3", kind="llm", exit_code=0,
+                                         pass_text="a short non-report wrap-up", usage=None,
+                                         vision_required=False, trailing_loss=True)
+    assert plain_loss["status"] == "report_lost", plain_loss["status"]
+    assert plain_loss["orphaned_items"] is None, plain_loss["orphaned_items"]
+
+
 def _gh167_trailing_loss_flows_end_to_end_through_stream_log_and_run_report():
     """gh#257 AC2/AC3, sourced end-to-end through stream_log.py -> run_report.py (the same two
     scripts run_member.sh chains, minus the `claude -p`/timeout wrapper around them): a synthetic
@@ -272,14 +311,33 @@ def _run_member_wires_trailing_loss_flag():
     actually chains them -- source-checked the same way `_run_member_writes_a_started_row_...`
     checks its own wiring, so a future edit that drops either flag (rather than the logic behind
     it) fails a test instead of silently going quiet in prod.
+
+    gh#461 AC1: the old version of this check (`"--trailing-loss" in re.sub(...)`) was a
+    repo-wide substring search -- it passed as long as the string `--trailing-loss` appeared
+    ANYWHERE after stripping `--trailing-loss-out`, including in the
+    `TRAILING_LOSS_FLAG="--trailing-loss"` assignment line itself. A future edit that dropped
+    `$TRAILING_LOSS_FLAG` from the real run_report.py invocation line (run_member.sh's only
+    normal-exit call, the one carrying --pass-file -/--usage-file) while leaving that
+    assignment untouched still satisfied the old assert -- false confidence on exactly the
+    regression this test's docstring claims to catch. Now it isolates that one real call
+    (joining its backslash-continued lines into a single logical line first) and checks
+    `$TRAILING_LOSS_FLAG` is actually referenced there.
     """
     src = (ROOT / "scripts" / "run_member.sh").read_text()
     assert "--trailing-loss-out" in src, "stream_log.py is never told where to write the loss signal"
     assert "TRAILING_LOSS_FILE" in src, "no side-channel file variable for the loss signal"
     assert '[ -s "$TRAILING_LOSS_FILE" ]' in src, \
         "run_member.sh never tests the loss file for non-emptiness before building the flag"
-    assert "--trailing-loss" in re.sub(r"--trailing-loss-out", "", src), \
-        "run_member.sh never forwards --trailing-loss to run_report.py"
+
+    logical_lines = re.sub(r"\\\n", " ", src).splitlines()
+    invocation = next(
+        (ln for ln in logical_lines
+         if "run_report.py" in ln and "--pass-file -" in ln and "--usage-file" in ln),
+        None)
+    assert invocation is not None, \
+        "no real run_report.py invocation line found (expected --pass-file -/--usage-file)"
+    assert "$TRAILING_LOSS_FLAG" in invocation, \
+        "run_member.sh's real run_report.py call never forwards $TRAILING_LOSS_FLAG: " + invocation
 
 
 def _artifact_regex_accepts_backtick_spans():
@@ -519,6 +577,30 @@ def _fleet_db_query_runs_item_id_matches_free_text_mentions():
         # limit is honored AFTER the free-text narrowing, not applied to the raw LIKE superset.
         limited = fleet_db.query_runs(conn, item_id="143", limit=2)
         assert len(limited) == 2, limited
+
+
+def _fleet_db_query_runs_empty_item_id_is_treated_like_none():
+    """gh#484: three truthiness checks against `item_id` in query_runs() used to disagree for
+    `item_id=""` -- `if item_id:` (falsy) vs `if item_id is None:` (False, since "" is not
+    None) -- so an empty string skipped the LIMIT clause entirely and returned the whole
+    table. AC1: `item_id=""` must return the same rows as `item_id=None`. AC2: `limit` must
+    still be honored for `item_id=""` against a table with more rows than the limit.
+    """
+    import fleet_db
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        runs = d / "runs.jsonl"
+        rows_in = [{"run_id": f"r{i}", "member": "minion", "outcome": "did stuff",
+                    "_recorded_at": float(i)} for i in range(5)]
+        runs.write_text("\n".join(json.dumps(r) for r in rows_in) + "\n")
+        conn = fleet_db.connect(d / "fleet.db")
+        fleet_db.sync(conn, runs_file=runs)
+
+        none_rows = fleet_db.query_runs(conn, item_id=None, limit=3)
+        empty_rows = fleet_db.query_runs(conn, item_id="", limit=3)
+        assert len(none_rows) == len(empty_rows) == 3, (none_rows, empty_rows)
+        assert {r["run_id"] for r in none_rows} == {r["run_id"] for r in empty_rows}
 
 
 def _fleet_db_composite_pk_migration_is_lock_serialized():
@@ -1164,9 +1246,10 @@ def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
     # Only a flag attached to the command itself -- prose explaining WHY --squash is wrong
     # ("an explicit --squash errors") must not trip this. Stop at the closing backtick/quote
     # so an explanation trailing the command is not read as part of it.
-    bad = _re.compile(r"gh pr merge(?:\s+(?:--auto|\"?\$?[A-Za-z_{}\"]*PR_NUM[\"}]*|\d+))*"
+    bad = _re.compile(r"gh pr merge(?:\s+(?:--auto|\"?\$?\{?[A-Za-z_]+\}?\"?|\d+))*"
                       r"\s+--(squash|merge|rebase)\b")
-    for rel in ("scripts/worktree_builder.sh", "members/minion/minion.fleet.json",
+    for rel in ("scripts/worktree_builder.sh", "scripts/auto_update_branch.sh",
+                "members/minion/minion.fleet.json",
                 "members/minion/minion.md", "members/jefe/jefe.md", "agents/builder.md",
                 "README.md"):
         f = ROOT / rel
@@ -5318,9 +5401,10 @@ def _green_pr_with_no_auto_merge_gets_armed():
         # #291 unarmed, #292 armed, #293 draft+unarmed. The -q expression is evaluated by gh
         # itself in the real thing, so the stub returns what that filter WOULD select.
         #
-        # The merge stub rejects a bare `--auto` exactly as the real `gh` CLI does on this
-        # repo (no merge queue -- an explicit strategy flag is required non-interactively).
-        # A regression back to the bare form fails this assertion instead of passing silently.
+        # The merge stub rejects a strategy flag exactly as the real `gh` CLI does on a
+        # merge-queue-controlled main (fleet-kit#523: fleet-kit's main has a queue now, same as
+        # nonprofit-atlas's). A regression back to `--squash` fails this instead of passing
+        # silently -- that regression is what left philanthropy PRs unarmed (PR #4215).
         (bin_dir / "gh").write_text(
             "#!/bin/bash\n"
             "if [ \"$1\" = \"repo\" ]; then echo 'The-Good-Project-Team/fleet-kit'; exit 0; fi\n"
@@ -5330,9 +5414,9 @@ def _green_pr_with_no_auto_merge_gets_armed():
             "fi\n"
             "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"merge\" ]; then\n"
             "  case \"$*\" in\n"
-            "    *--squash*|*--merge*|*--rebase*) : ;;\n"
-            "    *) echo '--merge, --rebase, or --squash required when not running "
-            "interactively' >&2; exit 1 ;;\n"
+            "    *--squash*|*--merge*|*--rebase*) echo '! The merge strategy for main is set "
+            "by the merge queue' >&2; exit 1 ;;\n"
+            "    *) : ;;\n"
             "  esac\n"
             f"  echo \"$3\" >> {calls}\n"
             "  exit 0\n"
@@ -6440,6 +6524,51 @@ def _run_member_puts_the_number_header_above_item_and_task():
     assert "FLEET_NUMBER_URL" in (ROOT / "fleet.env.example").read_text()
 
 
+def _roomba_runs_as_a_script_and_records_a_quiet_pass():
+    """fleet-kit#514: roomba is a shell runner now. Its spec dispatches run_member.sh to
+    roomba.sh, and that script drives the real roomba.py on a real (tmp) git repo and records
+    the pass through run_report.py -- so fleet.db/status/fleet_kpi see it exactly as before,
+    minus the 25-30 turns of window the model pass spent re-reading its own dry-run."""
+    import subprocess
+    spec = json.loads((ROOT / "members" / "roomba" / "roomba.fleet.json").read_text())
+    assert spec.get("llm", {}).get("runner") == "members/roomba/roomba.sh", spec.get("llm")
+    assert spec.get("kind") == "shell"
+    runner = ROOT / "members" / "roomba" / "roomba.sh"
+    assert runner.exists() and runner.stat().st_mode & 0o111, "roomba.sh must be executable for run_member.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        repo = tmp / "repo"; repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+        logs = tmp / "logs"
+        env = {"PATH": "/usr/bin:/bin", "FLEET_REPO": str(repo), "FLEET_LOG_DIR": str(logs), "HOME": str(tmp)}
+        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, timeout=60, env=env)
+        assert proc.returncode == 0, f"rc={proc.returncode} stderr={proc.stderr[:400]}"
+        assert proc.stdout.startswith("QUIET"), f"an empty repo must be a quiet pass: {proc.stdout!r}"
+        runs = (logs / "runs.jsonl").read_text().strip().splitlines()
+        assert len(runs) == 1, f"exactly one run must be recorded, got {len(runs)}: {runs!r}"
+        rec = json.loads(runs[-1])
+        assert rec.get("member") == "roomba" and rec.get("kind") == "shell", rec
+        assert rec.get("status") == "quiet", rec
+        assert "0 evaluated, 0 removed" in (rec.get("outcome") or ""), rec.get("outcome")
+
+
+def _datta_cadence_is_a_validated_cron_hour_dial():
+    """fleet-kit#514: the datta hour field is instance-tunable like gru's, and joins the same
+    validated family -- so the value that discarded a whole crontab for 40h (0,30) is refused
+    for this dial too, from the Settings page and from selftest."""
+    import fleet_view_server as fvs
+    entry = (ROOT / "entrypoint.sh").read_text()
+    assert '12 ${FLEET_DATTA_CADENCE:-*} * * *' in entry, "datta line must splice FLEET_DATTA_CADENCE into the hour field"
+    assert "FLEET_DATTA_CADENCE" in fvs.DIAL_FIELDS and "FLEET_DATTA_CADENCE" in fvs._CRON_HOUR_FIELDS
+    assert fvs._validate_dial_value("FLEET_DATTA_CADENCE", "0,30"), "0,30 must be refused (it is minutes, not an hour)"
+    assert fvs._validate_dial_value("FLEET_DATTA_CADENCE", "$(id)")
+    for ok in ("", "*", "9", "*/6", "0,12", "1-5"):
+        assert fvs._validate_dial_value("FLEET_DATTA_CADENCE", ok) is None, ok
+    assert "FLEET_DATTA_CADENCE" in (ROOT / "fleet.env.example").read_text()
+
+
 def _sync_health_check_pages_on_a_real_stalled_offset_not_on_a_caught_up_one():
     """gh#273: tail_runs_forever is the only thing keeping fleet.db in sync with runs.jsonl,
     and nothing watched whether it was still alive -- account_health_check.sh,
@@ -6903,10 +7032,12 @@ if __name__ == "__main__":
     check("a detected gh#167 trailing-turn loss is report_lost, not reported_nothing (gh#257 AC2/AC3)", _report_lost_is_not_reported_nothing)
     check("gh#167 trailing-loss signal flows end-to-end, stream_log.py -> run_report.py (gh#257 AC2/AC3)", _gh167_trailing_loss_flows_end_to_end_through_stream_log_and_run_report)
     check("run_member.sh wires --trailing-loss-out/--trailing-loss between the two scripts (gh#257)", _run_member_wires_trailing_loss_flag)
+    check("classify() prefers incomplete_fanout over report_lost on overlap (gh#461)", _incomplete_fanout_outranks_trailing_loss_on_overlap)
     check("_ARTIFACT accepts a backtick-wrapped path/PID/SHA (#251)", _artifact_regex_accepts_backtick_spans)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
     check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
     check("query_runs(item_id=) matches free-text #N mentions, not just the build-claim column (gh#405)", _fleet_db_query_runs_item_id_matches_free_text_mentions)
+    check("query_runs(item_id=\"\") behaves like item_id=None, not an unlimited full-table scan (gh#484)", _fleet_db_query_runs_empty_item_id_is_treated_like_none)
     check("fleet.db composite-PK migration is lock-serialized", _fleet_db_composite_pk_migration_is_lock_serialized)
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("cost_bridge converts real spend into fanout's --observed shape", _cost_bridge_converts_real_spend_into_fanouts_observed_shape)
@@ -7024,6 +7155,8 @@ if __name__ == "__main__":
     check("pool logs successes so outage length is measurable", _pool_logs_successes_so_downtime_is_measurable)
     check("account health check actually pages when configured (and never claims to when it isn't)", _account_health_check_actually_pages_when_configured)
     check("account health check re-pages on a fixed interval instead of once (gh#266)", _account_health_check_repages_on_a_fixed_interval_gh266)
+    check("roomba runs as a script and records a quiet pass through run_report (fleet-kit#514)", _roomba_runs_as_a_script_and_records_a_quiet_pass)
+    check("FLEET_DATTA_CADENCE is a validated cron-hour dial (fleet-kit#514)", _datta_cadence_is_a_validated_cron_hour_dial)
     check("number_read fetches from a URL and renders the five-line header (fleet-kit#513)", _number_read_fetches_from_a_url_and_renders_five_lines)
     check("number_read never renders zero for an unmeasured reading (fleet-kit#513)", _number_read_never_renders_zero_for_an_unmeasured_reading)
     check("run_member puts the number header above --item and --task (fleet-kit#513)", _run_member_puts_the_number_header_above_item_and_task)
