@@ -1500,9 +1500,15 @@ function renderSettingsPage() {
     await renderFleetState();
     // A bare "save failed" is what hid this bug for weeks: the server was answering 401
     // "unauthorized" the whole time and the page threw that away. Say which it is.
+    // gh#480: a validation failure sends {ok:false, errors:{key: msg}} (plural, a dict) --
+    // not the {error: msg} shape the 401 branch below expects -- so surface every pair
+    // instead of falling through to the generic string.
     document.getElementById('dialsMsg').textContent = resp.ok
       ? `saved ${resp.written.length} field(s)`
-      : (r.status === 401 ? 'not signed in -- paste the access key above first' : (resp.error || 'save failed'));
+      : (r.status === 401 ? 'not signed in -- paste the access key above first'
+        : (resp.errors && Object.keys(resp.errors).length
+          ? Object.entries(resp.errors).map(([k, v]) => `${k}: ${v}`).join('; ')
+          : 'save failed'));
     // Re-derive immediately: the whole point is that the operator SEES what the new dial did,
     // rather than trusting that a number they typed had the effect they intended.
     if (resp.ok) await renderBudgetPreview();

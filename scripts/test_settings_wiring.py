@@ -83,7 +83,20 @@ def _boot_mocks(route):
     elif path == "/api/fleet_toggle":
         route.fulfill(json=({"ok": True, "state": {"FLEET_ENABLED": False}}))
     elif path == "/api/fleet_settings":
-        route.fulfill(json=({"ok": True, "written": ["FLEET_QUEUE_CAP"], "state": {}}))
+        # gh#480 repro: a bad FLEET_GRU_CADENCE value (e.g. "0,30", a comma list where only a
+        # single hour/step/range belongs) is exactly the shape _validate_dial_value rejects
+        # server-side with a 400 {"ok": false, "errors": {key: msg}} body. Mirror that one
+        # case here so this test can drive the real client code against it; every other body
+        # still gets the healthy ok:true response the other checks below rely on.
+        body = json.loads(route.request.post_data or "{}")
+        if body.get("FLEET_GRU_CADENCE") == "0,30":
+            route.fulfill(status=400, json=({
+                "ok": False,
+                "errors": {"FLEET_GRU_CADENCE": "not a valid cron hour field "
+                           "(expected '*', 'N', 'N-M', '*/N', or a comma list, N in 0-23)"},
+            }))
+        else:
+            route.fulfill(json=({"ok": True, "written": ["FLEET_QUEUE_CAP"], "state": {}}))
     elif path == "/api/alerts":
         # gh#399: alert_store.snapshot() shape, healthy case -- worst="ok" so renderAlerts()
         # hides the banner and this test's own "zero console errors" assertion isn't tripped by
@@ -203,6 +216,25 @@ def main() -> int:
 
             check("Touching one dial still saves it without dragging in other unset dials (gh#355)",
                   _touched_dial_still_sent)
+
+            def _validation_error_shows_specific_message():
+                # gh#480: resp.errors (plural, a dict) was read as resp.error (singular) and
+                # always came back undefined, so every validation failure showed the literal
+                # string "save failed" instead of _validate_dial_value's specific reason.
+                page.select_option('.dial-input[data-key="FLEET_GRU_CADENCE"]', "__custom__")
+                page.fill('.dial-input[data-key="FLEET_GRU_CADENCE"]', "0,30")
+                with page.expect_response("**/api/fleet_settings"):
+                    page.click("#saveDials")
+                page.wait_for_function(
+                    "document.getElementById('dialsMsg').textContent.includes('cron hour field')",
+                    timeout=5000)
+                msg = page.text_content("#dialsMsg")
+                assert "FLEET_GRU_CADENCE" in msg and "cron hour field" in msg, \
+                    f"expected the server's specific validation message, got: {msg!r}"
+                assert msg.strip() != "save failed", "still showing the generic fallback"
+
+            check("A validation failure shows the field's specific error, not 'save failed' (gh#480)",
+                  _validation_error_shows_specific_message)
 
             browser.close()
     finally:
