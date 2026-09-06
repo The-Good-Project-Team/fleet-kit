@@ -371,7 +371,10 @@ spawns exactly one). Your job, in order:
 
 7. **Read each minion's real result** — its own run record in `runs.jsonl` (each minion's
    run_id is `minion-item<n>-<pid>-<timestamp>`, so `grep "minion-item<n>-" runs.jsonl` finds
-   it directly, or `gh pr list --search "<n> in:body"` for the PR it should have opened) —
+   it directly). If that comes up empty, do NOT fall back to `gh pr list --search "<n> in:body"`
+   — GitHub's search is not selective for short issue numbers and returns majority noise
+   (gh#425). Instead pull merged PRs locally and regex-match a word-bounded token:
+   `gh pr list --state merged --json number,title,body --limit 1000 | jq -r --arg n "<n>" '.[] | select((.title + "\n" + (.body // "")) | test("(?i)(gh)?#0*" + $n + "\\b")) | .number'` —
    and write ONE combined report as your own final output: the runway you computed, the
    priority call you made and why, and a one-line result per minion (PR #, or "found already
    fixed", or "failed: <reason>"). A minion that never reports back (crashed, hung) is a

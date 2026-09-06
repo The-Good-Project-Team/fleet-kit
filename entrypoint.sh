@@ -230,8 +230,13 @@ case "${1:-cron-foreground}" in
       # enabled+scheduled in its own spec since 11:39 that day and had run ZERO times, because
       # a member's spec does not put it on cron -- THIS hand-maintained list does, and nobody
       # remembered. The dashboard read "never run" and nothing else complained.
+      # datta's hour field is instance-tunable via FLEET_DATTA_CADENCE (default "*", hourly at
+      # :12), the same splice shape as FLEET_GRU_CADENCE above and validated by the same
+      # _CRON_HOUR_FIELDS family (fleet-kit#514). On the fleet-kit instance datta+nerd were
+      # 47% of the window analysing the fleet itself while the score they feed sat flat for
+      # 11 days; "9" makes that a daily 09:12 pass instead of 24 hourly ones.
       if cron_member_enabled datta; then
-        echo "12 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh datta >> $LOG_DIR/datta.log 2>&1"
+        echo "12 ${FLEET_DATTA_CADENCE:-*} * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh datta >> $LOG_DIR/datta.log 2>&1"
       fi
       # dumbledore: daily -> every 7h (2026-08-25, Reif), now that it OWNS the Magikarp score
       # rather than treating it as one rot-hunt item among five. A once-daily owner gets 1
