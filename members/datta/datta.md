@@ -99,12 +99,18 @@ Do not pick lanes by intuition. Score each lane on three signals and rank worst-
   three signals hit zero together and stay there forever once this rule first fires. Ranking is
   not the only path to a dispatch: **once per `FLEET_DATTA_FROZEN_PROBE_HOURS` hours (env var,
   default 168 = 7 days) since a frozen lane's last nerd run, spawn it a probe this pass
-  regardless of where it ranks**, on top of (not instead of) the lanes ranking already selected,
-  before applying the `FLEET_DATTA_MAX_NERDS_PER_PASS` cap to the combined set. This cadence is
-  deliberately far longer than any normal UNEXAMINED threshold, so it costs at most one extra
-  pass per frozen lane per week rather than reverting to polling it every hour. Name which
-  lane(s) this override fired for in your report — it is a deliberate exception to worst-first
-  ranking, not a silent extra dispatch.
+  regardless of where it ranks**, and **exempt from `FLEET_DATTA_MAX_NERDS_PER_PASS`**: spawn
+  it in addition to, never counted against, however many lanes the cap already selected by
+  worst-first ranking (judge-judy, gh#530). The frozen lane's own UNEXAMINED was just zeroed
+  for ranking, so it sorts at or near the bottom of that same worst-first order — building a
+  "combined set" of (ranked lanes) + (probe) and only then truncating to N would let the cap's
+  own truncation drop the probe on exactly the passes where ranking alone already fills N, which
+  is the modal case this override exists to fix, not a corner case. The cap bounds the ranked
+  selection alone; the probe is a separate, additional dispatch on top of that bound. This
+  cadence is deliberately far longer than any normal UNEXAMINED threshold, so it costs at most
+  one extra pass per frozen lane per week rather than reverting to polling it every hour. Name
+  which lane(s) this override fired for in your report — it is a deliberate exception to
+  worst-first ranking, not a silent extra dispatch.
 
   This override is the streak's only way back: if the resulting probe's outcome does not start
   with `STRUCTURAL-N/A`, the streak breaks and the lane returns to normal UNEXAMINED scoring on

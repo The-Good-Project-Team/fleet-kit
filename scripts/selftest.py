@@ -3943,6 +3943,14 @@ def _datta_structural_na_streak_has_a_reset_path():
     The fix must give the streak a reset path that does NOT depend on ranking: a periodic
     override that probes a frozen lane on a long fixed cadence regardless of where it ranks,
     and the doc's self-reversal claim must describe that real path rather than the false one.
+
+    gh#530: judge-judy blocked the first version of this override (PR #494) because it built a
+    "combined set" of (ranked lanes) + (probe) and only THEN applied `FLEET_DATTA_MAX_NERDS_PER_
+    PASS` -- since the frozen lane's UNEXAMINED was just zeroed for ranking, its probe sorts at
+    or near the bottom of that same order, so the cap's own truncation could silently drop it on
+    exactly the passes where ranking alone already fills the cap (the modal case, not a corner
+    case). The doc must state the probe is exempt from the cap, not merely part of a set the cap
+    is later applied to.
     """
     root = Path(__file__).parent.parent
     datta = (root / "members" / "datta" / "datta.md").read_text()
@@ -3972,6 +3980,18 @@ def _datta_structural_na_streak_has_a_reset_path():
     assert "regardless of where it ranks" in override, \
         "override still gated on ranking -- does not actually break the freeze"
     assert "gh#447" in override, "override doesn't cite the finding it fixes"
+
+    # gh#530: judge-judy blocked PR #494 because "rank, combine, then cap" still let the flat
+    # cap's own truncation silently drop the probe -- it sorts at/near the bottom of the same
+    # worst-first order it exists to bypass, so a combined-then-capped set is exactly where
+    # ranking still wins. The probe must be stated as exempt from the cap, not merely present
+    # in a set the cap is later applied to.
+    assert "FLEET_DATTA_MAX_NERDS_PER_PASS" in override, \
+        "gh#530: override never mentions the per-pass cap -- can't state an exemption from it"
+    assert "exempt" in override, \
+        "gh#530: override doesn't state the probe is exempt from FLEET_DATTA_MAX_NERDS_PER_PASS " \
+        "-- a flat cap-then-truncate reading can still silently drop the probe on the very " \
+        "passes (ranking already fills N) this override exists to fix"
 
     # The corrected claim must name the real mechanism instead of the disproven one.
     j = datta.find("This override is the streak's only way back")
