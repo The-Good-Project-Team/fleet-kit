@@ -924,13 +924,15 @@ def _gru_md_gates_candidates_on_vision_link():
 def _gru_md_checks_claim_history_before_claiming():
     """Doc-consistency guard, same shape as `_gru_md_clamps_allowance_to_share_ceiling`: proves
     the gh#64 dead-end check is actually wired into gru.md's step order (between step 2's
-    candidate read and step 4's claim), not just implemented and never called."""
+    candidate read and step 4's claim), not just implemented and never called. gh#593 folded
+    the dead-end check into step 2 (ahead of the Vision-link gate) and dropped its old standalone
+    "2c." label, so this anchors on the `claim_history.py` call itself rather than a step number."""
     text = (HERE.parent / "members" / "gru" / "gru.md").read_text()
     assert "claim_history.py" in text, \
         "gru.md never calls claim_history.py -- gh#64's dead-end check is unreachable"
-    step2c = text.index("2c.")
+    dead_end_check = text.index("claim_history.py")
     step4 = text.index("4. **Claim your chosen items")
-    assert step2c < step4, "step 2c must run before step 4's claim, not after"
+    assert dead_end_check < step4, "the dead-end check must run before step 4's claim, not after"
 
 
 def _vision_link_gate_eligibility_rule():
