@@ -386,7 +386,7 @@ from the dashboard URL. All of these return JSON and send
 | route | size | what it carries |
 |---|---|---|
 | `/api/snapshot` | ~570KB | everything: `runs[]` (last 500) + `gh.{prs,issues,merged,self_evolution}` |
-| `/api/query?member=&status=&item_id=&limit=100` | varies | filtered runs out of the sqlite mirror — prefer this over `snapshot` |
+| `/api/query?member=&status=&item_id=&limit=100` | varies | filtered runs out of the sqlite mirror — prefer this over `snapshot`; `item_id` matches both an exact `--item N` build-claim AND a free-text `#N` mention in outcome/evidence/self_critique (gh#405) |
 | `/api/stats/runs_summary?hours=24` | ~3KB | `signal_rate`, `executed`, `total`, `budget_wall`, `declined`, `dormant[]`, `statuses`, `agent_rates`, `hourly[]` |
 | `/api/stats/token_usage?hours=24` | ~2KB | hourly buckets: input/output tokens, `cost_usd` |
 | `/api/stats/backlog_history` | ~1.6KB | open-backlog trend (does its own `gh` calls; cached 120s) |
