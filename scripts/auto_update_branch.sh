@@ -115,7 +115,12 @@ for pr in $STALE_CANDIDATES; do
   rollup_failed=$(gh pr view "$pr" --json statusCheckRollup \
     -q '[.statusCheckRollup[]? | select(.conclusion=="FAILURE" or .state=="FAILURE")] | length' 2>/dev/null)
   verdict=$(timeout 25s gh api "repos/${REPO_SLUG}/statuses/${head}" --jq '[.[] | select(.context=="fleet-code-review")][0].state' 2>/dev/null)
-  armed_count=$([ -f "$LOG" ] && grep -c "PR #$pr: auto-merge armed" "$LOG" 2>/dev/null || echo 0)
+  # `grep -c` itself always prints a count (even "0") but exits 1 on no match, so it can't be
+  # chained with `|| echo 0` without double-printing -- the fallback only kicks in when the
+  # LOG file is absent.
+  armed_count=0
+  [ -f "$LOG" ] && armed_count=$(grep -c "PR #$pr: auto-merge armed" "$LOG" 2>/dev/null)
+  armed_count="${armed_count:-0}"
 
   if [ "${rollup_failed:-0}" -gt 0 ] 2>/dev/null || [ "$verdict" = "failure" ]; then
     reason="red"
