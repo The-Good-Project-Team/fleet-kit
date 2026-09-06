@@ -316,6 +316,41 @@ with `status=killed`, distinct from `timed_out` (had time left) and `budget_decl
 spending fine). It means **interrupted and safe to re-run**. `SIGKILL` still cannot be trapped by
 anyone, which is why the drain exists rather than relying on the trap alone.
 
+### Live-previewing a dashboard/script change: never `podman cp` into a running container
+
+**Never `podman cp` an edited file into a running fleet-kit container.** It works in the
+moment — the running process picks up the new file — but it mutates the *built image layer*,
+and rootless podman's overlay/permission handling does not tolerate that on the next restart.
+This caused a real outage on `dino`, 2026-08-22: a `podman cp` of `scripts/fleet_view.html` and
+`scripts/fleet_view_server.py` into the running `philanthropy` container (the fastest thing
+available for iterating on the dashboard) looked fine until the next `podman restart`, which
+then failed outright with `open executable: Permission denied: OCI permission denied` on
+`entrypoint.sh`. The fleet was offline — no cron, no dashboard — until recreated from a clean,
+freshly `git pull`-ed checkout via `up.sh --replace` (gh#17).
+
+The safe loop for the exact same use case — edit a script, see the change live, without
+rebuilding or restarting — is `up.sh --dev`:
+
+```bash
+./up.sh --repo <git-url> --name <project-name> --dev
+```
+
+`--dev` bind-mounts this checkout's `scripts/` **read-write** over the image's baked-in copy
+at `/fleet-kit/scripts`, instead of relying only on what `COPY . /fleet-kit` captured at build
+time. Edit a file on the host, reload the dashboard — same instant feedback loop `podman cp`
+gave, but it only ever touches the container's writable layer, never the image itself, so a
+later `--replace` or restart is exactly as safe as any other run. Turn it off (re-run `up.sh`
+without `--dev`) once you're done previewing; it isn't meant for a production instance, since
+it makes the container's behavior depend on host files living outside the image.
+
+`up.sh` also now warns — before it builds, not after — when the checkout it's running from is
+behind `origin/main`, since `COPY . /fleet-kit` bakes in whatever's on disk at build time with
+no record afterward of what commit that was. This is the same gap that (one day earlier, on
+the same box) had a rebuild after a merged PR do nothing because the local clone doing the
+building was still stale (`up.sh` comment above the build step, gh#17's second half). It's a
+warning, not a refusal — a feature branch or a deliberately pinned checkout is a normal reason
+to be "behind" — so confirm with `git status` / `git log` if you see it and didn't expect it.
+
 ### Why the box silently falls behind (confirmed live, 2026-08-26 — 19 commits behind)
 
 `auto_deploy.sh` polls `main` and deploys when it moves, so nobody watches it. It **refuses to
