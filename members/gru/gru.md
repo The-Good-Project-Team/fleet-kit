@@ -179,33 +179,68 @@ spawns exactly one). Your job, in order:
    marie hasn't gotten to yet (no priority label at all) is lowest priority by default, not an
    oversight you correct yourself.
 
-   **Also gate on a Vision-link before anything below reads the candidate set — gh#525.** A
-   candidate is eligible only if its body or its newest `fleet:prd` comment carries a
-   `Vision-link:` line naming something real (the number, the guardrail, or the channel
-   introduced by #513 — free text is fine until #513's `number.json` ships and this can
-   validate against it instead, per gh#525's own open question), OR it is explicitly
-   `Vision-link: none (maintenance)` **and** no OTHER open candidate anywhere in this pull
-   carries a real Vision-link (maintenance is eligible only when nothing number-moving is
-   waiting). A candidate with no `Vision-link:` line at all — neither a real link nor an
-   explicit `none (maintenance)` — is never eligible on its own; marie's PRD template does not
-   require this line yet (changing marie's own process is out of scope per gh#525), so most
-   candidates will fail this gate until it does — that IS the gate working, not a bug. Run it
-   on the full pull from ALL tiers you've queried so far (high, then medium/low once you fall
-   through to them), since "no linked-KR item open anywhere" has to see across tiers, not just
-   within one:
+   **Before the Vision-link gate, drop any candidate that has already dead-ended past the
+   threshold — gh#64, moved ahead of the Vision-link gate below by gh#593.**
+   Nothing above this line distinguishes "never tried" from "tried and abandoned 10 times";
+   without this check the same chronically-blocked item gets reclaimed and respawned every
+   hour, burning a full claim/spawn/clear cycle on doomed work each time
+   ([[project_gru_repeat_claim_dead_end_gap_fleetkit64]]). For each remaining candidate:
+   ```
+   python3 /fleet-kit/scripts/claim_history.py --item <n>
+   # exit 0 "ok count=<c> threshold=3"       -> keep in the candidate set
+   # exit 1 "BLOCKED count=<c> threshold=3"  -> drop from this pass's candidate set
+   ```
+   This is a DIFFERENT signal from the `fleet:needs-human-op` filter just above: that one is a
+   prior pass's *explicit* verdict that the item is structurally blocked on something no fleet
+   member holds (credentials, a human decision). This one is silent — nothing ever declared the
+   item blocked, it has just failed to close after repeated tries. The default threshold is 3
+   dead-end claims inside a 14-day window (reasoned default, not a human call — see
+   `claim_history.py`'s own docstring; the exact number was left `UNKNOWN` by this issue's PRD).
+   A dropped candidate is never silently missing from your report — name it explicitly
+   (issue number + the `count=` claim_history.py printed) the same way the `fleet:needs-human-op`
+   drops already are, so a human can decide whether it needs `fleet:needs-human-op` applied, a
+   priority downgrade, or nothing at all. Do not claim or spawn against a dropped candidate this
+   pass.
+
+   **This ordering is load-bearing, not cosmetic — gh#593.** Confirmed live 2026-09-06: with the
+   dead-end filter running AFTER the Vision-link gate, three permanently-blocked venture-repo
+   issues (#570-572 — this instance's `$FLEET_REPO` is fleet-kit's own repo, they need a venture
+   checkout that doesn't exist here, and `claim_history.py` had already clocked 2-3 dead-end
+   claims on them) still counted as "an open linked-KR candidate" for the gate's crowd-out rule,
+   which starved every OTHER open `Vision-link: none (maintenance)` candidate in the entire
+   backlog even though those three were about to be dropped anyway one step later. Three
+   consecutive gru passes spent a full ranking pull and packer call to ship zero work as a
+   result. Running the dead-end filter first removes doomed-but-linked candidates from the pool
+   before the crowd-out rule ever sees them.
+
+   **Then gate the survivors on a Vision-link — gh#525.** A candidate is eligible only if its
+   body or its newest `fleet:prd` comment carries a `Vision-link:` line naming something real
+   (the number, the guardrail, or the channel introduced by #513 — free text is fine until
+   #513's `number.json` ships and this can validate against it instead, per gh#525's own open
+   question), OR it is explicitly `Vision-link: none (maintenance)` **and** no OTHER surviving
+   candidate anywhere in this pull carries a real Vision-link (maintenance is eligible only when
+   nothing number-moving is still waiting). A candidate with no `Vision-link:` line at all —
+   neither a real link nor an explicit `none (maintenance)` — is never eligible on its own;
+   marie's PRD template did not require this line before PR#587 (gh#588 backfilled the 18
+   pre-existing `fleet:prd` issues that predated it), so a candidate still missing the line
+   outright is now a genuine gap worth flagging to marie, not "the gate working as designed."
+   Run it on the survivors from ALL tiers you've queried so far (high, then medium/low once you
+   fall through to them), since "no linked-KR item open anywhere" has to see across tiers, not
+   just within one:
    ```
    python3 /fleet-kit/scripts/vision_link_gate.py --items '[{"number":..,"body":..,"comments":..}, ...]'
    # {"eligible": [<numbers, same relative order as --items>],
    #  "dropped": [{"number":.., "reason":"no Vision-link line..." | "none (maintenance), but a
    #               linked-KR candidate is open: #.."}]}
    ```
-   This is a DIFFERENT signal from the `fleet:needs-human-op` filter just above (that one is a
-   label a prior pass applied; this one is free text in the candidate's own spec) and from 2c's
-   dead-end check below (that one is claim history; this one is content) — all three stack.
+   This is a DIFFERENT signal from the `fleet:needs-human-op` filter above (that one is a label
+   a prior pass applied; this one is free text in the candidate's own spec) and from the
+   dead-end check above (that one is claim history; this one is content) — all three stack, in
+   this order: needs-human-op, then dead-end, then Vision-link.
    **Never silently drop a candidate here** — name every one of `dropped`'s entries in your own
    report by number and reason, the same way the `fleet:needs-human-op` filter's drops already
-   are (gh#3920 precedent). Only `eligible`'s candidates continue on to step 2c and step 3's
-   pack; a dropped candidate is never claimed or spawned this pass.
+   are (gh#3920 precedent). Only `eligible`'s candidates continue on to step 3's pack; a dropped
+   candidate is never claimed or spawned this pass.
 
    **Within a tier, walk oldest-`createdAt`-first, never raw API order.** `gh issue list` with
    no explicit sort returns newest-created-first; since step 3's packer walks candidates
@@ -223,40 +258,6 @@ spawns exactly one). Your job, in order:
    Collect each candidate's `fleet:complexity-<1-10>` label along with its number — that is
    marie's size estimate and it is what makes packing possible. An item with no complexity
    label is treated as a 5 (median), never as free.
-
-   2b-2. **Only work that names the number is eligible — fleet-kit#523.** The header above
-   this pass (`scripts/number_read.py`, fleet-kit#519) says what THE NUMBER, the guardrail
-   and the channel are for this instance. A candidate is eligible only if its body carries a
-   `Vision-link:` line naming one of them (the number's own words, its KR, or the epic that
-   owns it). A candidate whose `Vision-link:` is missing or reads `none (maintenance)` is
-   eligible ONLY when no linked candidate is open in any tier — maintenance fills an empty
-   hour, it never displaces the number. Name every candidate you dropped here in your report
-   (issue number + "no Vision-link"), exactly as 2b's `needs-human-op` drops are, so marie
-   can link it or close it. Reif, 2026-09-06: "I don't care about the number of PRs we hit
-   ... I just want to make autonomous progress on agreed upon goals." Measured that night:
-   12 of 12 minion PRs in one hour were `fix(...)` inward spend, none named the number.
-
-   2c. **Drop any candidate that has already dead-ended past the threshold — gh#64.** Nothing
-   above this line distinguishes "never tried" from "tried and abandoned 10 times"; without
-   this check the same chronically-blocked item gets reclaimed and respawned every hour,
-   burning a full claim/spawn/clear cycle on doomed work each time
-   ([[project_gru_repeat_claim_dead_end_gap_fleetkit64]]). For each remaining candidate:
-   ```
-   python3 /fleet-kit/scripts/claim_history.py --item <n>
-   # exit 0 "ok count=<c> threshold=3"       -> claim normally, no behavior change
-   # exit 1 "BLOCKED count=<c> threshold=3"  -> drop from this pass's candidate set
-   ```
-   This is a DIFFERENT signal from 2b's `fleet:needs-human-op` filter: that one is a prior
-   pass's *explicit* verdict that the item is structurally blocked on something no fleet member
-   holds (credentials, a human decision). This one is silent — nothing ever declared the item
-   blocked, it has just failed to close after repeated tries. The default threshold is 3
-   dead-end claims inside a 14-day window (reasoned default, not a human call — see
-   `claim_history.py`'s own docstring; the exact number was left `UNKNOWN` by this issue's PRD).
-   A dropped candidate is never silently missing from your report — name it explicitly
-   (issue number + the `count=` claim_history.py printed) the same way 2b's
-   `fleet:needs-human-op` drops already are, so a human can decide whether it needs
-   `fleet:needs-human-op` applied, a priority downgrade, or nothing at all. Do not claim or
-   spawn against a dropped candidate this pass.
 
 3. **Pack the hour with `fanout.py`. N is an OUTPUT, not a decision.**
 
@@ -445,6 +446,6 @@ spawns exactly one). Your job, in order:
 
 ## Report
 
-Your runway read, the priority call you made and your reasoning, and a one-line result per minion spawned (PR #, "already fixed", or "failed: reason"). A minion that never reports back (crashed, hung) is a FAILURE you name explicitly, not a silent gap in the summary. Any candidate step 2c dropped for dead-ending past the threshold is named too (issue number + observed count) — never a silent absence from the candidate set. Same for every candidate step 2b's Vision-link gate dropped (issue number + which branch of gh#525's rule failed it) — never a silent absence there either.
+Your runway read, the priority call you made and your reasoning, and a one-line result per minion spawned (PR #, "already fixed", or "failed: reason"). A minion that never reports back (crashed, hung) is a FAILURE you name explicitly, not a silent gap in the summary. Any candidate step 2's dead-end check dropped for dead-ending past the threshold is named too (issue number + observed count) — never a silent absence from the candidate set. Same for every candidate step 2's Vision-link gate dropped (issue number + which branch of gh#525's rule failed it) — never a silent absence there either.
 
 **Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.
