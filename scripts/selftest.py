@@ -4362,6 +4362,47 @@ def _nerd_structural_na_marker_wires_to_datta_downrank():
         "one non-marker row must break the streak, never a partial down-rank"
 
 
+def _datta_gh392_hold_never_suppresses_stale_or_breached():
+    """gh#497 (PR #470 review finding): datta.md's gh#392 reconfirmation-only hold (step 5)
+    stated in prose that it "must never suppress a STALE or BREACHED verdict for the same
+    lane", but no step in the block (1 through 4) actually checked whether the lane was
+    currently STALE or BREACHED before the hold applied -- step 4 only tested a zero KPI/
+    guardrail delta since the lane's last `recorded_at`. A lane whose `lane_kpis_snapshot.py`
+    job stopped writing rows shows an unchanged KPI (read by step 4 as "not material") while
+    no issue moved either (step 3), so step 5's old condition was satisfied and the hold fired
+    -- silently suppressing exactly the STALE verdict its own text promised never to suppress.
+
+    The fix threads an explicit non-STALE/non-BREACHED check (reusing section 2's own STALE/
+    BREACHED definitions, not inventing a new one) into step 5's hold condition itself.
+    """
+    root = Path(__file__).parent.parent
+    datta = (root / "members" / "datta" / "datta.md").read_text()
+
+    section_start = datta.find("Separately, also check for reconfirmation-only staleness")
+    section_end = datta.find("**Spawning fewer nerds than lanes is the normal case")
+    assert 0 <= section_start < section_end, "gh#392 hold section markers not found"
+    section = datta[section_start:section_end]
+
+    step5_start = section.find("5. Zero referenced issues moved")
+    assert step5_start != -1, "step 5's hold condition text not found"
+    step5 = section[step5_start:step5_start + 700]
+    assert "STALE and BREACHED signals" in step5 and "section 2 above" in step5, \
+        "gh#497: step 5's hold condition doesn't itself gate on STALE/BREACHED -- the " \
+        "'never suppress a STALE or BREACHED verdict' promise is still only prose, not a check"
+
+    # A minimal model of the corrected rule: the hold only ever fires when the lane is
+    # confirmed non-STALE and non-BREACHED, in addition to the pre-existing two conditions.
+    def holds_flat(issues_moved, kpi_material, is_stale, is_breached):
+        return (not issues_moved) and (not kpi_material) and (not is_stale) and (not is_breached)
+
+    assert holds_flat(False, False, False, False) is True, \
+        "an ordinary reconfirmation-only lane (non-stale, non-breached) must still hold flat"
+    assert holds_flat(False, False, True, False) is False, \
+        "gh#497: a currently STALE lane must never be held flat by this hold"
+    assert holds_flat(False, False, False, True) is False, \
+        "gh#497: a currently BREACHED lane must never be held flat by this hold"
+
+
 def _nerd_invalid_lane_rejected_before_lane_work():
     """gh#374: a `lane=<name>` dispatch outside the canonical seven must be rejected BEFORE any
     lane-specific work begins, not discovered only after a full pass ran.
@@ -7453,6 +7494,7 @@ if __name__ == "__main__":
     check("datta's structural-N/A streak has a reset path independent of ranking (gh#447)", _datta_structural_na_streak_has_a_reset_path)
     check("nerd rejects an invalid lane before any lane-specific work (gh#374)", _nerd_invalid_lane_rejected_before_lane_work)
     check("nerd's STRUCTURAL-N/A marker wires to datta's down-rank rule (gh#451)", _nerd_structural_na_marker_wires_to_datta_downrank)
+    check("datta's gh#392 hold never suppresses a STALE or BREACHED verdict (gh#497)", _datta_gh392_hold_never_suppresses_stale_or_breached)
     check("a run records the item it worked", _a_run_records_the_item_it_worked)
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
