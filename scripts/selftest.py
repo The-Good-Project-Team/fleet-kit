@@ -1188,9 +1188,10 @@ def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
     # Only a flag attached to the command itself -- prose explaining WHY --squash is wrong
     # ("an explicit --squash errors") must not trip this. Stop at the closing backtick/quote
     # so an explanation trailing the command is not read as part of it.
-    bad = _re.compile(r"gh pr merge(?:\s+(?:--auto|\"?\$?[A-Za-z_{}\"]*PR_NUM[\"}]*|\d+))*"
+    bad = _re.compile(r"gh pr merge(?:\s+(?:--auto|\"?\$?\{?[A-Za-z_]+\}?\"?|\d+))*"
                       r"\s+--(squash|merge|rebase)\b")
-    for rel in ("scripts/worktree_builder.sh", "members/minion/minion.fleet.json",
+    for rel in ("scripts/worktree_builder.sh", "scripts/auto_update_branch.sh",
+                "members/minion/minion.fleet.json",
                 "members/minion/minion.md", "members/jefe/jefe.md", "agents/builder.md",
                 "README.md"):
         f = ROOT / rel
@@ -5342,9 +5343,10 @@ def _green_pr_with_no_auto_merge_gets_armed():
         # #291 unarmed, #292 armed, #293 draft+unarmed. The -q expression is evaluated by gh
         # itself in the real thing, so the stub returns what that filter WOULD select.
         #
-        # The merge stub rejects a bare `--auto` exactly as the real `gh` CLI does on this
-        # repo (no merge queue -- an explicit strategy flag is required non-interactively).
-        # A regression back to the bare form fails this assertion instead of passing silently.
+        # The merge stub rejects a strategy flag exactly as the real `gh` CLI does on a
+        # merge-queue-controlled main (fleet-kit#523: fleet-kit's main has a queue now, same as
+        # nonprofit-atlas's). A regression back to `--squash` fails this instead of passing
+        # silently -- that regression is what left philanthropy PRs unarmed (PR #4215).
         (bin_dir / "gh").write_text(
             "#!/bin/bash\n"
             "if [ \"$1\" = \"repo\" ]; then echo 'The-Good-Project-Team/fleet-kit'; exit 0; fi\n"
@@ -5354,9 +5356,9 @@ def _green_pr_with_no_auto_merge_gets_armed():
             "fi\n"
             "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"merge\" ]; then\n"
             "  case \"$*\" in\n"
-            "    *--squash*|*--merge*|*--rebase*) : ;;\n"
-            "    *) echo '--merge, --rebase, or --squash required when not running "
-            "interactively' >&2; exit 1 ;;\n"
+            "    *--squash*|*--merge*|*--rebase*) echo '! The merge strategy for main is set "
+            "by the merge queue' >&2; exit 1 ;;\n"
+            "    *) : ;;\n"
             "  esac\n"
             f"  echo \"$3\" >> {calls}\n"
             "  exit 0\n"
