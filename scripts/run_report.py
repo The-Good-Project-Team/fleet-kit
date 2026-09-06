@@ -226,18 +226,23 @@ def classify(report: dict, *, vision_required: bool, exit_code: int | None = Non
         # genuinely filed nothing (#3015).
         if exit_code in _EXIT_CODE_STATUS:
             return _EXIT_CODE_STATUS[exit_code]
+        # gh#252: exit_code 0 (or unknown) with an empty outcome AND evidence the pass
+        # dispatched a background sub-pass it never waited on is a live real-work loss, not a
+        # genuine "ran to completion and found nothing" -- distinguish it so the orphaned items
+        # don't vanish into reported_nothing with no trace back to what was dispatched. Checked
+        # BEFORE trailing_loss (gh#461): a pass that both wrote a real report inside
+        # _detect_trailing_loss's window AND dispatched a fan-out it never waited on is still an
+        # incomplete_fanout -- the dispatched sub-passes are the actionable orphan, and
+        # incomplete_fanout is itself already a form of real-work loss, so report_lost must not
+        # shadow it and drop orphaned_items.
+        if report.get("dispatched_items"):
+            return STATUS_INCOMPLETE_FANOUT
         # gh#257 AC2/AC3: the wrapper already confirmed (via stream_log.py's
         # _detect_trailing_loss) that a real report existed one turn earlier and was overwritten
         # -- this is real-work loss, distinct from both a genuine "found nothing" pass and from
         # incomplete_fanout's "never got as far as writing a report at all".
         if trailing_loss:
             return STATUS_REPORT_LOST
-        # gh#252: exit_code 0 (or unknown) with an empty outcome AND evidence the pass
-        # dispatched a background sub-pass it never waited on is a live real-work loss, not a
-        # genuine "ran to completion and found nothing" -- distinguish it so the orphaned items
-        # don't vanish into reported_nothing with no trace back to what was dispatched.
-        if report.get("dispatched_items"):
-            return STATUS_INCOMPLETE_FANOUT
         return STATUS_NOTHING
     if outcome.upper().startswith("QUIET"):
         # A quiet pass is legitimate, but only with evidence -- otherwise it is the
