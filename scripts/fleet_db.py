@@ -307,14 +307,28 @@ def sync(conn: sqlite3.Connection, runs_file: Path | None = None) -> int:
 def spend(conn: sqlite3.Connection, member: str | None = None, hours: float = 24.0) -> list[dict]:
     """Per-member trailing spend -- the number a self-tuning pass reads before deciding
     anything. Grouped, not a raw dump: a member deciding whether to throttle ITSELF wants its
-    own total, not 200 individual rows to sum by eye."""
+    own total, not 200 individual rows to sum by eye.
+
+    gh#185: `ok_runs`'s CASE now reuses fleet_stats.py's `_NOT_EXECUTED_STATUSES` set (#150) as
+    an explicit exclusion, rather than relying on 'ok'/'quiet' happening to already be disjoint
+    from it -- so if that taxonomy ever grows a status that isn't obviously a fail (the way
+    #150 itself widened `_NOT_EXECUTED_STATUSES` from one status to three), a run that never
+    got the chance to execute still can't count toward ok_runs by accident. `runs` and every
+    other field below are deliberately left alone (AC3/Non-goals): this is scoped to ok_runs'
+    own numerator, not a redefinition of the denominator every field here shares.
+    """
     import time
+
+    import fleet_stats
     since = time.time() - hours * 3600
-    q = """SELECT member, COUNT(*) as runs, SUM(cost_usd) as total_cost,
+    not_executed = fleet_stats._NOT_EXECUTED_STATUSES
+    not_executed_sql = ",".join("?" for _ in not_executed)
+    q = f"""SELECT member, COUNT(*) as runs, SUM(cost_usd) as total_cost,
                   AVG(cost_usd) as avg_cost, SUM(num_turns) as total_turns,
-                  SUM(CASE WHEN status IN ('ok','quiet') THEN 1 ELSE 0 END) as ok_runs
+                  SUM(CASE WHEN status IN ('ok','quiet') AND status NOT IN ({not_executed_sql})
+                           THEN 1 ELSE 0 END) as ok_runs
            FROM runs WHERE recorded_at >= ?"""
-    params: list = [since]
+    params: list = [*not_executed, since]
     if member:
         q += " AND member = ?"
         params.append(member)
