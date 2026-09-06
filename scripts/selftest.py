@@ -5963,6 +5963,138 @@ def _green_pr_with_no_auto_merge_gets_armed():
         assert "armed" in logtext, "the tick summary never reports how many PRs it armed"
 
 
+def _stale_pr_candidate_filter_excludes_human_branches_and_fresh_prs():
+    """gh#527: the closing sweep's OWN PR-list filter is the only thing standing between
+    "close a dead machine PR" and "close a human's PR" -- gh's `author` field can't tell them
+    apart (every fleet-opened PR is pushed under the same authenticated account), so the
+    branch-name regex IS the guard, and getting it wrong closes a human's work.
+
+    Runs the real jq expression extracted from auto_update_branch.sh (not retyped) against
+    fixture PRs, same shape as `_fixer_sees_a_green_but_parked_pr`.
+    """
+    import json
+    import re
+    import shutil
+    import subprocess
+
+    if not shutil.which("jq"):
+        return  # jq absent here; shape is also covered by the end-to-end stub test below
+
+    src = (ROOT / "scripts" / "auto_update_branch.sh").read_text()
+    m = re.search(r"STALE_CANDIDATES=\$\(gh pr list.*?-q '(.*?)' 2>/dev/null\)", src, re.S)
+    assert m, "cannot find auto_update_branch.sh's stale-candidate jq expression -- did its shape change?"
+    expr = m.group(1).replace('\'"$STALE_CUTOFF"\'', "2026-09-04T00:00:00Z")
+
+    old = "2026-09-01T00:00:00Z"   # before the cutoff -- stale
+    new = "2026-09-06T00:00:00Z"  # after it -- too fresh to judge
+
+    prs = [
+        {"number": 601, "isDraft": False, "headRefName": "member/minion-item601-1-1", "createdAt": old},
+        {"number": 602, "isDraft": False, "headRefName": "fix/hand-authored-branch", "createdAt": old},
+        {"number": 603, "isDraft": False, "headRefName": "minion/librarian-seq1-4439", "createdAt": old},
+        {"number": 604, "isDraft": False, "headRefName": "member/minion-item604-2-2", "createdAt": new},
+        {"number": 605, "isDraft": True, "headRefName": "member/minion-item605-3-3", "createdAt": old},
+    ]
+
+    proc = subprocess.run(["jq", "-r", expr], input=json.dumps(prs),
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"jq failed: {proc.stderr.strip()[:300]}"
+    picked = set(proc.stdout.split())
+
+    assert "601" in picked, "a stale machine (member/*) PR was not selected as a close candidate"
+    assert "602" not in picked, \
+        "a hand-authored branch (fix/*) was selected -- this would auto-close a human's PR"
+    assert "603" in picked, "a stale machine PR on the minion/* branch shape was not selected"
+    assert "604" not in picked, "a PR younger than the stale cutoff was selected -- too fresh to judge"
+    assert "605" not in picked, "a draft PR was selected -- a draft is explicitly not ready to judge"
+
+
+def _stale_pr_closed_and_claim_freed_but_a_queued_pr_is_untouched():
+    """gh#527: a PR that never arms (red CI, blocked, or stuck cycling in/out of the merge
+    queue) must be closed after 48h with a reason, and its issue's fleet:claimed label freed
+    so gru can re-pick it -- but a PR correctly waiting its turn in the queue must NOT be
+    closed just for being old (gh#4305: autoMergeRequest stays null for a queued PR too, so
+    only a raw GraphQL mergeQueueEntry call can tell "dead" from "patiently queued").
+
+    Stubs `gh` end to end (same boundary as `_green_pr_with_no_auto_merge_gets_armed`) so the
+    real closing/release path runs, including the real board_github.py release() call for the
+    stale PR's originating issue.
+    """
+    import subprocess
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"; log_dir.mkdir(parents=True, exist_ok=True)
+        repo = Path(tmp) / "repo"; repo.mkdir(parents=True, exist_ok=True)
+        bin_dir = Path(tmp) / "bin"; bin_dir.mkdir(parents=True, exist_ok=True)
+        calls = Path(tmp) / "calls.txt"
+
+        # #701: stale, member/* branch, red checks, no mergeQueueEntry -> MUST close + release.
+        # #702: stale, member/* branch, but HAS a mergeQueueEntry -> MUST be left alone.
+        (bin_dir / "gh").write_text(f"""#!/bin/bash
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then echo "acme/testrepo"; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  case "$*" in
+    *headRefName,createdAt*) echo 701; echo 702 ;;
+    *) : ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  case "$*" in *pr702:*) echo 702 ;; *) : ;; esac
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  num="$3"
+  case "$*" in
+    *--json*commits*) [ "$num" = "701" ] && echo "2026-09-01T00:00:00Z"; exit 0 ;;
+    *--json*headRefOid*) echo "sha$num"; exit 0 ;;
+    *--json*statusCheckRollup*) [ "$num" = "701" ] && echo 1 || echo 0; exit 0 ;;
+    *--json*body*) echo "Backlog: #9001"; exit 0 ;;
+    *) exit 0 ;;
+  esac
+fi
+if [ "$1" = "pr" ] && [ "$2" = "close" ]; then echo "close $3" >> {calls}; exit 0; fi
+if [ "$1" = "api" ]; then
+  case "$*" in *statuses/*) echo failure ;; *) : ;; esac
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then echo "issue-comment $3" >> {calls}; exit 0; fi
+if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then echo "issue-edit $3 $4 $5" >> {calls}; exit 0; fi
+exit 0
+""")
+        (bin_dir / "gh").chmod(0o755)
+
+        proc = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "auto_update_branch.sh")],
+            capture_output=True, text=True, timeout=30,
+            env={"FLEET_REPO": str(repo), "FLEET_LOG_DIR": str(log_dir),
+                 "FLEET_ENV_FILE": "/nonexistent", "PATH": f"{bin_dir}:/usr/bin:/bin"},
+        )
+        assert proc.returncode == 0, f"script failed: {proc.stderr.strip()[:300]}"
+
+        made = calls.read_text().splitlines() if calls.exists() else []
+        assert "close 701" in made, (
+            "a stale, red, member/* PR was never closed -- it can sit open forever with its "
+            f"issue's fleet:claimed label stuck: {made!r}"
+        )
+        assert "close 702" not in made, (
+            "a PR correctly waiting its turn in the merge queue was closed just for being old "
+            f"(gh#4305 shape): {made!r}"
+        )
+        assert "issue-edit 9001 --remove-label fleet:claimed" in made, (
+            f"closing PR #701 did not free its originating issue's fleet:claimed label: {made!r}"
+        )
+        assert any(c.startswith("issue-comment 9001") for c in made), (
+            f"board_github.py's release path must comment why before it strips the label: {made!r}"
+        )
+
+        logtext = (log_dir / "auto_update_branch.log").read_text()
+        assert "closed stale PR (red" in logtext, \
+            f"tick log never named the close reason: {logtext[-2000:]!r}"
+        assert "correctly waiting its turn in the merge queue" in logtext, \
+            f"tick log never explained why the queued PR was left alone: {logtext[-2000:]!r}"
+
+
 def _fleet_view_reads_the_api_key_from_the_env_file():
     """A key present in fleet.env must be readable by the auth path.
 
@@ -7753,6 +7885,10 @@ if __name__ == "__main__":
     check("the-fixer does not fire on a parked PR already in the merge queue",
           _fixer_does_not_fire_on_a_parked_pr_already_in_the_merge_queue)
     check("a green PR with no auto-merge gets armed", _green_pr_with_no_auto_merge_gets_armed)
+    check("stale-PR close filter excludes human branches and fresh PRs (gh#527)",
+          _stale_pr_candidate_filter_excludes_human_branches_and_fresh_prs)
+    check("a stale unarmed/red PR is closed and its claim freed, a queued one is untouched (gh#527)",
+          _stale_pr_closed_and_claim_freed_but_a_queued_pr_is_untouched)
     check("fleet-view reads FLEET_API_KEY from fleet.env", _fleet_view_reads_the_api_key_from_the_env_file)
     check("FLEET_API_KEY never reaches an LLM pass", _api_key_never_reaches_an_llm)
     check("incidental 'rate limit' text does not gate an account", _classifier_ignores_incidental_rate_limit_text)

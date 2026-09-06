@@ -52,6 +52,117 @@ if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
   exit 0
 fi
 
+# --- close stale (>48h) unarmed/red/queue-rejected PRs, free the claim --------------------
+# fleet-kit#527 (the other half of #523's "nothing sits"): a PR that never arms -- red CI,
+# blocked by fleet-code-review with no fix pushed since, or stuck cycling in and out of the
+# merge queue -- can sit open indefinitely, and its issue's fleet:claimed label sits with it:
+# invisible to gru (it only ever picks unclaimed items) and invisible to marie's Part A
+# stale-claim check (marie.md: that only clears a claim with NO open PR at all, never one
+# stuck behind a dead PR).
+#
+# Never a human-authored PR: `gh`'s own `author` field is useless here (every fleet-opened PR
+# is pushed under the same authenticated account -- fleet_view_server.py's own "author is
+# USELESS, the real signal is the branch name" note applies just as much here), so the guard
+# is the branch-name convention run_member.sh actually stamps: `member/<worker>-item<N>-...`
+# (see run_member.sh's WT_BRANCH). A hand-authored branch (`fix/...`, `feat/...`, etc.) never
+# matches and is always skipped, never closed.
+#
+# Never a PR correctly waiting its turn in the queue: gh#4305 already burned this once --
+# `autoMergeRequest` stays null for a PR that's already enqueued (the queue entry doesn't
+# populate that field), so the only reliable signal is a raw GraphQL `mergeQueueEntry` call,
+# same lesson members/the-fixer/check.sh's `queued_prs()` encodes. Reused here in the same
+# batched-single-call shape (one round trip for every candidate, not N).
+STALE_HOURS="${FLEET_STALE_PR_HOURS:-48}"
+STALE_CUTOFF=$(date -u -d "-${STALE_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+               || date -u -v-"${STALE_HOURS}"H +%Y-%m-%dT%H:%M:%SZ)
+CLOSED=0
+
+queued_prs() { # <space-separated pr numbers> -> the subset that already has a mergeQueueEntry
+  local nums="$1" owner name query n
+  [ -z "$nums" ] && return
+  owner="${REPO_SLUG%%/*}"; name="${REPO_SLUG#*/}"
+  query="query {"
+  for n in $nums; do
+    query+=" pr$n: repository(owner: \"$owner\", name: \"$name\") { pullRequest(number: $n) { mergeQueueEntry { state } } }"
+  done
+  query+=" }"
+  timeout 25s gh api graphql -f query="$query" \
+    -q '.data | to_entries[] | select(.value.pullRequest.mergeQueueEntry != null) | .key | ltrimstr("pr")' \
+    2>/dev/null
+}
+
+STALE_CANDIDATES=$(gh pr list --state open --json number,isDraft,headRefName,createdAt \
+  -q '.[] | select(.isDraft|not) | select(.headRefName | test("^(member|minion)/")) | select(.createdAt < "'"$STALE_CUTOFF"'") | .number' 2>/dev/null)
+STALE_QUEUED=$(queued_prs "$STALE_CANDIDATES")
+
+for pr in $STALE_CANDIDATES; do
+  if grep -qx "$pr" <<<"$STALE_QUEUED"; then
+    log "PR #$pr: not closing -- correctly waiting its turn in the merge queue (gh#4305)"
+    continue
+  fi
+
+  # A genuine push (a real fix, not this same script's own branch-sync merge) resets the
+  # clock: closing right after someone pushed a fix would race the next CI/review cycle.
+  # Filter out `update-branch`'s own "Merge branch ... into ..." sync commits so a PR this
+  # script keeps rebasing every tick (the loop below) doesn't look permanently "fresh" even
+  # though nobody has touched its actual content in days.
+  last_real_commit=$(gh pr view "$pr" --json commits \
+    -q '[.commits[] | select((.messageHeadline | startswith("Merge branch")) and (.messageHeadline | contains("into")) | not)] | if length>0 then .[-1].committedDate else empty end' \
+    2>/dev/null)
+  if [ -n "$last_real_commit" ] && [[ "$last_real_commit" > "$STALE_CUTOFF" ]]; then
+    log "PR #$pr: not closing -- a real commit landed at $last_real_commit, inside the window"
+    continue
+  fi
+
+  head=$(gh pr view "$pr" --json headRefOid -q '.headRefOid' 2>/dev/null)
+  rollup_failed=$(gh pr view "$pr" --json statusCheckRollup \
+    -q '[.statusCheckRollup[]? | select(.conclusion=="FAILURE" or .state=="FAILURE")] | length' 2>/dev/null)
+  verdict=$(timeout 25s gh api "repos/${REPO_SLUG}/statuses/${head}" --jq '[.[] | select(.context=="fleet-code-review")][0].state' 2>/dev/null)
+  # `grep -c` itself always prints a count (even "0") but exits 1 on no match, so it can't be
+  # chained with `|| echo 0` without double-printing -- the fallback only kicks in when the
+  # LOG file is absent.
+  armed_count=0
+  [ -f "$LOG" ] && armed_count=$(grep -c "PR #$pr: auto-merge armed" "$LOG" 2>/dev/null)
+  armed_count="${armed_count:-0}"
+
+  if [ "${rollup_failed:-0}" -gt 0 ] 2>/dev/null || [ "$verdict" = "failure" ]; then
+    reason="red"
+  elif [ "${armed_count:-0}" -ge 2 ] 2>/dev/null; then
+    reason="${armed_count} queue rejections"
+  else
+    reason="unarmed"
+  fi
+
+  note="Closing: open >${STALE_HOURS}h with no follow-up push and never merged ($reason, as of $(ts)). Nothing here is a content judgment -- the fleet-code-review/CI gates are what decided this never went green. A human or a future minion pass can pick this issue back up fresh."
+  if gh pr close "$pr" --comment "$note" >/dev/null 2>&1; then
+    log "PR #$pr: closed stale PR ($reason, created before $STALE_CUTOFF)"
+    CLOSED=$((CLOSED+1))
+
+    # Free the issue's claim so gru can re-pick it -- the whole point of this closing path.
+    # Backlog:# is worktree_builder.sh's own stamped convention (its body-append step); the
+    # branch's own -itemN- segment (run_member.sh's WT_BRANCH shape) is the fallback for a
+    # body that was hand-edited or never got stamped.
+    body=$(gh pr view "$pr" --json body -q '.body' 2>/dev/null)
+    issue=$(grep -oE 'Backlog:[[:space:]]*#[0-9]+' <<<"$body" | grep -oE '[0-9]+' | head -1)
+    if [ -z "$issue" ]; then
+      pr_head=$(gh pr view "$pr" --json headRefName -q '.headRefName' 2>/dev/null)
+      issue=$(sed -nE 's#.*-item([0-9]+)-.*#\1#p' <<<"$pr_head")
+    fi
+    if [ -n "$issue" ]; then
+      if python3 "$KIT_DIR/scripts/board_github.py" release "$issue" \
+           "released by auto_update_branch.sh: PR #$pr closed stale ($reason), re-claimable" >>"$LOG" 2>&1; then
+        log "issue #$issue: fleet:claimed removed (PR #$pr closed stale)"
+      else
+        log "issue #$issue: board_github.py release FAILED -- claim may still be stuck"
+      fi
+    else
+      log "PR #$pr: closed but could not determine its originating issue -- claim label untouched"
+    fi
+  else
+    log "PR #$pr: close FAILED"
+  fi
+done
+
 UPDATED=0
 CHECKED=0
 for pr in $(gh pr list --state open --json number,isDraft,mergeable,mergeStateStatus \
@@ -112,4 +223,4 @@ for pr in $(gh pr list --state open --json number,isDraft,autoMergeRequest \
   fi
 done
 
-log "tick done: checked $CHECKED PR(s), updated $UPDATED, armed $ARMED"
+log "tick done: checked $CHECKED PR(s), updated $UPDATED, armed $ARMED, closed stale $CLOSED"
