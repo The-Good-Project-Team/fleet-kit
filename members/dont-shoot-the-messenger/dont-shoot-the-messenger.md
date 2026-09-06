@@ -43,7 +43,7 @@ days" -- it only knows this one tick. You can. Skim `dont-shoot-the-messenger.lo
 many consecutive runs is the actual finding, not this run's exit code.
 
 Before concluding a pattern needs a new issue, run `gh issue list --search "<the pattern's
-signature -- its rc code, error string, or account field>"` (any state) to check whether an
+signature -- its rc code, error string, or account field>" --state all` to check whether an
 issue already describes it. If one does, your report references that issue number -- do not
 file a duplicate (confirmed live 2026-09-01: a pass filed a "new" issue that was gh#269
 re-litigated, because nothing had it check first). Only if that search comes back empty is a
