@@ -3606,6 +3606,43 @@ def _judge_judy_files_a_fix_item_on_block():
         "fix-item filing has no || WARN fallback -- a filing failure would crash the tick instead of logging"
 
 
+def _judge_judy_skips_an_empty_diff_instead_of_blocking():
+    """gh#531: `gh pr diff` can exit 0 with EMPTY output even though the PR has real commits --
+    live-confirmed on PR #505, whose diff against the CURRENT base had already been fully
+    absorbed into main by a sibling PR (#504) fixing the same issue (gh#448), so gh's
+    three-dot compare legitimately had nothing left to show. The exit-code check alone never
+    caught this: an empty $DIFF_FILE sailed straight into the review prompt, the model
+    (correctly, given an empty DIFF: section) said it couldn't review anything and blocked, and
+    that block then filed this exact issue via board_github.py -- a confusing, spurious escalation
+    for what was actually "nothing left to review", not a code defect.
+
+    Static assertions, same style as this file's other judge-judy checks: an empty-diff check
+    must exist, must run AFTER the `gh pr diff` fetch but BEFORE the review PROMPT is built (so
+    an empty diff can never reach the model), and must skip via the same
+    SKIPPED_THIS_TICK/cleanup_pass/continue shape as a hard `gh pr diff` failure -- never a
+    VERDICT: block.
+    """
+    src = (Path(__file__).parent.parent / "members" / "judge-judy" / "judge-judy.sh").read_text()
+
+    fetch_i = src.index('gh pr diff "$PR" > "$DIFF_FILE"')
+    prompt_i = src.index('PROMPT="You are the merge-blocking code reviewer')
+    window = src[fetch_i:prompt_i]
+
+    assert "tr -d '[:space:]' < \"$DIFF_FILE\"" in window, \
+        "no empty-diff check on $DIFF_FILE between the gh pr diff fetch and the review prompt"
+
+    empty_i = src.index("tr -d '[:space:]' < \"$DIFF_FILE\"", fetch_i)
+    assert empty_i < prompt_i, "empty-diff check runs after the review prompt is already built"
+
+    empty_branch = src[empty_i:empty_i + 400]
+    assert 'SKIPPED_THIS_TICK="$SKIPPED_THIS_TICK $PR"' in empty_branch, \
+        "an empty diff must skip via SKIPPED_THIS_TICK, same as a hard gh pr diff failure"
+    assert "cleanup_pass" in empty_branch, "an empty diff must still release the diff/lease temp state via cleanup_pass"
+    assert "continue" in empty_branch, "an empty diff must continue the tick loop, not fall through into a verdict"
+    assert "VERDICT" not in empty_branch, \
+        "an empty diff must never reach a VERDICT -- it should skip before the model is ever called"
+
+
 def _marie_sweeps_the_whole_backlog_not_just_the_new():
     """marie must re-judge the OLD backlog, not only what changed since last pass.
 
@@ -7244,6 +7281,7 @@ if __name__ == "__main__":
     check("judge-judy strikes are head-scoped and leave diagnosable evidence", _judge_judy_strikes_are_scoped_by_head_and_leave_diagnosable_evidence)
     check("board_github file_item can add a priority label alongside backlog/lane", _board_github_file_item_can_add_a_priority_label)
     check("judge-judy files a priority-high fix item when it blocks a PR", _judge_judy_files_a_fix_item_on_block)
+    check("judge-judy skips an empty diff instead of blocking (gh#531)", _judge_judy_skips_an_empty_diff_instead_of_blocking)
     check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)

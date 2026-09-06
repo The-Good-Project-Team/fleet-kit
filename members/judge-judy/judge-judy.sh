@@ -237,6 +237,23 @@ while :; do
     [ -n "$EXPLICIT_PR" ] && break
     continue
   fi
+  # gh#531: `gh pr diff` can exit 0 with EMPTY output even though the PR has real commits --
+  # live-confirmed on PR #505, whose diff against the CURRENT base had already been fully
+  # absorbed into main by a sibling PR (#504) fixing the same issue, so gh's three-dot compare
+  # legitimately had nothing left to show even though `gh pr diff --patch` still returns the
+  # original per-commit content. The exit-code check above only catches a hard gh failure, so an
+  # empty $DIFF_FILE used to sail straight into the review prompt below, where the model
+  # (correctly, given what it was shown) can't review code it was never given and blocks --
+  # confusing to a human, and indistinguishable from a real defect once it files a fix item via
+  # board_github.py. Treat it the same as a fetch failure: skip without a verdict, never spend a
+  # claude call reviewing nothing.
+  if [ -z "$(tr -d '[:space:]' < "$DIFF_FILE")" ]; then
+    log "PR #$PR: gh pr diff returned empty (likely already merged elsewhere) -- skipping without a verdict"
+    SKIPPED_THIS_TICK="$SKIPPED_THIS_TICK $PR"
+    cleanup_pass
+    [ -n "$EXPLICIT_PR" ] && break
+    continue
+  fi
   TRUNC_NOTE=""
   if [ "$(wc -c < "$DIFF_FILE")" -gt "$MAX_DIFF_BYTES" ]; then
     head -c "$MAX_DIFF_BYTES" "$DIFF_FILE" > "${DIFF_FILE}.t" && mv "${DIFF_FILE}.t" "$DIFF_FILE"
