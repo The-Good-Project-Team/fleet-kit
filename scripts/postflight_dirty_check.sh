@@ -21,11 +21,30 @@
 # alert. What this DOES fix: the same leaked file no longer re-alerts (and re-blames) every
 # single later pass forever -- see the state-file dedup below.
 #
+# gh#4542: detection alone left a leak sitting in $REPO for hours -- the gitpull cron's
+# `git merge --ff-only` (git_pull_guard.sh) has no way to proceed over a dirty tree, so it just
+# refuses on the same dirt every 10 minutes forever until a human notices and rescues it by
+# hand (`git stash -u`, per jefe's existing manual playbook). Below, ALERT now auto-stashes the
+# leak the same way, immediately -- reversible (nothing is dropped, `git stash list` still
+# holds it), so the very next gitpull tick can fast-forward again instead of waiting on a human
+# to notice a crashlooping cron. Locks on the same $REPO/.git/fleet_pull.lock git_pull_guard.sh
+# already uses, so an auto-stash here and a concurrent gitpull tick never race the same index.
+#
+# What this does NOT do, on purpose: silently expire or drop old stash entries. Reif's
+# writeup on gh#4542 found 17+ prior manual rescue stashes already sitting unreviewed for
+# weeks -- auto-stashing without ever surfacing that pile just moves the same rot from a dirty
+# working tree to a dirty stash list nobody looks at either. STASH_PILE_WARN_THRESHOLD below is
+# the stated policy: once the pile crosses it, log a POLICY line naming the count so a human
+# decides what to land or drop -- the fleet has no mechanism that judges whether stashed WIP is
+# still wanted, so it does not delete any of it itself.
+#
 # Callers must already have: $REPO set, a `log` function defined, and $LOG_DIR set -- same
 # preconditions run_member.sh and worktree_builder.sh both already establish before creating
 # their worktree.
 #
 # Usage: check_repo_clean_postflight <run-or-item-label>
+STASH_PILE_WARN_THRESHOLD="${STASH_PILE_WARN_THRESHOLD:-5}"
+
 check_repo_clean_postflight() {
   local label="${1:-unknown}"
   local state_file="$LOG_DIR/.repo_dirty_state"
@@ -56,7 +75,7 @@ check_repo_clean_postflight() {
   local sig
   sig=$(printf '%s' "$dirty" | (command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256) | awk '{print $1}')
   if [ -f "$state_file" ] && [ "$(sed -n '1p' "$state_file")" = "$sig" ]; then
-    log "NOTE: \$REPO ($REPO) is still dirty from an earlier leak (first flagged as run=$(sed -n '2p' "$state_file")) -- not caused by this run (run=$label); see repo_dirty_alerts.log, needs a human rescue"
+    log "NOTE: \$REPO ($REPO) is still dirty from an earlier leak (first flagged as run=$(sed -n '2p' "$state_file")) -- not caused by this run (run=$label); auto-stash of it must have failed, see repo_dirty_alerts.log, needs a human rescue"
     return 0
   fi
   printf '%s\n%s\n' "$sig" "$label" > "$state_file"
@@ -71,4 +90,33 @@ check_repo_clean_postflight() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] run=$label repo=$REPO"
     echo "$dirty"
   } >> "$LOG_DIR/repo_dirty_alerts.log"
+
+  # gh#4542: remediate immediately rather than leave the leak for gitpull to keep refusing on.
+  # Locked against git_pull_guard.sh's own lockfile so an in-flight `git merge --ff-only` and
+  # this stash can never touch the index at the same time.
+  local lockfile="$REPO/.git/fleet_pull.lock"
+  local stash_msg
+  stash_msg="postflight-dirty-check auto-stash run=$label $(date '+%Y-%m-%dT%H:%M:%SZ')"
+  local stash_out stash_rc
+  if command -v flock >/dev/null 2>&1; then
+    stash_out=$(flock "$lockfile" git -C "$REPO" stash push -u -m "$stash_msg" 2>&1)
+  else
+    stash_out=$(git -C "$REPO" stash push -u -m "$stash_msg" 2>&1)
+  fi
+  stash_rc=$?
+
+  if [ "$stash_rc" -eq 0 ]; then
+    rm -f "$state_file"   # remediated -- $REPO is clean again, nothing left for a later pass to blame
+    local pile_count
+    pile_count=$(git -C "$REPO" stash list 2>/dev/null | wc -l | tr -d ' ')
+    log "REMEDIATED: auto-stashed the leak from run=$label so gitpull can proceed on its next tick ($stash_out); \$REPO stash pile now has $pile_count entries, nothing dropped"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] REMEDIATED run=$label repo=$REPO auto-stashed pile=$pile_count" >> "$LOG_DIR/repo_dirty_alerts.log"
+    if [ "$pile_count" -ge "$STASH_PILE_WARN_THRESHOLD" ]; then
+      log "POLICY: \$REPO auto-stash pile has grown to $pile_count entries (threshold $STASH_PILE_WARN_THRESHOLD) -- these are reversible rescues, never auto-expired; a human needs to run \`git -C $REPO stash list\` and decide what to land or drop"
+      echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] POLICY repo=$REPO stash-pile=$pile_count threshold=$STASH_PILE_WARN_THRESHOLD needs-human-review" >> "$LOG_DIR/repo_dirty_alerts.log"
+    fi
+  else
+    log "REMEDIATION FAILED: could not auto-stash \$REPO ($REPO) after run=$label -- leak left in place, gitpull will keep refusing until a human intervenes: $stash_out"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] REMEDIATION-FAILED run=$label repo=$REPO: $stash_out" >> "$LOG_DIR/repo_dirty_alerts.log"
+  fi
 }

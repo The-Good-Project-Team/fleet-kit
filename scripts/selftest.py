@@ -2686,25 +2686,141 @@ def _postflight_dirty_check_catches_a_leaked_absolute_path_write():
         assert "ALERT" in member_text, "no loud alert written to the per-member log"
         assert "leaked.txt" in member_text, "per-member log does not name the leaked path"
 
-        # The SAME leak, still sitting there uncleaned, must not get re-blamed on every later
-        # pass that happens to check next -- a real risk once N members share one $REPO.
+        # gh#4542: the leak above is now auto-stashed as part of the ALERT (see the dedicated
+        # auto-stash test below), so $REPO is already clean again by the time a later,
+        # unrelated pass runs its own check -- it must see silence, not a re-blame.
         member_log.unlink()
         run_check("run-innocent-456")
         alerts_after = alerts_file.read_text()
         assert "run-innocent-456" not in alerts_after, \
             "an unrelated later run got blamed for a leak it didn't cause"
         assert not member_log.exists() or "ALERT" not in member_log.read_text(), \
-            "an unrelated later run raised a fresh ALERT for the same stale leak"
+            "an unrelated later run raised a fresh ALERT on an already-remediated $REPO"
 
-        # A genuinely NEW leak (different content) after the repo goes clean again must still
-        # alert -- dedup must key off the actual dirt, not just "have we ever seen dirt before".
-        subprocess.run(["git", "add", "leaked.txt"], cwd=repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-q", "-m", "absorb old leak"], cwd=repo, check=True, capture_output=True)
-        member_log.unlink()
+        # A genuinely NEW leak (different content) must still alert -- dedup must key off the
+        # actual dirt, not just "have we ever seen dirt before".
+        member_log.unlink(missing_ok=True)
         (repo / "second_leak.txt").write_text("different leak")
         run_check("run-dirty-789")
         assert "run-dirty-789" in alerts_file.read_text(), "a fresh, different leak was not alerted"
         assert "ALERT" in member_log.read_text(), "a fresh, different leak raised no ALERT"
+
+
+def _postflight_dirty_check_auto_stashes_a_leak_so_gitpull_can_proceed():
+    """gh#4542: detection alone left $REPO dirty for hours -- the gitpull cron's `git merge
+    --ff-only` (git_pull_guard.sh) has no way past a dirty tree, so it just kept refusing on
+    the same leak every 10 minutes until a human noticed and rescued it by hand
+    (`git stash -u`). This proves the ALERT path now does that rescue itself, immediately: the
+    leak lands in a real, recoverable stash and $REPO goes clean again in the same pass that
+    found it dirty, instead of waiting on a human.
+    """
+    import subprocess
+    script_path = ROOT / "scripts" / "postflight_dirty_check.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp) / "repo"
+        repo.mkdir()
+        for cmd in (
+            ["git", "init", "-q"],
+            ["git", "config", "user.email", "t@t"],
+            ["git", "config", "user.name", "t"],
+        ):
+            subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+        (repo / "f.txt").write_text("x")
+        subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        member_log = log_dir / "member.log"
+        alerts_file = log_dir / "repo_dirty_alerts.log"
+
+        (repo / "leaked.txt").write_text("orphaned WIP content")
+        script = (
+            "set -uo pipefail\n"
+            f'REPO="{repo}"\n'
+            f'LOG_DIR="{log_dir}"\n'
+            f'log() {{ echo "$*" >> "{member_log}"; }}\n'
+            f'. "{script_path}"\n'
+            f'check_repo_clean_postflight "run-dirty-123"\n'
+        )
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+
+        status = subprocess.run(
+            ["git", "-C", str(repo), "status", "--short"], capture_output=True, text=True, check=True
+        ).stdout
+        assert status.strip() == "", f"\\$REPO was not cleaned up by the auto-stash: {status!r}"
+
+        stash_list = subprocess.run(
+            ["git", "-C", str(repo), "stash", "list"], capture_output=True, text=True, check=True
+        ).stdout
+        assert "run-dirty-123" in stash_list, "the stash entry does not name the run that leaked"
+
+        recovered = subprocess.run(
+            ["git", "-C", str(repo), "stash", "show", "-p", "-u"], capture_output=True, text=True, check=True
+        ).stdout
+        assert "orphaned WIP content" in recovered, "the leaked content is not recoverable from the stash"
+
+        member_text = member_log.read_text()
+        assert "REMEDIATED" in member_text, "no REMEDIATED line logged for a successful auto-stash"
+        assert "REMEDIATED" in alerts_file.read_text(), "shared alerts log missing the REMEDIATED line"
+
+
+def _postflight_dirty_check_escalates_once_the_stash_pile_crosses_the_threshold():
+    """The other half of gh#4542: Reif's writeup found 17+ prior manual rescue stashes sitting
+    unreviewed for weeks -- auto-stashing every leak without ever surfacing the growing pile
+    just relocates that same rot into a place nobody looks. This proves the POLICY escalation
+    line only fires once the pile actually reaches the threshold, not before, and names the
+    count so a human can act on it.
+    """
+    import subprocess
+    script_path = ROOT / "scripts" / "postflight_dirty_check.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp) / "repo"
+        repo.mkdir()
+        for cmd in (
+            ["git", "init", "-q"],
+            ["git", "config", "user.email", "t@t"],
+            ["git", "config", "user.name", "t"],
+        ):
+            subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+        (repo / "f.txt").write_text("x")
+        subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        member_log = log_dir / "member.log"
+
+        def run_check(label, leak_name):
+            member_log.unlink(missing_ok=True)
+            (repo / leak_name).write_text("wip")
+            script = (
+                "set -uo pipefail\n"
+                'STASH_PILE_WARN_THRESHOLD=3\n'
+                f'REPO="{repo}"\n'
+                f'LOG_DIR="{log_dir}"\n'
+                f'log() {{ echo "$*" >> "{member_log}"; }}\n'
+                f'. "{script_path}"\n'
+                f'check_repo_clean_postflight "{label}"\n'
+            )
+            proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+            assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+
+        run_check("run-1", "leak1.txt")
+        assert not member_log.exists() or "POLICY" not in member_log.read_text(), \
+            "escalated before the pile reached the threshold (pile=1, threshold=3)"
+
+        run_check("run-2", "leak2.txt")
+        assert not member_log.exists() or "POLICY" not in member_log.read_text(), \
+            "escalated before the pile reached the threshold (pile=2, threshold=3)"
+
+        run_check("run-3", "leak3.txt")
+        assert "POLICY" in member_log.read_text(), \
+            "did not escalate once the pile reached the threshold (pile=3, threshold=3)"
+        assert "3 entries" in member_log.read_text() or "stash-pile=3" in member_log.read_text() or \
+            "pile=3" in (log_dir / "repo_dirty_alerts.log").read_text(), \
+            "escalation does not name the actual pile count"
 
 
 def _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure():
@@ -7829,6 +7945,8 @@ if __name__ == "__main__":
     check("signal_rate/dormant exclude killed+timed_out, not just budget_declined", _signal_rate_excludes_all_never_executed_statuses)
     check("a leaked absolute-path write into $REPO is caught and alerted", _postflight_dirty_check_catches_a_leaked_absolute_path_write)
     check("a git-status failure alerts rather than reading as clean", _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure)
+    check("a leak is auto-stashed so gitpull can proceed on its next tick (gh#4542)", _postflight_dirty_check_auto_stashes_a_leak_so_gitpull_can_proceed)
+    check("the stash pile escalates once it crosses the review threshold (gh#4542)", _postflight_dirty_check_escalates_once_the_stash_pile_crosses_the_threshold)
     check("auto-deploy race check detects an unrecognized git failure outside auto_deploy.sh's own path", _auto_deploy_race_check_detects_the_unrecognized_git_failure)
     check("the-fixer dedup does not let one stuck PR mute the batch", _fixer_dedup_does_not_let_one_stuck_pr_mute_the_batch)
     check("the-fixer dedup still suppresses an unchanged batch", _fixer_dedup_still_suppresses_an_unchanged_batch)
