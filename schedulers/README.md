@@ -8,7 +8,7 @@ topic the health pagers below page to), `{{PUBLIC_URL}}` (the public tunnel URL
 tunnel-health checks, e.g. `https://your-fleet.example.com/`), `{{VIEW_PORT}}` (your
 `FLEET_VIEW_PORT`, e.g. `8420`), `{{INSTANCE_DIR}}` (this instance's state dir, e.g.
 `instances/<name>` under `up.sh`'s own layout — where its `fleet.env` lives), and
-`{{CONTAINER_NAME}}` (the podman container this instance runs as, e.g. `fleet-kit-<name>`) —
+`{{CONTAINER_NAME}}` (the podman container this instance runs as, e.g. `fleet-kit-<name>`), and `{{INSTANCE_NAME}}` (the label the member-liveness pager names in its page) —
 then install per your platform's normal mechanism.
 
 | Job | Cadence | Script | Required? |

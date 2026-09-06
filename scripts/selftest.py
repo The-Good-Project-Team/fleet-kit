@@ -4260,6 +4260,19 @@ def _account_and_tunnel_health_checks_are_actually_scheduled():
     )
 
 
+def _has_host_only_scheduler(root, script_name: str) -> bool:
+    """True when schedulers/ carries the full host-side trio for this script."""
+    sd = root / "schedulers" / "systemd"
+    ld = root / "schedulers" / "launchd"
+    services = [f for f in sd.glob("fleetkit-*.service") if script_name in f.read_text()]
+    if not services:
+        return False
+    timers = [sd / (f.stem + ".timer") for f in services]
+    if not all(t.exists() for t in timers):
+        return False
+    return any(script_name in f.read_text() for f in ld.glob("com.fleetkit.*.plist"))
+
+
 def _required_health_check_scripts_in_readme_are_scheduled():
     """Closes the FAILURE CLASS, not just one instance of it (gh#249).
 
@@ -4289,8 +4302,15 @@ def _required_health_check_scripts_in_readme_are_scheduled():
         if not m:
             continue
         script_path, script_name = m.group(1), m.group(2)
-        if f"bash /fleet-kit/{script_path}" not in entry:
-            missing.append(script_name)
+        if f"bash /fleet-kit/{script_path}" in entry:
+            continue
+        # Host-only pagers (fleet-kit#512): a check whose whole point is "the container's
+        # cron is dead" cannot live in that container's crontab. Its scheduled shape is the
+        # one _account_heartbeat_and_budget_read_have_host_only_schedulers pins -- a systemd
+        # unit that names the script, its timer, and a launchd plist that names it.
+        if _has_host_only_scheduler(root, script_name):
+            continue
+        missing.append(script_name)
     assert not missing, (
         f"{missing} are marked required in schedulers/README.md but have no cron line in "
         "entrypoint.sh -- a required outage pager that looks shipped (merged PR, a README "
@@ -4312,14 +4332,16 @@ def _account_heartbeat_and_budget_read_have_host_only_schedulers():
     """
     root = Path(__file__).parent.parent
     entry = (root / "entrypoint.sh").read_text()
-    scripts = ("account_heartbeat.sh", "budget_read_check.sh")
+    scripts = ("account_heartbeat.sh", "budget_read_check.sh", "member_liveness_check.sh")
     problems = []
     for script in scripts:
         if f"bash /fleet-kit/scripts/{script}" in entry:
             problems.append(
-                f"{script} has a cron line in entrypoint.sh -- it `podman exec`s into its own "
-                "container and cannot run there; this looks scheduled but fails every tick")
-    stem = {"account_heartbeat.sh": "account-heartbeat", "budget_read_check.sh": "budget-read"}
+                f"{script} has a cron line in entrypoint.sh -- it cannot run inside the fleet's "
+                "own container (podman exec into itself / watching that container's own dead "
+                "cron); this looks scheduled but fails every tick")
+    stem = {"account_heartbeat.sh": "account-heartbeat", "budget_read_check.sh": "budget-read",
+            "member_liveness_check.sh": "member-liveness"}
     for script in scripts:
         unit = stem[script]
         service = root / "schedulers" / "systemd" / f"fleetkit-{unit}.service"
