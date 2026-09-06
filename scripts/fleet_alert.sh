@@ -52,7 +52,10 @@ done
 
 TITLE="${1:?usage: fleet_alert.sh [--check X --problem Y --severity Z] <title> <body>}"
 BODY="${2:-}"
-LOG=/home/ubuntu/fleet-kit-logs/fleet_alert.log
+LOG="${FLEET_ALERT_LOG:-/home/ubuntu/fleet-kit-logs/fleet_alert.log}"
+# Alarms neither channel could deliver wait here and are retried at the front of the NEXT
+# call (fleet-kit#512). See the drain block below for why.
+QUEUE="${FLEET_ALERT_QUEUE:-$(dirname "$LOG")/alerts_undelivered.jsonl}"
 _slog() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" >> "$LOG"; }
 
 # Recovery path: only tell a human it recovered if a human was told it broke.
@@ -93,10 +96,19 @@ log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" >> "$LOG"; }
 
 [ -f /home/ubuntu/.config/maxx/alert.env ] && { set -a; . /home/ubuntu/.config/maxx/alert.env; set +a; }
 
-sent_any=0
+# NTFY_TOPIC fallback (fleet-kit#512): on 2026-09-04 the "ALL accounts exhausted" alarm's email
+# leg failed (Resend, http=) and NO ntfy leg ran, because the caller's environment carried no
+# NTFY_TOPIC -- the leg below is gated on it. The log said ALARM UNDELIVERED and nobody heard.
+# anchor.env already holds the topic for the maxx checks; read only that one key from it so a
+# caller that forgot the topic still reaches the second channel. A caller that sets it wins.
+if [ -z "${NTFY_TOPIC:-}" ] && [ -f /home/ubuntu/.config/maxx/anchor.env ]; then
+  NTFY_TOPIC=$(grep -E '^NTFY_TOPIC=' /home/ubuntu/.config/maxx/anchor.env | head -1 | cut -d= -f2- | tr -d '"'"'"'')
+fi
 
-if [ -n "${RESEND_API_KEY:-}" ] && [ -n "${FLEET_ALERT_EMAIL:-}" ]; then
-  PAYLOAD=$(TITLE="$TITLE" BODY="$BODY" FROM="${MAIL_FROM:-990 Scout <hello@philanthropy.org>}" \
+_send_email() {  # <title> <body> -> 0 on delivered
+  [ -n "${RESEND_API_KEY:-}" ] && [ -n "${FLEET_ALERT_EMAIL:-}" ] || { log "email skipped: no RESEND_API_KEY/FLEET_ALERT_EMAIL in alert.env"; return 1; }
+  local payload code
+  payload=$(TITLE="$1" BODY="$2" FROM="${MAIL_FROM:-990 Scout <hello@philanthropy.org>}" \
             TO="$FLEET_ALERT_EMAIL" python3 -c '
 import json, os
 print(json.dumps({
@@ -105,27 +117,56 @@ print(json.dumps({
     "subject": os.environ["TITLE"],
     "text": os.environ["BODY"] + "\n\n-- dino fleet alarm",
 }))')
-  CODE=$(curl -s -o /tmp/fa_resp.json -w '%{http_code}' --max-time 25 \
+  code=$(curl -s -o /tmp/fa_resp.json -w '%{http_code}' --max-time 25 \
     -X POST https://api.resend.com/emails \
     -H "Authorization: Bearer $RESEND_API_KEY" \
-    -H "Content-Type: application/json" -d "$PAYLOAD")
-  if [ "$CODE" = "200" ]; then
-    log "email OK to $FLEET_ALERT_EMAIL -- $TITLE"; sent_any=1
-  else
-    log "email FAILED http=$CODE -- $(head -c 150 /tmp/fa_resp.json 2>/dev/null)"
+    -H "Content-Type: application/json" -d "$payload")
+  if [ "$code" = "200" ]; then
+    log "email OK to $FLEET_ALERT_EMAIL -- $1"; rm -f /tmp/fa_resp.json; return 0
   fi
-  rm -f /tmp/fa_resp.json
-else
-  log "email skipped: no RESEND_API_KEY/FLEET_ALERT_EMAIL in alert.env"
+  log "email FAILED http=$code -- $(head -c 150 /tmp/fa_resp.json 2>/dev/null)"; rm -f /tmp/fa_resp.json; return 1
+}
+
+_send_ntfy() {  # <title> <body> -> 0 on delivered
+  [ -n "${NTFY_TOPIC:-}" ] || return 1
+  if curl -sf -o /dev/null --max-time 15 -H "Title: $1" -d "$2" "https://ntfy.sh/$NTFY_TOPIC"; then
+    return 0
+  fi
+  log "ntfy FAILED -- $1"; return 1
+}
+
+_deliver() {  # <title> <body> -> 0 if ANY channel took it
+  local any=1
+  _send_email "$1" "$2" && any=0
+  _send_ntfy "$1" "$2" && any=0
+  return $any
+}
+
+# Drain the undelivered queue FIRST (fleet-kit#512). An alarm that failed both channels is not
+# gone -- it waits here, and the next alarm (or the next healthy tick of any check that pages
+# through this helper) retries it before sending its own. Bounded to 20 per call so a long
+# outage of the mail provider cannot turn one call into a flood; the rest wait their turn.
+if [ -s "$QUEUE" ]; then
+  _keep=$(mktemp)
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    _t=$(printf '%s' "$_line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["title"])' 2>/dev/null) || continue
+    _b=$(printf '%s' "$_line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["body"])' 2>/dev/null) || continue
+    if _deliver "[retry] $_t" "$_b"; then
+      log "retry delivered -- $_t"
+    else
+      printf '%s\n' "$_line" >> "$_keep"
+    fi
+  done < <(head -n 20 "$QUEUE")
+  tail -n +21 "$QUEUE" >> "$_keep" 2>/dev/null
+  mv "$_keep" "$QUEUE"
 fi
 
-if [ -n "${NTFY_TOPIC:-}" ]; then
-  if curl -sf -o /dev/null --max-time 15 -H "Title: $TITLE" -d "$BODY" "https://ntfy.sh/$NTFY_TOPIC"; then
-    sent_any=1
-  else
-    log "ntfy FAILED -- $TITLE"
-  fi
+if _deliver "$TITLE" "$BODY"; then
+  exit 0
 fi
-
-[ "$sent_any" -eq 0 ] && log "ALARM UNDELIVERED -- $TITLE :: $BODY"
+log "ALARM UNDELIVERED (queued for retry) -- $TITLE :: $BODY"
+TITLE="$TITLE" BODY="$BODY" python3 -c '
+import json, os, time
+print(json.dumps({"ts": int(time.time()), "title": os.environ["TITLE"], "body": os.environ["BODY"]}))' >> "$QUEUE"
 exit 0
