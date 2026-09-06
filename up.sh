@@ -24,6 +24,7 @@ CONTAINER_NAME=""
 # only the first. `--account` (singular) still works as an alias for one name.
 ACCOUNTS="${FLEET_ACCOUNTS:-primary}"
 VIEW_PORT=""
+DEV_MODE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -32,8 +33,20 @@ while [ $# -gt 0 ]; do
     --container-name) CONTAINER_NAME="$2"; shift 2 ;;
     --account|--accounts) ACCOUNTS="$2"; shift 2 ;;
     --port) VIEW_PORT="$2"; shift 2 ;;
+    --dev) DEV_MODE=1; shift ;;
     -h|--help)
-      echo "Usage: $0 --repo <git-url> --name <project-name> [--container-name <name>] [--accounts \"primary other\"] [--port <n>]"
+      echo "Usage: $0 --repo <git-url> --name <project-name> [--container-name <name>] [--accounts \"primary other\"] [--port <n>] [--dev]"
+      echo ""
+      echo "  --dev  bind-mount this checkout's scripts/ read-write into the container instead of"
+      echo "         relying only on what got baked in at build time. Use this for live-previewing"
+      echo "         a dashboard/script change (edit on the host, reload in the browser) -- NEVER"
+      echo "         'podman cp' a file into a running container: it mutates the built image layer"
+      echo "         and rootless podman's overlay handling does not tolerate that on the next"
+      echo "         restart ('OCI permission denied' on entrypoint.sh, gh#17). A --dev bind mount"
+      echo "         only ever touches the container's writable layer, so --replace / restart stay"
+      echo "         safe throughout. Not for production instances: it makes the container's"
+      echo "         behavior depend on host files outside the image, which is what this whole kit"
+      echo "         otherwise avoids."
       exit 0 ;;
     *) echo "Unknown flag: $1" >&2; exit 1 ;;
   esac
@@ -71,6 +84,29 @@ mkdir -p "$INSTANCE_DIR/repo" "$INSTANCE_DIR/logs"
 ENV_FILE="$INSTANCE_DIR/fleet.env"
 WEBHOOK_SECRET_FILE="$INSTANCE_DIR/webhook_secret"
 read -ra ACCOUNT_LIST <<< "$ACCOUNTS"
+
+# 0. Warn (don't block -- a deliberate feature branch or detached HEAD is a normal reason to
+#    be "behind") if THIS checkout is behind origin/main before building. `COPY . /fleet-kit`
+#    below bakes in whatever's on disk right now, with no indication afterward of what commit
+#    that was -- a rebuild from a stale local clone silently ships a stale image. Bit dino twice
+#    a day apart (2026-08-21: 13 commits behind; 2026-08-22: this same gap led straight into the
+#    podman-cp outage this flag/check exists for, gh#17). Best-effort only: a box with no network
+#    access to origin, or a shallow clone, should still be able to build.
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if git fetch origin main --quiet 2>/dev/null; then
+    LOCAL_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
+    REMOTE_SHA="$(git rev-parse origin/main 2>/dev/null || true)"
+    if [ -n "$LOCAL_SHA" ] && [ -n "$REMOTE_SHA" ] && [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+      BEHIND_COUNT="$(git rev-list --count HEAD..origin/main 2>/dev/null || true)"
+      if [ -n "$BEHIND_COUNT" ] && [ "$BEHIND_COUNT" != "0" ]; then
+        echo "[up] WARNING: this checkout ($(pwd)) is $BEHIND_COUNT commit(s) behind origin/main." >&2
+        echo "[up]          the image about to be built will bake in exactly what's on disk here --" >&2
+        echo "[up]          a merged PR does nothing until this checkout is 'git pull'-ed first." >&2
+        echo "[up]          'git pull --ff-only origin main' now if you meant to pick up recent changes." >&2
+      fi
+    fi
+  fi
+fi
 
 # 1. Build (or rebuild) the image every run -- podman's own layer cache makes an unchanged
 #    build fast, so this costs nothing on a re-run with no source changes. The PREVIOUS shape
@@ -178,6 +214,18 @@ for _pid in $(pgrep -f 'entrypoint\.sh cron-foreground' 2>/dev/null || true); do
   fi
 done
 
+# --dev: bind-mount THIS checkout's scripts/ read-write over the image's baked-in copy, so an
+# edit on the host (e.g. iterating on fleet_view.html) shows up the moment the running process
+# re-reads the file -- no rebuild, and critically, no `podman cp` mutating the image's built
+# layer. A --replace or restart after a --dev session is therefore still exactly as safe as one
+# after a normal run: the writable bind mount is the only thing that changed, never the layer
+# entrypoint.sh's permissions were baked into (gh#17).
+DEV_MOUNT_ARGS=()
+if [ "$DEV_MODE" = "1" ]; then
+  echo "[up] --dev: bind-mounting $(pwd)/scripts -> /fleet-kit/scripts (rw). Not for production instances."
+  DEV_MOUNT_ARGS=(-v "$(pwd)/scripts:/fleet-kit/scripts:rw")
+fi
+
 echo "[up] starting fleet '$NAME' as container '$CONTAINER_NAME' -> $REPO_URL (image $IMAGE_TAG, accounts [${ACCOUNT_LIST[*]}], view port $VIEW_PORT, webhook port $WEBHOOK_PORT)"
 podman run -d \
   --name "$CONTAINER_NAME" \
@@ -193,6 +241,7 @@ podman run -d \
   "${CREDS_MOUNT_ARGS[@]}" \
   -v "$INSTANCE_DIR/repo:/repo" \
   -v "$INSTANCE_DIR/logs:/var/log/fleet-kit" \
+  "${DEV_MOUNT_ARGS[@]}" \
   -p "$VIEW_PORT:$VIEW_PORT" \
   -p "$WEBHOOK_PORT:$WEBHOOK_PORT" \
   "$IMAGE_TAG"
