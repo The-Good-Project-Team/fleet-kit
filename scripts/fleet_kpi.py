@@ -140,7 +140,31 @@ _JUDGE_JUDY_PATTERNS = [
 # cluster carrying two references instead of not matching at all (a bare "#177" with no "PR"
 # keyword of its own would never match otherwise). See `_count_pr_refs` above for why counting
 # these clusters needs its own function rather than reusing `_count_issue_refs`.
-_PR_REF = r"(?:PRs?\s*#\d+(?:\s*(?:,|and)\s*#\d+)*|pull/\d+)"
+#
+# gh#516: that continuation clause absorbs a joined "#N" by proximity to a comma/"and" ALONE,
+# regardless of what that second number's own fate actually was -- "Shipped PR #300, #301
+# blocked on CI." matched "PR #300, #301" as one cluster and credited both, when the very same
+# clause says #301 never shipped. This reopens a scoped version of the exact defect gh#230 was
+# built to prevent (crediting a PR that never shipped), now via the comma/"and" join gh#448
+# added rather than gh#230's original no-verb gap. Fix: a continuation number is only absorbed
+# if it is NOT immediately followed (across an optional comma) by one of a short list of real
+# contradicting-fate verbs found in gru/jefe/minion outcome prose -- if it is, the continuation
+# stops there and that number falls out of the cluster entirely (and, having no "PR"/"pull/"
+# keyword of its own, is never picked up as a separate ref either). This only ever narrows an
+# existing match (a cluster can lose a trailing number it would otherwise have absorbed); it
+# never changes what the FIRST number in a cluster or an already-shipped list matches, so
+# gh#448's own all-shipped test cases are untouched.
+_PR_FATE_BREAK = r"(?:blocked|reverted|failed|stalled|declined|rejected|abandoned)"
+_PR_REF = (
+    r"(?:PRs?\s*#\d+"
+    # `\b` after `\d+` (not just the lookahead alone) matters: without it, a failed lookahead
+    # lets the engine backtrack `\d+` to a SHORTER digit run that happens to dodge the fate
+    # word ("#301 blocked" backtracking to "#30" + leftover "1 blocked", satisfying the
+    # lookahead on a truncated number) instead of correctly dropping the whole reference.
+    # Digits are word characters, so `\b` can only hold at the real end of the number.
+    r"(?:\s*(?:,|and)\s*#\d+\b(?!\s*,?\s*\b" + _PR_FATE_BREAK + r"\b))*"
+    r"|pull/\d+)"
+)
 _PR_CLAUSE_GAP = r"(?:(?!;|\.(?:\s|$)).)*?"
 _PR_SHIPPED_PATTERNS = [
     (re.compile(
