@@ -62,6 +62,9 @@
   .boot-error-banner.degraded { background: var(--warn); }
   .boot-error-banner.transient { background: var(--dim); }
   .topbar .stat.bad { color: var(--bad); font-weight: 600; }
+  /* gh#513: "the number" -- three stat spans grouped so they never wrap apart from each
+     other, same gap the topbar itself uses between its own direct children. */
+  .topbar .numgrp { display: flex; gap: 14px; }
 
   .body { display: grid; grid-template-columns: 220px 1fr; min-height: 0; }
 
@@ -259,6 +262,11 @@
     <span class="brand">fleet-kit</span>
     <select class="btn small" id="siblingSwitch" style="display:none;"></select>
     <span class="stat" id="repo"></span>
+    <span class="numgrp" id="theNumber" style="display:none;">
+      <span class="stat" id="numNumber"></span>
+      <span class="stat" id="numGuardrail"></span>
+      <span class="stat" id="numChannel"></span>
+    </span>
     <span class="spacer"></span>
     <span class="stat" id="needsHumanOp"></span>
     <span class="stat" id="globalSpend"></span>
@@ -1694,6 +1702,52 @@ async function renderAlerts() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// gh#513: "the number" -- the same three readings (number, guardrail, channel) run_member.sh
+// puts above every member's charter, mirrored here so a human watching the dashboard sees the
+// business move or not move too. Hidden entirely when this instance has no FLEET_NUMBER_URL
+// configured (number_read.py's own law: no URL means no header, not a placeholder) -- never
+// rendered as zero.
+// ---------------------------------------------------------------------------------------------
+function numFmt(v) {
+  if (v === null || v === undefined) return 'unmeasured';
+  return typeof v === 'number' ? v.toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(v);
+}
+function numDelta(v) {
+  if (v === null || v === undefined) return '';
+  const sign = v >= 0 ? '+' : '';
+  return ` (${sign}${numFmt(v)}/7d)`;
+}
+function renderTheNumber(data) {
+  const grp = document.getElementById('theNumber');
+  if (!data || !data.configured) { grp.style.display = 'none'; return; }
+  grp.style.display = '';
+  const stale = !!data.stale;
+  const cells = [
+    ['numNumber', 'Number', data.payload && data.payload.number],
+    ['numGuardrail', 'Guardrail', data.payload && data.payload.guardrail],
+    ['numChannel', 'Channel', data.payload && data.payload.channel],
+  ];
+  for (const [id, label, block] of cells) {
+    const el = document.getElementById(id);
+    el.classList.toggle('bad', stale);
+    if (!data.present || !block) {
+      el.innerHTML = `<b>${esc(label)}</b> ${data.present ? 'unmeasured' : 'not yet read'}`;
+      continue;
+    }
+    el.innerHTML = `<b>${esc(block.name || label)}</b> ${esc(numFmt(block.value))} ${esc(block.unit || '')}${esc(numDelta(block.delta_7d))}`;
+    el.title = stale ? `STALE -- as of ${data.payload.as_of || '?'}` : `as of ${data.payload.as_of || '?'}`;
+  }
+}
+async function renderTheNumberTile() {
+  try {
+    const data = await fetchJSON('/api/number');
+    renderTheNumber(data);
+  } catch (err) {
+    console.error('renderTheNumberTile() failed:', err);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Fleet state (master toggle) + members (spec/effective/overrides/spend) + queue (next fires)
 // ---------------------------------------------------------------------------------------------
 async function renderFleetState() {
@@ -1784,6 +1838,7 @@ async function boot() {
         renderFleetState(),
         loadMembers(),
         renderAlerts(),
+        renderTheNumberTile(),
       ]);
       ALL_RUNS = snap.runs || [];
       GH = snap.gh || { prs: [], issues: [], merged: [], self_evolution: [] };
@@ -1804,8 +1859,10 @@ async function boot() {
       try { await loadMembers(); renderSidebar(); if (PAGE === 'agent') renderDetailHead(); }
       catch (err) { console.error('periodic loadMembers() failed:', err); }
       // gh#399 AC1: /api/alerts rides this same 30s "other live tiles" interval rather than
-      // a new setInterval of its own.
+      // a new setInterval of its own. gh#513's number tile does the same -- it changes at
+      // most once a night (number_read.py's cron), so there is no case for its own timer.
       renderAlerts();
+      renderTheNumberTile();
     }, 30000);
     setInterval(renderQueue, 15000);
 
