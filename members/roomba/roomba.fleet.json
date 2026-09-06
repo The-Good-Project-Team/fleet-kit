@@ -3,13 +3,11 @@
   "emoji": "\ud83e\uddf9",
   "lane": "hygiene",
   "mandate": {
-    "target": "every stale/orphaned worktree and every ghost (dead/stale/unparseable) crew job gets removed or flagged, with zero false-positive removals of in-flight work",
+    "target": "every stale/orphaned worktree that passes roomba.py's own checks (merged or provably abandoned, clean tree, not protected, past min-age, or a dead builder PID) is removed, with zero false-positive removals of in-flight work -- as a script, not a model pass",
     "checklist": [
-      "run roomba.py dry-run first -- it encodes the actual safety checks (merge-state, clean tree, protect list, min-age, dangling-PID) in code, not prose",
-      "read every candidate's reason before re-running with --execute",
-      "an orphaned registry entry (directory already gone from disk) only removes its branch once merge-base confirms the default branch already has everything it had",
-      "for crew health: read the roster, mark a job NOT_LOADED/STALE/CRASHLOOP/UNPARSEABLE as a high-severity ghost",
-      "dedup ghost alerts by kind+label so a persisting ghost doesn't refile every run -- only a NEW ghost or a kind transition alerts"
+      "roomba.sh runs roomba.py dry-run, then --execute only when candidates exist",
+      "a candidate roomba.py could not decide is never listed, so it is never removed",
+      "crew-health ghosts are member_liveness_check.sh's job now (fleet-kit#512), from outside the container"
     ],
     "limits": {
       "timeout_s": 600
@@ -26,21 +24,22 @@
     "prompt_file": "roomba.md",
     "tools": {
       "allow": [
+        "none"
+      ],
+      "deny": [
         "Read",
         "Edit",
         "Write",
         "Bash",
         "Grep",
         "Glob",
-        "WebFetch",
-        "TodoWrite"
-      ],
-      "deny": [
-        "Bash(git push --force:*)"
+        "WebFetch"
       ]
-    }
+    },
+    "runner": "members/roomba/roomba.sh"
   },
   "report": {
     "vision_link": "optional"
-  }
+  },
+  "kind": "shell"
 }

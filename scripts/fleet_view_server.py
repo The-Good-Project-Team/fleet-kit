@@ -235,6 +235,7 @@ def _cached(key: str, ttl_s: float, produce):
 # is: this is the ONLY set of keys /api/fleet_settings may write. Never widen to "any key".
 DIAL_FIELDS = [
     "FLEET_SHARE_FRACTION", "FLEET_GRU_ALLOWANCE_FRACTION", "FLEET_GRU_CADENCE",
+    "FLEET_DATTA_CADENCE",
     "FLEET_CADENCE_BUILD", "FLEET_CADENCE_REVIEW", "FLEET_CADENCE_GITPULL",
     "FLEET_BUILDER_MODEL", "FLEET_CODE_REVIEW_MODEL",
     "FLEET_QUEUE_CAP", "FLEET_MAX_BUDGET_USD", "FLEET_DATTA_MAX_NERDS_PER_PASS",
@@ -270,7 +271,7 @@ _SHELL_METACHARS = set("$`;&|\n\r\\\"'<>(){}")
 # never read by entrypoint.sh or any container cron line. Validating them as a cron hour
 # field (0-23) would reject their own documented default of 3600. Validate each family by
 # what actually consumes it, not by name resemblance.
-_CRON_HOUR_FIELDS = {"FLEET_GRU_CADENCE"}
+_CRON_HOUR_FIELDS = {"FLEET_GRU_CADENCE", "FLEET_DATTA_CADENCE"}
 _NONNEG_INT_FIELDS = {
     "FLEET_QUEUE_CAP", "FLEET_DATTA_MAX_NERDS_PER_PASS",
     "FLEET_CADENCE_BUILD", "FLEET_CADENCE_REVIEW", "FLEET_CADENCE_GITPULL",

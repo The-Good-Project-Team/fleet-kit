@@ -6440,6 +6440,51 @@ def _run_member_puts_the_number_header_above_item_and_task():
     assert "FLEET_NUMBER_URL" in (ROOT / "fleet.env.example").read_text()
 
 
+def _roomba_runs_as_a_script_and_records_a_quiet_pass():
+    """fleet-kit#514: roomba is a shell runner now. Its spec dispatches run_member.sh to
+    roomba.sh, and that script drives the real roomba.py on a real (tmp) git repo and records
+    the pass through run_report.py -- so fleet.db/status/fleet_kpi see it exactly as before,
+    minus the 25-30 turns of window the model pass spent re-reading its own dry-run."""
+    import subprocess
+    spec = json.loads((ROOT / "members" / "roomba" / "roomba.fleet.json").read_text())
+    assert spec.get("llm", {}).get("runner") == "members/roomba/roomba.sh", spec.get("llm")
+    assert spec.get("kind") == "shell"
+    runner = ROOT / "members" / "roomba" / "roomba.sh"
+    assert runner.exists() and runner.stat().st_mode & 0o111, "roomba.sh must be executable for run_member.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        repo = tmp / "repo"; repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+        logs = tmp / "logs"
+        env = {"PATH": "/usr/bin:/bin", "FLEET_REPO": str(repo), "FLEET_LOG_DIR": str(logs), "HOME": str(tmp)}
+        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, timeout=60, env=env)
+        assert proc.returncode == 0, f"rc={proc.returncode} stderr={proc.stderr[:400]}"
+        assert proc.stdout.startswith("QUIET"), f"an empty repo must be a quiet pass: {proc.stdout!r}"
+        runs = (logs / "runs.jsonl").read_text().strip().splitlines()
+        assert len(runs) == 1, f"exactly one run must be recorded, got {len(runs)}: {runs!r}"
+        rec = json.loads(runs[-1])
+        assert rec.get("member") == "roomba" and rec.get("kind") == "shell", rec
+        assert rec.get("status") == "quiet", rec
+        assert "0 evaluated, 0 removed" in (rec.get("outcome") or ""), rec.get("outcome")
+
+
+def _datta_cadence_is_a_validated_cron_hour_dial():
+    """fleet-kit#514: the datta hour field is instance-tunable like gru's, and joins the same
+    validated family -- so the value that discarded a whole crontab for 40h (0,30) is refused
+    for this dial too, from the Settings page and from selftest."""
+    import fleet_view_server as fvs
+    entry = (ROOT / "entrypoint.sh").read_text()
+    assert '12 ${FLEET_DATTA_CADENCE:-*} * * *' in entry, "datta line must splice FLEET_DATTA_CADENCE into the hour field"
+    assert "FLEET_DATTA_CADENCE" in fvs.DIAL_FIELDS and "FLEET_DATTA_CADENCE" in fvs._CRON_HOUR_FIELDS
+    assert fvs._validate_dial_value("FLEET_DATTA_CADENCE", "0,30"), "0,30 must be refused (it is minutes, not an hour)"
+    assert fvs._validate_dial_value("FLEET_DATTA_CADENCE", "$(id)")
+    for ok in ("", "*", "9", "*/6", "0,12", "1-5"):
+        assert fvs._validate_dial_value("FLEET_DATTA_CADENCE", ok) is None, ok
+    assert "FLEET_DATTA_CADENCE" in (ROOT / "fleet.env.example").read_text()
+
+
 def _sync_health_check_pages_on_a_real_stalled_offset_not_on_a_caught_up_one():
     """gh#273: tail_runs_forever is the only thing keeping fleet.db in sync with runs.jsonl,
     and nothing watched whether it was still alive -- account_health_check.sh,
@@ -7024,6 +7069,8 @@ if __name__ == "__main__":
     check("pool logs successes so outage length is measurable", _pool_logs_successes_so_downtime_is_measurable)
     check("account health check actually pages when configured (and never claims to when it isn't)", _account_health_check_actually_pages_when_configured)
     check("account health check re-pages on a fixed interval instead of once (gh#266)", _account_health_check_repages_on_a_fixed_interval_gh266)
+    check("roomba runs as a script and records a quiet pass through run_report (fleet-kit#514)", _roomba_runs_as_a_script_and_records_a_quiet_pass)
+    check("FLEET_DATTA_CADENCE is a validated cron-hour dial (fleet-kit#514)", _datta_cadence_is_a_validated_cron_hour_dial)
     check("number_read fetches from a URL and renders the five-line header (fleet-kit#513)", _number_read_fetches_from_a_url_and_renders_five_lines)
     check("number_read never renders zero for an unmeasured reading (fleet-kit#513)", _number_read_never_renders_zero_for_an_unmeasured_reading)
     check("run_member puts the number header above --item and --task (fleet-kit#513)", _run_member_puts_the_number_header_above_item_and_task)
