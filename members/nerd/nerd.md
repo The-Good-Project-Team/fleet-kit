@@ -371,10 +371,13 @@ pricing decision from Reif** — its absence is deliberate, not an oversight to 
 <org>/fleet-kit --json visibility,stargazerCount,forkCount`) with no public surface for a
 search engine to crawl, no search-console-style credentials configured anywhere, and no
 `lane_kpi` rows in `fleet.db` for any lane. **There is no growth-lane surface here — state N/A
-explicitly, every pass, and stop.** Do not invent an indexation or acquisition proxy in its
-place (an onboarding-path check was tried and ruled out as a stand-in KPI — it stayed clean but
-gave a future pass nothing to act on), and do not spend the pass probing a different product in
-a different GitHub org from this one.
+explicitly, every pass, and stop.** Prefix your `Outcome:` line with the literal marker
+`STRUCTURAL-N/A: ` (gh#451) followed by the free-text explanation as before, so `datta.md`'s
+down-rank rule (`datta.md:76-99`) can actually match a confirmed-N/A streak instead of
+re-dispatching this lane on staleness alone. Do not invent an indexation or acquisition proxy in
+its place (an onboarding-path check was tried and ruled out as a stand-in KPI — it stayed clean
+but gave a future pass nothing to act on), and do not spend the pass probing a different product
+in a different GitHub org from this one.
 
 **searchquality** — fleet-kit has no `?q=`-style search endpoint or search telemetry
 (`usage/searched`, `search/no results`) of its own. The closest real surface is gh#193:
@@ -383,7 +386,10 @@ control, so the operator has to scroll the full list to find what they want — 
 searcher find what they wanted" question this lane asks, just framed there as UI friction
 rather than query-answering. Check gh#193's live status and whether its scope has grown to
 cover finding an item by content, not just filter/sort; if it has closed or been superseded,
-say so and name a fresh candidate rather than citing a stale reference.
+say so and name a fresh candidate rather than citing a stale reference. If gh#193 has closed
+and no fresh candidate surface exists, this lane is structurally N/A this pass — state that
+explicitly and prefix your `Outcome:` line with the literal marker `STRUCTURAL-N/A: `, the same
+convention growth and revenue use below (gh#451).
 
 **ui** — every user-facing surface, and whether it renders for a human.
 The core conversion hook works on every page, mobile included; responsive and overflow
@@ -432,8 +438,9 @@ capture from inbound intent. **Never add billing code without an explicit pricin
 its absence is deliberate. **On fleet-kit specifically: there is no revenue-lane surface at
 all** (confirmed 2026-08-29 — no stripe/billing/payment/signup/paywall code anywhere in the
 repo, no monetization mentioned in `README.md`/`docs/*.md`) — **state N/A explicitly, every
-pass, and stop**, the same as growth's paragraph above; the checks above this sentence are for
-nonprofit-atlas, which does have a follow/lead-capture surface to check.
+pass, and stop**, the same as growth's paragraph above; prefix your `Outcome:` line with the
+literal marker `STRUCTURAL-N/A: ` exactly as growth's paragraph does (gh#451). The checks above
+this sentence are for nonprofit-atlas, which does have a follow/lead-capture surface to check.
 
 ## Never build the fix
 
