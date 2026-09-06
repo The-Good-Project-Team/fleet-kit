@@ -7014,6 +7014,25 @@ def _number_read_fetches_from_a_url_and_renders_five_lines():
         assert (tmp / "logs" / "number.json").read_text() == before
 
 
+def _number_read_shows_the_target_and_distance_to_it():
+    """Reif, 2026-09-06: "$25k mrr, that would be a great number" -- by year end. A target
+    without a date is a wish; with one, gru can rank by distance-to-target. The endpoint
+    (philanthropy#4480) carries `target`; the header line for the number must show it, and
+    a payload without one must render exactly as before (older ventures)."""
+    import importlib, sys as _sys
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    nr = importlib.import_module("number_read")
+    base = {"fetched_at": int(time.time()), "as_of": "2026-09-06T02:00:00Z", "errors": [],
+            "number": {"name": "Stripe MRR", "value": 10.83, "unit": "$/mo", "delta_7d": 0.0}}
+    plain = nr.render(base)
+    assert "target" not in plain.lower(), plain
+    with_t = nr.render({**base, "target": {"value": 25000, "unit": "$/mo", "by": "2026-12-31"}})
+    line = [l for l in with_t.splitlines() if l.startswith("Number:")][0]
+    assert "of 25,000 $/mo by 2026-12-31" in line and "0.04%" in line, line
+    no_num = nr.render({**base, "number": None, "target": {"value": 25000, "unit": "$/mo", "by": "2026-12-31"}})
+    assert "unmeasured" in no_num and "25,000" in no_num, no_num
+
+
 def _number_read_never_renders_zero_for_an_unmeasured_reading():
     """KPI doctrine rule 5 at the prompt: a reading the endpoint could not take is 'unmeasured',
     never 0 -- a zero here would tell every member the business has no revenue."""
@@ -7761,6 +7780,7 @@ if __name__ == "__main__":
     check("roomba runs as a script and records a quiet pass through run_report (fleet-kit#514)", _roomba_runs_as_a_script_and_records_a_quiet_pass)
     check("FLEET_DATTA_CADENCE is a validated cron-hour dial (fleet-kit#514)", _datta_cadence_is_a_validated_cron_hour_dial)
     check("number_read fetches from a URL and renders the five-line header (fleet-kit#513)", _number_read_fetches_from_a_url_and_renders_five_lines)
+    check("number_read shows the target and distance to it", _number_read_shows_the_target_and_distance_to_it)
     check("number_read never renders zero for an unmeasured reading (fleet-kit#513)", _number_read_never_renders_zero_for_an_unmeasured_reading)
     check("run_member puts the number header above --item and --task (fleet-kit#513)", _run_member_puts_the_number_header_above_item_and_task)
     check("member liveness pages critical when no member has done work (fleet-kit#512)", _member_liveness_pages_critical_when_no_member_has_done_work)

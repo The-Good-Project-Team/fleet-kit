@@ -100,13 +100,27 @@ def render(payload: dict, now: float | None = None) -> str:
     if stale:
         head += f" -- STALE, last read {age / 3600:.0f}h ago; treat every figure below as unverified"
     lines.append(head)
+    target = payload.get("target") or {}
+    # The target is human-written at the endpoint (Reif, 2026-09-06: $25k MRR by 2026-12-31).
+    # Rendered on the Number line only, as "of <target> by <date> (<pct>%)", so distance to
+    # it is a ranking input for gru and not a separate line nobody reads.
+    tgt = ""
+    if target.get("value") is not None:
+        tgt = f" of {_fmt(target.get('value'))} {target.get('unit', '')}".rstrip() + f" by {target.get('by', '?')}"
     for key, label in (("number", "Number"), ("guardrail", "Guardrail"), ("channel", "Channel")):
         block = payload.get(key)
         if not block:
-            lines.append(f"{label}: unmeasured (the endpoint could not read it)")
+            lines.append(f"{label}: unmeasured (the endpoint could not read it)" + (f" -- target{tgt}" if key == "number" and tgt else ""))
             continue
         unit = block.get("unit", "")
-        lines.append(f"{label}: {block.get('name', key)} = {_fmt(block.get('value'))} {unit}".rstrip() + f" ({_delta(block.get('delta_7d'))})")
+        line = f"{label}: {block.get('name', key)} = {_fmt(block.get('value'))} {unit}".rstrip()
+        if key == "number" and tgt:
+            try:
+                pct = f" ({100.0 * float(block.get('value')) / float(target['value']):.2f}%)"
+            except (TypeError, ValueError, ZeroDivisionError):
+                pct = ""
+            line += tgt + pct
+        lines.append(line + f" ({_delta(block.get('delta_7d'))})")
     errs = payload.get("errors") or []
     tail = f"as of {payload.get('as_of', '?')}."
     if errs:
