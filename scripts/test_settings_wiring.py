@@ -189,6 +189,35 @@ def main() -> int:
 
             check("Save dials does not send untouched unset dials (gh#355)", _untouched_unset_dial_not_sent)
 
+            def _index0_reselect_still_sent():
+                # gh#460: for FLEET_SHARE_FRACTION (and its two siblings), the option already
+                # sitting at index 0 ('0.20') is a plausible deliberate choice, materially
+                # different from the script's real fallback (1.0) applied when the key is
+                # omitted entirely. An operator who opens the dropdown and picks that exact
+                # already-showing option never fires `change` (the value never actually
+                # changes) -- confirmed live in headless Chromium: clicking a <select> always
+                # fires `click`, but `change`/`input` only fire when the resulting value
+                # differs. Reproduce that precise sequence -- open, then close without moving
+                # the selection (Escape) -- rather than page.select_option(), which
+                # synthesizes `change`/`input` unconditionally and would never have caught
+                # this bug even against the pre-fix page.
+                sel = '.dial-input[data-key="FLEET_SHARE_FRACTION"]'
+                assert page.eval_on_selector(sel, "el => el.value") == "0.20", \
+                    "test assumes FLEET_SHARE_FRACTION's unset default renders as index-0 '0.20'"
+                page.click(sel)
+                page.keyboard.press("Escape")
+                assert page.eval_on_selector(sel, "el => el.value") == "0.20", \
+                    "selection must not have changed -- this reproduces the index-0 case, not a real edit"
+                with page.expect_response("**/api/fleet_settings"):
+                    page.click("#saveDials")
+                bodies = [json.loads(pd) for m, p, pd in post_bodies if p == "/api/fleet_settings"]
+                last = bodies[-1]
+                assert last.get("FLEET_SHARE_FRACTION") == "0.20", \
+                    f"picking the pre-selected index-0 option was not sent to /api/fleet_settings: {last}"
+
+            check("Reselecting the pre-shown index-0 option still saves it (gh#460)",
+                  _index0_reselect_still_sent)
+
             def _touched_dial_still_sent():
                 # A dial the operator actually picks must still save normally (AC3/AC4).
                 page.select_option('.dial-input[data-key="FLEET_BUILDER_MODEL"]', "opus")
