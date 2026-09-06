@@ -100,6 +100,21 @@ def _count_issue_refs(fragment: str) -> int:
     # "PR #N" ones would undercount to 1 via extract_kpi's `max(1, ...)` floor).
     return len(re.findall(r"#\d+|pull/\d+", fragment))
 
+
+def _count_pr_refs(fragment: str) -> int:
+    """gh#448: `_PR_SHIPPED_PATTERNS`'s merged capture can interleave real PR refs with
+    unrelated "gh#N" issue-cause mentions in the SAME clause ("gh#196->PR#199, gh#194->PR#200"
+    -- gh#196/gh#194 are the issues each PR closes, not shipped PRs themselves). A bare
+    `_count_issue_refs`-style "#\\d+" scan over the whole fragment would credit those issue
+    numbers too. Scan for `_PR_REF` *cluster* matches first (each one anchored on an actual
+    "PR"/"PRs"/"pull/" keyword), then count "#\\d+" only within each cluster -- a stray "gh#194"
+    sitting in the gap BETWEEN two clusters is never part of either match, so it's never
+    counted."""
+    return sum(
+        len(re.findall(r"#\d+|pull/\d+", cluster.group()))
+        for cluster in re.finditer(_PR_REF, fragment, re.I)
+    )
+
 _JUDGE_JUDY_PATTERNS = [
     (re.compile(r"approved PR #\d+"), "PRs reviewed"),
     (re.compile(r"(?:blocked|rejected) PR #\d+"), "PRs reviewed"),
@@ -115,7 +130,17 @@ _JUDGE_JUDY_PATTERNS = [
 # `_NERD_CLAUSE_GAP` below: stops at ';' or a real sentence-ending '.', so "Attempted PR #225
 # ... blocked." and "Retried and shipped PR #226." are two separate clauses and the verb never
 # reaches back across the boundary to credit #225.
-_PR_REF = r"(?:PR #\d+|pull/\d+)"
+#
+# gh#448: the original `PR #\d+` alternative required a literal space, silently undercounting
+# two real, common outcome-prose shapes to zero: no-space "PR#N" (33/261 real gru/jefe/minion
+# outcomes in runs.jsonl) and the plural shared-prefix "PRs #A and #B" (5/261, one "PR" keyword
+# governing a short list of numbers). `PRs?\s*#\d+` makes the space optional and accepts the
+# plural keyword; the trailing `(?:\s*(?:,|and)\s*#\d+)*` lets a single cluster match absorb an
+# immediately-following ", #N"/"and #N" continuation, so "PRs #178 and #177" matches as ONE
+# cluster carrying two references instead of not matching at all (a bare "#177" with no "PR"
+# keyword of its own would never match otherwise). See `_count_pr_refs` above for why counting
+# these clusters needs its own function rather than reusing `_count_issue_refs`.
+_PR_REF = r"(?:PRs?\s*#\d+(?:\s*(?:,|and)\s*#\d+)*|pull/\d+)"
 _PR_CLAUSE_GAP = r"(?:(?!;|\.(?:\s|$)).)*?"
 _PR_SHIPPED_PATTERNS = [
     (re.compile(
@@ -215,7 +240,15 @@ def extract_kpi(member: str, outcome: str | None) -> tuple[int, str] | None:
                 total += 1
             else:
                 g = groups[-1]
-                total += int(g) if g.isdigit() else max(1, _count_issue_refs(g))
+                if g.isdigit():
+                    total += int(g)
+                elif label == "PRs shipped":
+                    # gh#448: this fragment can interleave real PR refs with unrelated "gh#N"
+                    # issue-cause mentions -- _count_pr_refs (per-cluster) rather than
+                    # _count_issue_refs (bare "#\d+" over the whole fragment) is required here.
+                    total += max(1, _count_pr_refs(g))
+                else:
+                    total += max(1, _count_issue_refs(g))
             unit = label
     if not matched_any_pattern:
         if member in _REAL_ZERO_MEMBERS:

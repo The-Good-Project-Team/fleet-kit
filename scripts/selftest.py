@@ -4712,6 +4712,39 @@ def _fleet_kpi_gru_jefe_minion_ship_a_real_prs_shipped_count():
         ) == (1, "PRs shipped")
 
 
+def _fleet_kpi_pr_ref_no_space_and_plural_shared_prefix_gh448():
+    """gh#448: `_PR_REF` (shipped today via PR#434/gh#230) required a literal space between
+    "PR" and "#", and one "PR" token per reference -- silently undercounting two real, common
+    outcome-prose shapes to zero: no-space "PR#N" (33/261 real gru/jefe/minion outcomes in
+    runs.jsonl) and the plural shared-prefix "PRs #A and #B" (5/261). Samples below are the
+    issue's own quoted acceptance-criteria strings.
+    """
+    import fleet_kpi
+    for member in ("gru", "jefe", "minion"):
+        # AC1: no-space "PR#N" form, interleaved with unrelated "gh#N" issue-cause references
+        # in the SAME clause -- those must NOT be credited as shipped PRs (only the 3 real
+        # "PR#N" refs should count, not the 3 "gh#N" issue refs mixed in beside them).
+        assert fleet_kpi.extract_kpi(
+            member,
+            "Shipped gh#196→PR#199, gh#194→PR#200, gh#51→PR#198 in "
+            "The-Good-Project-Team/fleet-kit, all auto-merge armed.",
+        ) == (3, "PRs shipped")
+
+        # AC2: plural shared-prefix form -- one "PRs" keyword governing a short "and"-joined
+        # list, no second "PR" token before the second number.
+        assert fleet_kpi.extract_kpi(
+            member, "... both shipped green, auto-merge-armed PRs #178 and #177."
+        ) == (2, "PRs shipped")
+
+        # AC3: existing singular "PR #N" / "pull/N" coverage must still pass unchanged.
+        assert fleet_kpi.extract_kpi(
+            member, "Shipped PR #226 (fix retry backoff) and PR #227 (add health check), "
+                    "both auto-merge armed."
+        ) == (2, "PRs shipped")
+        assert fleet_kpi.extract_kpi(member, "Opened pull/4488, auto-merge armed.") == (
+            1, "PRs shipped")
+
+
 def _fleet_kpi_nerd_catches_filed_and_commented_verbs():
     """gh#225: `_KPI_TABLE` had entries for only roomba/marie/judge-judy -- nerd (one of the
     fleet's highest-volume members) returned `total: null` on `/api/kpi`, visually identical to
@@ -6790,6 +6823,7 @@ if __name__ == "__main__":
     check("fleet_kpi's marie pattern catches her real triage verb vocabulary", _fleet_kpi_marie_catches_her_real_triage_verb_vocabulary)
     check("fleet_kpi's marie pattern ignores an explicit-zero-counted verb (gh#409)", _fleet_kpi_marie_ignores_explicit_zero_counted_verb_gh409)
     check("fleet_kpi's gru/jefe/minion ship a real 'PRs shipped' count", _fleet_kpi_gru_jefe_minion_ship_a_real_prs_shipped_count)
+    check("fleet_kpi's PR ref catches no-space 'PR#N' and plural shared-prefix forms (gh#448)", _fleet_kpi_pr_ref_no_space_and_plural_shared_prefix_gh448)
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
     check("runs_summary() excludes provisional started rows from total/signal_rate/agent_rates (gh#437)", _runs_summary_excludes_started_rows_from_total_and_signal_rate)
