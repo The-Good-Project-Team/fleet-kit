@@ -145,6 +145,13 @@ case "${1:-cron-foreground}" in
       echo "FLEET_ENV_FILE=/fleet-kit/fleet.env"
       echo "PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
       echo "HOME=/root"
+      # gh#569: deploy.sh's `docker run -e FLEET_SHARE_DIR=...` only reaches PID 1 and its
+      # direct children -- every cron-triggered job starts from this block instead, which never
+      # forwarded it, so check_share_sum.sh (and any other cron-triggered reader) silently saw
+      # it unset and reported "ok: shares total 0" while the shared account was really
+      # oversubscribed. Forward PID 1's own value (empty/unset falls through to
+      # check_share_sum.sh's pre-gh#293 host-side scan unchanged, same as today).
+      echo "FLEET_SHARE_DIR=${FLEET_SHARE_DIR:-}"
       echo
       # Canary must record that cron FIRED, independent of whether git had anything to say
       # (2026-09-04, gh#4340): the old form only touched gitpull.log when git printed output,
