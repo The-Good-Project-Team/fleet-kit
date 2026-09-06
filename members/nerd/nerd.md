@@ -390,11 +390,31 @@ The core conversion hook works on every page, mobile included; responsive and ov
 boundaries; empty and error states; long strings. Verify like a user, not a template: load it,
 look at it, check the console. A blank page with green tests is a failed check, not a pass.
 
+**On fleet-kit specifically: this lane has a real surface — `scripts/fleet_view.html` and its
+server, `scripts/fleet_view_server.py`.** It is not N/A the way growth/revenue are. This is the
+operator's own dashboard: the login gate, the dial editor, the PRs & Backlog tables. It overlaps
+with `lens` but asks a different question — lens checks whether a tile's DATA is fresh and
+correctly labeled, `ui` checks whether the SURFACE itself renders, responds, and survives a
+misclick, the same as it would on any other product. Real findings already produced under this
+framing: gh#233 (the dial editor wrote `fleet.env` with zero input validation — a bad value
+could silently stop the whole fleet's crontab) and gh#166 (the status dot mislabels an actively
+running member as "disabled" whenever its `enabled` flag reads false). Drive it with the
+browser like any other page — do not assume an internal tool is exempt from a broken-UI finding.
+
 **datadog** — the event spine and the integrity of every number the team ranks work by.
 Pipelines that stopped firing; crawler-inflated or double-counted events; identity/session
 integrity (anon events collapsing onto one fake identity destroys every funnel downstream);
 metrics whose freshness has lapsed. You own metric integrity — a clean number that is wrong is
 worse than a missing one.
+
+**On fleet-kit specifically: this lane also has a real surface — `fleet.db`'s own `runs` table
+and `runs.jsonl`, fed by every member's own report.** There is no external analytics platform to
+audit here; the fleet's own run-logging pipeline IS its event spine, so hold it to the same
+standard. Real findings already produced under this framing: gh#437 (`fleet_stats.py`'s
+`runs_summary()` double-counts every run's provisional "started" row, deflating the Stats page's
+Signal rate) and gh#485 (`/status` has no tile for `fleet.db`'s own sync freshness, so a frozen
+sync would render every other tile as falsely live). Both are the same class of bug this lane
+looks for anywhere else — a number that is clean-looking but wrong.
 
 **devops** — production uptime and the delivery half of the deploy pipeline.
 Smoke monitor state; deploy success and failure classes; every prod regression class should
