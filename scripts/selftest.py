@@ -880,6 +880,98 @@ def _gru_md_checks_claim_history_before_claiming():
     assert step2c < step4, "step 2c must run before step 4's claim, not after"
 
 
+def _vision_link_gate_eligibility_rule():
+    """gh#525: a candidate is eligible only if it carries a real `Vision-link:` line, OR is
+    explicitly `none (maintenance)` AND nothing linked is open elsewhere in the set. A
+    candidate with no line at all is never eligible on its own -- confirmed against the Fix
+    section's own "only if X or Y" wording, not the looser same-tier framing AC2 uses to
+    describe its test scenario.
+    """
+    import vision_link_gate as vlg
+
+    # Pure classification: real link, explicit maintenance (tolerating a model's punctuation
+    # drift), and "nothing at all" are three distinct states.
+    assert vlg.classify_candidate("Vision-link: Stripe MRR -- top line metric", [])[0] == \
+        vlg.STATUS_LINKED
+    assert vlg.classify_candidate("Vision-link: none (maintenance)", [])[0] == \
+        vlg.STATUS_MAINTENANCE
+    assert vlg.classify_candidate("Vision-link: None(Maintenance)", [])[0] == \
+        vlg.STATUS_MAINTENANCE
+    status, raw = vlg.classify_candidate("just a bug report", [{"body": "claimed-by: gru"}])
+    assert status == vlg.STATUS_MISSING and raw is None
+
+    # A re-scored PRD comment (newest wins) overrides an older comment, which overrides body --
+    # same "latest wins" precedent gru.md/marie.md already use for superseded PRD comments.
+    status, raw = vlg.classify_candidate(
+        "Vision-link: none (maintenance)",
+        [
+            {"body": "Vision-link: none (maintenance)", "createdAt": "2026-09-01T00:00:00Z"},
+            {"body": "marie re-scored this.\nVision-link: KR2 guardrail",
+             "createdAt": "2026-09-05T00:00:00Z"},
+        ])
+    assert status == vlg.STATUS_LINKED and "KR2 guardrail" in raw
+
+    # gate_candidates: a linked candidate is always eligible; order is a filtered subsequence.
+    out = vlg.gate_candidates([
+        {"number": 3, "body": "Vision-link: A"},
+        {"number": 4, "body": "no link at all"},
+        {"number": 5, "body": "Vision-link: B"},
+    ])
+    assert out == {"eligible": [3, 5], "dropped": [
+        {"number": 4, "reason": "no Vision-link line (neither a real link nor explicit "
+                                 "'none (maintenance)')"}]}, out
+
+    # AC4: maintenance is eligible only when nothing number-moving is waiting -- present, it's
+    # dropped and the drop names the linked candidate (AC3); absent, it's picked.
+    out_blocked = vlg.gate_candidates([
+        {"number": 513, "body": "Vision-link: Stripe MRR"},
+        {"number": 100, "body": "Vision-link: none (maintenance)"},
+    ])
+    assert out_blocked["eligible"] == [513]
+    assert out_blocked["dropped"] == [{
+        "number": 100,
+        "reason": "none (maintenance), but a linked-KR candidate is open: #513"}], out_blocked
+
+    out_clear = vlg.gate_candidates([{"number": 100, "body": "Vision-link: none (maintenance)"}])
+    assert out_clear == {"eligible": [100], "dropped": []}, out_clear
+
+    # AC2's own verification scenario: a candidate missing the line is skipped when a
+    # Vision-link'd candidate is available at the same tier.
+    out_ac2 = vlg.gate_candidates([
+        {"number": 1, "body": "no vision line"},
+        {"number": 2, "body": "Vision-link: KR1 supply"},
+    ])
+    assert out_ac2["eligible"] == [2]
+    assert [d["number"] for d in out_ac2["dropped"]] == [1]
+
+    # The CLI surfaces the same verdict -- what gru.md's new gate step actually runs.
+    import subprocess
+    items = json.dumps([{"number": 513, "body": "Vision-link: Stripe MRR"},
+                         {"number": 100, "body": "Vision-link: none (maintenance)"}])
+    out = subprocess.run(
+        [sys.executable, str(HERE / "vision_link_gate.py"), "--items", items],
+        capture_output=True, text=True)
+    assert out.returncode == 0, (out.returncode, out.stdout, out.stderr)
+    assert json.loads(out.stdout) == out_blocked, out.stdout
+
+
+def _gru_md_gates_on_vision_link_before_packing():
+    """Doc-consistency guard, same shape as `_gru_md_checks_claim_history_before_claiming`:
+    proves gh#525's eligibility gate is wired into gru.md's step order -- documented in the
+    same place as the `fleet:needs-human-op` exclusion it's modeled on (AC1), and runs before
+    step 3's `fanout.py` pack (a dropped candidate must never reach the packer)."""
+    text = (HERE.parent / "members" / "gru" / "gru.md").read_text()
+    assert "vision_link_gate.py" in text, \
+        "gru.md never calls vision_link_gate.py -- gh#525's eligibility gate is unreachable"
+    assert "gh#525" in text
+    needs_human_op = text.index("fleet:needs-human-op")
+    gate_step = text.index("vision_link_gate.py")
+    step3 = text.index("3. **Pack the hour")
+    assert needs_human_op < gate_step < step3, \
+        "the Vision-link gate must be documented after the needs-human-op exclusion it's " \
+        "modeled on, and must run before step 3's pack"
+
+
 def _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing():
     """The meter gru spends against is the FLEET's per-diem hour, never a session's pacing.
 
@@ -7068,6 +7160,8 @@ if __name__ == "__main__":
     check("cost_bridge converts real spend into fanout's --observed shape", _cost_bridge_converts_real_spend_into_fanouts_observed_shape)
     check("claim_history blocks an item that keeps dead-ending", _claim_history_blocks_an_item_that_keeps_dead_ending)
     check("gru.md checks claim_history before claiming", _gru_md_checks_claim_history_before_claiming)
+    check("vision_link_gate applies gh#525's eligibility rule", _vision_link_gate_eligibility_rule)
+    check("gru.md gates on a Vision-link before packing (gh#525)", _gru_md_gates_on_vision_link_before_packing)
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
     check("maxx lease reserves, releases, and self-expires", _maxx_lease_reserves_releases_and_self_expires)
     check("maxx lease concurrent reserves don't clobber each other", _maxx_lease_concurrent_reserves_dont_clobber_each_other)
