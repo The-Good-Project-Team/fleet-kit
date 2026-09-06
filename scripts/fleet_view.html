@@ -195,6 +195,13 @@
   .checks-green { color: var(--ok); } .checks-pending { color: var(--warn); } .checks-failing { color: var(--bad); }
   .checks-blocked { color: var(--bad); }
 
+  /* ---------- Backlog filter bar: priority-tier toggle + title search (gh#193) ---------- */
+  .queue-filter-bar { display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+    border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .queue-filter-bar .hist-toggle { margin-top: 0; }
+  .queue-filter-bar input[type="search"] { flex: 1; min-width: 140px; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 12px; color: var(--text); }
+
   /* ---------- sidebar nav items: PRs/Backlog + Settings, same list as agents, separated ---------- */
   .side-nav-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer;
     border-left: 2px solid transparent; color: var(--text); }
@@ -838,11 +845,26 @@ function renderEvolutionPage() {
 // Queue page (sidebar item): PRs + backlog, now a full page instead of an always-visible rail --
 // it's reference material you check, not something that should compete for space every screen.
 // ---------------------------------------------------------------------------------------------
+// Backlog filter/sort state (gh#193) -- module-level so it survives the SSE-driven re-renders
+// renderQueuePage() gets on every 'gh' event, not just the one the operator triggered.
+let QUEUE_FILTER = { tier: 'all', text: '' };
+const PRIORITY_TIER_LABEL = ['fleet:priority-high', 'fleet:priority-medium', 'fleet:priority-low'];
+function issueTier(i) {
+  const names = (i.labels || []).map(l => l.name);
+  const idx = PRIORITY_TIER_LABEL.findIndex(t => names.includes(t));
+  return idx === -1 ? 3 : idx; // unlabeled issues sort after low, but still show under "all"
+}
+
 function renderQueuePage() {
   if (PAGE !== 'queue') return;
   const prs = GH.prs || [];
   const issues = GH.issues || [];
   detailHeadEl.innerHTML = `<div class="title-row"><h2>PRs &amp; Backlog</h2></div>`;
+
+  // The filter text input gets rebuilt below along with the rest of the page -- capture focus
+  // and cursor position first so a keystroke doesn't visibly steal focus from itself.
+  const filterHadFocus = document.activeElement?.id === 'queueFilterText';
+  const filterSelStart = filterHadFocus ? document.activeElement.selectionStart : null;
 
   const prsHtml = prs.map(pr => {
     const cls = pr._rollup === 'green' ? 'checks-green' : pr._rollup === 'failing' ? 'checks-failing' :
@@ -864,6 +886,19 @@ function renderQueuePage() {
   const epics = issues.filter(isEpic);
   const rest = issues.filter(i => !isEpic(i));
 
+  // Default order is priority tier (high -> medium -> low -> unlabeled), not the recency order
+  // GH.issues arrives in -- that recency order is exactly what buried 18 high-priority items
+  // across 36 unsorted rows in gh#193's evidence. Array.sort is stable, so issues within the
+  // same tier keep their incoming (recency) relative order.
+  const tierCounts = [0, 0, 0, 0];
+  rest.forEach(i => tierCounts[issueTier(i)]++);
+  const filterText = QUEUE_FILTER.text.trim().toLowerCase();
+  const visible = rest
+    .filter(i => QUEUE_FILTER.tier === 'all' || issueTier(i) === QUEUE_FILTER.tier)
+    .filter(i => !filterText || i.title.toLowerCase().includes(filterText))
+    .slice()
+    .sort((a, b) => issueTier(a) - issueTier(b));
+
   const renderIssueRow = i => {
     const labels = (i.labels || []).map(l =>
       `<span class="tag" style="--tag-color:#${esc(l.color || '888')}">${esc(l.name)}</span>`).join('');
@@ -880,7 +915,18 @@ function renderQueuePage() {
     </div>`;
   };
   const epicsHtml = epics.map(renderIssueRow).join('');
-  const issuesHtml = rest.map(renderIssueRow).join('') || '<div class="run-empty">backlog empty</div>';
+  const issuesHtml = visible.map(renderIssueRow).join('') ||
+    `<div class="run-empty">${rest.length ? 'no backlog items match this filter' : 'backlog empty'}</div>`;
+
+  const tierBtn = (tier, label) => `<button data-tier="${tier}" class="${QUEUE_FILTER.tier === tier ? 'active' : ''}">
+      ${label} <span class="count-badge">${tier === 'all' ? rest.length : tierCounts[tier]}</span></button>`;
+  const filterBarHtml = `
+    <div class="queue-filter-bar">
+      <div class="hist-toggle" id="queueTierFilter">
+        ${tierBtn('all', 'all')}${tierBtn(0, 'high')}${tierBtn(1, 'medium')}${tierBtn(2, 'low')}
+      </div>
+      <input type="search" id="queueFilterText" placeholder="filter by title…" value="${esc(QUEUE_FILTER.text)}">
+    </div>`;
 
   runListEl.innerHTML = `
     <div class="rail-section">
@@ -893,11 +939,30 @@ function renderQueuePage() {
       ${epicsHtml}
     </div>` : ''}
     <div class="rail-section">
-      <div class="rail-head">Backlog <span class="count-badge">${rest.length}</span>
+      <div class="rail-head">Backlog <span class="count-badge">${visible.length}${visible.length !== rest.length ? '/' + rest.length : ''}</span>
         <button class="btn small" id="newPriority" style="margin-left:auto">🔥 priority</button>
         <button class="btn small" id="newIssue">+ new</button></div>
+      ${filterBarHtml}
       ${issuesHtml}
     </div>`;
+
+  document.getElementById('queueTierFilter')?.addEventListener('click', e => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    const t = btn.dataset.tier;
+    QUEUE_FILTER.tier = t === 'all' ? 'all' : Number(t);
+    renderQueuePage();
+  });
+  const filterInput = document.getElementById('queueFilterText');
+  filterInput?.addEventListener('input', () => {
+    QUEUE_FILTER.text = filterInput.value;
+    renderQueuePage();
+  });
+  if (filterHadFocus && filterInput) {
+    filterInput.focus();
+    filterInput.setSelectionRange(filterSelStart, filterSelStart);
+  }
+
   document.getElementById('newIssue')?.addEventListener('click', async () => {
     const title = prompt('issue title:');
     if (!title) return;
