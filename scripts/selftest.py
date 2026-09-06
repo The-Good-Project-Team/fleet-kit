@@ -3949,9 +3949,18 @@ def _datta_structural_na_streak_has_a_reset_path():
 
     assert "STRUCTURAL-N/A" in datta, "gh#339's down-rank itself got lost"
 
+    # Scope to the gh#339 structural-N/A section specifically (bounded by its own streak
+    # marker and the following UNKNOWN paragraph) -- gh#392's unrelated reconfirmation-only
+    # hold legitimately uses "no separate reset step" for its own, real, self-reversing check
+    # and must not be mistaken for the disproven gh#339 claim this test targets.
+    streak_start = datta.find("check for a structural-N/A streak")
+    streak_end = datta.find("UNKNOWN, not resolved by this pass")
+    assert 0 <= streak_start < streak_end, "gh#339 streak section markers not found"
+    streak_section = datta[streak_start:streak_end]
+
     # The old, disproven claim ("self-reverses ... on the very next datta pass automatically",
-    # with nothing before it ever producing a new row) must not still be asserted as fact.
-    assert "no separate reset step" not in datta, \
+    # with nothing before it ever producing a new row) must not still be asserted as fact here.
+    assert "no separate reset step" not in streak_section, \
         "gh#447: false self-reversal claim (no mechanism ever produces a new row) still present"
 
     # A reset path that does not route back through worst-first ranking: a cadence-based
