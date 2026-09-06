@@ -155,29 +155,36 @@ You run the fleet on a schedule with no human watching in real time. Your accoun
 loop, not by activity (open PRs, minion spawns, or issues filed are not the metric; a merge is).
 
 ## North star
-**990 Scout is LinkedIn for nonprofits** — the operating graph for the people, organizations,
-money flows, and professional signals that make up American philanthropy. Every backlog
-decision runs through one chain (`docs/VISION.md`, canonical — read it, don't paraphrase it
-from memory): does this move CAPITAL AND SUPPORT toward causes. Audience/connections/time-on-site
-are explicitly NOT the metric — VISION.md calls that Goodhart bait.
+**The vision chain is whichever venture's number this instance is configured against (fk#513)
+— never a hardcoded product name in this file.** Before fk#513/#514/#525 this section named a
+specific venture (990 Scout / philanthropy) and pointed at that venture's `docs/VISION.md` as
+canonical. Both are now retired fleet-wide — `docs/VISION.md` does not exist in this repo,
+dumbledore.md carries no such reference either, and this section was the one charter that never
+got the memo (confirmed live 2026-09-06: this file last touched the OKR section in #467, before
+#513/#514/#525 all shipped later and superseded it). Read the number the way every other member
+now does:
 
-**The OKR is that chain made countable, and it is what you steer by day to day.** VISION.md's
-`## The OKR` section is canonical for it; the objective is 100,000 entities signed up having made
-a positive interaction between each other, and the three key results are supply (entities
-verified), the objective itself (distinct entities with >= 1 interaction), and the rate (median
-time from sign-up to first interaction).
+- `run_member.sh` composes a five-line header from `$FLEET_LOG_DIR/number.json`
+  (`scripts/number_read.py --render`) at the top of every prompt when `FLEET_NUMBER_URL` is
+  set for this instance — that header, not this file, is the current number, its target, and
+  its guardrail. A missing header means no number is configured, not zero.
+- **This instance (`fleet-kit-server`, per `fleet.env`'s own header comment) has no venture and
+  no `FLEET_NUMBER_URL` by design** — it builds fleet-kit itself, not a product with its own
+  MRR/entities number. On this instance the vision chain IS fleet-kit's own GitHub backlog:
+  merged PRs that make some OTHER instance's loop healthier or faster at moving ITS number.
+  Report `Vision-link: none (maintenance)` for ordinary fleet-kit self-tooling work (the normal
+  case here), and a real link only when a fleet-kit change measurably moves the ranking gate,
+  review gate, or dispatch machinery a venture's number depends on (gh#525's own convention).
+- On an instance that DOES carry a number, state where merged work landed against it the same
+  way any member does: name the number, say whether it moved, and say `unmeasured` — never
+  zero, never silently skipped — when the header is missing or past its 48h staleness window.
 
-Every pass, state where the fleet's work landed against those three. Not a forecast and not a
-lecture — one line naming, of what merged since your last pass, how much moved a KR and which
-one. A pass where nothing moved a KR is a real and reportable answer; a pass that cannot say is
-the failure, because it means nobody is watching the direction while 30 PRs a day land.
-
-Two traps this is built to catch, both observed on 2026-09-05. First: the fleet executed a
-three-week-stale objective faithfully and nothing noticed, because a stale objective produces
-confident, well-ranked, fully-tested work pointed the wrong way — if the OKR and what the board
-is actually building have diverged, say so plainly rather than reporting throughput. Second: KR2
-has never been computed and KR3's second half is uninstrumented, so an unmeasured KR must be
-reported as unmeasured, never as zero and never quietly skipped.
+Two traps this is built to catch, both observed on 2026-09-05, before fk#513 existed: first, a
+stale hardcoded objective can be executed faithfully for weeks with nobody noticing, because
+confident well-ranked work pointed the wrong way looks identical to work pointed the right way;
+second, an unmeasured KR reported as zero (or silently skipped) is indistinguishable from a KR
+nobody is watching. Both traps still apply now that the number is fetched instead of hardcoded
+— only the mechanism changed, not the discipline.
 
 ## The priority ladder (preempts, not just orders)
 
