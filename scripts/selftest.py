@@ -1772,6 +1772,51 @@ def _dormant_flags_an_enabled_member_with_zero_runs_in_window():
         "with no roster passed, a zero-run member must not be flagged (safe default)")
 
 
+def _runs_summary_excludes_started_rows_from_total_and_signal_rate():
+    """gh#437: run_report.py's provisional "started" row (gh#145) was never added to either
+    `_NOT_EXECUTED_STATUSES` or `_OK_STATUSES` in `runs_summary()`, so it was double-counted --
+    once as an extra `total` run, and once as an executed-but-not-ok failure (the same bucket as
+    a real crash), deflating `signal_rate` and inflating `total`. 3rd instance of the same
+    "a new run_report.py status doesn't reach fleet_stats.py's classification sets" bug class
+    as gh#150 (killed/timed_out) and gh#254 (incomplete_fanout).
+
+    Mixed window: a matched started+completion pair (must contribute exactly one count, the
+    completion's), an unmatched started row still mid-run (must contribute zero), plus plain
+    ok/quiet rows to give signal_rate a real denominator to get right or wrong.
+    """
+    import fleet_stats
+    now = fleet_stats._now_epoch()
+
+    def run(member, status, run_id=None, ts_offset=0):
+        return {"member": member, "status": status, "run_id": run_id, "ts": now - ts_offset}
+
+    runs = [
+        run("a", "started", run_id="paired-1", ts_offset=10 * 60),
+        run("a", "ok", run_id="paired-1", ts_offset=9 * 60),   # same pass's completion
+        run("b", "started", run_id="unmatched-1", ts_offset=1 * 60),  # still running, no completion
+        run("a", "ok"),
+        run("a", "quiet"),
+    ]
+    summary = fleet_stats.runs_summary(runs, hours=24.0)
+
+    # 3 real runs (2 ok + 1 quiet) -- the started rows contribute nothing to total/executed.
+    assert summary["total"] == 3, f"total = {summary['total']}, want 3 (started rows excluded)"
+    assert summary["executed"] == 3, f"executed = {summary['executed']}, want 3"
+    assert summary["signal_rate"] == round(100 * 2 / 3), (
+        f"signal_rate = {summary['signal_rate']}, want {round(100 * 2 / 3)} (2 ok / 3 executed)")
+
+    # per-member breakdown must apply the same exclusion: member "a" has 3 real rows (paired-1's
+    # completion + the standalone ok + quiet), never 4 (its started row must not also count).
+    rates = {r["member"]: r for r in summary["agent_rates"]}
+    assert rates["a"]["executed"] == 3, (
+        f"member a executed = {rates['a']['executed']}, want 3 (paired-1's started row excluded)")
+    assert "b" not in rates, "member b has only a started row -- must not appear in agent_rates"
+
+    # "started" must never render as a status/outcome on the hourly chart.
+    assert "started" not in summary["statuses"], (
+        "'started' leaked into the hourly chart's status vocabulary")
+
+
 def _status_page_deploy_component_classifies_stale_as_down():
     """gh#367: /status had 5 COMPONENTS rows and no Deploy row, so the fleet's own worst-
     performing pipeline (deploy_success_rate=8-9% at filing) had zero representation on the
@@ -6956,6 +7001,7 @@ if __name__ == "__main__":
     check("fleet_kpi's gru/jefe/minion ship a real 'PRs shipped' count", _fleet_kpi_gru_jefe_minion_ship_a_real_prs_shipped_count)
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
+    check("runs_summary() excludes provisional started rows from total/signal_rate/agent_rates (gh#437)", _runs_summary_excludes_started_rows_from_total_and_signal_rate)
     check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
     check("status_data.members() reads fleet.db in-process, no podman on $PATH needed (gh#364)", _status_data_members_reads_fleet_db_with_no_podman_on_path)
     check("status_data's other four components are unaffected by the members() fix (gh#364)", _status_data_other_components_unaffected_by_members_fix)
