@@ -98,6 +98,21 @@ class RedactionTest(unittest.TestCase):
         self.assertNotIn(note, found)
         self.assertNotIn(other, found)
 
+    def test_iter_transcripts_skips_jsonl_inside_memory_dir(self):
+        """The memory-dir guard itself, not the suffix filter: a .jsonl file (the one shape the
+        protection actually exists for) inside a memory/ dir must still be excluded -- this
+        test fails if the is_protected(p) call site in iter_transcripts() is ever deleted,
+        unlike the .md-seeded test above which the suffix filter alone already satisfies."""
+        mem_dir = self.root / "-repo" / "memory"
+        mem_dir.mkdir(parents=True)
+        note = mem_dir / "notes.jsonl"
+        note.write_text("gho_" + "M" * 36)
+
+        found = list(librarian.iter_transcripts(self.root))
+        self.assertNotIn(note, found)
+        found_full = list(librarian.iter_transcripts(self.root, include_compressed=True))
+        self.assertNotIn(note, found_full)
+
     def test_report_names_every_class_after_grep_returns_zero_hits(self):
         """AC2: 0 grep hits post-scrub, report still names the classes for human rotation."""
         (self.root / "a.jsonl").write_text("token gho_" + "E" * 36)
@@ -115,6 +130,41 @@ class RedactionTest(unittest.TestCase):
         lines = stats.report_lines()
         self.assertTrue(any("GitHub OAuth" in l and "1 file" in l for l in lines), lines)
         self.assertTrue(any("Postgres" in l and "2 file" in l for l in lines), lines)
+
+    def test_full_scan_rescans_already_compressed_transcript(self):
+        """AC1: a credential archived to .jsonl.gz before a pattern existed for it is still
+        reachable by a later --full-scan, decompress-scrub-recompress."""
+        import gzip as gzip_mod
+
+        token = "gho_" + "J" * 36
+        gz = self.root / "sess" / "old.jsonl.gz"
+        gz.parent.mkdir(parents=True)
+        with gzip_mod.open(gz, "wt", encoding="utf-8") as f:
+            f.write(json.dumps({"content": f"leaked {token}"}) + "\n")
+
+        found = list(librarian.iter_transcripts(self.root, include_compressed=True))
+        self.assertIn(gz, found)
+
+        stats = librarian.ScrubStats()
+        changed = librarian.scrub_file(gz, stats, execute=True)
+        self.assertTrue(changed)
+        with gzip_mod.open(gz, "rt", encoding="utf-8") as f:
+            scrubbed = f.read()
+        self.assertNotIn(token, scrubbed)
+        self.assertIn("[REDACTED:gho]", scrubbed)
+
+    def test_incremental_scan_never_lists_compressed_transcript(self):
+        """AC2: the ordinary (non-full-scan) path must not even enumerate a .jsonl.gz, let
+        alone decompress it -- only --full-scan pays that cost."""
+        import gzip as gzip_mod
+
+        gz = self.root / "sess" / "old.jsonl.gz"
+        gz.parent.mkdir(parents=True)
+        with gzip_mod.open(gz, "wt", encoding="utf-8") as f:
+            f.write("gho_" + "K" * 36)
+
+        found = list(librarian.iter_transcripts(self.root))
+        self.assertNotIn(gz, found)
 
     def test_main_refuses_repo_shaped_root(self):
         script = Path(__file__).resolve().parent / "librarian.py"
@@ -243,6 +293,19 @@ class RetentionTest(unittest.TestCase):
         mem = self.root / "-repo" / "memory"
         mem.mkdir(parents=True)
         note = mem / "MEMORY.md"
+        note.write_text("keep me forever")
+        self._age(note, 99999)
+        librarian.retention_sweep(self.root, execute=True, compress_days=30, drop_days=90)
+        self.assertTrue(note.exists())
+        self.assertEqual(note.read_text(), "keep me forever")
+
+    def test_jsonl_inside_memory_dir_never_swept(self):
+        """The memory-dir guard itself: a .jsonl file (TRANSCRIPT_SUFFIXES would otherwise
+        match it) inside memory/ must survive retention -- fails if is_protected(p) is ever
+        deleted from retention_sweep(), unlike the .md-seeded test above."""
+        mem = self.root / "-repo" / "memory"
+        mem.mkdir(parents=True)
+        note = mem / "notes.jsonl"
         note.write_text("keep me forever")
         self._age(note, 99999)
         librarian.retention_sweep(self.root, execute=True, compress_days=30, drop_days=90)

@@ -26,6 +26,14 @@ this member's own 900s timeout once it's a routine tick rather than a one-time b
 mtime is newer than the watermark left by the last successful --execute run; a closed transcript
 that's already been scrubbed once never needs re-reading. --full-scan bypasses the watermark for
 the first run against a real corpus, or after the pattern list changes.
+
+--full-scan ALSO reopens every already-compressed .jsonl.gz transcript (decompress, scrub,
+recompress if changed) -- an ordinary incremental tick never does, since gunzipping the whole
+archived corpus on every hourly run would defeat the watermark's purpose. This means a
+.jsonl.gz is unconditionally re-read on every --full-scan regardless of when it was archived,
+rather than tracked against a separate "pattern list last changed" watermark -- --full-scan is
+already the documented slow, explicit-opt-in path (see INCREMENTAL SCRUB above), and a real
+corpus's compressed fraction is a small tail next to the multi-GB raw scan it already pays for.
 """
 from __future__ import annotations
 
@@ -155,16 +163,21 @@ def looks_like_repo_root(root: Path) -> bool:
     return root.name == "repo"
 
 
-def iter_transcripts(root: Path, since: float = 0.0):
+def iter_transcripts(root: Path, since: float = 0.0, include_compressed: bool = False):
     """since=0.0 (default) walks everything -- a real first run against a real corpus, or any
     test, wants every matching file. A positive `since` skips a file whose content could not
-    have changed after that watermark, which is what keeps a routine incremental tick fast."""
+    have changed after that watermark, which is what keeps a routine incremental tick fast.
+
+    include_compressed=True additionally yields already-gzipped .jsonl.gz transcripts -- only
+    ever set by --full-scan (see module docstring); the ordinary incremental path leaves it
+    False so a routine tick never re-reads the archived tail of the corpus."""
     if not root.is_dir():
         return
+    suffixes = (".jsonl", ".jsonl.gz") if include_compressed else (".jsonl",)
     for p in sorted(root.rglob("*")):
         if not p.is_file() or is_protected(p):
             continue
-        if not p.name.endswith(".jsonl"):
+        if not p.name.endswith(suffixes):
             continue
         if since:
             try:
@@ -197,14 +210,26 @@ def redact_text(text: str, stats: ScrubStats, path: str) -> str:
 
 
 def scrub_file(path: Path, stats: ScrubStats, execute: bool) -> bool:
+    """Handles both raw .jsonl and already-archived .jsonl.gz transparently -- a .gz path is
+    decompressed to text, scrubbed, and (if changed) recompressed back in place, so --full-scan
+    can clean a credential that was archived before the pattern that catches it existed."""
+    is_gz = path.name.endswith(".gz")
     try:
-        text = path.read_text(encoding="utf-8", errors="surrogateescape")
+        if is_gz:
+            with gzip.open(path, "rt", encoding="utf-8", errors="surrogateescape") as f:
+                text = f.read()
+        else:
+            text = path.read_text(encoding="utf-8", errors="surrogateescape")
     except OSError:
         return False
     new_text = redact_text(text, stats, str(path))
     changed = new_text != text
     if changed and execute:
-        path.write_text(new_text, encoding="utf-8", errors="surrogateescape")
+        if is_gz:
+            with gzip.open(path, "wt", encoding="utf-8", errors="surrogateescape") as f:
+                f.write(new_text)
+        else:
+            path.write_text(new_text, encoding="utf-8", errors="surrogateescape")
     return changed
 
 
@@ -263,8 +288,9 @@ def main() -> int:
     ap.add_argument(
         "--full-scan", action="store_true",
         help="ignore the scrub watermark and re-read every transcript, not just ones modified "
-             "since the last --execute run (use for the first run against a real corpus, or "
-             "after the pattern list changes)",
+             "since the last --execute run, AND reopen already-compressed .jsonl.gz archives "
+             "too (use for the first run against a real corpus, or after the pattern list "
+             "changes)",
     )
     ap.add_argument("--state-file", default=DEFAULT_STATE_FILE,
                      help="where the scrub watermark is kept")
@@ -292,7 +318,7 @@ def main() -> int:
     since = 0.0 if args.full_scan else load_watermark(args.state_file)
     if not args.skip_scrub:
         for root in roots:
-            for f in iter_transcripts(root, since=since):
+            for f in iter_transcripts(root, since=since, include_compressed=args.full_scan):
                 stats.files_scanned += 1
                 if scrub_file(f, stats, args.execute):
                     changed_files += 1
