@@ -4105,6 +4105,84 @@ def _datta_dispatches_and_nerds_analyse():
     assert minion_spec.get("schedule"), "empty schedule fails member_spec validation (found live)"
 
 
+def _datta_structural_na_streak_has_a_reset_path():
+    """gh#447: PR #441's structural-N/A down-rank (gh#339) zeroed a frozen lane's UNEXAMINED
+    signal to stop it winning worst-first ranking every pass -- but that same zeroing also
+    starves the lane of the one thing that could ever change its last-3-rows window, since
+    ranking was the ONLY path to a new nerd run. Once STALE/BREACHED/UNEXAMINED all hit zero
+    together, the lane can never win ranking again, no new run is ever recorded, and the
+    3-row window this rule reads is frozen forever -- while datta.md kept asserting the
+    down-rank "self-reverses ... on the very next datta pass automatically", a claim with no
+    mechanism behind it. judge-judy blocked PR #441 on exactly this at commit 3d18d463e82b.
+
+    The fix must give the streak a reset path that does NOT depend on ranking: a periodic
+    override that probes a frozen lane on a long fixed cadence regardless of where it ranks,
+    and the doc's self-reversal claim must describe that real path rather than the false one.
+
+    gh#530: judge-judy blocked the first version of this override (PR #494) because it built a
+    "combined set" of (ranked lanes) + (probe) and only THEN applied `FLEET_DATTA_MAX_NERDS_PER_
+    PASS` -- since the frozen lane's UNEXAMINED was just zeroed for ranking, its probe sorts at
+    or near the bottom of that same order, so the cap's own truncation could silently drop it on
+    exactly the passes where ranking alone already fills the cap (the modal case, not a corner
+    case). The doc must state the probe is exempt from the cap, not merely part of a set the cap
+    is later applied to.
+    """
+    root = Path(__file__).parent.parent
+    datta = (root / "members" / "datta" / "datta.md").read_text()
+
+    assert "STRUCTURAL-N/A" in datta, "gh#339's down-rank itself got lost"
+
+    # Scope to the gh#339 structural-N/A section specifically (bounded by its own streak
+    # marker and the following UNKNOWN paragraph) -- gh#392's unrelated reconfirmation-only
+    # hold legitimately uses "no separate reset step" for its own, real, self-reversing check
+    # and must not be mistaken for the disproven gh#339 claim this test targets.
+    streak_start = datta.find("check for a structural-N/A streak")
+    streak_end = datta.find("UNKNOWN, not resolved by this pass")
+    assert 0 <= streak_start < streak_end, "gh#339 streak section markers not found"
+    streak_section = datta[streak_start:streak_end]
+
+    # The old, disproven claim ("self-reverses ... on the very next datta pass automatically",
+    # with nothing before it ever producing a new row) must not still be asserted as fact here.
+    assert "no separate reset step" not in streak_section, \
+        "gh#447: false self-reversal claim (no mechanism ever produces a new row) still present"
+
+    # A reset path that does not route back through worst-first ranking: a cadence-based
+    # override, independent of STALE/BREACHED/UNEXAMINED all being zero.
+    assert "FLEET_DATTA_FROZEN_PROBE_HOURS" in datta, \
+        "no override dial -- a frozen lane still has no path back once ranking excludes it"
+    i = datta.find("FLEET_DATTA_FROZEN_PROBE_HOURS")
+    override = datta[max(0, i - 400):i + 800]
+    assert "regardless of where it ranks" in override, \
+        "override still gated on ranking -- does not actually break the freeze"
+    assert "gh#447" in override, "override doesn't cite the finding it fixes"
+
+    # gh#530: judge-judy blocked PR #494 because "rank, combine, then cap" still let the flat
+    # cap's own truncation silently drop the probe -- it sorts at/near the bottom of the same
+    # worst-first order it exists to bypass, so a combined-then-capped set is exactly where
+    # ranking still wins. The probe must be stated as exempt from the cap, not merely present
+    # in a set the cap is later applied to.
+    assert "FLEET_DATTA_MAX_NERDS_PER_PASS" in override, \
+        "gh#530: override never mentions the per-pass cap -- can't state an exemption from it"
+    assert "exempt" in override, \
+        "gh#530: override doesn't state the probe is exempt from FLEET_DATTA_MAX_NERDS_PER_PASS " \
+        "-- a flat cap-then-truncate reading can still silently drop the probe on the very " \
+        "passes (ranking already fills N) this override exists to fix"
+
+    # The corrected claim must name the real mechanism instead of the disproven one.
+    j = datta.find("This override is the streak's only way back")
+    assert j != -1, "no corrected self-reversal explanation found"
+    corrected = datta[j:j + 700]
+    assert "STRUCTURAL-N/A" in corrected, "corrected claim doesn't tie back to the streak marker"
+    assert "does not" in corrected and "self-reverse" in corrected, \
+        "corrected text doesn't actually retract the old false claim"
+
+    # Report contract: a lane probed by the override must be named, same as a down-rank/reset.
+    report_i = datta.find("## Report")
+    report = datta[report_i:report_i + 800]
+    assert "gh#447" in report and "override" in report, \
+        "report section never asks datta to name a lane probed via the override"
+
+
 def _nerd_structural_na_marker_wires_to_datta_downrank():
     """gh#451: `datta.md`'s down-rank rule (`datta.md:76-99`, gh#339/PR#441) resets a lane's
     UNEXAMINED score to 0 only if its last 3 `nerd` runs all have an `outcome` starting with the
@@ -4940,6 +5018,35 @@ def _fleet_kpi_pr_ref_no_space_and_plural_shared_prefix_gh448():
         ) == (2, "PRs shipped")
         assert fleet_kpi.extract_kpi(member, "Opened pull/4488, auto-merge armed.") == (
             1, "PRs shipped")
+
+
+def _fleet_kpi_pr_ref_mixed_fate_in_joined_list_gh516():
+    """gh#516: `_PR_REF`'s comma/"and"-joined continuation (added for gh#448) absorbed a
+    second `#N` by proximity to a comma/"and" alone, regardless of that number's own fate --
+    `extract_kpi("gru", "Shipped PR #300, #301 blocked on CI.")` returned (2, "PRs shipped"),
+    crediting #301 as shipped in the very same sentence that says it was blocked. This is a
+    scoped reopening of the exact defect gh#230 was built to prevent, via the join gh#448
+    added rather than gh#230's original no-verb gap. A joined `#N` must now only be credited
+    when nothing contradicts the leading "shipped" verb sits between it and the next clause
+    boundary.
+    """
+    import fleet_kpi
+    for member in ("gru", "jefe", "minion"):
+        # AC1: comma-joined, fate word follows the second number directly (no comma).
+        assert fleet_kpi.extract_kpi(
+            member, "Shipped PR #300, #301 blocked on CI."
+        ) == (1, "PRs shipped")
+
+        # AC2: "and"-joined, fate word follows a comma after the second number.
+        assert fleet_kpi.extract_kpi(
+            member, "Shipped PR #100 and #101, reverted."
+        ) == (1, "PRs shipped")
+
+        # AC3: gh#448's own all-shipped joined-list case must still pass unchanged -- no fate
+        # word breaks the cluster, so both numbers are still credited.
+        assert fleet_kpi.extract_kpi(
+            member, "... both shipped green, auto-merge-armed PRs #178 and #177."
+        ) == (2, "PRs shipped")
 
 
 def _fleet_kpi_nerd_catches_filed_and_commented_verbs():
@@ -7198,6 +7305,7 @@ if __name__ == "__main__":
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
     check("datta dispatches by coverage, nerds analyse one lane", _datta_dispatches_and_nerds_analyse)
+    check("datta's structural-N/A streak has a reset path independent of ranking (gh#447)", _datta_structural_na_streak_has_a_reset_path)
     check("nerd rejects an invalid lane before any lane-specific work (gh#374)", _nerd_invalid_lane_rejected_before_lane_work)
     check("nerd's STRUCTURAL-N/A marker wires to datta's down-rank rule (gh#451)", _nerd_structural_na_marker_wires_to_datta_downrank)
     check("a run records the item it worked", _a_run_records_the_item_it_worked)
@@ -7282,6 +7390,7 @@ if __name__ == "__main__":
     check("fleet_kpi's marie pattern ignores an explicit-zero-counted verb (gh#409)", _fleet_kpi_marie_ignores_explicit_zero_counted_verb_gh409)
     check("fleet_kpi's gru/jefe/minion ship a real 'PRs shipped' count", _fleet_kpi_gru_jefe_minion_ship_a_real_prs_shipped_count)
     check("fleet_kpi's PR ref catches no-space 'PR#N' and plural shared-prefix forms (gh#448)", _fleet_kpi_pr_ref_no_space_and_plural_shared_prefix_gh448)
+    check("fleet_kpi's PR ref stops a joined list at a contradicting fate word (gh#516)", _fleet_kpi_pr_ref_mixed_fate_in_joined_list_gh516)
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
     check("runs_summary() excludes provisional started rows from total/signal_rate/agent_rates (gh#437)", _runs_summary_excludes_started_rows_from_total_and_signal_rate)
