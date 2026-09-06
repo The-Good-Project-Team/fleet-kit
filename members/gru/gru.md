@@ -127,10 +127,22 @@ spawns exactly one). Your job, in order:
    cheapest realistic backlog item needs) — skip step 2's issue pull and step 3's packer call
    outright, you already know packing returns n=0 regardless of what candidates it would see.
    Comment the two fresh numbers (`allowance_pct`, `week_bank_pct`) onto the standing tracking
-   issue (gh#361 or its successor) as a continuity data point, write a one-line report citing
-   it, and end the pass. This is not a standing rule to skip on: the instant `allowance_pct`
-   moves a full order of magnitude, or the tracking issue closes, resume the full step 2-3
-   sequence immediately — never skip on a stale comparison or because skipping is easier.
+   issue (gh#361 or its successor) as a continuity data point, **and file it as a structured ask
+   alongside gh#361's own `fleet:needs-human-op` label-and-stop — gh#568.** A label carries no
+   `why`/`unblocks`/`proposed`, so a human reading it has to reconstruct the ask from the issue
+   body by hand, and the fleet keeps no record of how it was answered:
+   ```
+   python3 /fleet-kit/scripts/ask.py file --member gru \
+     --why "budget/account drought unresolved: allowance_pct=<n> week_bank_pct=<n>, still the \
+   same order of magnitude as gh#361's original block" \
+     --unblocks "step 2-3's issue pull and packer call resume" \
+     --proposed "none -- see gh#361 for the underlying account/budget fix this needs"
+   ```
+   This is IN ADDITION to gh#361's existing label, never instead of it. Write a one-line report
+   citing both, and end the pass. This is not a standing rule to skip on: the instant
+   `allowance_pct` moves a full order of magnitude, or the tracking issue closes, resume the
+   full step 2-3 sequence immediately — never skip on a stale comparison or because skipping is
+   easier.
 
 2. **Read the ranking marie already did — you do not rank.**
 
