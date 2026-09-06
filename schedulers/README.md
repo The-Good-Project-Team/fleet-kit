@@ -5,8 +5,11 @@ Templates for both macOS (launchd) and Linux (systemd timer). Fill the `{{...}}`
 `{{USER}}` (the account running the fleet), `{{LOG_DIR}}` (your `FLEET_LOG_DIR`),
 `{{WEBHOOK_PORT}}` (your `FLEET_WEBHOOK_PORT`, e.g. `8562`), `{{NTFY_TOPIC}}` (the ntfy.sh
 topic the health pagers below page to), `{{PUBLIC_URL}}` (the public tunnel URL
-tunnel-health checks, e.g. `https://your-fleet.example.com/`), and `{{VIEW_PORT}}` (your
-`FLEET_VIEW_PORT`, e.g. `8420`) — then install per your platform's normal mechanism.
+tunnel-health checks, e.g. `https://your-fleet.example.com/`), `{{VIEW_PORT}}` (your
+`FLEET_VIEW_PORT`, e.g. `8420`), `{{INSTANCE_DIR}}` (this instance's state dir, e.g.
+`instances/<name>` under `up.sh`'s own layout — where its `fleet.env` lives), and
+`{{CONTAINER_NAME}}` (the podman container this instance runs as, e.g. `fleet-kit-<name>`) —
+then install per your platform's normal mechanism.
 
 | Job | Cadence | Script | Required? |
 |---|---|---|---|
@@ -26,6 +29,27 @@ launchd: `cp <file> ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAg
 systemd: `cp <file>.service <file>.timer /etc/systemd/system/ && systemctl enable --now <file>.timer`
 (the `view` job has no `.timer` — it's `Type=simple` + `Restart=on-failure`, enabled directly:
 `systemctl enable --now fleetkit-view.service`)
+
+## Host-only jobs: scripts that `podman exec` into the fleet's own container
+
+The table above covers two shapes: jobs that run **inside** the container (entrypoint.sh's own
+crontab — see its heredoc) and pure host-read pagers (account/tunnel/sync-health) that need
+nothing but log files and a `curl` to page. Neither shape works for a script that reaches
+*into* the running fleet container from outside it — the container has no podman socket bind
+mounted, so it cannot `podman exec` itself (gh#376). These two jobs are that third shape, and
+must be scheduled host-side, never added to entrypoint.sh's crontab:
+
+| Job | Cadence | Script | Required? |
+|---|---|---|---|
+| account-heartbeat | hourly | `scripts/account_heartbeat.sh` | recommended — catches a pool account going stale with nothing else running to reveal it (the 60.2h incident its own header documents); costs one real `claude -p` call per pool account per tick |
+| budget-read | 15 min | `scripts/budget_read_check.sh` | recommended — pages when the account the fleet is actually spending from goes budget-blind instead of failing open silently (the incident PR#338 shipped both scripts for) |
+
+Both need `FLEET_INSTANCE_DIR` and `FLEET_CONTAINER_NAME` (`{{INSTANCE_DIR}}`/
+`{{CONTAINER_NAME}}` above) in addition to the usual placeholders — see
+`fleetkit-account-heartbeat.service`/`.timer` and `fleetkit-budget-read.service`/`.timer` (or
+their launchd equivalents) for the exact shape. Cadence is a starting default, not a measured
+optimum — see each `.timer`/`.plist`'s own comment for the open question a human should
+confirm against real per-tick cost.
 
 Both template families set `PATH`/environment explicitly — neither launchd nor a systemd
 timer gives a job a login shell, so `gh`/`git`/`claude` are not guaranteed to be found
