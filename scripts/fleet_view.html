@@ -228,6 +228,12 @@
      these rules only apply under the breakpoint. ---------- */
   @media (max-width: 700px) {
     #menuToggle { display: inline-block !important; }
+    /* gh#157: the repo-URL stat wraps to multiple lines inside the topbar's fixed 40px band
+       (no room to grow it without pushing the sidebar/detail down), overflowing both
+       vertically and, at narrow phone widths (<=375px), horizontally past the viewport
+       itself. It's the least essential item in the topbar on a phone -- brand name and the
+       live dot already say which console this is -- so it's hidden rather than truncated. */
+    #repo { display: none; }
     .body { grid-template-columns: 1fr; position: relative; overflow: hidden; }
     .sidebar { position: absolute; inset: 0; z-index: 20; width: 100%;
       transform: translateX(-100%); transition: transform .18s ease; }

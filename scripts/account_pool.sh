@@ -224,29 +224,45 @@ _account_pool_budget_verdict() {
 # healthy account has NO known reset here, and there is no API this kit can read for one. That
 # is a real limit, not an oversight -- so this function must never pretend otherwise:
 #
-#   - accounts with a KNOWN future reset sort first, soonest epoch first
-#   - accounts with NO known reset keep their FLEET_ACCOUNTS order, after those
+#   - accounts with a KNOWN future reset sort first, soonest epoch first (these are gated, and
+#     _account_pool_budget_verdict will skip them regardless of position -- see below)
+#   - accounts with a reset epoch already in the PAST ("lapsed") sort next, soonest-passed
+#     epoch first
+#   - accounts with NO recorded epoch at all ("never gated") keep their FLEET_ACCOUNTS order,
+#     last
 #
-# The second group is the normal steady state (both accounts healthy, nothing gated), so this
-# function is a NO-OP exactly when nothing is known -- the fixed order still governs and
-# behavior is identical to before. It only steers once an account has actually reported a
-# reset, which is precisely when the information to steer by exists.
+# gh#462: the first cut of this function only had two buckets -- "known future" and
+# "everything else" -- which silently merged "lapsed" into "never gated" and let both fall
+# back to unmodified FLEET_ACCOUNTS order. That made the whole feature a no-op in every
+# reachable state: the "known future" bucket is exactly what _account_pool_budget_verdict
+# gates and skips no matter where it sits, and the "lapsed" case -- the PR's own stated payoff
+# scenario, a just-reset account that should be drained before a never-gated one -- was
+# reordered right back to FLEET_ACCOUNTS order, identical to no fix at all. A lapsed account is
+# distinguishable from a never-gated one: it still has a state-file line, just with an epoch
+# that has already passed, whereas a never-gated account has no line there at all. Splitting
+# that line out into its own bucket is what makes the ordering context-sensitive instead of
+# reshuffling only accounts guaranteed to be skipped.
+#
+# The third group (never gated) is the normal steady state (every account healthy, nothing
+# ever gated), so this function is still a NO-OP exactly when nothing is known -- the fixed
+# order still governs and behavior is identical to before the feature existed.
 #
 # INTERACTION with _account_pool_budget_verdict: an account whose gate is still in the future is
 # SKIPPED by the caller without spending a call. So a soonest-reset that has not arrived yet is
 # not tried early -- it is skipped, exactly as before. What this ordering changes is the window
-# AFTER a gate expires: the just-reset account is the one whose fresh quota is most perishable,
-# and it is now drained first instead of sitting behind whatever FLEET_ACCOUNTS listed first.
+# AFTER a gate expires: the just-reset (lapsed) account is the one whose fresh quota is most
+# perishable, and it is now drained ahead of a never-gated account instead of sitting behind
+# whatever FLEET_ACCOUNTS listed first.
 #
 # An 'unauthenticated' or 'other' entry carries an epoch too (a 1h / 5m holdoff, not a real
-# quota reset). Sorting on it is still correct: it is a time-to-retry, and the account that
-# becomes retryable soonest is the right one to reach for first. It is skipped while gated
-# either way.
+# quota reset). Sorting on it is still correct in both the known-future and lapsed buckets: it
+# is a time-to-retry, and the account that becomes (or became) retryable soonest is the right
+# one to reach for first.
 #
-# Any malformed epoch is treated as unknown rather than sorted as garbage -- an unreadable state
-# file must never reorder the pool into nonsense.
+# Any malformed epoch is treated as never-gated rather than sorted as garbage -- an unreadable
+# state file must never reorder the pool into nonsense.
 _account_pool_order() {
-  local account epoch now known="" unknown=""
+  local account epoch now known="" lapsed="" unknown=""
   now=$(date +%s)
   for account in $ACCOUNT_POOL_ORDER; do
     epoch=""
@@ -255,12 +271,15 @@ _account_pool_order() {
     fi
     if [[ "$epoch" =~ ^[0-9]+$ ]] && [ "$epoch" -gt "$now" ]; then
       known="${known}${epoch} ${account}"$'\n'
+    elif [[ "$epoch" =~ ^[0-9]+$ ]]; then
+      lapsed="${lapsed}${epoch} ${account}"$'\n'
     else
       unknown="${unknown}${account}"$'\n'
     fi
   done
   {
     [ -n "$known" ] && printf '%s' "$known" | sort -n | awk '{print $2}'
+    [ -n "$lapsed" ] && printf '%s' "$lapsed" | sort -n | awk '{print $2}'
     [ -n "$unknown" ] && printf '%s' "$unknown"
   } | grep -v '^$' || true
 }
