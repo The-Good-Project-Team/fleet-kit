@@ -182,6 +182,18 @@ spawns exactly one). Your job, in order:
    marie's size estimate and it is what makes packing possible. An item with no complexity
    label is treated as a 5 (median), never as free.
 
+   2b-2. **Only work that names the number is eligible — fleet-kit#523.** The header above
+   this pass (`scripts/number_read.py`, fleet-kit#519) says what THE NUMBER, the guardrail
+   and the channel are for this instance. A candidate is eligible only if its body carries a
+   `Vision-link:` line naming one of them (the number's own words, its KR, or the epic that
+   owns it). A candidate whose `Vision-link:` is missing or reads `none (maintenance)` is
+   eligible ONLY when no linked candidate is open in any tier — maintenance fills an empty
+   hour, it never displaces the number. Name every candidate you dropped here in your report
+   (issue number + "no Vision-link"), exactly as 2b's `needs-human-op` drops are, so marie
+   can link it or close it. Reif, 2026-09-06: "I don't care about the number of PRs we hit
+   ... I just want to make autonomous progress on agreed upon goals." Measured that night:
+   12 of 12 minion PRs in one hour were `fix(...)` inward spend, none named the number.
+
    2c. **Drop any candidate that has already dead-ended past the threshold — gh#64.** Nothing
    above this line distinguishes "never tried" from "tried and abandoned 10 times"; without
    this check the same chronically-blocked item gets reclaimed and respawned every hour,

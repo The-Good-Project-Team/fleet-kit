@@ -868,6 +868,23 @@ def _claim_history_blocks_an_item_that_keeps_dead_ending():
         assert "ok" in out_clean.stdout, out_clean.stdout
 
 
+def _gru_md_gates_candidates_on_vision_link():
+    """fleet-kit#523: Reif, 2026-09-06 -- "I don't care about the number of PRs we hit ... I
+    just want to make autonomous progress on agreed upon goals." Measured the same night:
+    12 of 12 minion PRs in one hour were `fix(...)` inward spend; gru picked from marie's
+    tier order by createdAt and never read whether an item named the number. The gate is a
+    step in gru.md between 2b (marie's ranking) and 2c (dead-end drop): a candidate is
+    eligible only if its body carries a `Vision-link:` naming the number, guardrail or
+    channel from the header; `none (maintenance)` fills an empty hour, never displaces."""
+    text = (HERE.parent / "members" / "gru" / "gru.md").read_text()
+    b = text.index("2b. **Otherwise, marie's normal ranking.**")
+    c = text.index("2c. **Drop any candidate that has already dead-ended")
+    gate = text[b:c]
+    assert "fleet-kit#523" in gate and "Vision-link" in gate, \
+        "gru.md has no Vision-link eligibility gate between 2b and 2c -- the fleet builds whatever is oldest"
+    assert "none (maintenance)" in gate, "the gate must say what happens to maintenance items"
+
+
 def _gru_md_checks_claim_history_before_claiming():
     """Doc-consistency guard, same shape as `_gru_md_clamps_allowance_to_share_ceiling`: proves
     the gh#64 dead-end check is actually wired into gru.md's step order (between step 2's
