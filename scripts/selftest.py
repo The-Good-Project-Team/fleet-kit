@@ -200,6 +200,45 @@ def _report_lost_is_not_reported_nothing():
     assert reported["status"] == "ok", reported["status"]
 
 
+def _incomplete_fanout_outranks_trailing_loss_on_overlap():
+    """gh#461 AC2/AC3: a run can satisfy BOTH `_detect_trailing_loss` (a real report existed
+    one turn earlier and was overwritten) AND `dispatched_items` (the same pass fanned out a
+    background sub-pass it never waited on) -- the-fixer/datta's exact shape of report, then
+    keep working, then dispatch. Before this fix classify() checked `trailing_loss` first, so
+    this overlap silently read as `report_lost` and gh#252's `orphaned_items` tracking (the
+    actionable list of what's still out there unresolved) vanished for that case. Red before
+    the reorder in classify(), green after.
+    """
+    import run_report
+    text = ("Report:\nBOTTOM LINE: found the regression, dispatching parallel fixes.\n\n"
+            "bash scripts/run_member.sh the-fixer --item 224\n"
+            "bash scripts/run_member.sh the-fixer --item 229\n"
+            "Waiting for both sub-passes before the final wrap-up.\n")
+    # No Outcome:/Evidence: lines -- empty outcome is the precondition for either branch.
+    overlap = run_report.build_record(member="the-fixer", run_id="r1", kind="llm", exit_code=0,
+                                      pass_text=text, usage=None, vision_required=False,
+                                      trailing_loss=True)
+    assert overlap["status"] == "incomplete_fanout", overlap["status"]
+    assert overlap["status"] != "report_lost", overlap["status"]
+    assert overlap["orphaned_items"] == ["224", "229"], overlap["orphaned_items"]
+
+    # AC3-style control: identical dispatch text, trailing_loss NOT signalled -- unaffected,
+    # already incomplete_fanout before this fix and must stay so.
+    no_overlap = run_report.build_record(member="the-fixer", run_id="r2", kind="llm",
+                                         exit_code=0, pass_text=text, usage=None,
+                                         vision_required=False, trailing_loss=False)
+    assert no_overlap["status"] == "incomplete_fanout", no_overlap["status"]
+    assert no_overlap["orphaned_items"] == ["224", "229"], no_overlap["orphaned_items"]
+
+    # Control: trailing_loss signalled with NO dispatch evidence at all -- still report_lost,
+    # proving the reorder didn't just delete the trailing_loss branch outright.
+    plain_loss = run_report.build_record(member="t", run_id="r3", kind="llm", exit_code=0,
+                                         pass_text="a short non-report wrap-up", usage=None,
+                                         vision_required=False, trailing_loss=True)
+    assert plain_loss["status"] == "report_lost", plain_loss["status"]
+    assert plain_loss["orphaned_items"] is None, plain_loss["orphaned_items"]
+
+
 def _gh167_trailing_loss_flows_end_to_end_through_stream_log_and_run_report():
     """gh#257 AC2/AC3, sourced end-to-end through stream_log.py -> run_report.py (the same two
     scripts run_member.sh chains, minus the `claude -p`/timeout wrapper around them): a synthetic
@@ -272,14 +311,33 @@ def _run_member_wires_trailing_loss_flag():
     actually chains them -- source-checked the same way `_run_member_writes_a_started_row_...`
     checks its own wiring, so a future edit that drops either flag (rather than the logic behind
     it) fails a test instead of silently going quiet in prod.
+
+    gh#461 AC1: the old version of this check (`"--trailing-loss" in re.sub(...)`) was a
+    repo-wide substring search -- it passed as long as the string `--trailing-loss` appeared
+    ANYWHERE after stripping `--trailing-loss-out`, including in the
+    `TRAILING_LOSS_FLAG="--trailing-loss"` assignment line itself. A future edit that dropped
+    `$TRAILING_LOSS_FLAG` from the real run_report.py invocation line (run_member.sh's only
+    normal-exit call, the one carrying --pass-file -/--usage-file) while leaving that
+    assignment untouched still satisfied the old assert -- false confidence on exactly the
+    regression this test's docstring claims to catch. Now it isolates that one real call
+    (joining its backslash-continued lines into a single logical line first) and checks
+    `$TRAILING_LOSS_FLAG` is actually referenced there.
     """
     src = (ROOT / "scripts" / "run_member.sh").read_text()
     assert "--trailing-loss-out" in src, "stream_log.py is never told where to write the loss signal"
     assert "TRAILING_LOSS_FILE" in src, "no side-channel file variable for the loss signal"
     assert '[ -s "$TRAILING_LOSS_FILE" ]' in src, \
         "run_member.sh never tests the loss file for non-emptiness before building the flag"
-    assert "--trailing-loss" in re.sub(r"--trailing-loss-out", "", src), \
-        "run_member.sh never forwards --trailing-loss to run_report.py"
+
+    logical_lines = re.sub(r"\\\n", " ", src).splitlines()
+    invocation = next(
+        (ln for ln in logical_lines
+         if "run_report.py" in ln and "--pass-file -" in ln and "--usage-file" in ln),
+        None)
+    assert invocation is not None, \
+        "no real run_report.py invocation line found (expected --pass-file -/--usage-file)"
+    assert "$TRAILING_LOSS_FLAG" in invocation, \
+        "run_member.sh's real run_report.py call never forwards $TRAILING_LOSS_FLAG: " + invocation
 
 
 def _artifact_regex_accepts_backtick_spans():
@@ -6523,6 +6581,7 @@ if __name__ == "__main__":
     check("a detected gh#167 trailing-turn loss is report_lost, not reported_nothing (gh#257 AC2/AC3)", _report_lost_is_not_reported_nothing)
     check("gh#167 trailing-loss signal flows end-to-end, stream_log.py -> run_report.py (gh#257 AC2/AC3)", _gh167_trailing_loss_flows_end_to_end_through_stream_log_and_run_report)
     check("run_member.sh wires --trailing-loss-out/--trailing-loss between the two scripts (gh#257)", _run_member_wires_trailing_loss_flag)
+    check("classify() prefers incomplete_fanout over report_lost on overlap (gh#461)", _incomplete_fanout_outranks_trailing_loss_on_overlap)
     check("_ARTIFACT accepts a backtick-wrapped path/PID/SHA (#251)", _artifact_regex_accepts_backtick_spans)
     check("a pass's Prediction survives for the NEXT pass to verify", _rsi_lines_survive_to_the_next_pass)
     check("fleet.db run_id collisions don't lose a verdict", _fleet_db_run_id_collisions_dont_lose_a_verdict)
