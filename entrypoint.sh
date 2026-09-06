@@ -206,7 +206,7 @@ case "${1:-cron-foreground}" in
       # "*/2" in their own fleet.env without forking this file. Default is unchanged from
       # the original hourly schedule.
       if cron_member_enabled gru; then
-        echo "3 ${FLEET_GRU_CADENCE:-*} * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_gru_fanout.sh"
+        echo "3 ${FLEET_GRU_CADENCE:-*} * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_gru_fanout.sh >> $LOG_DIR/gru.log 2>&1"
       fi
       if cron_member_enabled jefe; then
         echo "21 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh jefe >> $LOG_DIR/jefe.log 2>&1"
