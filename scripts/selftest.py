@@ -5781,13 +5781,8 @@ def _unknown_reset_keeps_configured_order():
     This is the normal steady state: both accounts healthy, nothing gated, so nothing has ever
     reported a reset time. The feature must be a NO-OP here rather than inventing an order.
     """
-    now = int(time.time())
     assert _pool_order([]) == ["tgp", "gmail"], "empty state file changed the order"
-    # A PAST epoch is not a pending reset -- it is a gate that already expired, so the account
-    # is 'unknown' again and keeps configured order.
-    assert _pool_order([f"gmail {now - 5000}"]) == ["tgp", "gmail"], \
-        "an expired gate was treated as a pending reset"
-    # A malformed epoch must degrade to unknown, never sort as garbage.
+    # A malformed epoch must degrade to never-gated, never sort as garbage.
     assert _pool_order(["gmail notanumber"]) == ["tgp", "gmail"], \
         "unreadable state file reordered the pool"
 
@@ -5801,6 +5796,43 @@ def _known_reset_outranks_unknown():
     now = int(time.time())
     got = _pool_order([f"gmail {now + 600}"])
     assert got == ["gmail", "tgp"], f"known reset did not outrank unknown: {got}"
+
+
+def _lapsed_reset_outranks_never_gated():
+    """gh#462: a gate whose reset epoch has already PASSED ("lapsed") sorts ahead of an account
+    that was never gated at all -- the exact case the original PR claimed to fix and didn't.
+
+    Before the fix, _account_pool_order only split "known future reset" from "everything else",
+    which silently merged a just-lapsed account into the same bucket as a never-gated one and
+    left both in unmodified FLEET_ACCOUNTS order -- so this assertion FAILS against the pre-fix
+    code (gmail would come out second, identical to no ordering at all) and passes after it.
+    The old test here asserted the opposite (that a lapsed gate keeps configured order), which
+    was itself asserting the no-op bug as correct behavior -- see _unknown_reset_keeps_configured_order.
+    """
+    now = int(time.time())
+    # gmail was gated but its reset has already passed; tgp was never gated. gmail's quota just
+    # refreshed and is the most perishable in the pool, so it must be tried first.
+    got = _pool_order([f"gmail {now - 5000}"])
+    assert got == ["gmail", "tgp"], \
+        f"lapsed-but-now-eligible account did not outrank never-gated: {got}"
+
+    # ...and the reverse seeding must NOT invert, or the test would pass on any reordering.
+    got = _pool_order([f"tgp {now - 5000}"])
+    assert got == ["tgp", "gmail"], f"ordering ignored which account actually lapsed: {got}"
+
+
+def _lapsed_reset_sorts_ahead_of_known_future_gate_too():
+    """A three-way mix: a lapsed reset must still outrank a never-gated account even when a
+    THIRD, still-gated account is also present -- the known-future bucket must not swallow or
+    reorder the lapsed one.
+    """
+    now = int(time.time())
+    got = _pool_order([f"tgp {now + 86400}", f"gmail {now - 5000}"],
+                       accounts="tgp gmail primary")
+    assert got == ["tgp", "gmail", "primary"], (
+        f"three-bucket ordering wrong: {got} "
+        "(want known-future 'tgp' first, lapsed 'gmail' second, never-gated 'primary' last)"
+    )
 
 
 def _every_configured_account_survives_ordering():
@@ -6721,6 +6753,8 @@ if __name__ == "__main__":
     check("soonest-reset account is tried first", _soonest_reset_account_is_tried_first)
     check("no known reset keeps configured order", _unknown_reset_keeps_configured_order)
     check("known reset outranks unknown reset", _known_reset_outranks_unknown)
+    check("lapsed reset outranks never-gated (gh#462)", _lapsed_reset_outranks_never_gated)
+    check("lapsed reset still outranks never-gated alongside a known-future gate", _lapsed_reset_sorts_ahead_of_known_future_gate_too)
     check("ordering never drops an account", _every_configured_account_survives_ordering)
     check("run loop actually uses the ordering", _run_loop_actually_uses_the_ordering)
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)

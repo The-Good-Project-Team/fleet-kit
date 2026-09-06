@@ -123,6 +123,58 @@ Do not pick lanes by intuition. Score each lane on three signals and rank worst-
   scope to add — that is a lane-checklist change, gh#143's, not this file's) and to correctly
   never fire before then, rather than mis-firing on today's inconsistent free text.
 
+  **Separately, also check for reconfirmation-only staleness on a LIVE lane (gh#392).** This is
+  independent of the gh#339 check immediately above — different trigger, different evidence, do
+  not merge the two. gh#339 fires when a lane has no lane-specific surface at all; this fires
+  when a lane IS applicable but its already-open findings simply haven't moved since the lane
+  was last examined, so re-dispatching on UNEXAMINED alone would only reconfirm a conclusion a
+  prior pass already reached (confirmed live 2026-09-05: devops was re-dispatched 2h05m after a
+  prior pass had already answered, by name, the same two questions — 4 of the last 6 devops nerd
+  passes that day were reconfirmation-only). For each lane that did NOT already get held flat by
+  the gh#339 check above:
+
+  1. Read the lane's last nerd run: `SELECT recorded_at, outcome, self_critique FROM runs WHERE
+     member='nerd' AND lane='<lane>' ORDER BY recorded_at DESC LIMIT 1`. Pull every issue number
+     (`#\d+`) mentioned in that row's `outcome`/`self_critique` — the issues that pass referenced
+     as its findings. No structured `referenced_issues` field exists yet to read instead; this
+     free-text parse is the same class of fragility already flagged above for lane attribution
+     (UNKNOWN, not resolved by this pass — a future structured column would remove this risk;
+     weigh it against the parse before trusting a hold this produces).
+  2. No prior run, or zero issue numbers found in it: skip this check for the lane this pass —
+     the hold never fires on missing or incomplete evidence, same posture as the gh#339 rule.
+  3. For each referenced issue, check `gh issue view <n> --json updatedAt,comments`. It counts
+     as **moved** if `updatedAt` is later than the lane's last `recorded_at` (GitHub bumps
+     `updatedAt` on close/reopen, so this alone already captures a state change since
+     `recorded_at`) or any comment's `createdAt` is later than `recorded_at`. Do not compare
+     current `state` against `open` directly — an issue already closed at `recorded_at` time
+     (a routine citation pattern: a run's own `outcome`/`self_critique` often names an issue it
+     just closed) would always read as "not open" and falsely count as moved on every future
+     pass, permanently defeating this hold for that lane.
+  4. Pull only the `lane_kpi` rows whose `computed_at` is later than the lane's last
+     `recorded_at` (`lane_kpi`'s own timestamp column — confirmed via
+     `sqlite3 fleet.db ".schema lane_kpi"`; the table has no `recorded_at` column of its own to
+     reuse). Zero such rows means no `lane_kpi` snapshot has landed since the lane was last
+     examined — that is **no evidence of movement**, the same "skip on missing evidence"
+     posture as step 2, never material by default. If one or more rows postdate `recorded_at`,
+     compare the newest of them against the most recent row at or before `recorded_at` (the
+     value already known as of the last check) on `value` and `denominator`. If the lane's
+     guardrail-alert job defines a numeric noise threshold for that metric, a move counts as
+     **material** only past that threshold; if none is defined — true fleet-wide as of
+     2026-09-05, no `lane_kpi_alerts.py` exists in this repo — treat ANY nonzero change in
+     `value` or `denominator` as material. Do not invent a threshold neither job defines. A
+     `lane_kpi` row at or before `recorded_at` can never itself trigger "material" — it only
+     ever serves as the baseline for a row that postdates `recorded_at`.
+  5. Zero referenced issues moved, AND the KPI/guardrail change is not material: hold this
+     lane's priority flat this pass — do not let UNEXAMINED alone win it a dispatch. This hold
+     fires on UNEXAMINED grounds only; it must never suppress a STALE or BREACHED verdict for
+     the same lane.
+  6. The hold is self-reversing with no separate reset step: the moment any referenced issue has
+     moved, or the KPI/guardrail change becomes material, that lane scores UNEXAMINED normally
+     again on the very next datta pass.
+
+  Name every lane held flat this way in your report (below), with which issue(s) you checked
+  and found unchanged — an audit trail, never a silent skip.
+
 **Spawning fewer nerds than lanes is the normal case, not a failure.** A lane whose KPI is
 fresh, whose guardrail holds, and which was examined recently does not need a pass this hour.
 Say that in your report rather than spawning to look busy — a nerd that finds nothing because
@@ -207,7 +259,10 @@ fired), which lanes you spawned nerds for and why, which you deliberately skippe
 a one-line result per nerd — findings filed, or "found nothing, here is what it examined", or
 "failed: <reason>". Name any lane down-ranked this pass via the gh#339 structural-N/A streak
 rule, any lane probed this pass via the gh#447 frozen-lane override rather than ranking, and
-any lane whose streak broke this pass — an audit trail, never a silent skip.
+any lane whose streak broke this pass — an audit trail, never a silent skip. Same for gh#392:
+name any lane held flat because its referenced open issues showed no movement and its
+KPI/guardrail stayed within noise, with which issue(s) you checked, and any lane whose hold
+broke this pass.
 
 **Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus
 `Self-critique:` per §11) — the prose above is what a human reads, these lines are what
