@@ -1831,6 +1831,95 @@ def _daily_outcomes_carries_hours_elapsed_for_partial_today():
         "grader prompt text does not mention hours_elapsed for normalizing same-day comparisons"
 
 
+def _daily_outcomes_excludes_started_double_count():
+    """gh#576: DAILY_OUTCOMES must not count run_report.py's provisional 'started' row as a
+    distinct outcome -- it's written the instant a pass launches, before its real terminal row,
+    and counting it verbatim double-counts every healthy run and inflates apparent volume. Same
+    class as gh#150/#254/#437 (fleet_stats.py's `_PROVISIONAL_STATUSES` fix); this digest was
+    never updated to match. Runs the real script end-to-end (same stub pattern as
+    `_daily_outcomes_carries_hours_elapsed_for_partial_today`) against a seeded runs.jsonl with
+    an unmatched 'started' row, a matched 'started'+completion pair, and a normal 'ok' row.
+    """
+    import os
+    import subprocess
+
+    tmp = tempfile.mkdtemp()
+    log_dir = Path(tmp) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    fleet_repo = Path(tmp) / "fleet_repo"
+    fleet_repo.mkdir(parents=True, exist_ok=True)
+    bin_dir = Path(tmp) / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    home_dir = Path(tmp) / "home"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    capture_file = Path(tmp) / "prompt.txt"
+
+    subprocess.run(["git", "-C", str(fleet_repo), "init", "-q"], check=True)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    yesterday = now - datetime.timedelta(days=1)
+    day_start_yesterday = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_iso = yesterday.date().isoformat()
+
+    runs = [
+        # Unmatched 'started': crashed before writing a terminal row -- must not be counted.
+        {"ts": (day_start_yesterday + datetime.timedelta(hours=1)).timestamp(),
+         "status": "started", "run_id": "unmatched-1"},
+        # Matched pair: same run_id, real terminal status arrives later -- must count once, as 'ok'.
+        {"ts": (day_start_yesterday + datetime.timedelta(hours=2)).timestamp(),
+         "status": "started", "run_id": "matched-1"},
+        {"ts": (day_start_yesterday + datetime.timedelta(hours=2, minutes=5)).timestamp(),
+         "status": "ok", "run_id": "matched-1"},
+        # A normal run with no 'started' row at all.
+        {"ts": (day_start_yesterday + datetime.timedelta(hours=3)).timestamp(),
+         "status": "ok", "run_id": "plain-1"},
+    ]
+    runs_file = log_dir / "runs.jsonl"
+    runs_file.write_text("\n".join(json.dumps(r) for r in runs) + "\n")
+
+    gh_stub = (bin_dir / "gh")
+    gh_stub.write_text("#!/usr/bin/env python3\nprint('[]')\n")
+    gh_stub.chmod(0o755)
+
+    claude_stub = (bin_dir / "claude")
+    claude_stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, os\n"
+        "args = sys.argv[1:]\n"
+        "prompt = args[args.index('-p') + 1] if '-p' in args else ''\n"
+        f"open({str(capture_file)!r}, 'w').write(prompt)\n"
+        "print('{\"score\": 42, \"reasoning\": \"test\"}')\n"
+    )
+    claude_stub.chmod(0o755)
+
+    env = dict(os.environ)
+    env.update({
+        "FLEET_REPO": str(fleet_repo),
+        "FLEET_LOG_DIR": str(log_dir),
+        "FLEET_ENV_FILE": str(Path(tmp) / "nonexistent.env"),
+        "HOME": str(home_dir),
+        "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+    })
+    proc = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "self_improve_score.sh")],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert proc.returncode == 0, (
+        f"self_improve_score.sh failed rc={proc.returncode}\nstdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    assert capture_file.exists(), f"claude was never invoked -- stderr={proc.stderr}"
+    prompt = capture_file.read_text()
+
+    m = re.search(r'\{"' + re.escape(yesterday_iso) + r'".*?\}\}', prompt)
+    assert m, f"DAILY_OUTCOMES block not found in prompt:\n{prompt[-2000:]}"
+    daily = json.loads(m.group(0))
+    day_counts = daily[yesterday_iso]
+    assert day_counts.get("started", 0) == 0, \
+        f"'started' rows must never be counted as a distinct outcome, got {day_counts}"
+    assert day_counts.get("ok") == 2, \
+        f"expected exactly 2 'ok' (the matched pair's completion + the plain run), got {day_counts}"
+
+
 def _adhoc_task_adds_to_the_charter_never_replaces_it():
     """`--task` runs a member ad-hoc with one extra instruction, charter still governing.
 
@@ -8100,6 +8189,7 @@ if __name__ == "__main__":
     check("self-evolution evidence covers fleet-kit's own repo, not just $FLEET_REPO", _self_evo_evidence_covers_both_repos)
     check("self_improve_score.sh's evidence catches the member/<name>-<id> branch shape", _self_improve_score_evidence_covers_member_branch_shape)
     check("DAILY_OUTCOMES carries hours_elapsed for a partial today (#263)", _daily_outcomes_carries_hours_elapsed_for_partial_today)
+    check("DAILY_OUTCOMES excludes 'started' rows from the count (gh#576)", _daily_outcomes_excludes_started_double_count)
     check("jefe can unstick a PR that is merely behind its base", _jefe_can_unstick_a_pr_that_is_merely_behind)
     check("jefe.md's precedent citations are repo-qualified, and the verify-before-you-cite guard is present", _jefe_precedent_citations_are_repo_qualified)
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
