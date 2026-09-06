@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""test_librarian.py -- proves the two load-bearing properties from philanthropy#4439's
+acceptance criteria: (1) a secret-shaped string gets redacted inside the transcript store and
+left completely untouched anywhere that looks like a repo checkout, verified together in one
+run; (2) after a scrub, the tracked patterns are gone from the store while the run's own report
+still names every class it found, for a human to rotate."""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import librarian  # noqa: E402
+
+TRACKED_NEEDLES = ("gho_", "ghp_", "ghs_", "ghu_", "ghr_", "sk-ant-", "PGPASSWORD=", "postgresql://")
+
+
+class RedactionTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "transcripts"
+        self.root.mkdir()
+        self.repo = Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        (self.repo / ".git").mkdir()
+
+    def test_seeded_token_redacted_in_transcript_untouched_in_repo_code_fence(self):
+        """AC1: RED before, GREEN after, both verified in one run."""
+        token = "gho_" + "A" * 36
+        transcript = self.root / "sess" / "abc.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(json.dumps({"role": "user", "content": f"here is a token={token}"}) + "\n")
+
+        readme = self.repo / "README.md"
+        readme.write_text(f"example format, never a real secret:\n```\ntoken={token}\n```\n")
+
+        # RED: before any scrub runs, both copies still hold the raw token.
+        self.assertIn(token, transcript.read_text())
+        self.assertIn(token, readme.read_text())
+
+        stats = librarian.ScrubStats()
+        changed = librarian.scrub_file(transcript, stats, execute=True)
+
+        # GREEN: the transcript is redacted to the stable marker...
+        self.assertTrue(changed)
+        scrubbed = transcript.read_text()
+        self.assertNotIn(token, scrubbed)
+        self.assertIn("[REDACTED:gho]", scrubbed)
+        self.assertEqual(stats.occurrences.get("gho"), 1)
+        # ...and the /repo copy was never even opened: scrub_file only touches the path it's
+        # given, and main()'s own root-scoping (proven in test_main_refuses_repo_shaped_root
+        # below) is what keeps a real run from ever handing it a /repo path to begin with.
+        self.assertIn(token, readme.read_text())
+
+    def test_marker_is_stable_and_idempotent(self):
+        token = "sk-ant-" + "B" * 40
+        f = self.root / "s.jsonl"
+        f.write_text(json.dumps({"text": token}) + "\n")
+
+        stats1 = librarian.ScrubStats()
+        librarian.scrub_file(f, stats1, execute=True)
+        first_pass = f.read_text()
+        self.assertIn("[REDACTED:sk-ant]", first_pass)
+
+        stats2 = librarian.ScrubStats()
+        changed_again = librarian.scrub_file(f, stats2, execute=True)
+        self.assertFalse(changed_again, "re-scrubbing an already-redacted file changed it")
+        self.assertEqual(f.read_text(), first_pass)
+
+    def test_specific_class_not_double_redacted_by_generic_secret_env_pattern(self):
+        """A key name like GH_TOKEN also looks like a *_TOKEN= pair to the generic secret_env
+        catch-all -- the specific gho/ghp/... classification must win, not get overwritten."""
+        token = "ghp_" + "C" * 36
+        f = self.root / "s.jsonl"
+        f.write_text(f"GH_TOKEN={token}\n")
+        stats = librarian.ScrubStats()
+        librarian.scrub_file(f, stats, execute=True)
+        text = f.read_text()
+        self.assertIn("[REDACTED:ghp]", text)
+        self.assertNotIn("secret_env", text)
+
+    def test_iter_transcripts_skips_memory_dir_and_non_jsonl(self):
+        mem_dir = self.root / "-repo" / "memory"
+        mem_dir.mkdir(parents=True)
+        note = mem_dir / "MEMORY.md"
+        note.write_text("gho_" + "D" * 36)
+
+        other = self.root / "sess2" / "notes.txt"
+        other.parent.mkdir(parents=True)
+        other.write_text("not a transcript")
+
+        found = list(librarian.iter_transcripts(self.root))
+        self.assertNotIn(note, found)
+        self.assertNotIn(other, found)
+
+    def test_report_names_every_class_after_grep_returns_zero_hits(self):
+        """AC2: 0 grep hits post-scrub, report still names the classes for human rotation."""
+        (self.root / "a.jsonl").write_text("token gho_" + "E" * 36)
+        (self.root / "b.jsonl").write_text("PGPASSWORD=hunter2hunter2")
+        (self.root / "c.jsonl").write_text("db at postgresql://u:secretpw@host:5432/db")
+
+        stats = librarian.ScrubStats()
+        for f in librarian.iter_transcripts(self.root):
+            librarian.scrub_file(f, stats, execute=True)
+
+        combined = "\n".join(p.read_text() for p in librarian.iter_transcripts(self.root))
+        for needle in TRACKED_NEEDLES:
+            self.assertNotIn(needle, combined, f"{needle!r} survived a scrub run")
+
+        lines = stats.report_lines()
+        self.assertTrue(any("GitHub OAuth" in l and "1 file" in l for l in lines), lines)
+        self.assertTrue(any("Postgres" in l and "2 file" in l for l in lines), lines)
+
+    def test_main_refuses_repo_shaped_root(self):
+        script = Path(__file__).resolve().parent / "librarian.py"
+        proc = subprocess.run(
+            [sys.executable, str(script), "--root", str(self.repo)],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("refus", (proc.stdout + proc.stderr).lower())
+
+    def test_main_end_to_end_scrubs_and_reports(self):
+        token = "gho_" + "F" * 36
+        (self.root / "run.jsonl").write_text(f"leaked {token}\n")
+        script = Path(__file__).resolve().parent / "librarian.py"
+        # --state-file MUST be isolated here: the default is the real production watermark
+        # (~/.cache/fleet-kit/librarian_state.json). Omitting it would stamp that file with
+        # this test's "now" on every CI/dev run, and since scrub skips anything older than the
+        # watermark, the real first deploy run against the actual 726MB corpus (all older than
+        # a test just run) would then skip almost everything -- silently defeating AC1/AC2.
+        state_file = str(Path(self.tmp.name) / "state.json")
+        proc = subprocess.run(
+            [sys.executable, str(script), "--root", str(self.root), "--execute",
+             "--state-file", state_file],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("GitHub OAuth: 1 file(s), 1 occurrence(s)", proc.stdout)
+        self.assertNotIn(token, (self.root / "run.jsonl").read_text())
+
+
+class WatermarkTest(unittest.TestCase):
+    """A full-text scan of the real corpus is minutes, not seconds -- this is what keeps a
+    routine hourly tick from re-reading a closed transcript it already scrubbed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "transcripts"
+        self.root.mkdir()
+        self.state_file = str(Path(self.tmp.name) / "state.json")
+
+    def _age(self, path: Path, days: float) -> None:
+        old = time.time() - days * 86400
+        os.utime(path, (old, old))
+
+    def test_missing_state_file_means_scan_everything(self):
+        self.assertEqual(librarian.load_watermark(self.state_file), 0.0)
+
+    def test_save_then_load_roundtrips(self):
+        librarian.save_watermark(self.state_file, 12345.0)
+        self.assertEqual(librarian.load_watermark(self.state_file), 12345.0)
+
+    def test_unchanged_file_skipped_on_incremental_rerun(self):
+        old = self.root / "old.jsonl"
+        old.write_text("gho_" + "G" * 36)
+        self._age(old, 5)
+        watermark = time.time() - 1 * 86400  # 1 day ago; old.jsonl is 5 days old
+        found = list(librarian.iter_transcripts(self.root, since=watermark))
+        self.assertNotIn(old, found)
+
+    def test_touched_file_still_picked_up_on_incremental_rerun(self):
+        fresh = self.root / "fresh.jsonl"
+        fresh.write_text("gho_" + "H" * 36)
+        watermark = time.time() - 1 * 86400
+        found = list(librarian.iter_transcripts(self.root, since=watermark))
+        self.assertIn(fresh, found)
+
+    def test_main_execute_advances_watermark_dry_run_does_not(self):
+        (self.root / "a.jsonl").write_text("gho_" + "I" * 36)
+        script = Path(__file__).resolve().parent / "librarian.py"
+        base_cmd = [sys.executable, str(script), "--root", str(self.root),
+                    "--state-file", self.state_file, "--skip-retention"]
+
+        subprocess.run(base_cmd, capture_output=True, text=True, timeout=30)
+        self.assertEqual(librarian.load_watermark(self.state_file), 0.0, "dry-run advanced the watermark")
+
+        subprocess.run(base_cmd + ["--execute"], capture_output=True, text=True, timeout=30)
+        self.assertGreater(librarian.load_watermark(self.state_file), 0.0)
+
+
+class RetentionTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def _age(self, path: Path, days: float) -> None:
+        old = time.time() - days * 86400
+        os.utime(path, (old, old))
+
+    def test_mid_age_compressed_ancient_dropped(self):
+        """AC3: past the retention window, compressed then dropped, on a real directory walk."""
+        mid = self.root / "mid.jsonl"
+        mid.write_text("hello\n")
+        self._age(mid, 45)
+
+        ancient = self.root / "ancient.jsonl"
+        ancient.write_text("bye\n")
+        self._age(ancient, 120)
+
+        fresh = self.root / "fresh.jsonl"
+        fresh.write_text("still relevant\n")
+
+        results = librarian.retention_sweep(self.root, execute=True, compress_days=30, drop_days=90)
+        by_name = {Path(r["path"]).name: r["action"] for r in results}
+
+        self.assertEqual(by_name.get("mid.jsonl"), "compress")
+        self.assertTrue((self.root / "mid.jsonl.gz").exists())
+        self.assertFalse(mid.exists())
+
+        self.assertEqual(by_name.get("ancient.jsonl"), "drop")
+        self.assertFalse(ancient.exists())
+        self.assertFalse((self.root / "ancient.jsonl.gz").exists())
+
+        self.assertNotIn("fresh.jsonl", by_name)
+        self.assertTrue(fresh.exists())
+
+    def test_already_compressed_file_dropped_once_past_drop_days(self):
+        gz = self.root / "old.jsonl.gz"
+        gz.write_bytes(b"\x1f\x8b\x00")  # not valid gzip, but retention never reads gz contents
+        self._age(gz, 95)
+        librarian.retention_sweep(self.root, execute=True, compress_days=30, drop_days=90)
+        self.assertFalse(gz.exists())
+
+    def test_memory_dir_never_swept_regardless_of_age(self):
+        mem = self.root / "-repo" / "memory"
+        mem.mkdir(parents=True)
+        note = mem / "MEMORY.md"
+        note.write_text("keep me forever")
+        self._age(note, 99999)
+        librarian.retention_sweep(self.root, execute=True, compress_days=30, drop_days=90)
+        self.assertTrue(note.exists())
+        self.assertEqual(note.read_text(), "keep me forever")
+
+    def test_dry_run_changes_nothing(self):
+        old = self.root / "old.jsonl"
+        old.write_text("data\n")
+        self._age(old, 120)
+        librarian.retention_sweep(self.root, execute=False, compress_days=30, drop_days=90)
+        self.assertTrue(old.exists())
+        self.assertEqual(old.read_text(), "data\n")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
