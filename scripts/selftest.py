@@ -4363,6 +4363,117 @@ def _deploy_log_is_durable_regardless_of_caller():
             "a second run clobbered the first instead of appending"
 
 
+def _deploy_drain_recordons_after_an_external_flag_breach():
+    """gh#552: FLEET_ENABLED has a writer this drain does not control.
+
+    fleet_view_server.py's `/api/fleet_toggle` (the dashboard kill-switch) calls
+    write_env_flag("FLEET_ENABLED", ...) directly, with zero awareness of an in-progress
+    cordon -- and it is the ONLY other writer of this key in the whole repo, missed by the
+    original incident's own `grep -rn FLEET_ENABLED scripts/*.sh` search purely because it is
+    a `.py` file. Root-caused live 2026-09-06: deploy.log showed a cordon and a 7-in-flight
+    defer, then (per its own account) no clear/timeout/uncordon line for 31 more minutes --
+    yet gru.log shows a real gru pass starting 173s in, which is only possible if
+    FLEET_ENABLED had already flipped back to true by then. None of drain_inflight_passes()'s
+    three logged exit paths fired that early; something outside them did.
+
+    Proves the drain notices an external reset and re-cordons -- turning an unbounded, silent
+    gap into a bounded (one poll interval), loud one.
+
+    Runs the REAL cordon_write()/uncordon_fleet()/drain_inflight_passes()/log() bodies
+    extracted from deploy.sh (this repo's pattern for live-executing shell logic under
+    selftest -- see _deploy_log_is_durable_regardless_of_caller above), against a stub
+    `podman` that simulates an external FLEET_ENABLED=true write landing between two polls,
+    and a `sleep` override so the test doesn't actually wait 15s per poll.
+    """
+    import os
+    import subprocess
+
+    src = (ROOT / "scripts" / "deploy.sh").read_text()
+
+    def extract_func(name):
+        i = src.index(f"\n{name}() {{")
+        j = src.index("\n}\n", i)
+        return src[i + 1:j + 2]
+
+    cordon_write_body = extract_func("cordon_write")
+    uncordon_fleet_body = extract_func("uncordon_fleet")
+    drain_body = extract_func("drain_inflight_passes")
+    exists_line = next(l for l in src.splitlines() if l.startswith("exists() "))
+    log_body = src[src.find("log() {"):src.find("\n}", src.find("log() {"))] + "\n}\n"
+
+    assert "CORDON BREACHED" in drain_body, \
+        "drain no longer detects an externally-reset FLEET_ENABLED -- gh#552 regressed"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        instance_dir = tmp / "instance"
+        instance_dir.mkdir()
+        fleet_env = instance_dir / "fleet.env"
+        fleet_env.write_text("FLEET_ENABLED=true\n")
+        log_dir = tmp / "logs"
+        log_dir.mkdir()
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        counter_file = tmp / "podman_calls"
+        counter_file.write_text("0")
+
+        # First `podman exec` (in-flight check) reports 3 in flight AND simulates the external
+        # breach landing mid-poll (e.g. someone hits the dashboard toggle while the count is
+        # being taken); second call reports 0 -- the drain would clear here IF it still had a
+        # cordon in effect, proving the breach was caught and repaired, not just detected.
+        podman_stub = bin_dir / "podman"
+        podman_stub.write_text(f"""#!/bin/bash
+if [ "$1" = "container" ] && [ "$2" = "exists" ]; then exit 0; fi
+if [ "$1" = "inspect" ]; then echo true; exit 0; fi
+if [ "$1" = "exec" ]; then
+    n=$(cat "{counter_file}"); n=$((n + 1)); echo "$n" > "{counter_file}"
+    if [ "$n" = "1" ]; then
+        echo "FLEET_ENABLED=true" > "{fleet_env}"
+        echo 3
+    else
+        echo 0
+    fi
+    exit 0
+fi
+exit 1
+""")
+        podman_stub.chmod(0o755)
+
+        script = (
+            "set -euo pipefail\n"
+            f'INSTANCE_DIR="{instance_dir}"\n'
+            'CONTAINER="test-container"\n'
+            "DRAIN_MAX_S=1800\n"
+            "FLEET_QUIESCE=1\n"
+            f'DEPLOY_LOG="{log_dir}/deploy.log"\n'
+            "CORDONED=0\n"
+            "sleep() { :; }\n"  # no real 15s wait between polls in this test
+            f"{exists_line}\n"
+            f"{log_body}\n"
+            f"{cordon_write_body}\n"
+            f"{uncordon_fleet_body}\n"
+            f"{drain_body}\n"
+            "drain_inflight_passes\n"
+        )
+        env = dict(os.environ)
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                               timeout=30, env=env)
+        assert proc.returncode == 0, f"drain harness failed: {proc.stderr.strip()[:400]}"
+
+        deploy_log = (log_dir / "deploy.log").read_text()
+        assert "CORDON BREACHED" in deploy_log, \
+            f"drain did not notice the external FLEET_ENABLED reset:\n{deploy_log}"
+        assert "drain: clear after" in deploy_log, \
+            f"drain never reached its own clear exit path after re-cordoning:\n{deploy_log}"
+        assert "uncordon: FLEET_ENABLED=true" in deploy_log, \
+            "drain cleared but never logged the real uncordon"
+
+        final = fleet_env.read_text()
+        assert "FLEET_ENABLED=true" in final, \
+            "drain finished without the fleet ending back up enabled"
+
+
 def _marie_writes_a_prd_and_minion_reads_it():
     """marie is m-PM: she must make an item BUILDABLE, and minion must consume that.
 
@@ -8253,6 +8364,7 @@ if __name__ == "__main__":
     check("deploy.sh's host log dir survives sourcing the instance's container-scoped fleet.env", _deploy_sh_host_log_dir_survives_sourcing_the_instances_container_scoped_fleet_env)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("deploy.sh's log is durable regardless of caller", _deploy_log_is_durable_regardless_of_caller)
+    check("deploy drain re-cordons after an external FLEET_ENABLED breach", _deploy_drain_recordons_after_an_external_flag_breach)
     check("overrides tune dials, refuse authority", _overrides_are_narrow)
     check("overrides store never resolves under $HOME/.claude", _overrides_store_is_not_under_home_dot_claude)
     check("fleet.env.example present, fleet.env untracked", _env_example_exists)

@@ -350,6 +350,22 @@ drain_inflight_passes() {
 
     local waited=0 inflight
     while :; do
+        # CORDON BREACH CHECK (gh#552): fleet.env's FLEET_ENABLED has a writer this drain does
+        # not control -- fleet_view_server.py's `/api/fleet_toggle` (the dashboard's kill-switch
+        # toggle) calls write_env_flag() directly with zero awareness of an in-progress drain.
+        # Root-caused live 2026-09-06: a gru pass started 173s into a 7-in-flight drain that,
+        # per deploy.log's own account, did not legitimately clear or time out for another 31
+        # minutes -- none of this loop's three logged exit paths (clear / timeout / no-live-
+        # container) had fired, so something OUTSIDE this script reset the flag. The original
+        # grep for writers (`grep -rn FLEET_ENABLED scripts/*.sh`) missed it because it is a
+        # `.py` file. Re-assert every poll (bounds exposure to one 15s tick instead of the rest
+        # of the drain) and log it loudly, so the previously-silent path is now visible here
+        # instead of only reconstructible from gru.log/fleet.env mtime.
+        if [ "$CORDONED" = "1" ] \
+           && ! grep -qE '^[[:space:]]*FLEET_ENABLED[[:space:]]*=[[:space:]]*false' "$INSTANCE_DIR/fleet.env"; then
+            log "CORDON BREACHED: FLEET_ENABLED was reset outside cordon_write()/uncordon_fleet() while this drain was still in progress -- re-cordoning. Check for a fleet_toggle/dashboard write racing this deploy."
+            cordon_write false
+        fi
         # `|| echo 0` on its own is NOT enough: pgrep -c PRINTS "0" and THEN exits 1 when it
         # matches nothing, so the fallback appends a second line and $inflight becomes "0\n0" --
         # which is non-empty, fails -eq, and made the gate report a defer with nothing running.
