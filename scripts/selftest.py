@@ -1953,6 +1953,37 @@ def _runs_summary_excludes_started_rows_from_total_and_signal_rate():
         "'started' leaked into the hourly chart's status vocabulary")
 
 
+def _runs_summary_signal_rate_and_budget_wall_are_none_not_zero_when_no_data():
+    """gh#153: `signal_rate`/`budget_wall` fell back to the literal int `0` whenever their
+    denominator (`executed`/`total`) was empty -- indistinguishable, on the Stats page's KPI
+    strip, from a real 0% (every executed run failed, or every run got budget-declined). An
+    empty window (nothing ran at all, e.g. the box was down) must report `None` for both instead,
+    so `fleet_view.html` can render a distinct "no data" dash rather than a confident, wrong 0%.
+    """
+    import fleet_stats
+
+    empty_summary = fleet_stats.runs_summary([], hours=24.0)
+    assert empty_summary["total"] == 0, f"total = {empty_summary['total']}, want 0"
+    assert empty_summary["signal_rate"] is None, (
+        f"signal_rate = {empty_summary['signal_rate']!r}, want None for an empty window")
+    assert empty_summary["budget_wall"] is None, (
+        f"budget_wall = {empty_summary['budget_wall']!r}, want None for an empty window")
+
+    # A real total failure (executed runs exist, all failed) must still read a real 0%, not None
+    # -- the fix distinguishes "no data" from "all failed," it must not blur them the other way.
+    now = fleet_stats._now_epoch()
+    all_failed = [{"member": "a", "status": "reported_nothing", "ts": now}]
+    failed_summary = fleet_stats.runs_summary(all_failed, hours=24.0)
+    assert failed_summary["signal_rate"] == 0, (
+        f"signal_rate = {failed_summary['signal_rate']!r}, want a real 0 (executed, all failed)")
+
+    # budget_wall alone at 0 (some runs executed, none declined) must also stay a real 0, not None.
+    all_executed = [{"member": "a", "status": "ok", "ts": now}]
+    executed_summary = fleet_stats.runs_summary(all_executed, hours=24.0)
+    assert executed_summary["budget_wall"] == 0, (
+        f"budget_wall = {executed_summary['budget_wall']!r}, want a real 0 (no declines, but total>0)")
+
+
 def _status_page_deploy_component_classifies_stale_as_down():
     """gh#367: /status had 5 COMPONENTS rows and no Deploy row, so the fleet's own worst-
     performing pipeline (deploy_success_rate=8-9% at filing) had zero representation on the
@@ -7430,6 +7461,7 @@ if __name__ == "__main__":
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
     check("runs_summary() excludes provisional started rows from total/signal_rate/agent_rates (gh#437)", _runs_summary_excludes_started_rows_from_total_and_signal_rate)
+    check("runs_summary()'s signal_rate/budget_wall are None (not 0) for an empty window (gh#153)", _runs_summary_signal_rate_and_budget_wall_are_none_not_zero_when_no_data)
     check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
     check("status_data.members() reads fleet.db in-process, no podman on $PATH needed (gh#364)", _status_data_members_reads_fleet_db_with_no_podman_on_path)
     check("status_data's other four components are unaffected by the members() fix (gh#364)", _status_data_other_components_unaffected_by_members_fix)

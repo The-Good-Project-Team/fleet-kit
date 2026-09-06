@@ -1138,19 +1138,23 @@ async function renderStatsPage() {
   // good" -- signal rate (ok / executed), budget-wall rate (declined before running / total),
   // total runs, and which agents are fully walled off (dormant).
   const STATUS_COLOR = { ok: '#1f8b4c', quiet: '#a6720f', reported_nothing: '#c13a2e', budget_declined: '#9a9ea6' };
-  const rs = runsSummary || { signal_rate: 0, executed: 0, total: 0, budget_wall: 0, declined: 0,
+  // gh#153: `null` (not `0`) is the "no data" sentinel for these two -- a real 0% (everyone
+  // failed, or everyone got budget-walled) is a different diagnosis from "nothing ran in this
+  // window," and pctOrDash below is what keeps the two from rendering as the same digit.
+  const rs = runsSummary || { signal_rate: null, executed: 0, total: 0, budget_wall: null, declined: 0,
                                dormant: [], hourly: [], statuses: [], agent_rates: [] };
+  const pctOrDash = v => (v === null || v === undefined) ? '—' : v + '%';
   const kpiRow = document.getElementById('runsKpiRow');
   if (kpiRow) {
     kpiRow.innerHTML = `
       <div class="kpi-cell">
         <div class="kpi-label">Signal rate</div>
-        <div class="kpi-value">${rs.signal_rate}%</div>
+        <div class="kpi-value">${pctOrDash(rs.signal_rate)}</div>
         <div class="kpi-sub">${rs.executed} of ${rs.total} executed</div>
       </div>
       <div class="kpi-cell">
         <div class="kpi-label">Budget wall</div>
-        <div class="kpi-value">${rs.budget_wall}%</div>
+        <div class="kpi-value">${pctOrDash(rs.budget_wall)}</div>
         <div class="kpi-sub">${rs.declined} runs declined</div>
       </div>
       <div class="kpi-cell">
