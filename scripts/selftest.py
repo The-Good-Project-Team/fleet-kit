@@ -1225,7 +1225,8 @@ def _maxx_share_ceiling_respects_a_real_over_verdict_not_just_unreadable_meters(
 
 
 def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
-    """Arming auto-merge must not pass --squash/--merge/--rebase, and must not eat the error.
+    """Neither caller may hardcode --squash/--merge/--rebase; only merge_arm.sh's own guarded
+    fallback may, and it must not eat the error.
 
     `main` on nonprofit-atlas is merge-queue-controlled (a `merge_queue` ruleset, SQUASH,
     grouping ALLGREEN). Passing an explicit strategy to `gh pr merge` on a queue-controlled
@@ -1234,13 +1235,18 @@ def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
         ! The merge strategy for main is set by the merge queue
 
     Confirmed live twice: issue #3108, and again 2026-08-26 on nonprofit-atlas#3307, which sat
-    MERGEABLE with statusCheckRollup=SUCCESS and autoMergeRequest=null for hours. minion.md
-    step 9 already documents the bare form and says CHECK THE EXIT CODE; these two callers
-    shipped the broken one anyway.
+    MERGEABLE with statusCheckRollup=SUCCESS and autoMergeRequest=null for hours.
 
-    The second half is why nobody noticed: worktree_builder.sh redirected the failure to
-    /dev/null and logged "auto-merge armed" on the very next line, so the log asserted success
-    for a command that had just failed. Silence reads as health.
+    But a plain (non-queue) repo needs the opposite: fleet-kit's own repo REQUIRES an explicit
+    strategy, since gh refuses to guess one non-interactively (see gh#524, PR history
+    #406/#407/#413/#414/#416/#417). Neither caller script may hardcode either shape -- only
+    scripts/merge_arm.sh's arm_pr_auto_merge may pass --squash, and only inside its own
+    fallback branch, gated on the specific non-queue rejection string; see
+    _merge_arm_falls_back_only_on_the_right_error for that guarantee.
+
+    The exit-code half is why nobody noticed #3108 for as long as they didn't: worktree_builder.sh
+    used to redirect the failure to /dev/null and log "auto-merge armed" on the very next line,
+    so the log asserted success for a command that had just failed. Silence reads as health.
     """
     import re as _re
     # Only a flag attached to the command itself -- prose explaining WHY --squash is wrong
@@ -1261,12 +1267,84 @@ def _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue():
                     f"{rel}:{i} arms auto-merge with a strategy flag -- errors under the "
                     f"merge queue instead of enqueueing: {line.strip()[:90]}")
 
-    # The builder must not claim it armed auto-merge without checking the exit code.
-    src = (ROOT / "scripts/worktree_builder.sh").read_text()
-    arm = [l for l in src.splitlines() if "gh pr merge" in l and "--auto" in l]
-    assert arm, "worktree_builder.sh no longer arms auto-merge at all"
-    assert not any(_re.search(r">/dev/null 2>&1\s*$", l) for l in arm), \
-        "the arming call still discards its error; a failed arm would log as armed"
+    # Both callers must arm through the shared helper, not a raw `gh pr merge`, and must not
+    # discard its error -- a failed arm must not be able to log as armed.
+    for rel in ("scripts/worktree_builder.sh", "scripts/auto_update_branch.sh"):
+        src = (ROOT / rel).read_text()
+        assert "arm_pr_auto_merge" in src, f"{rel} no longer arms auto-merge through the shared helper"
+        arm = [l for l in src.splitlines() if "arm_pr_auto_merge" in l and "=" in l]
+        assert arm, f"{rel} calls arm_pr_auto_merge but never captures its result"
+        assert not any(_re.search(r">/dev/null 2>&1\s*$", l) for l in arm), \
+            f"{rel}: the arming call still discards its error; a failed arm would log as armed"
+
+
+def _merge_arm_falls_back_only_on_the_right_error():
+    """merge_arm.sh's --squash fallback must be gated on the specific non-queue rejection
+    string, not on any failure -- otherwise a queue repo's real rejection ("The merge strategy
+    for main is set by the merge queue") would be retried with the very flag that caused it, or
+    a genuinely different failure (permissions, already merged) would be masked.
+
+    gh#524 acceptance criterion 2: exercise both failure-string branches without hitting the
+    real GitHub API -- so this stubs `gh` itself rather than calling out.
+    """
+    src = (ROOT / "scripts/merge_arm.sh").read_text()
+    assert "arm_pr_auto_merge" in src, "merge_arm.sh no longer defines arm_pr_auto_merge"
+    assert "required when not running interactively" in src, \
+        "merge_arm.sh's fallback is no longer gated on the non-queue rejection string"
+
+    import subprocess
+
+    def run_with_stub_gh(stub_body: str, pr: str = "42") -> tuple[int, str]:
+        script = f"""
+set -uo pipefail
+gh() {{
+{stub_body}
+}}
+. "{ROOT / 'scripts/merge_arm.sh'}"
+out="$(arm_pr_auto_merge {pr})"
+rc=$?
+printf '%s' "$out"
+exit $rc
+"""
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        return proc.returncode, proc.stdout
+
+    # Branch 1: a plain repo. The bare `--auto` call fails with the non-interactive string;
+    # the fallback retries with --squash, which succeeds -- no real GitHub API involved.
+    plain_repo_stub = """
+  if [[ "$*" == *--squash* ]]; then
+    exit 0
+  fi
+  echo "! --merge, --rebase, or --squash required when not running interactively" >&2
+  exit 1
+"""
+    rc, out = run_with_stub_gh(plain_repo_stub)
+    assert rc == 0, f"plain-repo branch should succeed via the --squash fallback, got rc={rc} out={out!r}"
+    assert out == "", f"a successful fallback must not surface a stale error, got {out!r}"
+
+    # Branch 2: a merge-queue repo. The bare `--auto` call itself succeeds -- the fallback must
+    # never even be attempted (an explicit --squash there is the OTHER invalid combination).
+    queue_repo_stub = """
+  if [[ "$*" == *--squash* ]]; then
+    echo "! The merge strategy for main is set by the merge queue" >&2
+    exit 1
+  fi
+  exit 0
+"""
+    rc, out = run_with_stub_gh(queue_repo_stub)
+    assert rc == 0, f"queue-repo branch should succeed on the bare form alone, got rc={rc} out={out!r}"
+    assert out == "", f"a successful bare arm must not surface anything, got {out!r}"
+
+    # A failure unrelated to either shape (already merged, no permission) must not be retried
+    # into --squash, and must surface as-is rather than being swallowed.
+    unrelated_failure_stub = """
+  echo "! pull request #42 is already merged" >&2
+  exit 1
+"""
+    rc, out = run_with_stub_gh(unrelated_failure_stub)
+    assert rc != 0, "an unrelated failure must still fail, not be silently treated as armed"
+    assert "already merged" in out, \
+        f"an unrelated failure must surface its real message, not be masked by the fallback: {out!r}"
 
 
 def _minion_knows_the_browser_exists():
@@ -7083,6 +7161,7 @@ if __name__ == "__main__":
     check("jefe can unstick a PR that is merely behind its base", _jefe_can_unstick_a_pr_that_is_merely_behind)
     check("jefe.md's precedent citations are repo-qualified, and the verify-before-you-cite guard is present", _jefe_precedent_citations_are_repo_qualified)
     check("arming auto-merge passes no strategy flag, and checks it worked", _auto_merge_never_passes_a_strategy_flag_under_a_merge_queue)
+    check("merge_arm.sh falls back to --squash only on the non-queue rejection string (gh#524)", _merge_arm_falls_back_only_on_the_right_error)
     check("--task adds to a charter, never replaces it", _adhoc_task_adds_to_the_charter_never_replaces_it)
     check("a killed pass is recorded, not silently lost", _a_killed_pass_is_recorded_not_lost)
     check("run_member.sh writes a started row before claude -p and before the SIGTERM trap arms", _run_member_writes_a_started_row_before_claude_p)

@@ -42,6 +42,8 @@ log() { echo "[$(ts)] $*" >> "$LOG"; }
 # kind of edit, not two different systems.
 . "$KIT_DIR/scripts/fleet_enabled.sh"
 fleet_enabled_or_exit "builder"
+# shellcheck source=/dev/null
+. "$KIT_DIR/scripts/merge_arm.sh"
 if [ "${FLEET_RUN_NOW:-0}" != "1" ] && [ "${FLEET_BUILDER_ENABLED:-false}" != "true" ]; then
   log "builder: FLEET_BUILDER_ENABLED != true -- exiting without doing anything"
   exit 0
@@ -227,15 +229,17 @@ if [ -n "$PR_NUM" ]; then
   if ! grep -qE 'Backlog:[[:space:]]*#[0-9]+' <<<"$BODY"; then
     printf '%s\n\nBacklog: #%s\n' "$BODY" "$ITEM_ID" | gh pr edit "$PR_NUM" --body-file - >/dev/null 2>&1
   fi
-  # NO STRATEGY FLAG. `main` is merge-queue-controlled, and an explicit --squash is an invalid
-  # combination on a queued branch: gh ERRORS ("The merge strategy for main is set by the merge
-  # queue") instead of enqueueing. Confirmed live twice -- issue #3108, and again 2026-08-26 on
-  # nonprofit-atlas#3307, which sat green and unmerged for hours with autoMergeRequest=null.
+  # arm_pr_auto_merge (scripts/merge_arm.sh) tries the bare form first -- the only form that's
+  # ever valid on a merge-queue-controlled repo, where an explicit --squash is an invalid
+  # combination and gh ERRORS ("The merge strategy for main is set by the merge queue") instead
+  # of enqueueing (confirmed live -- issue #3108, and again 2026-08-26 on nonprofit-atlas#3307,
+  # which sat green and unmerged for hours with autoMergeRequest=null) -- and falls back to
+  # --squash only on a plain repo's own non-interactive rejection (gh#524).
   #
   # And CHECK THE EXIT CODE. This call used to end in `>/dev/null 2>&1` with the "auto-merge
   # armed" line unconditionally after it -- so a failed arm logged as a successful one and the
   # PR simply never merged, with nothing anywhere saying why.
-  if arm_err="$(gh pr merge "$PR_NUM" --auto 2>&1 >/dev/null)"; then
+  if arm_err="$(arm_pr_auto_merge "$PR_NUM")"; then
     log "item #$ITEM_ID: opened PR #$PR_NUM, auto-merge armed"
   else
     log "item #$ITEM_ID: opened PR #$PR_NUM, but ARMING AUTO-MERGE FAILED -- it will not merge on green: ${arm_err:-unknown error}"
