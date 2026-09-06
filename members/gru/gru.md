@@ -154,9 +154,11 @@ spawns exactly one). Your job, in order:
    label (high/medium/low). Your read is:
    ```
    gh issue list --state open --label fleet:backlog --label fleet:priority-high \
-     --json number,title,body,labels,createdAt --limit 200 --jq 'sort_by(.createdAt)'
+     --json number,title,body,labels,createdAt,comments --limit 200 --jq 'sort_by(.createdAt)'
    ```
-   filtering out anything already `fleet:claimed` **or carrying `fleet:needs-human-op`**
+   (`comments` added for the Vision-link gate below — it costs nothing extra, `gh issue list
+   --json` already supports it in one call, no per-candidate round-trip.) filtering out
+   anything already `fleet:claimed` **or carrying `fleet:needs-human-op`**
    (that label means a prior pass already confirmed the item is blocked on something no fleet
    member holds — credentials, a human decision — and re-claiming it only re-confirms the same
    block; gh#3920 found #2195 re-claimed and re-spawned 15+ times because this filter was
@@ -164,6 +166,34 @@ spawns exactly one). Your job, in order:
    only once medium is too. You are choosing FROM marie's ranking, not re-deriving it — an item
    marie hasn't gotten to yet (no priority label at all) is lowest priority by default, not an
    oversight you correct yourself.
+
+   **Also gate on a Vision-link before anything below reads the candidate set — gh#525.** A
+   candidate is eligible only if its body or its newest `fleet:prd` comment carries a
+   `Vision-link:` line naming something real (the number, the guardrail, or the channel
+   introduced by #513 — free text is fine until #513's `number.json` ships and this can
+   validate against it instead, per gh#525's own open question), OR it is explicitly
+   `Vision-link: none (maintenance)` **and** no OTHER open candidate anywhere in this pull
+   carries a real Vision-link (maintenance is eligible only when nothing number-moving is
+   waiting). A candidate with no `Vision-link:` line at all — neither a real link nor an
+   explicit `none (maintenance)` — is never eligible on its own; marie's PRD template does not
+   require this line yet (changing marie's own process is out of scope per gh#525), so most
+   candidates will fail this gate until it does — that IS the gate working, not a bug. Run it
+   on the full pull from ALL tiers you've queried so far (high, then medium/low once you fall
+   through to them), since "no linked-KR item open anywhere" has to see across tiers, not just
+   within one:
+   ```
+   python3 /fleet-kit/scripts/vision_link_gate.py --items '[{"number":..,"body":..,"comments":..}, ...]'
+   # {"eligible": [<numbers, same relative order as --items>],
+   #  "dropped": [{"number":.., "reason":"no Vision-link line..." | "none (maintenance), but a
+   #               linked-KR candidate is open: #.."}]}
+   ```
+   This is a DIFFERENT signal from the `fleet:needs-human-op` filter just above (that one is a
+   label a prior pass applied; this one is free text in the candidate's own spec) and from 2c's
+   dead-end check below (that one is claim history; this one is content) — all three stack.
+   **Never silently drop a candidate here** — name every one of `dropped`'s entries in your own
+   report by number and reason, the same way the `fleet:needs-human-op` filter's drops already
+   are (gh#3920 precedent). Only `eligible`'s candidates continue on to step 2c and step 3's
+   pack; a dropped candidate is never claimed or spawned this pass.
 
    **Within a tier, walk oldest-`createdAt`-first, never raw API order.** `gh issue list` with
    no explicit sort returns newest-created-first; since step 3's packer walks candidates
@@ -403,6 +433,6 @@ spawns exactly one). Your job, in order:
 
 ## Report
 
-Your runway read, the priority call you made and your reasoning, and a one-line result per minion spawned (PR #, "already fixed", or "failed: reason"). A minion that never reports back (crashed, hung) is a FAILURE you name explicitly, not a silent gap in the summary. Any candidate step 2c dropped for dead-ending past the threshold is named too (issue number + observed count) — never a silent absence from the candidate set.
+Your runway read, the priority call you made and your reasoning, and a one-line result per minion spawned (PR #, "already fixed", or "failed: reason"). A minion that never reports back (crashed, hung) is a FAILURE you name explicitly, not a silent gap in the summary. Any candidate step 2c dropped for dead-ending past the threshold is named too (issue number + observed count) — never a silent absence from the candidate set. Same for every candidate step 2b's Vision-link gate dropped (issue number + which branch of gh#525's rule failed it) — never a silent absence there either.
 
 **Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.
