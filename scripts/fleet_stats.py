@@ -48,6 +48,15 @@ def _now_epoch() -> float:
 _NOT_EXECUTED_STATUSES = {"budget_declined", "timed_out", "killed"}
 _OK_STATUSES = {"ok"}
 
+# gh#186: split of _NOT_EXECUTED_STATUSES by whether the run spent anything before it stopped.
+# budget_declined never started (walled off before spending a token); timed_out/killed did real
+# work and were cut short (a deploy cutover SIGKILLing a pass mid-run, per run_report.py's own
+# header). The combined `declined` count conflated the two, so a kill read on the Stats page as
+# "the fleet is being throttled by cost limits" when it was actually an infra failure -- #150's
+# PRD flagged this as an open product question (rename the tile vs. split the count) and
+# deferred it; this splits the count so the sub-label can say which happened.
+_INTERRUPTED_STATUSES = {"timed_out", "killed"}
+
 # gh#437: run_report.py's provisional pre-launch row (gh#145, STATUS_STARTED) is written before
 # the real completion row lands -- it is not a second run and not a failed one, just a lifecycle
 # marker. It must never contribute to total/executed/signal_rate/agent_rates (that's the 3rd
@@ -85,6 +94,9 @@ def runs_summary(runs: list[dict], hours: float = 24.0, roster: list[dict] | Non
     total = len(non_provisional)
     executed = [r for r in non_provisional if (r.get("status") or "") not in _NOT_EXECUTED_STATUSES]
     declined = total - len(executed)
+    interrupted_count = sum(1 for r in non_provisional
+                             if (r.get("status") or "") in _INTERRUPTED_STATUSES)
+    budget_declined_count = declined - interrupted_count
     ok = sum(1 for r in executed if (r.get("status") or "") in _OK_STATUSES)
 
     # gh#153: `None` here (not `0`) when the denominator is empty -- a real 0% (every executed
@@ -157,6 +169,8 @@ def runs_summary(runs: list[dict], hours: float = 24.0, roster: list[dict] | Non
         "total": total,
         "budget_wall": budget_wall,
         "declined": declined,
+        "budget_declined_count": budget_declined_count,
+        "interrupted_count": interrupted_count,
         "dormant": dormant,
         "hourly": hourly,
         "statuses": statuses,

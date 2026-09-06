@@ -2031,6 +2031,39 @@ def _runs_summary_excludes_started_rows_from_total_and_signal_rate():
         "'started' leaked into the hourly chart's status vocabulary")
 
 
+def _runs_summary_splits_declined_into_budget_declined_and_interrupted():
+    """gh#186: #150 widened `_NOT_EXECUTED_STATUSES` to `budget_declined`/`timed_out`/`killed`
+    so signal_rate/dormant treat all three as "never got the chance to do real work", but
+    `declined` (rendered on the Stats page as "Budget wall") stayed a single combined count.
+    A `timed_out`/`killed` run may have spent real tokens before being cut short (a deploy
+    cutover SIGKILLing a pass mid-run) -- lumping it under "declined" told the operator every
+    one of those runs was walled off before spending anything, which is only true for
+    `budget_declined`. `budget_declined_count` + `interrupted_count` must sum back to
+    `declined` (no run double-counted or dropped) and must classify each status correctly.
+    """
+    import fleet_stats
+    now = fleet_stats._now_epoch()
+
+    def run(member, status, ts_offset=0):
+        return {"member": member, "status": status, "ts": now - ts_offset}
+
+    runs = [
+        run("a", "budget_declined"),
+        run("a", "budget_declined"),
+        run("a", "timed_out"),
+        run("b", "killed"),
+        run("b", "ok"),
+    ]
+    summary = fleet_stats.runs_summary(runs, hours=24.0)
+    assert summary["budget_declined_count"] == 2, (
+        f"budget_declined_count = {summary['budget_declined_count']}, want 2")
+    assert summary["interrupted_count"] == 2, (
+        f"interrupted_count = {summary['interrupted_count']}, want 2 (1 timed_out + 1 killed)")
+    assert summary["declined"] == 4, f"declined = {summary['declined']}, want 4"
+    assert (summary["budget_declined_count"] + summary["interrupted_count"]
+            == summary["declined"]), "budget_declined_count + interrupted_count must equal declined"
+
+
 def _runs_summary_signal_rate_and_budget_wall_are_none_not_zero_when_no_data():
     """gh#153: `signal_rate`/`budget_wall` fell back to the literal int `0` whenever their
     denominator (`executed`/`total`) was empty -- indistinguishable, on the Stats page's KPI
@@ -7656,6 +7689,7 @@ if __name__ == "__main__":
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
     check("runs_summary() excludes provisional started rows from total/signal_rate/agent_rates (gh#437)", _runs_summary_excludes_started_rows_from_total_and_signal_rate)
+    check("runs_summary() splits declined into budget_declined_count/interrupted_count (gh#186)", _runs_summary_splits_declined_into_budget_declined_and_interrupted)
     check("runs_summary()'s signal_rate/budget_wall are None (not 0) for an empty window (gh#153)", _runs_summary_signal_rate_and_budget_wall_are_none_not_zero_when_no_data)
     check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
     check("status_data.members() reads fleet.db in-process, no podman on $PATH needed (gh#364)", _status_data_members_reads_fleet_db_with_no_podman_on_path)

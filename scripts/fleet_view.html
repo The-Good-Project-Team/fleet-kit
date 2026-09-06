@@ -1228,6 +1228,7 @@ async function renderStatsPage() {
   // failed, or everyone got budget-walled) is a different diagnosis from "nothing ran in this
   // window," and pctOrDash below is what keeps the two from rendering as the same digit.
   const rs = runsSummary || { signal_rate: null, executed: 0, total: 0, budget_wall: null, declined: 0,
+                               budget_declined_count: 0, interrupted_count: 0,
                                dormant: [], hourly: [], statuses: [], agent_rates: [] };
   const pctOrDash = v => (v === null || v === undefined) ? '—' : v + '%';
   const kpiRow = document.getElementById('runsKpiRow');
@@ -1241,7 +1242,7 @@ async function renderStatsPage() {
       <div class="kpi-cell">
         <div class="kpi-label">Budget wall</div>
         <div class="kpi-value">${pctOrDash(rs.budget_wall)}</div>
-        <div class="kpi-sub">${rs.declined} runs declined</div>
+        <div class="kpi-sub">${rs.budget_declined_count} declined, ${rs.interrupted_count} interrupted</div>
       </div>
       <div class="kpi-cell">
         <div class="kpi-label">Total runs</div>
