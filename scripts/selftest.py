@@ -6362,6 +6362,84 @@ def _fleet_alert_queues_an_undelivered_alarm_and_retries_it_next_call():
         assert queue.read_text().strip() == "", f"delivered retry must leave the queue: {queue.read_text()!r}"
 
 
+def _number_read_fetches_from_a_url_and_renders_five_lines():
+    """fleet-kit#513: the venture's number goes above every charter. --fetch reads the URL
+    (file:// here, so the suite touches no network) and writes number.json + a history line;
+    --render prints the header with values and 7d deltas; a stale read says STALE up front."""
+    import subprocess, json as _json
+    script = ROOT / "scripts" / "number_read.py"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        src = tmp / "number.json.src"
+        src.write_text(_json.dumps({
+            "as_of": "2026-09-05T23:00:00Z",
+            "number": {"name": "Stripe MRR", "value": 10.83, "unit": "$/mo", "delta_7d": 0.83},
+            "guardrail": {"name": "entities with >=1 attributable interaction", "value": 572, "unit": "entities", "delta_7d": 181},
+            "channel": {"name": "sessions, last full week", "value": 108849, "unit": "sessions/wk", "delta_7d": 12470},
+            "errors": [],
+        }))
+        env = {"PATH": "/usr/bin:/bin", "FLEET_LOG_DIR": str(tmp / "logs"),
+               "FLEET_NUMBER_URL": src.as_uri(), "FLEET_NUMBER_TOKEN": "t"}
+        proc = subprocess.run(["python3", str(script), "--fetch"], capture_output=True, text=True, timeout=30, env=env)
+        assert proc.returncode == 0, proc.stderr[:300]
+        assert (tmp / "logs" / "number.json").exists(), "fetch must write number.json"
+        assert (tmp / "logs" / "number_history.jsonl").read_text().count("\n") == 1, "fetch must append one history line"
+
+        proc = subprocess.run(["python3", str(script), "--render"], capture_output=True, text=True, timeout=30, env=env)
+        out = proc.stdout
+        lines = [l for l in out.splitlines() if l.strip()]
+        assert len(lines) == 5, f"header must be five lines, got {len(lines)}: {out!r}"
+        assert "Stripe MRR = 10.83 $/mo (+0.83 in 7d)" in out, out
+        assert "572 entities (+181 in 7d)" in out, out
+        assert "108,849 sessions/wk (+12,470 in 7d)" in out, out
+        assert "STALE" not in out, "a fresh read must not say STALE"
+
+        data = _json.loads((tmp / "logs" / "number.json").read_text())
+        data["fetched_at"] -= 3 * 86400
+        (tmp / "logs" / "number.json").write_text(_json.dumps(data))
+        proc = subprocess.run(["python3", str(script), "--render"], capture_output=True, text=True, timeout=30, env=env)
+        assert proc.stdout.splitlines()[0].startswith("THE NUMBER") and "STALE" in proc.stdout.splitlines()[0], proc.stdout
+
+        proc = subprocess.run(["python3", str(script), "--render"], capture_output=True, text=True, timeout=30,
+                              env={**env, "FLEET_NUMBER_URL": ""})
+        assert proc.stdout.strip() == "", f"no URL must render nothing: {proc.stdout!r}"
+
+        before = (tmp / "logs" / "number.json").read_text()
+        proc = subprocess.run(["python3", str(script), "--fetch"], capture_output=True, text=True, timeout=30,
+                              env={**env, "FLEET_NUMBER_URL": (tmp / "missing.json").as_uri()})
+        assert proc.returncode == 0 and "keeping previous" in proc.stderr, proc.stderr
+        assert (tmp / "logs" / "number.json").read_text() == before
+
+
+def _number_read_never_renders_zero_for_an_unmeasured_reading():
+    """KPI doctrine rule 5 at the prompt: a reading the endpoint could not take is 'unmeasured',
+    never 0 -- a zero here would tell every member the business has no revenue."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import importlib
+    nr = importlib.import_module("number_read")
+    out = nr.render({"fetched_at": int(time.time()), "as_of": "x",
+                     "number": None, "guardrail": {"name": "g", "value": 0, "unit": "entities", "delta_7d": None},
+                     "channel": None, "errors": ["number: credential_missing: STRIPE_API_KEY"]})
+    assert "Number: unmeasured" in out, out
+    assert "g = 0 entities (delta unmeasured)" in out, out
+    assert "credential_missing" in out, out
+    assert " 0 $/mo" not in out
+
+
+def _run_member_puts_the_number_header_above_item_and_task():
+    """The header must be the FIRST thing a member reads -- above --item and --task -- and its
+    absence must be silent (no URL, no header, no failure)."""
+    src = (ROOT / "scripts" / "run_member.sh").read_text()
+    hook = src.index('number_read.py" --render')
+    item = src.index('if [ -n "$ITEM" ]; then')
+    task = src.index('if [ -n "$TASK" ]; then')
+    assert hook < item < task, "number header must be composed before --item and --task"
+    assert "|| true" in src[hook:hook + 200], "a failed render must never kill the member run"
+    entry = (ROOT / "entrypoint.sh").read_text()
+    assert "number_read.py --fetch" in entry, "nothing schedules the fetch -- the header would be STALE forever"
+    assert "FLEET_NUMBER_URL" in (ROOT / "fleet.env.example").read_text()
+
+
 def _sync_health_check_pages_on_a_real_stalled_offset_not_on_a_caught_up_one():
     """gh#273: tail_runs_forever is the only thing keeping fleet.db in sync with runs.jsonl,
     and nothing watched whether it was still alive -- account_health_check.sh,
@@ -6946,6 +7024,9 @@ if __name__ == "__main__":
     check("pool logs successes so outage length is measurable", _pool_logs_successes_so_downtime_is_measurable)
     check("account health check actually pages when configured (and never claims to when it isn't)", _account_health_check_actually_pages_when_configured)
     check("account health check re-pages on a fixed interval instead of once (gh#266)", _account_health_check_repages_on_a_fixed_interval_gh266)
+    check("number_read fetches from a URL and renders the five-line header (fleet-kit#513)", _number_read_fetches_from_a_url_and_renders_five_lines)
+    check("number_read never renders zero for an unmeasured reading (fleet-kit#513)", _number_read_never_renders_zero_for_an_unmeasured_reading)
+    check("run_member puts the number header above --item and --task (fleet-kit#513)", _run_member_puts_the_number_header_above_item_and_task)
     check("member liveness pages critical when no member has done work (fleet-kit#512)", _member_liveness_pages_critical_when_no_member_has_done_work)
     check("member liveness is quiet and resolves after a recent ok run (fleet-kit#512)", _member_liveness_is_quiet_and_resolves_when_a_member_worked_recently)
     check("member liveness names the reset time when the pool is exhausted (fleet-kit#512)", _member_liveness_names_the_reset_when_the_pool_is_exhausted)

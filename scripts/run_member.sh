@@ -376,6 +376,19 @@ if [ -z "$PROMPT" ]; then
   exit 2
 fi
 
+# THE NUMBER (fleet-kit#513): the venture's own objective, read by number_read.py --fetch on
+# cron and rendered here as five lines above the charter. Empty when the instance has no
+# FLEET_NUMBER_URL -- a fleet with no number configured gets no header, never a fake one.
+# Sits ABOVE --item/--task on purpose: the first thing read frames everything after it, and
+# the number is what every item and task is for. Failure to render is silent: a member run
+# must not die because the number is unreadable; the header itself says STALE when it is.
+NUMBER_HEADER=$(FLEET_LOG_DIR="$LOG_DIR" python3 "$(dirname "$0")/number_read.py" --render 2>/dev/null || true)
+if [ -n "$NUMBER_HEADER" ]; then
+  PROMPT="$NUMBER_HEADER
+
+$PROMPT"
+fi
+
 # --item is how gru hands a minion its pre-claimed issue number -- prepended as the very
 # first thing the minion reads, before its own charter, so "which item" is never ambiguous
 # even though every concurrently-spawned minion runs the exact same charter file.
