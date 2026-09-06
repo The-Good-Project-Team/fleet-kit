@@ -7897,6 +7897,157 @@ def _overrides_apply_skips_a_legacy_malformed_row_instead_of_crashing():
             f"effective schedule should have fallen back to the spec default, got {eff['schedule']}"
 
 
+def _ask_schema_presence_and_clean_migration_gh568():
+    """gh#568 AC5: the `asks` table must be declared in SCHEMA, and a pre-existing fleet.db that
+    predates it must still gain it on the next `connect()` -- same expectation every other table
+    in SCHEMA gets (`CREATE TABLE IF NOT EXISTS` reaches an existing db file, it just no-ops
+    against one that already has the table)."""
+    import fleet_db
+    assert "CREATE TABLE IF NOT EXISTS asks" in fleet_db.SCHEMA, "fleet.db has no asks table"
+
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        # A "legacy" db: every table EXCEPT asks, built by stripping just that block out of the
+        # real SCHEMA -- so this fixture can never silently drift from the real schema shape.
+        start = fleet_db.SCHEMA.index("CREATE TABLE IF NOT EXISTS asks")
+        end = fleet_db.SCHEMA.index("CREATE INDEX IF NOT EXISTS idx_asks_member")
+        end = fleet_db.SCHEMA.index("\n", end) + 1
+        legacy_schema = fleet_db.SCHEMA[:start] + fleet_db.SCHEMA[end:]
+        assert "asks" not in legacy_schema, "fixture still contains the asks table -- bad slice"
+
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(legacy_schema)
+        conn.commit()
+        conn.close()
+
+        conn = fleet_db.connect(db_path)
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "asks" in tables, "connect() against a pre-existing db never added asks"
+
+        import ask
+        ask_id = ask.file_ask(conn, "selftest", "does the migrated table actually work")
+        assert ask_id and ask.list_asks(conn, status="open"), \
+            "asks table exists but is not actually usable after a clean migration"
+
+
+def _ask_file_and_list_roundtrip_gh568():
+    """gh#568 AC1/AC2: filing an ask inserts a row and exits 0 (checked via the CLI's `main()`
+    return value, not just the pure `file_ask()` helper, since a real caller goes through the
+    CLI); listing with `--status open` must then show it."""
+    import ask, fleet_db
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        rc = ask.main(["--db-path", str(db_path), "file", "--member", "marie",
+                      "--why", "need a human call on X", "--unblocks", "the Y decision",
+                      "--proposed", "do Z", "--no-notify"])
+        assert rc == 0, f"ask.py file must exit 0, got {rc}"
+
+        conn = fleet_db.connect(db_path)
+        rows = ask.list_asks(conn, status="open")
+        assert len(rows) == 1, f"expected exactly the one just-filed row, got {rows}"
+        row = rows[0]
+        assert row["member"] == "marie" and row["why"] == "need a human call on X"
+        assert row["unblocks"] == "the Y decision" and row["proposed"] == "do Z"
+        assert row["status"] == "open" and row["answered_at"] is None
+
+        # A status filter that doesn't match must exclude it, not silently ignore the filter.
+        assert ask.list_asks(conn, status="answered") == []
+
+
+def _ask_answer_is_idempotent_gh568():
+    """gh#568 AC3: `answer` sets status/answer/answered_by/answered_at exactly once; a second
+    call on the same id must be a no-op (never a silent overwrite of who answered what) and
+    must exit nonzero so a caller can tell the difference from a fresh answer."""
+    import ask, fleet_db
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        conn = fleet_db.connect(db_path)
+        ask_id = ask.file_ask(conn, "gru", "is this account still blocked")
+
+        ok = ask.answer_ask(conn, ask_id, "no, cleared this morning", "reif")
+        assert ok is True, "first answer_ask() call must succeed"
+        row = ask.list_asks(conn, status="all")[0]
+        assert row["status"] == "answered" and row["answer"] == "no, cleared this morning"
+        assert row["answered_by"] == "reif" and row["answered_at"] is not None
+
+        ok2 = ask.answer_ask(conn, ask_id, "a different answer", "someone-else")
+        assert ok2 is False, "answering an already-answered ask must be a no-op, not succeed"
+        row2 = ask.list_asks(conn, status="all")[0]
+        assert row2["answer"] == "no, cleared this morning" and row2["answered_by"] == "reif", \
+            "the no-op second call must not have overwritten the real answer"
+
+        # Same contract through the CLI: exit 0 then exit nonzero.
+        rc1 = ask.main(["--db-path", str(db_path), "answer", str(ask_id),
+                       "--answer", "yet another", "--answered-by", "x"])
+        assert rc1 != 0, "the CLI's second answer on an already-answered ask must exit nonzero"
+
+        ask_id2 = ask.file_ask(conn, "gru", "a fresh one")
+        rc2 = ask.main(["--db-path", str(db_path), "answer", str(ask_id2),
+                       "--answer", "yes", "--answered-by", "reif"])
+        assert rc2 == 0, "a first answer through the CLI must exit 0"
+
+
+def _ask_file_rate_limits_ntfy_to_once_per_member_per_hour_gh568():
+    """gh#568 AC4: filing rate-limits its page to one NTFY per instance (member) per hour,
+    routed through the existing fleet_alert.sh (and therefore its undelivered-retry queue) --
+    not a new state file. Exercises the real ask.py + fleet_alert.sh + alert_store.py chain,
+    curl stubbed the same way `_fleet_alert_queues_an_undelivered_alarm...` above stubs it."""
+    import subprocess
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        bin_dir = d / "bin"; bin_dir.mkdir()
+        calls = d / "curl_calls.log"
+        (bin_dir / "curl").write_text('#!/bin/bash\necho "$@" >> "$CURL_CALLS"\nexit 0\n')
+        (bin_dir / "curl").chmod(0o755)
+        db_path = d / "fleet.db"
+        env = {
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "NTFY_TOPIC": "selftest-fake-topic",
+            "FLEET_ALERT_LOG": str(d / "fleet_alert.log"),
+            "FLEET_ALERT_QUEUE": str(d / "alerts_undelivered.jsonl"),
+            "FLEET_ALERT_STATE_FILE": str(d / "alerts.json"),
+            "CURL_CALLS": str(calls),
+            "SELFTEST": "1",
+        }
+        script = str(ROOT / "scripts" / "ask.py")
+
+        def _file(member, why):
+            return subprocess.run(
+                [sys.executable, script, "--db-path", str(db_path), "file",
+                 "--member", member, "--why", why],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+
+        p1 = _file("marie", "first wall this hour")
+        assert p1.returncode == 0, f"ask.py file must exit 0: {p1.stderr[:300]}"
+        p2 = _file("marie", "second wall, same member, same hour")
+        assert p2.returncode == 0, f"ask.py file must exit 0: {p2.stderr[:300]}"
+        p3 = _file("gru", "a different member, same hour")
+        assert p3.returncode == 0, f"ask.py file must exit 0: {p3.stderr[:300]}"
+
+        sent = calls.read_text() if calls.exists() else ""
+        assert sent.count("fleet ask filed by marie") == 1, \
+            f"a second ask from the same member inside the hour must not page again: {sent!r}"
+        assert "fleet ask filed by gru" in sent, \
+            f"a different member's first ask this hour must still page: {sent!r}"
+
+
+def _gru_md_calls_ask_file_alongside_needs_human_op_stop_gh568():
+    """Doc-consistency guard, same shape as `_gru_md_checks_claim_history_before_claiming`:
+    gh#568 AC6 requires at least one real member charter to call `ask.py file` alongside its
+    existing `fleet:needs-human-op` label-and-stop behavior -- gru.md is the only charter that
+    references the label at all (`grep -rl fleet:needs-human-op members/*/*.md`), so it is the
+    highest-frequency filer the issue's own open question points at."""
+    text = (HERE.parent / "members" / "gru" / "gru.md").read_text()
+    assert "ask.py file" in text, "gru.md never calls ask.py file -- gh#568 AC6 is unwired"
+    needs_human_op = text.index("gh#361")
+    ask_file = text.index("ask.py file")
+    assert needs_human_op < ask_file, \
+        "ask.py file should be wired alongside the existing gh#361 needs-human-op stop, not before it"
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -8088,6 +8239,12 @@ if __name__ == "__main__":
     check("status page's transient alert does not render as a confirmed fault (gh#399)", _status_page_transient_alert_does_not_render_as_a_confirmed_fault)
     check("overrides.set_override() rejects a malformed schedule/max_turns/enabled/model dial value (gh#208)", _overrides_set_rejects_a_malformed_dial_value)
     check("overrides.apply() skips a legacy malformed row instead of crashing a member's run (gh#208)", _overrides_apply_skips_a_legacy_malformed_row_instead_of_crashing)
+
+    check("asks schema is present and reaches a pre-existing fleet.db (gh#568)", _ask_schema_presence_and_clean_migration_gh568)
+    check("ask.py file/list round-trips a filed ask (gh#568)", _ask_file_and_list_roundtrip_gh568)
+    check("ask.py answer sets the row once; a second call is a no-op (gh#568 AC3)", _ask_answer_is_idempotent_gh568)
+    check("ask.py file rate-limits its NTFY page to once per member per hour (gh#568 AC4)", _ask_file_rate_limits_ntfy_to_once_per_member_per_hour_gh568)
+    check("gru.md calls ask.py file alongside its own needs-human-op stop (gh#568 AC6)", _gru_md_calls_ask_file_alongside_needs_human_op_stop_gh568)
 
     for n in ok:
         print(f"  ok    {n}")

@@ -95,6 +95,26 @@ CREATE TABLE IF NOT EXISTS lane_kpi (
   computed_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_lane_kpi_lane_metric_time ON lane_kpi(lane, metric, computed_at);
+
+-- gh#568: a real channel for "a member hit a wall the fleet cannot act on" -- today the only
+-- option is `fleet:needs-human-op` and stop, a label with no structured why/unblocks/proposed
+-- and no record of how it was answered. See scripts/ask.py, the only reader/writer. `answer`,
+-- `answered_by` and `answered_at` are all NULL together (open) or all set together (answered) --
+-- ask.py's own `answer` command is what keeps that invariant, never a hand UPDATE.
+CREATE TABLE IF NOT EXISTS asks (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  member       TEXT NOT NULL,
+  why          TEXT NOT NULL,
+  unblocks     TEXT,
+  proposed     TEXT,
+  status       TEXT NOT NULL DEFAULT 'open',
+  answer       TEXT,
+  answered_by  TEXT,
+  answered_at  REAL,
+  filed_at     REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_asks_status ON asks(status);
+CREATE INDEX IF NOT EXISTS idx_asks_member ON asks(member);
 """
 
 
