@@ -1139,6 +1139,7 @@ async function renderStatsPage() {
   // total runs, and which agents are fully walled off (dormant).
   const STATUS_COLOR = { ok: '#1f8b4c', quiet: '#a6720f', reported_nothing: '#c13a2e', budget_declined: '#9a9ea6' };
   const rs = runsSummary || { signal_rate: 0, executed: 0, total: 0, budget_wall: 0, declined: 0,
+                               budget_declined_count: 0, interrupted_count: 0,
                                dormant: [], hourly: [], statuses: [], agent_rates: [] };
   const kpiRow = document.getElementById('runsKpiRow');
   if (kpiRow) {
@@ -1151,7 +1152,7 @@ async function renderStatsPage() {
       <div class="kpi-cell">
         <div class="kpi-label">Budget wall</div>
         <div class="kpi-value">${rs.budget_wall}%</div>
-        <div class="kpi-sub">${rs.declined} runs declined</div>
+        <div class="kpi-sub">${rs.budget_declined_count} declined, ${rs.interrupted_count} interrupted</div>
       </div>
       <div class="kpi-cell">
         <div class="kpi-label">Total runs</div>
