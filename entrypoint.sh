@@ -152,6 +152,11 @@ case "${1:-cron-foreground}" in
       # oversubscribed. Forward PID 1's own value (empty/unset falls through to
       # check_share_sum.sh's pre-gh#293 host-side scan unchanged, same as today).
       echo "FLEET_SHARE_DIR=${FLEET_SHARE_DIR:-}"
+      # gh#579: same env-forwarding gap as gh#569 above, sibling variable. maxx_lease.py's
+      # ledger is SHARED ACROSS INSTANCES only when FLEET_LEASE_DIR is set -- unforwarded here,
+      # a cron-triggered pass falls back to a per-instance/empty ledger and silently reports
+      # reserved_pct: 0 even when the real shared bind-mount is populated.
+      echo "FLEET_LEASE_DIR=${FLEET_LEASE_DIR:-}"
       echo
       # Canary must record that cron FIRED, independent of whether git had anything to say
       # (2026-09-04, gh#4340): the old form only touched gitpull.log when git printed output,
