@@ -1174,20 +1174,27 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             days = int(qs.get("days", ["14"])[0])
             score_file = LOG_DIR / "self_improve_score.jsonl"
-            history = []
+            all_history = []
             if score_file.exists():
                 for line in score_file.read_text().splitlines():
                     line = line.strip()
                     if not line:
                         continue
                     try:
-                        history.append(json.loads(line))
+                        all_history.append(json.loads(line))
                     except json.JSONDecodeError:
                         continue
             cutoff = (datetime.datetime.now(datetime.timezone.utc)
                       - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
-            history = [h for h in history if str(h.get("date", ""))[:10] >= cutoff]
-            latest = history[-1] if history else None
+            history = [h for h in all_history if str(h.get("date", ""))[:10] >= cutoff]
+            # `latest` is deliberately taken from the UNFILTERED history, not the
+            # days-windowed one above: a score written 20 days ago, requested with
+            # days=14, would otherwise fall out of the window and `latest` would read
+            # None -- byte-for-byte the same payload as "this has never run", which is
+            # exactly the "no score yet" vs "this stopped running" confusion gh#141
+            # is about. The frontend needs the true last-ever score (and its age) to
+            # tell those two apart; the trend chart still only plots the windowed rows.
+            latest = all_history[-1] if all_history else None
             self._json({"latest": latest, "history": history})
             return
         if path == "/api/query":
