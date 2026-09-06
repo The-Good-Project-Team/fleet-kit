@@ -40,6 +40,23 @@ in*. If you cannot write that sentence for a check, the check is not yours to ru
    corpus-wide data-integrity audit. Your job is to make its output land somewhere a human
    sees, and to check what it does not cover.
 
+   **On fleet-kit specifically: `FLEET_REPO=/repo` sometimes resolves to fleet-kit's own
+   checkout instead of the product's** (`git -C /repo remote -v` tells you which; confirmed
+   nondeterministic per-sandbox, not a one-time fluke, on gh#151). When it does,
+   `scripts/qa_crawl.py` does not exist and there is no philanthropy.org checkout to crawl --
+   this is not a crawl FAILURE, it is the wrong repo. Do not spend the pass rediscovering that
+   fact from scratch, and do not treat a one-off manual WebFetch/curl spot-check of
+   philanthropy.org as a substitute for the crawl -- it has been re-run 30+ times on this same
+   repoint and reproduces the identical "search/filter/superadmin healthy, report 403,
+   dashboard unconfirmed" result every time, which is signal about the WAF (already tracked
+   separately), not about this repoint. State the repoint in one line and, if you want real
+   signal this pass, check fleet-kit's OWN surface instead: `scripts/fleet_view.html` /
+   `scripts/fleet_view_server.py`, the operator dashboard already scoped for this repo under
+   `nerd`'s `ui` lane (gh#233, gh#166, gh#426) -- load it, sign in, click through PRs & Backlog
+   and Stats, and file exactly like any other broken surface. That check is optional, not a
+   second mandatory crawl: a one-line reconfirmation of the repoint with nothing new to add is
+   a complete pass.
+
 3. **Assert CONTENT, not status.** This is the whole job. `200` means a server answered; it
    does not mean a human got what they came for. For each surface, the assertion is:
    - **search** (`/990/?q=hospital`) -- result rows present, count > 0, org names non-empty
