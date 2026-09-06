@@ -3421,6 +3421,20 @@ def _git_pull_guard_serializes_via_a_lock_on_the_git_directory():
             "auto_deploy.sh no longer locks the same fleet_pull.lock inside its own .git dir"
 
 
+def _judge_block_pulls_the_pr_out_of_the_queue():
+    """fleet-kit#523: main is merge-queue-controlled on both repos, and `fleet-code-review` is
+    not (cannot be) a required check there -- the queue only waits for checks that report on
+    its own temporary branch, and judge-judy posts on the PR head. So the verdict has to move
+    the arm itself: BLOCK dequeues + disarms, approve arms. Otherwise a BLOCK is a comment."""
+    src = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    assert "dequeuePullRequest" in src and "--disable-auto" in src, \
+        "a BLOCK must dequeue the PR and disarm auto-merge -- the queue merges whatever is armed"
+    block = src.index("fleet-code-review: BLOCK")
+    assert 'unqueue_pr "$PR"' in src[block:], "the BLOCK branch never calls unqueue_pr"
+    approve = src.index('"Code review passed')
+    assert 'gh pr merge "$PR" --auto' in src[approve:block], "an approve must (re)arm auto-merge"
+
+
 def _judge_judy_ticks_dont_overlap():
     """A judge-judy cron tick that overlaps a still-running prior tick must not review.
 
@@ -5409,7 +5423,13 @@ def _green_pr_with_no_auto_merge_gets_armed():
             "#!/bin/bash\n"
             "if [ \"$1\" = \"repo\" ]; then echo 'The-Good-Project-Team/fleet-kit'; exit 0; fi\n"
             "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n"
-            "  case \"$*\" in *autoMergeRequest*) echo 291 ;; *) ;; esac\n"
+            "  case \"$*\" in *autoMergeRequest*) echo 291; echo 294 ;; *) ;; esac\n"
+            "  exit 0\n"
+            "fi\n"
+            "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo \"sha$3\"; exit 0; fi\n"
+            "if [ \"$1\" = \"api\" ]; then\n"
+            "  # --jq is applied by the real gh; the stub answers what that filter would print.\n"
+            "  case \"$*\" in *statuses/sha294*) echo failure ;; *) echo null ;; esac\n"
             "  exit 0\n"
             "fi\n"
             "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"merge\" ]; then\n"
@@ -5439,6 +5459,11 @@ def _green_pr_with_no_auto_merge_gets_armed():
             "nothing red, and the-fixer only hunts red"
         )
         assert "293" not in armed, "a DRAFT PR was armed -- a draft is explicitly not ready"
+        # fleet-kit#523: #294's head carries fleet-code-review=failure. fleet-code-review is
+        # not a required check (a merge queue only waits for checks on its own temporary
+        # branch), so re-arming a judge-blocked PR enqueues and MERGES it. Seen live
+        # 2026-09-06 01:50Z: #494/#505/#518, all BLOCKed, re-armed by this loop and queued.
+        assert "294" not in armed, "a judge-blocked head was re-armed -- the queue would merge it"
 
         logtext = (log_dir / "auto_update_branch.log").read_text()
         assert "armed" in logtext, "the tick summary never reports how many PRs it armed"
@@ -7084,6 +7109,8 @@ if __name__ == "__main__":
     check("git_pull_guard.sh self-heals a stray branch and leaves a normal pull unchanged", _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged)
     check("git_pull_guard.sh serializes via a lock on the .git directory", _git_pull_guard_serializes_via_a_lock_on_the_git_directory)
     check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
+    check("a judge-judy BLOCK pulls the PR out of the merge queue (fleet-kit#523)",
+          _judge_block_pulls_the_pr_out_of_the_queue)
     check("judge-judy lock lives somewhere persistent", _judge_judy_lock_lives_somewhere_persistent)
     check("judge-judy strikes are head-scoped and leave diagnosable evidence", _judge_judy_strikes_are_scoped_by_head_and_leave_diagnosable_evidence)
     check("board_github file_item can add a priority label alongside backlog/lane", _board_github_file_item_can_add_a_priority_label)

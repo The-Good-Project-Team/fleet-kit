@@ -87,6 +87,20 @@ fi
 REPO_SLUG=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null || echo "")
 [ -z "$REPO_SLUG" ] && { log "FATAL: cannot resolve repo slug (gh auth?)"; exit 1; }
 
+unqueue_pr() { # <pr>
+  # fleet-kit#523: main is merge-queue-controlled, and fleet-code-review is not a required
+  # check (it cannot be -- the queue only waits for checks on its own temporary branch, and
+  # this status lands on the PR head). So a BLOCK has to pull the PR out of the queue and
+  # disarm auto-merge itself; auto_update_branch.sh then refuses to re-arm a head whose
+  # latest fleet-code-review is failure. Before this, a BLOCK was a comment: 2026-09-06 01:50Z
+  # three BLOCKed PRs (#494 #505 #518) were queued to merge.
+  local id
+  id=$(timeout 25s gh pr view "$1" --json id -q '.id' 2>/dev/null || true)
+  [ -n "$id" ] && timeout 25s gh api graphql -f query="mutation{dequeuePullRequest(input:{id:\"$id\"}){clientMutationId}}" >/dev/null 2>&1
+  timeout 25s gh pr merge "$1" --disable-auto >/dev/null 2>&1
+  log "PR #$1: dequeued + auto-merge disarmed (blocked)"
+}
+
 post_status() { # <sha> <state> <description>
   timeout 25s gh api -X POST "repos/${REPO_SLUG}/statuses/$1" \
     -f state="$2" -f context="$CONTEXT" -f description="${3:0:139}" >/dev/null 2>&1
@@ -348,6 +362,8 @@ This reflects a parse/format issue in the reviewer's own output, not a finding a
     post_status "$HEAD_SHA" "success" "Code review passed (local claude, model=$MODEL)" \
       && log "PR #$PR: APPROVED -- status posted" \
       || log "PR #$PR: WARN approved but status POST failed"
+    # fleet-kit#523: the queue merges whatever is armed, so the verdict moves the arm.
+    if timeout 25s gh pr merge "$PR" --auto >/dev/null 2>&1; then log "PR #$PR: auto-merge armed"; else log "PR #$PR: WARN could not arm auto-merge"; fi
     report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "approved PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: success" "$SELF_CRITIQUE"
   else
     # Findings comment first, status second: a failure status pointing at nothing is worse
@@ -358,6 +374,7 @@ $FINDINGS" >/dev/null 2>&1 || log "PR #$PR: WARN findings comment failed"
     post_status "$HEAD_SHA" "failure" "Code review found blocking issues -- see PR comment" \
       && log "PR #$PR: BLOCKED -- status + findings posted" \
       || log "PR #$PR: WARN blocked but status POST failed"
+    unqueue_pr "$PR"
 
     # gh#5: nothing downstream ever read a block verdict, so a blocked PR just sat until a
     # human noticed. Reif's decision (quoted on gh#5): don't build a dedicated "fix" persona,
