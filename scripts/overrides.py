@@ -30,8 +30,12 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import member_spec  # noqa: E402  (same directory as this file, always -- see fleet_view_server.py)
 
 # Only these keys may be tuned live. Everything else is PR-only, by design.
 TUNABLE = ("max_turns", "model", "enabled", "schedule")
@@ -73,6 +77,30 @@ def _now() -> float:
     return time.time()
 
 
+def _validate_value(key: str, value) -> None:
+    """Reject a malformed dial value BEFORE it reaches the store (gh#208).
+
+    member_spec.validate() already rejects exactly these shapes for a git-committed spec --
+    schedule.hourly_at_minute out of range, a non-positive max_turns -- but only on the
+    load_all() path. A live override skipped it entirely, so the same malformed shape that
+    would fail review in a PR sailed straight into apply() from the dashboard instead. This
+    runs the identical checks (member_spec.validate_schedule / validate_max_turns) here, plus
+    the two dial types member_spec never had to type-check because a git spec's author writes
+    JSON, not a text box that falls back to a raw unquoted string on a typo.
+    """
+    where = f"override {key}: "
+    if key == "max_turns":
+        member_spec.validate_max_turns(value, where=where)
+    elif key == "model":
+        if not (isinstance(value, str) and value.strip()):
+            raise OverrideError(f"{where}model must be a non-empty string, got {value!r}")
+    elif key == "enabled":
+        if not isinstance(value, bool):
+            raise OverrideError(f"{where}enabled must be a bool (true/false), got {value!r}")
+    elif key == "schedule":
+        member_spec.validate_schedule(value, where=where)
+
+
 def set_override(member: str, key: str, value, *, by: str, why: str,
                  ttl_hours: float = DEFAULT_TTL_HOURS, store: Path | None = None) -> dict:
     """Record one override. Append-only: the newest live row for a key wins.
@@ -84,6 +112,10 @@ def set_override(member: str, key: str, value, *, by: str, why: str,
         raise OverrideError(
             f"{key!r} is not live-tunable. Tunable: {', '.join(TUNABLE)}. "
             f"Prompts and tools are a member's authority and change only through a PR.")
+    try:
+        _validate_value(key, value)
+    except member_spec.SpecError as exc:
+        raise OverrideError(str(exc)) from exc
     if not why or not why.strip():
         raise OverrideError("an override needs a reason -- it is what makes it reviewable")
     row = {"member": member, "key": key, "value": value, "by": by, "why": why.strip(),
@@ -130,6 +162,15 @@ def apply(spec: dict, *, store: Path | None = None, now: float | None = None) ->
     eff = json.loads(json.dumps(spec))
     applied = []
     for key, row in sorted(rows.items()):
+        # set_override() has refused a malformed value since gh#208, but a row written by an
+        # older build (or hand-edited into the jsonl) can still predate that check -- skip it
+        # here rather than hand the member a schedule/max_turns apply() itself can't trust, the
+        # same "never crash a member's run over stored data" rule live_overrides() already
+        # applies to a torn line.
+        try:
+            _validate_value(key, row["value"])
+        except (OverrideError, member_spec.SpecError):
+            continue
         if key == "max_turns":
             eff["llm"]["max_turns"] = row["value"]
         elif key == "model":

@@ -7047,6 +7047,80 @@ def _up_sh_never_emits_the_shared_image_tag_into_a_generated_fleet_env():
         "a generated fleet.env's FLEET_IMAGE_NAME still fell through to the shared 'fleet-kit:latest' tag"
 
 
+def _overrides_set_rejects_a_malformed_dial_value():
+    """gh#208: a human typo on the dashboard's schedule/max_turns/enabled dial used to sail
+    straight into the override store with no error, then misbehave hours later far from the
+    click that caused it. set_override() must now refuse it in place, using the same schema
+    member_spec.validate() already enforces for a git-committed spec."""
+    import overrides
+
+    with tempfile.TemporaryDirectory() as d:
+        store = Path(d) / "overrides.jsonl"
+
+        # The issue's own repro: a typo'd minute (99 for 09).
+        try:
+            overrides.set_override("gru", "schedule", {"hourly_at_minute": 99},
+                                    by="test", why="repro", store=store)
+            raise AssertionError("a schedule.hourly_at_minute of 99 was accepted")
+        except overrides.OverrideError:
+            pass
+
+        # An unquoted dashboard edit that JSON.parse falls back to as a raw string.
+        try:
+            overrides.set_override("gru", "schedule", "not-a-schedule",
+                                    by="test", why="repro", store=store)
+            raise AssertionError("a non-object schedule value was accepted")
+        except overrides.OverrideError:
+            pass
+
+        try:
+            overrides.set_override("gru", "max_turns", -1, by="test", why="repro", store=store)
+            raise AssertionError("a non-positive max_turns was accepted")
+        except overrides.OverrideError:
+            pass
+
+        try:
+            overrides.set_override("gru", "enabled", "yes", by="test", why="repro", store=store)
+            raise AssertionError("a non-bool enabled was accepted")
+        except overrides.OverrideError:
+            pass
+
+        # A well-formed value of each shape still goes through -- this must refuse the bad
+        # shape, not tighten the dial shut.
+        overrides.set_override("gru", "schedule", {"hourly_at_minute": 9},
+                                by="test", why="repro", store=store)
+        overrides.set_override("gru", "max_turns", 40, by="test", why="repro", store=store)
+        overrides.set_override("gru", "enabled", False, by="test", why="repro", store=store)
+        overrides.set_override("gru", "model", "claude-sonnet-5", by="test", why="repro", store=store)
+        live = overrides.live_overrides("gru", store=store)
+        assert live["schedule"]["value"] == {"hourly_at_minute": 9}
+        assert live["max_turns"]["value"] == 40
+        assert live["enabled"]["value"] is False
+        assert live["model"]["value"] == "claude-sonnet-5"
+
+
+def _overrides_apply_skips_a_legacy_malformed_row_instead_of_crashing():
+    """A row written before gh#208's set_override() check existed (or hand-edited into the
+    jsonl) can still be sitting in the store. apply() must skip it like live_overrides()
+    already skips a torn line, not hand a member's run a schedule it can't trust."""
+    import overrides
+
+    with tempfile.TemporaryDirectory() as d:
+        store = Path(d) / "overrides.jsonl"
+        bad_row = {"member": "gru", "key": "schedule", "value": {"hourly_at_minute": 99},
+                   "by": "legacy", "why": "typo", "set_at": time.time(),
+                   "expires_at": time.time() + 3600}
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_text(json.dumps(bad_row) + "\n")
+
+        spec = {"name": "gru", "llm": {"max_turns": 40, "model": "x"},
+                "schedule": {"hourly_at_minute": 0}, "enabled": True}
+        eff, applied = overrides.apply(spec, store=store)
+        assert applied == [], f"a malformed legacy row was applied instead of skipped: {applied}"
+        assert eff["schedule"] == {"hourly_at_minute": 0}, \
+            f"effective schedule should have fallen back to the spec default, got {eff['schedule']}"
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -7217,6 +7291,8 @@ if __name__ == "__main__":
     check("status_data.live_alerts() fails open on a broken store (gh#399)", _status_data_live_alerts_fails_open_on_a_broken_store)
     check("status page renders a live-alert banner distinct from the component grid (gh#399)", _status_page_renders_live_alert_banner_distinct_from_component_grid)
     check("status page's transient alert does not render as a confirmed fault (gh#399)", _status_page_transient_alert_does_not_render_as_a_confirmed_fault)
+    check("overrides.set_override() rejects a malformed schedule/max_turns/enabled/model dial value (gh#208)", _overrides_set_rejects_a_malformed_dial_value)
+    check("overrides.apply() skips a legacy malformed row instead of crashing a member's run (gh#208)", _overrides_apply_skips_a_legacy_malformed_row_instead_of_crashing)
 
     for n in ok:
         print(f"  ok    {n}")
