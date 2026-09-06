@@ -88,6 +88,41 @@ def _require(cond: bool, msg: str) -> None:
         raise SpecError(msg)
 
 
+def validate_schedule(sched, *, where: str = "") -> None:
+    """The exactly-one-of shape check for a schedule object.
+
+    Pulled out of validate() (gh#208) so overrides.py can run the SAME check on a live
+    dial-edit that this function already runs on a git-committed spec -- a malformed
+    schedule is exactly as bad coming from the dashboard as it is coming from a PR, but only
+    the PR path called this before.
+    """
+    _require(isinstance(sched, dict), f"{where}schedule must be an object")
+    # Three shapes, and the distinction between the last two is load-bearing: launchd's
+    # StartCalendarInterval with a Minute but NO Hour means "every hour at :MM", while adding
+    # an Hour makes it once a DAY. Collapsing them into one "calendar" field silently turned
+    # magikarp/mbuild/mpm from hourly into daily when this schema was first drafted -- a 24x
+    # cadence loss that renders as a perfectly valid plist.
+    keys = [k for k in ("interval_s", "hourly_at_minute", "daily_at") if k in sched]
+    _require(len(keys) == 1,
+             f"{where}schedule needs exactly one of interval_s, hourly_at_minute, daily_at")
+    if "interval_s" in sched:
+        _require(isinstance(sched["interval_s"], int) and sched["interval_s"] > 0,
+                 f"{where}schedule.interval_s must be a positive int")
+    elif "hourly_at_minute" in sched:
+        m = sched["hourly_at_minute"]
+        _require(isinstance(m, int) and 0 <= m <= 59,
+                 f"{where}schedule.hourly_at_minute must be an int 0-59")
+    else:
+        _require(isinstance(sched["daily_at"], str) and ":" in sched["daily_at"],
+                 f"{where}schedule.daily_at must look like 'HH:MM'")
+
+
+def validate_max_turns(value, *, where: str = "") -> None:
+    """Same reasoning as validate_schedule: shared with overrides.py's live dial-edit path."""
+    _require(isinstance(value, int) and value > 0,
+             f"{where}max_turns must be a positive int when set (omit it for uncapped)")
+
+
 def validate(spec: dict, *, filename: str = "<dict>") -> dict:
     """Full validation. Raises SpecError with the file named, never returns a partial spec."""
     where = f"{filename}: "
@@ -111,26 +146,7 @@ def validate(spec: dict, *, filename: str = "<dict>") -> dict:
                  f"{where}parent directory must match name {name!r}, got {parent!r} "
                  f"(expected members/{name}/{name}.fleet.json)")
 
-    sched = spec["schedule"]
-    _require(isinstance(sched, dict), f"{where}schedule must be an object")
-    # Three shapes, and the distinction between the last two is load-bearing: launchd's
-    # StartCalendarInterval with a Minute but NO Hour means "every hour at :MM", while adding
-    # an Hour makes it once a DAY. Collapsing them into one "calendar" field silently turned
-    # magikarp/mbuild/mpm from hourly into daily when this schema was first drafted -- a 24x
-    # cadence loss that renders as a perfectly valid plist.
-    keys = [k for k in ("interval_s", "hourly_at_minute", "daily_at") if k in sched]
-    _require(len(keys) == 1,
-             f"{where}schedule needs exactly one of interval_s, hourly_at_minute, daily_at")
-    if "interval_s" in sched:
-        _require(isinstance(sched["interval_s"], int) and sched["interval_s"] > 0,
-                 f"{where}schedule.interval_s must be a positive int")
-    elif "hourly_at_minute" in sched:
-        m = sched["hourly_at_minute"]
-        _require(isinstance(m, int) and 0 <= m <= 59,
-                 f"{where}schedule.hourly_at_minute must be an int 0-59")
-    else:
-        _require(isinstance(sched["daily_at"], str) and ":" in sched["daily_at"],
-                 f"{where}schedule.daily_at must look like 'HH:MM'")
+    validate_schedule(spec["schedule"], where=where)
 
     _require(isinstance(spec["timeout_s"], int) and spec["timeout_s"] > 0,
              f"{where}timeout_s must be a positive int")
@@ -182,8 +198,7 @@ def validate(spec: dict, *, filename: str = "<dict>") -> dict:
              f"{where}llm.tools.allow must be a non-empty list")
     _require(isinstance(tools.get("deny", []), list), f"{where}llm.tools.deny must be a list")
     if "max_turns" in llm:
-        _require(isinstance(llm["max_turns"], int) and llm["max_turns"] > 0,
-                 f"{where}llm.max_turns must be a positive int when set (omit it for uncapped)")
+        validate_max_turns(llm["max_turns"], where=where)
 
     report = spec["report"]
     _require(isinstance(report, dict), f"{where}report must be an object")
