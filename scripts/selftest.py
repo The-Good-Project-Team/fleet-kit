@@ -4942,6 +4942,35 @@ def _fleet_kpi_pr_ref_no_space_and_plural_shared_prefix_gh448():
             1, "PRs shipped")
 
 
+def _fleet_kpi_pr_ref_mixed_fate_in_joined_list_gh516():
+    """gh#516: `_PR_REF`'s comma/"and"-joined continuation (added for gh#448) absorbed a
+    second `#N` by proximity to a comma/"and" alone, regardless of that number's own fate --
+    `extract_kpi("gru", "Shipped PR #300, #301 blocked on CI.")` returned (2, "PRs shipped"),
+    crediting #301 as shipped in the very same sentence that says it was blocked. This is a
+    scoped reopening of the exact defect gh#230 was built to prevent, via the join gh#448
+    added rather than gh#230's original no-verb gap. A joined `#N` must now only be credited
+    when nothing contradicts the leading "shipped" verb sits between it and the next clause
+    boundary.
+    """
+    import fleet_kpi
+    for member in ("gru", "jefe", "minion"):
+        # AC1: comma-joined, fate word follows the second number directly (no comma).
+        assert fleet_kpi.extract_kpi(
+            member, "Shipped PR #300, #301 blocked on CI."
+        ) == (1, "PRs shipped")
+
+        # AC2: "and"-joined, fate word follows a comma after the second number.
+        assert fleet_kpi.extract_kpi(
+            member, "Shipped PR #100 and #101, reverted."
+        ) == (1, "PRs shipped")
+
+        # AC3: gh#448's own all-shipped joined-list case must still pass unchanged -- no fate
+        # word breaks the cluster, so both numbers are still credited.
+        assert fleet_kpi.extract_kpi(
+            member, "... both shipped green, auto-merge-armed PRs #178 and #177."
+        ) == (2, "PRs shipped")
+
+
 def _fleet_kpi_nerd_catches_filed_and_commented_verbs():
     """gh#225: `_KPI_TABLE` had entries for only roomba/marie/judge-judy -- nerd (one of the
     fleet's highest-volume members) returned `total: null` on `/api/kpi`, visually identical to
@@ -7282,6 +7311,7 @@ if __name__ == "__main__":
     check("fleet_kpi's marie pattern ignores an explicit-zero-counted verb (gh#409)", _fleet_kpi_marie_ignores_explicit_zero_counted_verb_gh409)
     check("fleet_kpi's gru/jefe/minion ship a real 'PRs shipped' count", _fleet_kpi_gru_jefe_minion_ship_a_real_prs_shipped_count)
     check("fleet_kpi's PR ref catches no-space 'PR#N' and plural shared-prefix forms (gh#448)", _fleet_kpi_pr_ref_no_space_and_plural_shared_prefix_gh448)
+    check("fleet_kpi's PR ref stops a joined list at a contradicting fate word (gh#516)", _fleet_kpi_pr_ref_mixed_fate_in_joined_list_gh516)
     check("fleet_kpi's nerd pattern catches filed/commented/posted/edited verbs", _fleet_kpi_nerd_catches_filed_and_commented_verbs)
     check("dormant flags an enabled member with zero runs in-window, given a roster", _dormant_flags_an_enabled_member_with_zero_runs_in_window)
     check("runs_summary() excludes provisional started rows from total/signal_rate/agent_rates (gh#437)", _runs_summary_excludes_started_rows_from_total_and_signal_rate)
