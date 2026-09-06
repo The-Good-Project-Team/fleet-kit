@@ -48,6 +48,15 @@ def _now_epoch() -> float:
 _NOT_EXECUTED_STATUSES = {"budget_declined", "timed_out", "killed"}
 _OK_STATUSES = {"ok"}
 
+# gh#437: run_report.py's provisional pre-launch row (gh#145, STATUS_STARTED) is written before
+# the real completion row lands -- it is not a second run and not a failed one, just a lifecycle
+# marker. It must never contribute to total/executed/signal_rate/agent_rates (that's the 3rd
+# instance of gh#150/gh#254's "a new run_report.py status doesn't reach this file" class), but it
+# still belongs in `dormant`'s view: a member with only a started row this window is mid-run, not
+# walled off, and folding it into _NOT_EXECUTED_STATUSES there would misreport an in-flight pass
+# as a budget decline.
+_PROVISIONAL_STATUSES = {"started"}
+
 
 def runs_summary(runs: list[dict], hours: float = 24.0, roster: list[dict] | None = None) -> dict:
     """One payload for the whole Recent Runs card: headline KPIs (signal rate, budget-wall rate,
@@ -67,9 +76,14 @@ def runs_summary(runs: list[dict], hours: float = 24.0, roster: list[dict] | Non
     """
     cutoff = _now_epoch() - hours * 3600
     windowed = [r for r in runs if r.get("ts") is not None and r.get("ts") >= cutoff]
+    # excludes "started" rows entirely (gh#437) -- a started row paired with its own completion
+    # row (also in-window) would otherwise count twice: once here as an extra total, once as an
+    # executed-but-not-ok failure. `windowed` itself is kept intact (with started rows) below,
+    # purely for `dormant`'s in-flight-run check.
+    non_provisional = [r for r in windowed if (r.get("status") or "") not in _PROVISIONAL_STATUSES]
 
-    total = len(windowed)
-    executed = [r for r in windowed if (r.get("status") or "") not in _NOT_EXECUTED_STATUSES]
+    total = len(non_provisional)
+    executed = [r for r in non_provisional if (r.get("status") or "") not in _NOT_EXECUTED_STATUSES]
     declined = total - len(executed)
     ok = sum(1 for r in executed if (r.get("status") or "") in _OK_STATUSES)
 
@@ -87,9 +101,10 @@ def runs_summary(runs: list[dict], hours: float = 24.0, roster: list[dict] | Non
         dormant += [spec["name"] for spec in roster
                     if spec.get("enabled") and spec["name"] not in by_member]
 
-    # hourly stacked-bar: count per (hour, status)
+    # hourly stacked-bar: count per (hour, status). Uses non_provisional -- "started" has no
+    # STATUS_COLOR legend entry in fleet_view.html and must not render as an outcome (gh#437).
     hour_buckets: dict[int, dict[str, int]] = {}
-    for r in windowed:
+    for r in non_provisional:
         hour = int(r["ts"] // 3600) * 3600
         status = r.get("status") or "unknown"
         b = hour_buckets.setdefault(hour, {})
@@ -104,7 +119,7 @@ def runs_summary(runs: list[dict], hours: float = 24.0, roster: list[dict] | Non
     # emitted, zeros included: a gap in a sparse series reads as "no data", while an explicit 0
     # reads as "gru ran and chose to spawn nothing", which is a real and different signal.
     minion_buckets: dict[int, int] = {}
-    for r in windowed:
+    for r in non_provisional:
         if (r.get("member") or "") != "minion":
             continue
         hour = int(r["ts"] // 3600) * 3600
@@ -114,10 +129,14 @@ def runs_summary(runs: list[dict], hours: float = 24.0, roster: list[dict] | Non
     minions_hourly = [{"ts": h, "count": minion_buckets.get(h, 0)}
                       for h in range(first_hour, last_hour + 3600, 3600)]
 
-    # per-agent signal rate, executed runs only
+    # per-agent signal rate, executed runs only -- also excludes "started" (gh#437), same reason
+    # as `executed`/`total` above; `by_member` itself still includes started rows (dormant needs
+    # them), so the exclusion has to happen here rather than by switching to a non_provisional-only
+    # by_member.
     agent_rates = []
     for member, rs in sorted(by_member.items()):
-        member_executed = [r for r in rs if (r.get("status") or "") not in _NOT_EXECUTED_STATUSES]
+        member_executed = [r for r in rs if (r.get("status") or "") not in _NOT_EXECUTED_STATUSES
+                            and (r.get("status") or "") not in _PROVISIONAL_STATUSES]
         if not member_executed:
             continue
         member_ok = sum(1 for r in member_executed if (r.get("status") or "") in _OK_STATUSES)
