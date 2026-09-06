@@ -7084,6 +7084,7 @@ if __name__ == "__main__":
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("cost_bridge converts real spend into fanout's --observed shape", _cost_bridge_converts_real_spend_into_fanouts_observed_shape)
     check("claim_history blocks an item that keeps dead-ending", _claim_history_blocks_an_item_that_keeps_dead_ending)
+    check("gru.md gates candidates on a Vision-link (fleet-kit#523)", _gru_md_gates_candidates_on_vision_link)
     check("gru.md checks claim_history before claiming", _gru_md_checks_claim_history_before_claiming)
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
     check("maxx lease reserves, releases, and self-expires", _maxx_lease_reserves_releases_and_self_expires)
