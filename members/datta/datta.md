@@ -159,13 +159,17 @@ Do not pick lanes by intuition. Score each lane on three signals and rank worst-
      `value` or `denominator` as material. Do not invent a threshold neither job defines. A
      `lane_kpi` row at or before `recorded_at` can never itself trigger "material" — it only
      ever serves as the baseline for a row that postdates `recorded_at`.
-  5. Zero referenced issues moved, AND the KPI/guardrail change is not material: hold this
-     lane's priority flat this pass — do not let UNEXAMINED alone win it a dispatch. This hold
-     fires on UNEXAMINED grounds only; it must never suppress a STALE or BREACHED verdict for
-     the same lane.
+  5. Zero referenced issues moved, AND the KPI/guardrail change is not material, **AND this
+     lane's own STALE and BREACHED signals from section 2 above (lines 63-66) are both false
+     for this pass**: hold this lane's priority flat this pass — do not let UNEXAMINED alone
+     win it a dispatch. That third condition is what enforces "this hold fires on UNEXAMINED
+     grounds only; it must never suppress a STALE or BREACHED verdict for the same lane" — a
+     lane currently scoring STALE or BREACHED skips this hold and is ranked on those verdicts
+     normally, never held flat.
   6. The hold is self-reversing with no separate reset step: the moment any referenced issue has
-     moved, or the KPI/guardrail change becomes material, that lane scores UNEXAMINED normally
-     again on the very next datta pass.
+     moved, the KPI/guardrail change becomes material, or the lane's own STALE or BREACHED
+     signal turns true, that lane scores UNEXAMINED (or STALE/BREACHED) normally again on the
+     very next datta pass.
 
   Name every lane held flat this way in your report (below), with which issue(s) you checked
   and found unchanged — an audit trail, never a silent skip.
