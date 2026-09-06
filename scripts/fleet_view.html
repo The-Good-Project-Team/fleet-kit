@@ -1412,17 +1412,15 @@ function renderSettingsPage() {
       // `selected` -- the browser still defaults the rendered <select>.value to the FIRST
       // listed option with no visual flag. data-unset marks that case so saveDials (below)
       // can skip it unless the operator actually touches the control.
-      // gh#460: `change` alone missed one real interaction -- clicking open the dropdown and
-      // choosing the option ALREADY sitting at index 0 (the browser default) never fires
-      // `change` at all, because the select's value never actually changes. Confirmed live in
-      // headless Chromium: opening a <select> fires `click` unconditionally, but `change`/
-      // `input` only fire when the resulting value differs from before. `onclick` here marks
-      // the dial touched the moment the operator opens it -- before `change` gets a chance to
-      // (or doesn't) -- so an index-0 pick still counts. Plain tab-through focus does NOT fire
-      // `click`, so a dial nobody ever clicked still gets skipped per gh#355.
+      // gh#510: PR#501 (gh#460) added `onclick` here so re-picking the option already sitting
+      // at index 0 (which never fires `change`, since the value never actually changes) still
+      // counted as touched. But `onclick` fires on every open of the dropdown, including one
+      // dismissed (Escape/click-away) without ever picking a value -- reintroducing gh#355's
+      // bug (a value the operator never gave gets written) via a different trigger. `change`
+      // is a real value commit; only that marks a dial touched. This narrower fix knowingly
+      // leaves gh#460's own index-0-reselect edge case unhandled again -- see gh#510 comments.
       const unset = !cur && !options.includes('');
       field = `<select class="dial-input" data-key="${key}"${unset ? ' data-unset="1"' : ''} style="${box}"
-        onclick="this.dataset.touched='1';"
         onchange="this.dataset.touched='1';
           if(this.value==='__custom__'){const i=document.createElement('input');
           i.className='dial-input';i.dataset.key='${key}';i.dataset.touched='1';i.value='';
