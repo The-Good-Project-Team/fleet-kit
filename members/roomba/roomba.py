@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""roomba.py — safe worktree/ghost sweep. Removes stale git worktrees, flags dead/stale crew.
+"""roomba.py — safe worktree sweep. Removes stale/orphaned git worktrees.
 
 Provenance: genericized + consolidated from nonprofit-atlas's scripts/worktree_sweep.py (886
 lines, the worktree half) and scripts/lucky2/fleet_ghosts_core.py (the crew-liveness half).
@@ -20,9 +20,10 @@ confirmed dead -- a SIGKILL never runs a script's own cleanup trap, so a killed 
 worktree is orphaned forever otherwise. A short grace period still applies (defense in depth
 against reading a PID a moment before it starts).
 
-GHOST DETECTION: reads a roster of expected scheduled jobs against what's actually
-loaded/running; flags NOT_LOADED / STALE / CRASHLOOP / UNPARSEABLE. Dedups by kind+label so a
-persisting ghost doesn't re-alert every run -- only a NEW ghost or a kind TRANSITION alerts.
+The crew-liveness half (dead/stale/crashlooping scheduled jobs) that used to live here moved
+out to scripts/member_liveness_check.sh (fleet-kit#512/#514) -- a check running INSIDE this
+container can't notice its own cron dying, which is exactly the outage that motivated the move.
+See gh#204 for the history of this file's now-removed ghost-dedup state file.
 
 Dry-run by default. Pass --execute to actually remove anything.
 """
@@ -46,8 +47,6 @@ MAX_PID = 4_194_304  # real PIDs never exceed this on macOS or Linux
 # Path convention a mechanical builder can opt into so roomba recognizes its own dangling
 # worktrees: <anything>-<pid> or <anything>-<pid>-<idx>, embedding the spawning process's PID.
 _BUILDER_PID_RE = re.compile(r"-(\d+)(?:-\d+)?/?$")
-
-_HIGH_SEVERITY_GHOST_KINDS = ("NOT_LOADED", "STALE", "CRASHLOOP", "UNPARSEABLE")
 
 
 def _run(cmd: list[str], cwd: str | None = None) -> subprocess.CompletedProcess:
@@ -179,22 +178,6 @@ def sweep(repo_dir: str, protect: set[str], base: str, execute: bool) -> list[di
         if execute:
             _run(["git", "worktree", "remove", "--force", wt.path], cwd=repo_dir)
     return results
-
-
-def ghost_marker(kind: str, label: str) -> str:
-    return f"{kind}:{label}"
-
-
-def find_ghosts(roster: list[dict], loaded: dict[str, dict]) -> list[dict]:
-    """roster: [{"label": str}]. loaded: {label: {"status": "running"|"stale"|"crashloop"|...}}.
-    A roster entry with no matching loaded status is NOT_LOADED."""
-    ghosts = []
-    for r in roster:
-        label = r["label"]
-        status = loaded.get(label, {}).get("status", "NOT_LOADED").upper()
-        if status in _HIGH_SEVERITY_GHOST_KINDS:
-            ghosts.append({"label": label, "kind": status})
-    return ghosts
 
 
 def main() -> int:
