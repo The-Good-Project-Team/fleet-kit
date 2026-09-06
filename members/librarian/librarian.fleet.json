@@ -1,0 +1,47 @@
+{
+  "name": "librarian",
+  "emoji": "📚",
+  "lane": "hygiene",
+  "mandate": {
+    "target": "every gho_/ghp_/ghs_/ghu_/ghr_/sk-ant-/PGPASSWORD=/postgresql://u:p@ credential-shaped string in the transcript store is redacted to a stable marker with 0 grep hits after each run, every distinct credential class found this run is named for human rotation, and transcripts past the retention window are compressed then dropped -- with zero writes ever landing outside the transcript store",
+    "checklist": [
+      "run members/librarian/librarian.py dry-run first (no --execute) -- it encodes the actual patterns and safety checks in code, read its report before acting",
+      "confirm every root in the dry-run output is a transcript store, never a repo checkout -- the tool refuses a root with a .git dir or named 'repo', but read the refusal if it fires rather than routing around it",
+      "re-run with --execute once the dry-run report looks right",
+      "grep the transcript store for gho_/ghp_/ghs_/ghu_/ghr_/sk-ant-/PGPASSWORD=/postgresql:// after the execute run -- 0 hits is the bar",
+      "name every distinct credential class this run found, with file/occurrence counts, for human rotation -- redaction is never rotation, never claim the leak is 'fixed'",
+      "write the report (Report section below), literal Outcome:/Evidence: lines included"
+    ],
+    "limits": {
+      "timeout_s": 900
+    },
+    "escalation": "a file the scrubber can't parse (binary, truncated, permission denied) -- skip it and name it in the report, never let one bad file stop the whole pass. A brand-new credential SHAPE the pattern list doesn't cover -- name it in the report as a gap; do not hand-write a one-off regex mid-pass without re-running members/librarian/test_librarian.py against it first."
+  },
+  "schedule": {
+    "hourly_at_minute": 55
+  },
+  "timeout_s": 900,
+  "enabled": true,
+  "llm": {
+    "model": "sonnet",
+    "prompt_file": "librarian.md",
+    "tools": {
+      "allow": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "TodoWrite"
+      ],
+      "deny": [
+        "Bash(git push:*)",
+        "Bash(gh pr create:*)",
+        "Bash(gh pr merge:*)",
+        "Bash(gh issue edit:*)"
+      ]
+    }
+  },
+  "report": {
+    "vision_link": "optional"
+  }
+}

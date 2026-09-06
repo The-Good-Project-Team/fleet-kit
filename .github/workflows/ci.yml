@@ -40,3 +40,5 @@ jobs:
         run: playwright install --with-deps chromium
       - name: run test_settings_wiring.py
         run: python3 scripts/test_settings_wiring.py
+      - name: run members/librarian/test_librarian.py
+        run: python3 members/librarian/test_librarian.py

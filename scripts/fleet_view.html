@@ -195,6 +195,13 @@
   .checks-green { color: var(--ok); } .checks-pending { color: var(--warn); } .checks-failing { color: var(--bad); }
   .checks-blocked { color: var(--bad); }
 
+  /* ---------- Backlog filter bar: priority-tier toggle + title search (gh#193) ---------- */
+  .queue-filter-bar { display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+    border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .queue-filter-bar .hist-toggle { margin-top: 0; }
+  .queue-filter-bar input[type="search"] { flex: 1; min-width: 140px; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 12px; color: var(--text); }
+
   /* ---------- sidebar nav items: PRs/Backlog + Settings, same list as agents, separated ---------- */
   .side-nav-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer;
     border-left: 2px solid transparent; color: var(--text); }
@@ -408,6 +415,17 @@ function statusClass(status) {
   return 'bad'; // no_vision_link, fail, etc.
 }
 
+// gh#166: enabled:false is a legitimate permanent throttle for a dispatch-only member (nerd,
+// minion -- they only ever run via another member's task-override, never self-fire), not proof
+// the member is dead. Only treat "disabled" as "actually off" when there's also no run inside
+// the same 24h lookback window the rest of this dashboard already uses (spend/turns labels).
+const RECENT_RUN_WINDOW_MS = 24 * 3600 * 1000;
+function hasRecentRun(last) {
+  if (!last) return false;
+  const tsMs = typeof last.ts === 'number' ? last.ts * 1000 : Date.parse(last.ts);
+  return (Date.now() - tsMs) < RECENT_RUN_WINDOW_MS;
+}
+
 let SIDEBAR_ORDER = null; // cached agent-name order -- computed once per resort, not per render
 
 function resortSidebar() {
@@ -434,12 +452,13 @@ function renderSidebar() {
     const name = m.spec.name;
     const enabled = !!m.effective.enabled;
     const last = lastRunFor(name);
-    const cls = !enabled ? 'off' : statusClass(last?.status);
+    const off = !enabled && !hasRecentRun(last);
+    const cls = off ? 'off' : statusClass(last?.status);
     const active = PAGE === 'agent' && name === SELECTED;
     const k = KPI_BY_MEMBER[name];
     const kpiLine = (k && k.total !== null && k.total !== undefined && k.unit)
       ? `<div class="akpi">${k.total} ${esc(k.unit)}</div>` : '';
-    return `<div class="agent-item ${active ? 'active' : ''} ${!enabled ? 'disabled-agent' : ''}"
+    return `<div class="agent-item ${active ? 'active' : ''} ${off ? 'disabled-agent' : ''}"
         data-agent="${esc(name)}">
       <span class="astatus ${cls}"></span>
       <div class="atext">
@@ -528,7 +547,9 @@ function renderDetailHead() {
     return `<button class="dial" data-act="edit-dial" data-member="${esc(name)}" data-key="${key}">${key}=${esc(JSON.stringify(v))}</button>`;
   }).join('');
   const next = NEXT_FIRES.find(f => f.member === name);
-  const nextLine = next && next.enabled ? `next run in ${fmtIn(next.in_s)}` : (enabled ? '' : 'disabled — not scheduled');
+  const dispatchedOnly = !enabled && hasRecentRun(lastRunFor(name));
+  const nextLine = next && next.enabled ? `next run in ${fmtIn(next.in_s)}`
+    : (enabled ? '' : (dispatchedOnly ? 'dispatched only (no self-schedule)' : 'disabled — not scheduled'));
 
   detailHeadEl.innerHTML = `
     <div class="title-row">
@@ -709,7 +730,10 @@ function renderUpcomingCard() {
   const m = SPECS.find(s => s.spec.name === SELECTED);
   const next = NEXT_FIRES.find(f => f.member === SELECTED);
   if (!next || !next.enabled) {
-    runListEl.innerHTML = `<div class="run-empty">${m && !m.effective.enabled ? 'disabled — not scheduled' : 'no upcoming run scheduled'}</div>`;
+    const label = m && !m.effective.enabled
+      ? (hasRecentRun(lastRunFor(SELECTED)) ? 'dispatched only (no self-schedule)' : 'disabled — not scheduled')
+      : 'no upcoming run scheduled';
+    runListEl.innerHTML = `<div class="run-empty">${label}</div>`;
     return;
   }
   const sched = (m?.spec?.schedule && JSON.stringify(m.spec.schedule)) || '';
@@ -838,11 +862,26 @@ function renderEvolutionPage() {
 // Queue page (sidebar item): PRs + backlog, now a full page instead of an always-visible rail --
 // it's reference material you check, not something that should compete for space every screen.
 // ---------------------------------------------------------------------------------------------
+// Backlog filter/sort state (gh#193) -- module-level so it survives the SSE-driven re-renders
+// renderQueuePage() gets on every 'gh' event, not just the one the operator triggered.
+let QUEUE_FILTER = { tier: 'all', text: '' };
+const PRIORITY_TIER_LABEL = ['fleet:priority-high', 'fleet:priority-medium', 'fleet:priority-low'];
+function issueTier(i) {
+  const names = (i.labels || []).map(l => l.name);
+  const idx = PRIORITY_TIER_LABEL.findIndex(t => names.includes(t));
+  return idx === -1 ? 3 : idx; // unlabeled issues sort after low, but still show under "all"
+}
+
 function renderQueuePage() {
   if (PAGE !== 'queue') return;
   const prs = GH.prs || [];
   const issues = GH.issues || [];
   detailHeadEl.innerHTML = `<div class="title-row"><h2>PRs &amp; Backlog</h2></div>`;
+
+  // The filter text input gets rebuilt below along with the rest of the page -- capture focus
+  // and cursor position first so a keystroke doesn't visibly steal focus from itself.
+  const filterHadFocus = document.activeElement?.id === 'queueFilterText';
+  const filterSelStart = filterHadFocus ? document.activeElement.selectionStart : null;
 
   const prsHtml = prs.map(pr => {
     const cls = pr._rollup === 'green' ? 'checks-green' : pr._rollup === 'failing' ? 'checks-failing' :
@@ -864,6 +903,19 @@ function renderQueuePage() {
   const epics = issues.filter(isEpic);
   const rest = issues.filter(i => !isEpic(i));
 
+  // Default order is priority tier (high -> medium -> low -> unlabeled), not the recency order
+  // GH.issues arrives in -- that recency order is exactly what buried 18 high-priority items
+  // across 36 unsorted rows in gh#193's evidence. Array.sort is stable, so issues within the
+  // same tier keep their incoming (recency) relative order.
+  const tierCounts = [0, 0, 0, 0];
+  rest.forEach(i => tierCounts[issueTier(i)]++);
+  const filterText = QUEUE_FILTER.text.trim().toLowerCase();
+  const visible = rest
+    .filter(i => QUEUE_FILTER.tier === 'all' || issueTier(i) === QUEUE_FILTER.tier)
+    .filter(i => !filterText || i.title.toLowerCase().includes(filterText))
+    .slice()
+    .sort((a, b) => issueTier(a) - issueTier(b));
+
   const renderIssueRow = i => {
     const labels = (i.labels || []).map(l =>
       `<span class="tag" style="--tag-color:#${esc(l.color || '888')}">${esc(l.name)}</span>`).join('');
@@ -880,7 +932,18 @@ function renderQueuePage() {
     </div>`;
   };
   const epicsHtml = epics.map(renderIssueRow).join('');
-  const issuesHtml = rest.map(renderIssueRow).join('') || '<div class="run-empty">backlog empty</div>';
+  const issuesHtml = visible.map(renderIssueRow).join('') ||
+    `<div class="run-empty">${rest.length ? 'no backlog items match this filter' : 'backlog empty'}</div>`;
+
+  const tierBtn = (tier, label) => `<button data-tier="${tier}" class="${QUEUE_FILTER.tier === tier ? 'active' : ''}">
+      ${label} <span class="count-badge">${tier === 'all' ? rest.length : tierCounts[tier]}</span></button>`;
+  const filterBarHtml = `
+    <div class="queue-filter-bar">
+      <div class="hist-toggle" id="queueTierFilter">
+        ${tierBtn('all', 'all')}${tierBtn(0, 'high')}${tierBtn(1, 'medium')}${tierBtn(2, 'low')}
+      </div>
+      <input type="search" id="queueFilterText" placeholder="filter by title…" value="${esc(QUEUE_FILTER.text)}">
+    </div>`;
 
   runListEl.innerHTML = `
     <div class="rail-section">
@@ -893,11 +956,30 @@ function renderQueuePage() {
       ${epicsHtml}
     </div>` : ''}
     <div class="rail-section">
-      <div class="rail-head">Backlog <span class="count-badge">${rest.length}</span>
+      <div class="rail-head">Backlog <span class="count-badge">${visible.length}${visible.length !== rest.length ? '/' + rest.length : ''}</span>
         <button class="btn small" id="newPriority" style="margin-left:auto">🔥 priority</button>
         <button class="btn small" id="newIssue">+ new</button></div>
+      ${filterBarHtml}
       ${issuesHtml}
     </div>`;
+
+  document.getElementById('queueTierFilter')?.addEventListener('click', e => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    const t = btn.dataset.tier;
+    QUEUE_FILTER.tier = t === 'all' ? 'all' : Number(t);
+    renderQueuePage();
+  });
+  const filterInput = document.getElementById('queueFilterText');
+  filterInput?.addEventListener('input', () => {
+    QUEUE_FILTER.text = filterInput.value;
+    renderQueuePage();
+  });
+  if (filterHadFocus && filterInput) {
+    filterInput.focus();
+    filterInput.setSelectionRange(filterSelStart, filterSelStart);
+  }
+
   document.getElementById('newIssue')?.addEventListener('click', async () => {
     const title = prompt('issue title:');
     if (!title) return;
@@ -1138,19 +1220,23 @@ async function renderStatsPage() {
   // good" -- signal rate (ok / executed), budget-wall rate (declined before running / total),
   // total runs, and which agents are fully walled off (dormant).
   const STATUS_COLOR = { ok: '#1f8b4c', quiet: '#a6720f', reported_nothing: '#c13a2e', budget_declined: '#9a9ea6' };
-  const rs = runsSummary || { signal_rate: 0, executed: 0, total: 0, budget_wall: 0, declined: 0,
+  // gh#153: `null` (not `0`) is the "no data" sentinel for these two -- a real 0% (everyone
+  // failed, or everyone got budget-walled) is a different diagnosis from "nothing ran in this
+  // window," and pctOrDash below is what keeps the two from rendering as the same digit.
+  const rs = runsSummary || { signal_rate: null, executed: 0, total: 0, budget_wall: null, declined: 0,
                                dormant: [], hourly: [], statuses: [], agent_rates: [] };
+  const pctOrDash = v => (v === null || v === undefined) ? '—' : v + '%';
   const kpiRow = document.getElementById('runsKpiRow');
   if (kpiRow) {
     kpiRow.innerHTML = `
       <div class="kpi-cell">
         <div class="kpi-label">Signal rate</div>
-        <div class="kpi-value">${rs.signal_rate}%</div>
+        <div class="kpi-value">${pctOrDash(rs.signal_rate)}</div>
         <div class="kpi-sub">${rs.executed} of ${rs.total} executed</div>
       </div>
       <div class="kpi-cell">
         <div class="kpi-label">Budget wall</div>
-        <div class="kpi-value">${rs.budget_wall}%</div>
+        <div class="kpi-value">${pctOrDash(rs.budget_wall)}</div>
         <div class="kpi-sub">${rs.declined} runs declined</div>
       </div>
       <div class="kpi-cell">
@@ -1408,17 +1494,15 @@ function renderSettingsPage() {
       // `selected` -- the browser still defaults the rendered <select>.value to the FIRST
       // listed option with no visual flag. data-unset marks that case so saveDials (below)
       // can skip it unless the operator actually touches the control.
-      // gh#460: `change` alone missed one real interaction -- clicking open the dropdown and
-      // choosing the option ALREADY sitting at index 0 (the browser default) never fires
-      // `change` at all, because the select's value never actually changes. Confirmed live in
-      // headless Chromium: opening a <select> fires `click` unconditionally, but `change`/
-      // `input` only fire when the resulting value differs from before. `onclick` here marks
-      // the dial touched the moment the operator opens it -- before `change` gets a chance to
-      // (or doesn't) -- so an index-0 pick still counts. Plain tab-through focus does NOT fire
-      // `click`, so a dial nobody ever clicked still gets skipped per gh#355.
+      // gh#510: PR#501 (gh#460) added `onclick` here so re-picking the option already sitting
+      // at index 0 (which never fires `change`, since the value never actually changes) still
+      // counted as touched. But `onclick` fires on every open of the dropdown, including one
+      // dismissed (Escape/click-away) without ever picking a value -- reintroducing gh#355's
+      // bug (a value the operator never gave gets written) via a different trigger. `change`
+      // is a real value commit; only that marks a dial touched. This narrower fix knowingly
+      // leaves gh#460's own index-0-reselect edge case unhandled again -- see gh#510 comments.
       const unset = !cur && !options.includes('');
       field = `<select class="dial-input" data-key="${key}"${unset ? ' data-unset="1"' : ''} style="${box}"
-        onclick="this.dataset.touched='1';"
         onchange="this.dataset.touched='1';
           if(this.value==='__custom__'){const i=document.createElement('input');
           i.className='dial-input';i.dataset.key='${key}';i.dataset.touched='1';i.value='';
