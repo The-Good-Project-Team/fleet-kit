@@ -6228,6 +6228,118 @@ def _account_health_check_actually_pages_when_configured():
         assert not ntfy_calls.exists(), "an unset NTFY_TOPIC must never reach the ntfy leg"
 
 
+def _liveness_fixture(tmp, newest_ok_age_s, exhausted_reset_in_s=None):
+    """A fleet.db with one ok run at the given age, plus the selftest alert sandbox."""
+    import sqlite3
+    log_dir = tmp / "logs"; log_dir.mkdir(exist_ok=True)
+    db = sqlite3.connect(str(log_dir / "fleet.db"))
+    db.execute("create table runs (run_id text, member text, status text, recorded_at real, primary key (run_id, recorded_at))")
+    now = time.time()
+    db.execute("insert into runs values ('jefe-1', 'jefe', 'ok', ?)", (now - newest_ok_age_s,))
+    db.execute("insert into runs values ('minion-2', 'minion', 'started', ?)", (now - 60,))
+    db.commit(); db.close()
+    if exhausted_reset_in_s is not None:
+        (log_dir / "account-pool-exhausted.state").write_text(
+            f"tgp {int(now + exhausted_reset_in_s)}\ngmail {int(now + exhausted_reset_in_s)}\n")
+    calls = tmp / "calls.log"
+    env = {"FLEET_LOG_DIR": str(log_dir), "FLEET_INSTANCE_NAME": "selftest-inst",
+           "NTFY_CALLS_FILE": str(calls), "SELFTEST": "1", "PATH": "/usr/bin:/bin"}
+    return env, calls
+
+
+def _run_liveness(env):
+    import subprocess
+    return subprocess.run(["bash", str(ROOT / "scripts" / "member_liveness_check.sh")],
+                          capture_output=True, text=True, timeout=30, env=env)
+
+
+def _member_liveness_pages_critical_when_no_member_has_done_work():
+    """fleet-kit#512: the dead man's switch. Sep 3-5 the crontab was discarded and no member
+    ran for 40h while every probe stayed green. Newest `ok` in fleet.db older than the window,
+    with no exhaustion state, must page critical with problem=silent on the FIRST tick."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        env, calls = _liveness_fixture(tmp, newest_ok_age_s=5 * 3600)
+        proc = _run_liveness(env)
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        assert "PAGED silent" in proc.stdout, f"stdout: {proc.stdout!r} stderr: {proc.stderr[:300]!r}"
+        text = calls.read_text() if calls.exists() else ""
+        assert "problem=silent severity=critical" in text, f"calls: {text!r}"
+        assert "silent for 5h" in text, f"page must carry the silence length: {text!r}"
+
+
+def _member_liveness_is_quiet_and_resolves_when_a_member_worked_recently():
+    """A recent `ok` is a heartbeat: no page, and the check closes any alarm it opened before
+    (fleet_alert.sh itself drops a recovery nobody was paged for, so this is safe every tick)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        env, calls = _liveness_fixture(tmp, newest_ok_age_s=10 * 60)
+        proc = _run_liveness(env)
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        assert proc.stdout.strip().endswith("OK"), f"stdout: {proc.stdout!r}"
+        text = calls.read_text() if calls.exists() else ""
+        assert "page " not in text, f"a 10-minute-old ok run must never page: {text!r}"
+        assert "resolve " in text, f"a healthy tick must resolve the check: {text!r}"
+
+
+def _member_liveness_names_the_reset_when_the_pool_is_exhausted():
+    """Aug 30 - Sep 1: 25h of budget_declined runs, no page. Genuinely out of tokens is a
+    STATE, paged once, degraded not critical, and the page carries the pool's own reset time
+    -- so a human knows nothing is broken and when it resumes."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        env, calls = _liveness_fixture(tmp, newest_ok_age_s=6 * 3600, exhausted_reset_in_s=20 * 3600)
+        proc = _run_liveness(env)
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        assert "PAGED out_of_tokens" in proc.stdout, f"stdout: {proc.stdout!r} stderr: {proc.stderr[:300]!r}"
+        text = calls.read_text() if calls.exists() else ""
+        assert "problem=out_of_tokens severity=degraded" in text, f"calls: {text!r}"
+        assert "out of tokens until" in text and "UTC" in text, f"page must name the reset: {text!r}"
+        # A reset already in the PAST is not exhaustion -- that pool should be working again.
+        (tmp / "logs" / "account-pool-exhausted.state").write_text(f"tgp {int(time.time()) - 3600}\n")
+        calls.unlink(missing_ok=True)
+        proc = _run_liveness(env)
+        assert "PAGED silent" in proc.stdout, f"a stale reset must fall through to silent: {proc.stdout!r}"
+
+
+def _fleet_alert_queues_an_undelivered_alarm_and_retries_it_next_call():
+    """fleet-kit#512: on 2026-09-04 both legs failed and the log said ALARM UNDELIVERED -- and
+    that was the end of it. Now an alarm neither channel took waits in a queue and is retried
+    at the front of the next call, so a mail-provider blip delays a page instead of eating it.
+    Exercises the real script: no alert.env in the sandbox (email leg skips), NTFY_TOPIC set,
+    curl stubbed to fail then succeed."""
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        bin_dir = tmp / "bin"; bin_dir.mkdir()
+        calls = tmp / "curl_calls.log"
+        (bin_dir / "curl").write_text('#!/bin/bash\necho "$@" >> "$CURL_CALLS"\nexit "${CURL_RC:-0}"\n')
+        (bin_dir / "curl").chmod(0o755)
+        log = tmp / "fleet_alert.log"; queue = tmp / "alerts_undelivered.jsonl"
+        env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "NTFY_TOPIC": "selftest-fake-topic",
+               "FLEET_ALERT_LOG": str(log), "FLEET_ALERT_QUEUE": str(queue),
+               "CURL_CALLS": str(calls), "SELFTEST": "1"}
+        script = str(ROOT / "scripts" / "fleet_alert.sh")
+
+        proc = subprocess.run(["bash", script, "first title", "first body"], capture_output=True,
+                              text=True, timeout=30, env={**env, "CURL_RC": "22"})
+        assert proc.returncode == 0, f"helper must never exit non-zero: {proc.stderr[:300]}"
+        assert queue.exists() and queue.read_text().count("\n") == 1, \
+            f"an alarm both legs dropped must be queued, got: {queue.read_text() if queue.exists() else None!r}"
+        assert "first title" in queue.read_text()
+        assert "UNDELIVERED (queued" in log.read_text(), log.read_text()
+
+        calls.unlink(missing_ok=True)
+        proc = subprocess.run(["bash", script, "second title", "second body"], capture_output=True,
+                              text=True, timeout=30, env={**env, "CURL_RC": "0"})
+        assert proc.returncode == 0, proc.stderr[:300]
+        sent = calls.read_text()
+        assert "[retry] first title" in sent, f"queued alarm must be retried first: {sent!r}"
+        assert "second title" in sent, sent
+        assert sent.index("[retry] first title") < sent.index("second title"), "retry goes before the new alarm"
+        assert queue.read_text().strip() == "", f"delivered retry must leave the queue: {queue.read_text()!r}"
+
+
 def _sync_health_check_pages_on_a_real_stalled_offset_not_on_a_caught_up_one():
     """gh#273: tail_runs_forever is the only thing keeping fleet.db in sync with runs.jsonl,
     and nothing watched whether it was still alive -- account_health_check.sh,
@@ -6812,6 +6924,10 @@ if __name__ == "__main__":
     check("pool logs successes so outage length is measurable", _pool_logs_successes_so_downtime_is_measurable)
     check("account health check actually pages when configured (and never claims to when it isn't)", _account_health_check_actually_pages_when_configured)
     check("account health check re-pages on a fixed interval instead of once (gh#266)", _account_health_check_repages_on_a_fixed_interval_gh266)
+    check("member liveness pages critical when no member has done work (fleet-kit#512)", _member_liveness_pages_critical_when_no_member_has_done_work)
+    check("member liveness is quiet and resolves after a recent ok run (fleet-kit#512)", _member_liveness_is_quiet_and_resolves_when_a_member_worked_recently)
+    check("member liveness names the reset time when the pool is exhausted (fleet-kit#512)", _member_liveness_names_the_reset_when_the_pool_is_exhausted)
+    check("fleet_alert queues an undelivered alarm and retries it next call (fleet-kit#512)", _fleet_alert_queues_an_undelivered_alarm_and_retries_it_next_call)
     check("sync health check pages on a real stalled offset, not on a caught-up one (gh#273)", _sync_health_check_pages_on_a_real_stalled_offset_not_on_a_caught_up_one)
     check("sync health check re-pages on a fixed interval instead of once", _sync_health_check_repages_on_a_fixed_interval)
     check("nothing hardcodes a read of the frozen instances/*/logs mirror", _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror)
