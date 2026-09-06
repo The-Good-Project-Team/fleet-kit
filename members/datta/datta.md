@@ -140,22 +140,36 @@ Do not pick lanes by intuition. Score each lane on three signals and rank worst-
   the gh#339 check above:
 
   1. Read the lane's last nerd run: `SELECT recorded_at, outcome, self_critique FROM runs WHERE
-     member='nerd' AND lane='<lane>' ORDER BY recorded_at DESC LIMIT 1`. Pull every issue number
-     (`#\d+`) mentioned in that row's `outcome`/`self_critique` — the issues that pass referenced
-     as its findings. No structured `referenced_issues` field exists yet to read instead; this
-     free-text parse is the same class of fragility already flagged above for lane attribution
-     (UNKNOWN, not resolved by this pass — a future structured column would remove this risk;
-     weigh it against the parse before trusting a hold this produces).
+     member='nerd' AND lane='<lane>' ORDER BY recorded_at DESC LIMIT 1`. Pull every issue
+     citation (`#\d+` or `gh#\d+`) mentioned in that row's `outcome`/`self_critique` — the
+     issues that pass referenced as its findings — but skip any number written as `PR#\d+`,
+     `PR #\d+` (case-insensitive), or inside a trailing `(#\d+)` parenthetical (this fleet's own
+     commit-message shorthand for the PR number, e.g. `(gh#395) (#472)` — the first is the
+     issue, the second in parens is the PR). Those are PR citations, not issue numbers, and
+     `gh issue view` errors outright on a PR number (`Could not resolve to an issue with the
+     number of <n>`) rather than returning issue data — nerd's own free text routinely cites PR
+     numbers this way when describing partial fixes (e.g. "PR#420 fixed X, Y still broken"). No
+     structured `referenced_issues` field exists yet to read instead; this free-text parse is
+     the same class of fragility already flagged above for lane attribution (UNKNOWN, not
+     resolved by this pass — a future structured column would remove this risk; weigh it
+     against the parse before trusting a hold this produces).
   2. No prior run, or zero issue numbers found in it: skip this check for the lane this pass —
      the hold never fires on missing or incomplete evidence, same posture as the gh#339 rule.
-  3. For each referenced issue, check `gh issue view <n> --json updatedAt,comments`. It counts
-     as **moved** if `updatedAt` is later than the lane's last `recorded_at` (GitHub bumps
-     `updatedAt` on close/reopen, so this alone already captures a state change since
-     `recorded_at`) or any comment's `createdAt` is later than `recorded_at`. Do not compare
-     current `state` against `open` directly — an issue already closed at `recorded_at` time
-     (a routine citation pattern: a run's own `outcome`/`self_critique` often names an issue it
-     just closed) would always read as "not open" and falsely count as moved on every future
-     pass, permanently defeating this hold for that lane.
+  3. For each remaining referenced issue, check `gh issue view <n> --json updatedAt,comments`.
+     If this errors for any number (a PR number step 1's filter didn't catch, or an issue that
+     was deleted or transferred), drop that number from the referenced set for this check —
+     never let an unresolvable citation default to counting as moved OR as unmoved, since either
+     default biases the hold (defaulting to moved lets one bad citation permanently defeat the
+     hold for the lane; defaulting to unmoved lets one bad citation manufacture a hold with no
+     real evidence behind it). If dropping errored numbers empties the referenced set, this
+     check is skipped for the lane this pass, same posture as step 2's no-evidence case. For
+     every number that does resolve, it counts as **moved** if `updatedAt` is later than the
+     lane's last `recorded_at` (GitHub bumps `updatedAt` on close/reopen, so this alone already
+     captures a state change since `recorded_at`) or any comment's `createdAt` is later than
+     `recorded_at`. Do not compare current `state` against `open` directly — an issue already
+     closed at `recorded_at` time (a routine citation pattern: a run's own `outcome`/
+     `self_critique` often names an issue it just closed) would always read as "not open" and
+     falsely count as moved on every future pass, permanently defeating this hold for that lane.
   4. Pull only the `lane_kpi` rows whose `computed_at` is later than the lane's last
      `recorded_at` (`lane_kpi`'s own timestamp column — confirmed via
      `sqlite3 fleet.db ".schema lane_kpi"`; the table has no `recorded_at` column of its own to

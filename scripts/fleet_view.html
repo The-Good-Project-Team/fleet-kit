@@ -1013,6 +1013,15 @@ async function renderStatsPage() {
       </div>`;
   }
 
+  // Cron cadence is 3h; anything older than 2 missed runs reads as "stopped", not "lagging" --
+  // gh#141: the empty-state copy below used to render identically whether the pipeline was
+  // minutes old or had never run at all. `latest` now always carries the true last-ever score
+  // (see the server's days-window comment), so a genuinely stale-but-real score and a
+  // never-written one are distinguishable here instead of both falling through to one string.
+  const SI_CADENCE_MS = 3 * 3600 * 1000;
+  const siStaleMs = siLatest ? Date.now() - Date.parse(siLatest.date) : null;
+  const siStale = siStaleMs !== null && siStaleMs > SI_CADENCE_MS * 2;
+
   if (siCard) {
     if (!siLatest) {
       siCard.innerHTML = '<div class="run-empty">no score yet -- self_improve_score.sh runs every 3h</div>';
@@ -1060,13 +1069,17 @@ async function renderStatsPage() {
           </details>`;
       }).join('');
 
+      const staleBadge = siStale
+        ? `<span class="badge quiet" title="expected every 3h -- last score ${esc(ago(siLatest.date))}, this may have stopped running">stale</span>`
+        : '';
       siCard.innerHTML = `
         <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;">
           ${magikarpArt(siLatest.score)}
           <div class="kpi-cell" style="flex:1;min-width:240px;">
-            <div class="kpi-label">${esc(humanDate(siLatest.date))} &middot; ${quip}</div>
+            <div class="kpi-label">${esc(humanDate(siLatest.date))} &middot; ${quip} ${staleBadge}</div>
             <div class="kpi-value" style="color:${color};">${siLatest.score}<span style="font-size:14px;color:var(--dimmer);">/100</span></div>
             <div class="kpi-sub">${esc(siLatest.reasoning || '')}</div>
+            ${siStale ? `<div class="kpi-sub" style="color:var(--warn);">last score ${esc(ago(siLatest.date))} -- expected every 3h, this pipeline may have stopped</div>` : ''}
           </div>
         </div>
         <div style="margin-top:14px;">
@@ -1394,10 +1407,18 @@ function renderSettingsPage() {
       // gh#355: when cur is unset and the option list has no '' entry, no <option> above gets
       // `selected` -- the browser still defaults the rendered <select>.value to the FIRST
       // listed option with no visual flag. data-unset marks that case so saveDials (below)
-      // can skip it unless the operator actually touches the control (onchange sets
-      // data-touched on every real interaction, including picking "other...").
+      // can skip it unless the operator actually touches the control.
+      // gh#460: `change` alone missed one real interaction -- clicking open the dropdown and
+      // choosing the option ALREADY sitting at index 0 (the browser default) never fires
+      // `change` at all, because the select's value never actually changes. Confirmed live in
+      // headless Chromium: opening a <select> fires `click` unconditionally, but `change`/
+      // `input` only fire when the resulting value differs from before. `onclick` here marks
+      // the dial touched the moment the operator opens it -- before `change` gets a chance to
+      // (or doesn't) -- so an index-0 pick still counts. Plain tab-through focus does NOT fire
+      // `click`, so a dial nobody ever clicked still gets skipped per gh#355.
       const unset = !cur && !options.includes('');
       field = `<select class="dial-input" data-key="${key}"${unset ? ' data-unset="1"' : ''} style="${box}"
+        onclick="this.dataset.touched='1';"
         onchange="this.dataset.touched='1';
           if(this.value==='__custom__'){const i=document.createElement('input');
           i.className='dial-input';i.dataset.key='${key}';i.dataset.touched='1';i.value='';
@@ -1506,9 +1527,15 @@ function renderSettingsPage() {
     await renderFleetState();
     // A bare "save failed" is what hid this bug for weeks: the server was answering 401
     // "unauthorized" the whole time and the page threw that away. Say which it is.
+    // gh#480: a validation failure sends {ok:false, errors:{key: msg}} (plural, a dict) --
+    // not the {error: msg} shape the 401 branch below expects -- so surface every pair
+    // instead of falling through to the generic string.
     document.getElementById('dialsMsg').textContent = resp.ok
       ? `saved ${resp.written.length} field(s)`
-      : (r.status === 401 ? 'not signed in -- paste the access key above first' : (resp.error || 'save failed'));
+      : (r.status === 401 ? 'not signed in -- paste the access key above first'
+        : (resp.errors && Object.keys(resp.errors).length
+          ? Object.entries(resp.errors).map(([k, v]) => `${k}: ${v}`).join('; ')
+          : 'save failed'));
     // Re-derive immediately: the whole point is that the operator SEES what the new dial did,
     // rather than trusting that a number they typed had the effect they intended.
     if (resp.ok) await renderBudgetPreview();
