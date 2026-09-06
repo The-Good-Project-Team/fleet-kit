@@ -3930,6 +3930,64 @@ def _datta_dispatches_and_nerds_analyse():
     assert minion_spec.get("schedule"), "empty schedule fails member_spec validation (found live)"
 
 
+def _nerd_structural_na_marker_wires_to_datta_downrank():
+    """gh#451: `datta.md`'s down-rank rule (`datta.md:76-99`, gh#339/PR#441) resets a lane's
+    UNEXAMINED score to 0 only if its last 3 `nerd` runs all have an `outcome` starting with the
+    literal marker `STRUCTURAL-N/A`. Before this fix, `nerd.md`'s N/A paragraphs (growth,
+    searchquality, revenue) only said "state N/A explicitly" in free prose and never told a pass
+    to emit that literal marker, so the rule was 100% dormant (confirmed live: `fleet.db` had
+    zero `STRUCTURAL-N/A` rows despite 15+ consecutive N/A passes).
+
+    Two halves, since the marker and the rule that consumes it live in different files with no
+    shared code path (this is prose read by two different LLM passes, not a function call):
+
+    1. Each of nerd.md's three current N/A paragraphs now instructs emitting the marker.
+    2. A synthetic 3-row sequence that matches the marker datta.md's own rule is written
+       against (a small model of `datta.md:87-95`'s spec, since that logic has no Python
+       module of its own to import) actually resets UNEXAMINED to 0, and a non-unanimous or
+       short sequence does not -- the down-rank must never fire as a default or on partial
+       evidence, per datta.md's own text.
+    """
+    root = Path(__file__).parent.parent
+    nerd = (root / "members" / "nerd" / "nerd.md").read_text()
+    datta = (root / "members" / "datta" / "datta.md").read_text()
+
+    for lane in ("growth", "searchquality", "revenue"):
+        # Each of these three lanes has TWO headings: the generic source-fleet checklist
+        # (nonprofit-atlas-shaped) earlier in the file, and fleet-kit's own N/A override
+        # paragraph later -- rfind gets the fleet-kit-specific one this issue targets.
+        heading = nerd.rfind(f"**{lane}** —")
+        assert heading != -1, f"{lane} lost its fleet-kit-native N/A paragraph"
+        body = nerd[heading:heading + 1600]
+        assert "STRUCTURAL-N/A" in body, \
+            f"{lane}'s N/A paragraph never tells nerd to emit the marker datta.md keys on (gh#451)"
+    assert "startswith(\"STRUCTURAL-N/A\")" in datta or "starts with the literal marker" in datta, \
+        "datta.md's down-rank rule text moved/changed -- re-check gh#451's wiring still matches"
+
+    # A minimal model of datta.md:87-95's specified rule: fewer than 3 rows, or the 3 not
+    # unanimous, means score UNEXAMINED as normal; only a unanimous 3-row STRUCTURAL-N/A streak
+    # resets it to 0. This is the "Python equivalent under test" of a rule that otherwise only
+    # exists as prose an LLM dispatcher reads.
+    def down_ranked_unexamined(last_3_outcomes, raw_hours):
+        if len(last_3_outcomes) < 3:
+            return raw_hours
+        if all(o.strip().startswith("STRUCTURAL-N/A") for o in last_3_outcomes):
+            return 0.0
+        return raw_hours
+
+    unanimous = ["STRUCTURAL-N/A: no revenue surface on fleet-kit"] * 3
+    assert down_ranked_unexamined(unanimous, 47.0) == 0.0, \
+        "3 unanimous STRUCTURAL-N/A rows must reset UNEXAMINED to 0"
+
+    too_few = unanimous[:2]
+    assert down_ranked_unexamined(too_few, 47.0) == 47.0, \
+        "fewer than 3 rows must never trigger the down-rank"
+
+    broken_streak = ["STRUCTURAL-N/A: still N/A"] * 2 + ["QUIET -- found nothing this pass"]
+    assert down_ranked_unexamined(broken_streak, 47.0) == 47.0, \
+        "one non-marker row must break the streak, never a partial down-rank"
+
+
 def _nerd_invalid_lane_rejected_before_lane_work():
     """gh#374: a `lane=<name>` dispatch outside the canonical seven must be rejected BEFORE any
     lane-specific work begins, not discovered only after a full pass ran.
@@ -6659,6 +6717,7 @@ if __name__ == "__main__":
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
     check("datta dispatches by coverage, nerds analyse one lane", _datta_dispatches_and_nerds_analyse)
     check("nerd rejects an invalid lane before any lane-specific work (gh#374)", _nerd_invalid_lane_rejected_before_lane_work)
+    check("nerd's STRUCTURAL-N/A marker wires to datta's down-rank rule (gh#451)", _nerd_structural_na_marker_wires_to_datta_downrank)
     check("a run records the item it worked", _a_run_records_the_item_it_worked)
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
