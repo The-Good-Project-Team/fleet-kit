@@ -499,3 +499,15 @@ fi
 
 log "DEPLOYED: $CONTAINER live on $VIEW_PORT/$WEBHOOK_PORT, running $(podman exec "$CONTAINER" sh -c 'cd /fleet-kit && git log -1 --oneline' 2>/dev/null)"
 log "previous build kept stopped as $RETIRED_MARKER -- roll back any time with: bash $0 --rollback"
+
+# gh#622: a fix is tested the instant it lands. The cordon above skipped every hourly member
+# tick that fell inside the drain (gru 13:03Z and 14:03Z on 2026-09-07 both exited on
+# FLEET_ENABLED=false), so after cutover nothing exercised the new build until the next tick,
+# up to an hour later. Kick one gru pass in the live container now -- detached, with the same
+# env the crontab line hands it -- so the build runs its real path within seconds of landing
+# and the fanout the cordon ate is replaced. Best-effort: a failed kick is logged, never fatal.
+if podman exec -d "$CONTAINER" bash -c 'set -a; eval "$(grep -hE "^[A-Z_]+=" /etc/cron.d/* 2>/dev/null)"; set +a; export GH_TOKEN=$(cat /root/.gh_token 2>/dev/null); cd /fleet-kit && bash scripts/run_gru_fanout.sh >> /var/log/fleet-kit/gru.log 2>&1' 9>&- 2>/dev/null; then
+    log "post-deploy: kicked one gru pass in $CONTAINER so the new build runs its real path now, not at the next cron tick (gh#622)"
+else
+    log "post-deploy: could not kick a gru pass in $CONTAINER -- the next cron tick will run it (gh#622)"
+fi
