@@ -162,6 +162,14 @@ run_args() {
     if [ -n "${FLEET_ANALYTICS_CREDS_DIR:-}" ] && [ -d "$FLEET_ANALYTICS_CREDS_DIR" ]; then
         analytics_mounts+=(-v "$FLEET_ANALYTICS_CREDS_DIR:/fleet-kit/.analytics:ro")
     fi
+    # Resend credentials for the messenger (fk#558): the same file fleet_alert.sh reads on the
+    # host, mounted read-only at the same path so in-container senders find it. Optional --
+    # without it the messenger logs no-credentials and the fleet runs exactly as before.
+    local alert_mounts=()
+    local alert_env="${FLEET_ALERT_ENV:-/home/ubuntu/.config/maxx/alert.env}"
+    if [ -f "$alert_env" ]; then
+        alert_mounts+=(-v "$alert_env:/home/ubuntu/.config/maxx/alert.env:ro")
+    fi
     echo -d --name "$name" \
         -e FLEET_REPO_URL="$FLEET_REPO_URL" \
         -e FLEET_VIEW_PORT="$view_port" \
@@ -180,6 +188,7 @@ run_args() {
         -v "$INSTANCE_DIR/webhook_secret:/fleet-kit/.webhook_secret" \
         "${account_mounts[@]}" \
         "${analytics_mounts[@]}" \
+        "${alert_mounts[@]}" \
         -p "$view_port:$view_port" -p "$webhook_port:$webhook_port" \
         "$IMAGE" cron-foreground
 }

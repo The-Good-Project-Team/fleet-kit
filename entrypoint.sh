@@ -130,7 +130,7 @@ case "${1:-cron-foreground}" in
     # `FLEET_CRON_MEMBERS=judge-judy`) to schedule only those. dont-shoot-the-messenger is
     # excluded from ALL_CRON_MEMBERS because its own cron line is already commented out
     # (archived 2026-09-04, see below) -- re-enabling it is a separate step from this mechanism.
-    ALL_CRON_MEMBERS=(the-fixer judge-judy gru jefe roomba marie datta dumbledore sentry librarian)
+    ALL_CRON_MEMBERS=(the-fixer judge-judy gru jefe roomba marie datta dumbledore sentry librarian dont-shoot-the-messenger)
     if [ -n "${FLEET_CRON_MEMBERS:-}" ]; then
       IFS=', ' read -ra RESOLVED_CRON_MEMBERS <<< "$FLEET_CRON_MEMBERS"
       for m in "${RESOLVED_CRON_MEMBERS[@]}"; do
@@ -216,7 +216,14 @@ case "${1:-cron-foreground}" in
       # real work -- that is NOT true on this instance: `grep FLEET_MESSENGER_DRIVER
       # fleet.env` returns nothing. Re-enable by setting FLEET_MESSENGER_DRIVER to an
       # executable driver, then uncommenting the line below.
-      # echo "51 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dont-shoot-the-messenger >> $LOG_DIR/dont-shoot-the-messenger.log 2>&1"
+      # dont-shoot-the-messenger (fk#558 deliverable 8): the one voice to Reif. 06:30 / 12:30 /
+      # 17:30 Central = 11:30 / 17:30 / 22:30 UTC while CDT holds (UTC-5). When DST ends these
+      # drift an hour late; fix here, not in the member. Each slot is passed as the task line.
+      if cron_member_enabled dont-shoot-the-messenger; then
+        echo "30 11 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dont-shoot-the-messenger --task morning >> $LOG_DIR/dont-shoot-the-messenger.log 2>&1"
+        echo "30 17 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dont-shoot-the-messenger --task afternoon >> $LOG_DIR/dont-shoot-the-messenger.log 2>&1"
+        echo "30 22 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh dont-shoot-the-messenger --task wrap >> $LOG_DIR/dont-shoot-the-messenger.log 2>&1"
+      fi
       if cron_member_enabled judge-judy; then
         echo "*/15 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh judge-judy >> $LOG_DIR/judge-judy.log 2>&1"
       fi

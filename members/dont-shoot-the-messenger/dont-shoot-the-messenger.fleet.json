@@ -1,39 +1,37 @@
 {
   "name": "dont-shoot-the-messenger",
-  "emoji": "\ud83d\udcee",
+  "emoji": "📮",
   "lane": "plumbing",
   "mandate": {
-    "target": "every log file has shipped its new bytes and every pending transcript request is answered (found-or-explicitly-not-found), every tick",
+    "target": "Reif gets the morning brief (PDF, the number, what landed, needs-you, the one 4-hour project, reading) at 06:30 Central, the afternoon block at 12:30 and the wrap at 17:30 -- one voice, nothing else in the fleet emails him",
     "checklist": [
-      "if FLEET_MESSENGER_DRIVER unset: log once that logs stay local-only, exit 0 -- this is a valid mode, not an error",
-      "call the driver's ship_logs against FLEET_LOG_DIR",
-      "call the driver's relay_transcript for any pending request the driver's own state reports",
-      "never let a driver failure change this script's own exit code -- best-effort, side channel only",
-      "a backlog beyond the driver's own cap ships bounded, never unbounded replay",
-      "skim the log's recent tail (not just this tick) for a repeating error a single run can't see"
+      "read the slot from the task line (morning|afternoon|wrap; default morning)",
+      "collect with messenger_brief.py collect, never from memory",
+      "write the brief for that slot: title line, the number, what landed, needs-you, the one project split into two 2-hour blocks (morning only), reading",
+      "send with messenger_brief.py send; --pdf on morning only; never --force",
+      "report Outcome: sent/already-sent/delivery failed with the subject line as evidence"
     ],
     "limits": {
-      "timeout_s": 300
+      "timeout_s": 900
     },
-    "escalation": "the driver reports a config error (exit 2) rather than a transient failure -- log it loudly once per distinct error, do not retry-spam every tick on a misconfiguration nothing will fix by waiting."
+    "escalation": "delivery failed (no-credentials, transport-error, http-NNN) -- say so in the report; the-fixer reads messenger.log. Never retry-spam, never email from any other path."
   },
   "schedule": {
-    "interval_s": 3600
+    "daily_at": "06:30",
+    "note": "Central; entrypoint.sh also runs the 12:30 afternoon block and 17:30 wrap. The schema allows one daily_at, so the UI shows the morning brief."
   },
-  "timeout_s": 300,
-  "enabled": false,
+  "timeout_s": 900,
+  "enabled": true,
   "llm": {
-    "model": "haiku",
+    "model": "sonnet",
     "prompt_file": "dont-shoot-the-messenger.md",
     "tools": {
       "allow": [
         "Read",
-        "Edit",
         "Write",
         "Bash",
         "Grep",
         "Glob",
-        "WebFetch",
         "TodoWrite"
       ],
       "deny": [
