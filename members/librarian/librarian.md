@@ -49,6 +49,20 @@ hand-edit of a transcript.
      `--full-scan` only when you have a specific reason to re-read everything (e.g. the pattern
      list just changed) -- the very first run ever (no watermark yet) already scans everything
      without needing the flag.
+   - **If this Bash call still exceeds the tool's ~600s ceiling and gets moved to the
+     background** (a cold first-ever run, or `--full-scan`, both genuinely take 20+ minutes
+     against this corpus): do NOT end your turn believing you'll be notified later, and do NOT
+     call `ScheduleWakeup` -- that tool only exists inside a `/loop` context and errors
+     (`` `prompt` is required when `stop` is not true ``) outside one; this member is a one-shot
+     hourly pass, not a loop. Ending your turn here reaps the backgrounded job with it (SIGKILL)
+     and the whole pass reports nothing -- confirmed live, 3 separate hourly runs
+     (2026-09-07 04:55/05:55/06:55 UTC, then again at 07:05), every one landing
+     `reported_nothing` this exact way even after gh#588's watermark-checkpoint fix (PR#603)
+     shipped, because that fix addresses losing progress on a kill, not this: the turn ending at
+     all. Instead, stay in the SAME turn: re-check the backgrounded task's own output path (named
+     in the tool result) every minute or two with a short `Bash(sleep 90 && ...)` / `Read` call
+     until it finishes, then continue to step 2. Only move on once you hold the finished scan's
+     real output -- an unfinished scan is not something to defer past your own turn's end.
    - `gho_`/`ghp_`/`ghs_`/`ghu_`/`ghr_` (GitHub OAuth) tokens
    - `sk-ant-` (Anthropic key) strings
    - `PGPASSWORD=...` and `postgresql://user:pass@...` (Postgres credentials)
