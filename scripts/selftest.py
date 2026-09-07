@@ -3896,6 +3896,27 @@ def _judge_runs_the_closes_gate_and_reads_the_issue():
     assert (ROOT / "docs" / "quality-standard.md").exists()
 
 
+def _console_home_is_usable_on_a_phone_and_the_number_tile_reads_fleet_env():
+    """Reif, from his phone, 2026-09-07: "look at how unmobile friendly". Home showed the
+    number tile as "unavailable" and then nothing. Two causes, two pins: (1) /api/number runs
+    in the dashboard process, which entrypoint.sh starts before fleet.env is sourced, so it
+    must take FLEET_NUMBER_* from the env FILE when the process env lacks them; (2) Home must
+    carry the agents and the nav inline, with a tap target of at least 40px, because the
+    sidebar is off-screen under 700px.
+    """
+    sv = (ROOT / "scripts" / "fleet_view_server.py").read_text()
+    i = sv.index('if path == "/api/number":')
+    j = sv.index("number_read.read_current()", i)
+    window = sv[i:j]
+    assert "read_env_values()" in window and 'startswith("FLEET_NUMBER_")' in window, "/api/number does not fall back to fleet.env values"
+    html_src = (ROOT / "scripts" / "fleet_view.html").read_text()
+    home = html_src[html_src.index("function renderHomePage()"):html_src.index("function homeAgentsHtml()")]
+    assert "${homeAgentsHtml()}" in home and "${homeNavHtml()}" in home, "Home does not render agents and nav inline"
+    assert ".home-agent{" in html_src and "min-height:40px" in html_src, "home agent rows lack a phone-sized tap target"
+    assert "closest('.home-agent')" in html_src and "closest('.home-nav')" in html_src, "home rows are not clickable"
+    assert "@media (max-width: 700px){.home-agents,.home-nav-grid{grid-template-columns:1fr}}" in html_src
+
+
 def _console_shows_role_and_steps_per_member():
     """Reif, 2026-09-07: "emojis and role overview with the actual steps it takes, so someone
     can prune it from actual knowledge." The agent page shows the member's emoji, its mandate
@@ -9113,6 +9134,7 @@ if __name__ == "__main__":
     check("deploy.sh kicks one gru pass right after cutover (gh#622)", _deploy_sh_kicks_a_gru_pass_right_after_cutover)
     check("deploy.sh rolls over via caddy without a cordon (gh#625)", _deploy_sh_rolls_over_via_caddy_without_a_cordon)
     check("console shows each member's emoji, role and the steps a pass takes", _console_shows_role_and_steps_per_member)
+    check("console Home is usable on a phone and the number tile reads fleet.env", _console_home_is_usable_on_a_phone_and_the_number_tile_reads_fleet_env)
     check("messenger_brief.py sends the brief through Resend once per kind per day (fk#558)", _messenger_brief_sends_through_resend_once_per_day)
     check("messenger is scheduled 3x/day with creds mounted and a send-only charter (fk#558)", _messenger_is_scheduled_three_times_a_day_with_creds_mounted)
     check("messenger brief restates the strategy and points every project step at a page (fk#558)", _messenger_brief_restates_the_strategy_and_points_at_pages)

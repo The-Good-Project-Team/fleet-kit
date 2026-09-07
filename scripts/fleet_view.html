@@ -262,6 +262,16 @@
 .role-block li{margin:2px 0}
 .role-esc{opacity:.85;margin:4px 0}
 .role-src{opacity:.6;font-size:12px}
+.home-section{margin-top:22px}
+.home-agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px 14px;margin-top:8px}
+.home-agent{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--line,#e4e4e4);border-radius:8px;cursor:pointer;background:var(--panel,#fff);min-height:40px}
+.home-agent:hover{background:var(--panel-2)}
+.home-agent .ha-name{font-weight:600;white-space:nowrap}
+.home-agent .ha-meta{opacity:.7;font-size:12px;margin-left:auto;text-align:right}
+.home-nav-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-top:8px}
+.home-nav{display:flex;align-items:center;gap:8px;padding:12px 12px;border:1px solid var(--line,#e4e4e4);border-radius:8px;cursor:pointer;background:var(--panel,#fff);font-weight:600;min-height:44px}
+.home-nav:hover{background:var(--panel-2)}
+@media (max-width: 700px){.home-agents,.home-nav-grid{grid-template-columns:1fr}}
 </style>
 <!-- Chart.js: Reif, 2026-08-25 -- "dont handroll, pick a nice graph element". This page already
      assumes internet access (calls GitHub's API, loads from a public domain), so a CDN script
@@ -894,6 +904,13 @@ function mergedLast24hCount() {
   const cutoff = Date.now() - 24 * 3600 * 1000;
   return (GH.merged || []).filter(pr => pr.mergedAt && Date.parse(pr.mergedAt) >= cutoff).length;
 }
+runListEl.addEventListener('click', e => {
+  const a = e.target.closest('.home-agent');
+  if (a) { selectAgent(a.dataset.agent); return; }
+  const n = e.target.closest('.home-nav');
+  if (n) selectPage(n.dataset.page);
+});
+
 function renderHomePage() {
   if (PAGE !== 'home') return;
   detailHeadEl.innerHTML = `<div class="title-row"><h2>Console</h2></div>`;
@@ -920,7 +937,49 @@ function renderHomePage() {
         <div class="kpi-cell"><div class="kpi-label">Waiting on human</div>${nhoHtml}</div>
         <div class="kpi-cell"><div class="kpi-label">Merged, last 24h</div>${mergedHtml}</div>
       </div>
+      ${homeAgentsHtml()}
+      ${homeNavHtml()}
     </div>`;
+}
+
+// Reif, from his phone, 2026-09-07: "look at how unmobile friendly" -- Home showed four
+// tiles and then nothing, because the agents and the nav live in a sidebar that is off-screen
+// under 700px. Home now carries both inline, on every width: it is the landing page, and a
+// landing page that needs a hamburger to go anywhere is not one.
+function homeAgentsHtml() {
+  if (!SIDEBAR_ORDER) resortSidebar();
+  const byName = Object.fromEntries(SPECS.map(m => [m.spec.name, m]));
+  const ranked = SIDEBAR_ORDER.map(n => byName[n]).filter(Boolean);
+  SPECS.forEach(m => { if (!SIDEBAR_ORDER.includes(m.spec.name)) ranked.push(m); });
+  if (!ranked.length) return '';
+  const rows = ranked.map(m => {
+    const name = m.spec.name;
+    const last = lastRunFor(name);
+    const enabled = !!m.effective.enabled;
+    const off = !enabled && !hasRecentRun(last);
+    const cls = off ? 'off' : statusClass(last?.status);
+    const k = KPI_BY_MEMBER[name];
+    const kpi = (k && k.total !== null && k.total !== undefined && k.unit) ? `${k.total} ${esc(k.unit)}` : '';
+    return `<div class="home-agent ${off ? 'disabled-agent' : ''}" data-agent="${esc(name)}">
+        <span class="astatus ${cls}"></span>
+        <span class="ha-name">${m.spec.emoji ? esc(m.spec.emoji) + ' ' : ''}${esc(name)}</span>
+        <span class="ha-meta">${last ? esc(ago(last.ts)) : 'never run'}${kpi ? ' · ' + kpi : ''}</span>
+      </div>`;
+  }).join('');
+  return `<div class="home-section"><div class="kpi-label">Agents</div><div class="home-agents">${rows}</div></div>`;
+}
+
+function homeNavHtml() {
+  const badge = id => (document.getElementById(id) || {}).textContent || '';
+  const items = [
+    ['queue', 'PRs & Backlog', badge('navQueueCount')],
+    ['merged', 'Recently Merged', badge('navMergedCount')],
+    ['evolution', 'Self-Evolution', badge('navEvolutionCount')],
+    ['stats', 'Stats', ''],
+    ['settings', 'Settings', ''],
+  ];
+  return `<div class="home-section"><div class="kpi-label">Pages</div><div class="home-nav-grid">${items.map(([page, label, n]) =>
+    `<div class="home-nav" data-page="${page}">${esc(label)}${n ? ` <span class="count-badge">${esc(n)}</span>` : ''}</div>`).join('')}</div></div>`;
 }
 
 // ---------------------------------------------------------------------------------------------
