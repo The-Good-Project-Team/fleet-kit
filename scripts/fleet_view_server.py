@@ -884,6 +884,10 @@ def watch_and_broadcast():
 
 
 PAGE = (KIT_DIR / "scripts" / "fleet_view.html")
+# fk#645: Console v2 -- one page, phone first -- is the landing page; the previous console stays
+# reachable at /classic until Reif accepts v2 on his phone (docs/quality-standard.md rule 5).
+PAGE_V2 = (KIT_DIR / "scripts" / "fleet_home.html")
+PROCESS_STARTED_AT = time.time()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1062,8 +1066,9 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if path == "/":
-            html = PAGE.read_text() if PAGE.exists() else "<h1>fleet_view.html missing</h1>"
+        if path in ("/", "/classic"):
+            page = PAGE_V2 if (path == "/" and PAGE_V2.exists()) else PAGE
+            html = page.read_text() if page.exists() else f"<h1>{page.name} missing</h1>"
             body = html.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1086,6 +1091,38 @@ class Handler(BaseHTTPRequestHandler):
             db = fleet_db.connect()
             fleet_db.sync(db)
             self._json({"spend": fleet_db.spend(db, member=member, hours=hours), "hours": hours})
+            return
+        if path == "/api/asks":
+            # fk#645 block 2, "Needs you": the open asks ask.py holds (gh#568), for the human to
+            # answer from the page. ask.py is the only writer; this is a read.
+            try:
+                p = subprocess.run([sys.executable, str(KIT_DIR / "scripts" / "ask.py"), "list", "--status", "open"],
+                                   capture_output=True, text=True, timeout=20)
+                asks = json.loads(p.stdout or "[]") if p.returncode == 0 else []
+            except Exception as exc:  # noqa: BLE001
+                self._json({"asks": [], "error": str(exc)}, 200)
+                return
+            self._json({"asks": asks})
+            return
+        if path == "/api/build":
+            # What is live: the sha the Dockerfile baked in at build time (gh#201), and when this
+            # process started -- the footer's "live build abc1234, up since 12m ago".
+            sha = ""
+            for cand in (KIT_DIR / ".deploy_sha", Path("/fleet-kit/.deploy_sha")):
+                if cand.exists():
+                    sha = cand.read_text().strip()
+                    break
+            self._json({"sha": sha, "started_at": PROCESS_STARTED_AT})
+            return
+        if path == "/api/plan":
+            # The strategy the brief restates every morning, for the number block: the objective
+            # and the plan's checkpoints on the number. Same reader the messenger uses.
+            try:
+                import messenger_brief
+                v = messenger_brief.vision()
+                self._json({"objective": v.get("objective", ""), "checkpoints": v.get("checkpoints", ""), "source": v.get("source", "")})
+            except Exception as exc:  # noqa: BLE001
+                self._json({"objective": "", "checkpoints": "", "error": str(exc)})
             return
         if path == "/api/number":
             # gh#513: the same reading number_read.py puts above every member's charter,
@@ -1545,6 +1582,27 @@ class Handler(BaseHTTPRequestHandler):
         # fleet_enabled.sh) -- a manual click is an explicit human action, not the thing those
         # switches exist to gate; without this, testing a member you deliberately keep off
         # cron would be impossible. ------------------------------------------------------------
+        if path == "/api/asks/answer":
+            # fk#645: answer an open ask from the page. ask.py enforces answer-once; the
+            # answered_by is the signed-in human, never a member.
+            try:
+                ask_id = int(body.get("id"))
+            except (TypeError, ValueError):
+                self._json({"ok": False, "error": "id must be an integer"}, 400)
+                return
+            answer = str(body.get("answer") or "").strip()
+            if not answer:
+                self._json({"ok": False, "error": "answer is empty"}, 400)
+                return
+            p = subprocess.run([sys.executable, str(KIT_DIR / "scripts" / "ask.py"), "answer", str(ask_id),
+                                "--answer", answer, "--answered-by", "reif (fleet-home)"],
+                               capture_output=True, text=True, timeout=20)
+            if p.returncode != 0:
+                self._json({"ok": False, "error": (p.stderr or p.stdout).strip()[:300]}, 409)
+                return
+            self._json({"ok": True, "id": ask_id})
+            return
+
         if path == "/api/run_now":
             name = body.get("member", "")
             if name not in MEMBERS:

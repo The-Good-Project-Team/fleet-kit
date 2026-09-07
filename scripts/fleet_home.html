@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet</title>
+<!--
+  fleet_home.html -- Console v2 (fk#645). One page, phone first, five blocks:
+  the number, needs you, agents, landed today, footer. Nothing else.
+
+  Reif, from his phone, 2026-09-07: "look at how unmobile friendly" and "likely a good time
+  for a simple rebuild. We have way too many things going on on this page and can simplify
+  down, way down." The question this page answers in ten seconds: is the fleet moving the
+  number, and does it need me?
+
+  No framework, no build step, no caching. Polls the existing JSON endpoints every 30s.
+  The previous console is served at /classic until Reif accepts this one, then it goes.
+  Design width is 390px; desktop is the same page, wider. Tap targets are 44px.
+-->
+<style>
+  :root { --bg:#f6f7f8; --panel:#fff; --text:#161616; --muted:#6b7280; --line:#e5e7eb;
+          --ok:#1f8b4c; --warn:#a6720f; --bad:#c13a2e; --accent:#2166c4; --off:#b9bcc2; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111214; --panel:#1b1c1f; --text:#ececec; --muted:#9aa0a6; --line:#2a2c30; --off:#4a4d52; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; background:var(--bg); color:var(--text);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 12px 12px 40px; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; color: var(--muted); margin: 22px 0 8px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .big { font-size: 34px; font-weight: 700; line-height: 1.1; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 14px; }
+  .delta { font-weight: 600; }
+  .up { color: var(--ok); } .down { color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+  td, th { text-align: left; padding: 6px 0; border-top: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  td.num, th.num { text-align: right; white-space: nowrap; }
+  .row { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 8px 4px; border-top: 1px solid var(--line); cursor: pointer; }
+  .row:first-of-type { border-top: 0; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--off); flex: none; }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  .name { font-weight: 600; white-space: nowrap; }
+  .meta { color: var(--muted); font-size: 13px; margin-left: auto; text-align: right; white-space: nowrap; }
+  .outcome { color: var(--muted); font-size: 13px; padding: 0 4px 10px 24px; margin-top: -6px; }
+  .drawer { padding: 8px 4px 12px 24px; border-top: 1px dashed var(--line); font-size: 14px; }
+  .drawer .role { color: var(--muted); margin-bottom: 8px; }
+  .drawer .run { padding: 4px 0; border-top: 1px solid var(--line); }
+  .drawer .run:first-child { border-top: 0; }
+  .btns { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  button, a.btn { font: inherit; font-size: 15px; font-weight: 600; min-height: 44px; padding: 0 16px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--bad); border-color: var(--bad); }
+  button:disabled { opacity: .5; }
+  .ask { padding: 10px 0; border-top: 1px solid var(--line); }
+  .ask:first-child { border-top: 0; }
+  .ask .why { font-weight: 600; }
+  .ask .prop { color: var(--muted); font-size: 14px; margin: 4px 0 8px; }
+  .ask input { font: inherit; font-size: 15px; min-height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); width: 100%; }
+  .empty { color: var(--muted); padding: 6px 4px; }
+  .pr { display: block; padding: 8px 4px; border-top: 1px solid var(--line); color: var(--text); text-decoration: none; min-height: 44px; }
+  .pr:first-child { border-top: 0; }
+  .pr .t { font-weight: 500; } .pr .m { color: var(--muted); font-size: 13px; }
+  .banner { background: #fff4e5; color: #7a4b00; border: 1px solid #f3d9a4; border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; font-weight: 600; }
+  .err { color: var(--bad); font-size: 13px; }
+  footer { color: var(--muted); font-size: 13px; margin-top: 26px; line-height: 1.8; }
+  footer a { color: var(--accent); }
+  @media (min-width: 700px) { main { padding: 20px; } .big { font-size: 40px; } }
+</style>
+</head>
+<body>
+<main>
+  <div id="banner"></div>
+  <h1>The number</h1>
+  <div class="card" id="number"><div class="sub">loading…</div></div>
+
+  <h1>Needs you</h1>
+  <div class="card" id="asks"><div class="empty">loading…</div></div>
+
+  <h1>Agents</h1>
+  <div class="card" id="agents"><div class="empty">loading…</div></div>
+
+  <h1>Landed today</h1>
+  <div class="card" id="landed"><div class="empty">loading…</div></div>
+
+  <footer id="foot"></footer>
+</main>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money = v => (v === null || v === undefined) ? '--' : '$' + Number(v).toLocaleString('en-US', {maximumFractionDigits: 2});
+const num = v => (v === null || v === undefined) ? '--' : Number(v).toLocaleString('en-US');
+const ago = ts => { if (!ts) return 'never'; const s = Math.max(0, Date.now()/1000 - ts);
+  return s < 60 ? `${Math.round(s)}s ago` : s < 3600 ? `${Math.round(s/60)}m ago` : s < 86400 ? `${Math.round(s/3600)}h ago` : `${Math.round(s/86400)}d ago`; };
+const signed = (v, fmt) => v === null || v === undefined ? '' : `<span class="delta ${v >= 0 ? 'up' : 'down'}">${v >= 0 ? '+' : '−'}${fmt(Math.abs(v))}</span> 7d`;
+const centralDay = d => new Intl.DateTimeFormat('en-CA', {timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit'}).format(d);
+
+let OPEN = null;        // which agent drawer is open, survives re-renders
+let STATE = { number: null, plan: null, asks: [], members: [], runs: [], gh: {}, kpi: {}, spend: null, build: null, fleet: null };
+
+async function getJSON(path) {
+  const r = await fetch(path, {cache: 'no-store'});
+  if (!r.ok) throw new Error(`${path} ${r.status}`);
+  return r.json();
+}
+async function postJSON(path, body) {
+  const r = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401) throw new Error('sign in first (Settings on the classic console)');
+  if (!r.ok || j.ok === false) throw new Error(j.error || `${path} ${r.status}`);
+  return j;
+}
+
+async function load() {
+  const [number, plan, asks, members, snap, kpi, spend, build, fleet] = await Promise.all([
+    getJSON('/api/number').catch(() => null),
+    getJSON('/api/plan').catch(() => null),
+    getJSON('/api/asks').catch(() => ({asks: []})),
+    getJSON('/api/members').catch(() => ({members: []})),
+    getJSON('/api/snapshot').catch(() => ({runs: [], gh: {}})),
+    getJSON('/api/kpi').catch(() => ({kpi: []})),
+    getJSON('/api/spend?hours=24').catch(() => null),
+    getJSON('/api/build').catch(() => null),
+    getJSON('/api/fleet_state').catch(() => null),
+  ]);
+  STATE = { number, plan, asks: asks.asks || [], members: members.members || [], runs: snap.runs || [], gh: snap.gh || {},
+            kpi: Object.fromEntries((kpi.kpi || []).map(k => [k.member, k])), spend, build, fleet };
+  render();
+}
+
+function render() {
+  renderBanner(); renderNumber(); renderAsks(); renderAgents(); renderLanded(); renderFoot();
+}
+
+function renderBanner() {
+  const f = STATE.fleet;
+  $('banner').innerHTML = (f && f.FLEET_ENABLED === false) ? `<div class="banner">The fleet is paused. Nothing new starts until it is turned back on.</div>` : '';
+}
+
+function nextCheckpoint(plan) {
+  // "Checkpoints on the number: $1,000 MRR by 2026-10-31 · $8,000 by 2026-11-30 · ..."
+  const line = (plan && plan.checkpoints) || '';
+  const today = centralDay(new Date());
+  const hits = [...line.matchAll(/\$([\d,]+)[^·]*?by (\d{4}-\d{2}-\d{2})/g)].map(m => ({amount: m[1], by: m[2]}));
+  return hits.find(h => h.by >= today) || hits[hits.length - 1] || null;
+}
+
+function renderNumber() {
+  const d = STATE.number;
+  if (!d || !d.configured) { $('number').innerHTML = `<div class="sub">No number configured for this fleet.</div>`; return; }
+  if (!d.present || !d.payload || !d.payload.number) { $('number').innerHTML = `<div class="sub">Not measured yet.</div>`; return; }
+  const p = d.payload, n = p.number, t = p.target || {}, g = p.guardrail, c = p.channel;
+  const cp = nextCheckpoint(STATE.plan);
+  const pct = t.value ? (100 * n.value / t.value) : null;
+  $('number').innerHTML = `
+    <div class="sub">${esc(n.name)}${d.stale ? ' · <span class="err">stale reading</span>' : ''}</div>
+    <div class="big">${money(n.value)}<span class="sub">/mo</span></div>
+    <div class="sub">${signed(n.delta_7d, money)} · target ${money(t.value)}/mo by ${esc(t.by || '?')}${pct !== null ? ` · ${pct.toFixed(2)}% there` : ''}</div>
+    ${cp ? `<div class="sub">Next checkpoint: $${esc(cp.amount)}/mo by ${esc(cp.by)}</div>` : ''}
+    <table>
+      <tr><th>Key result</th><th class="num">Now</th><th class="num">7 days</th></tr>
+      ${g ? `<tr><td>Orgs and people with at least one real interaction</td><td class="num">${num(g.value)}</td><td class="num">${signed(g.delta_7d, num)}</td></tr>` : ''}
+      ${c ? `<tr><td>Visits, last full week</td><td class="num">${num(c.value)}</td><td class="num">${signed(c.delta_7d, num)}</td></tr>` : ''}
+    </table>`;
+}
+
+function renderAsks() {
+  const asks = STATE.asks;
+  if (!asks.length) { $('asks').innerHTML = `<div class="empty">Nothing waiting on you.</div>`; return; }
+  $('asks').innerHTML = asks.map(a => `
+    <div class="ask" data-id="${esc(a.id)}">
+      <div class="why">${esc(a.why)}</div>
+      <div class="prop">${a.member ? `from ${esc(a.member)} · ` : ''}${a.unblocks ? `unblocks ${esc(a.unblocks)} · ` : ''}${a.proposed ? `fleet proposes: ${esc(a.proposed)}` : 'no proposed answer'}</div>
+      <div class="btns">
+        ${a.proposed ? `<button class="primary" data-act="answer" data-answer="${esc(a.proposed)}">Yes, do that</button>` : ''}
+        <input placeholder="or answer in a sentence" data-act="text">
+        <button data-act="send">Send</button>
+      </div>
+      <div class="err" data-act="err"></div>
+    </div>`).join('');
+}
+
+function lastRuns(name) {
+  return STATE.runs.filter(r => r.member === name).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+}
+function dotClass(run, enabled) {
+  if (!enabled && !(run && Date.now()/1000 - (run.ts || 0) < 6 * 3600)) return '';
+  if (!run) return '';
+  const s = run.status || '';
+  if (s === 'ok') return 'ok';
+  if (['killed', 'timed_out', 'failed', 'error', 'reported_nothing', 'incomplete_fanout', 'report_lost'].includes(s) || (run.exit_code && run.exit_code !== 0)) return 'bad';
+  return 'warn';
+}
+function renderAgents() {
+  const ms = STATE.members;
+  if (!ms.length) { $('agents').innerHTML = `<div class="empty">No agents found.</div>`; return; }
+  const ranked = ms.map(m => ({m, last: lastRuns(m.spec.name)[0] || null})).sort((a, b) => ((b.last && b.last.ts) || 0) - ((a.last && a.last.ts) || 0));
+  $('agents').innerHTML = ranked.map(({m, last}) => {
+    const name = m.spec.name, enabled = !!m.effective.enabled, k = STATE.kpi[name];
+    const count = (k && k.total !== null && k.total !== undefined && k.unit) ? `${k.total} ${k.unit} today` : '';
+    const open = OPEN === name;
+    const runs = open ? lastRuns(name).slice(0, 5) : [];
+    return `
+      <div class="row" data-agent="${esc(name)}">
+        <span class="dot ${dotClass(last, enabled)}"></span>
+        <span class="name">${esc(m.spec.emoji || '')} ${esc(name)}${enabled ? '' : ' <span class="sub">(paused)</span>'}</span>
+        <span class="meta">${last ? esc(ago(last.ts)) : 'never run'}${count ? `<br>${esc(count)}` : ''}</span>
+      </div>
+      ${last && last.outcome ? `<div class="outcome">${esc(String(last.outcome).slice(0, 140))}</div>` : ''}
+      ${open ? `<div class="drawer">
+          <div class="role">${esc((m.spec.mandate || {}).target || '')}</div>
+          ${runs.map(r => `<div class="run"><span class="dot ${dotClass(r, true)}" style="display:inline-block;vertical-align:middle;margin-right:6px"></span>${esc(ago(r.ts))} · ${esc(r.status || '')}${r.pr ? ` · <a href="${esc(String(r.pr).startsWith('http') ? r.pr : '#')}" target="_blank">PR</a>` : ''}<br><span class="sub">${esc(String(r.outcome || '').slice(0, 200))}</span></div>`).join('') || '<div class="sub">no runs yet</div>'}
+          <div class="btns">
+            <button class="primary" data-act="rerun" data-member="${esc(name)}">Rerun now</button>
+            <button class="${enabled ? 'danger' : ''}" data-act="toggle" data-member="${esc(name)}" data-on="${enabled}">${enabled ? 'Pause' : 'Resume'}</button>
+          </div>
+          <div class="err" data-act="err"></div>
+        </div>` : ''}`;
+  }).join('');
+}
+
+function renderLanded() {
+  const merged = (STATE.gh.merged || []);
+  const today = centralDay(new Date());
+  const rows = merged.filter(pr => pr.mergedAt && centralDay(new Date(pr.mergedAt)) === today)
+    .sort((a, b) => new Date(b.mergedAt) - new Date(a.mergedAt));
+  if (!rows.length) { $('landed').innerHTML = `<div class="empty">Nothing merged yet today (Central time).</div>`; return; }
+  $('landed').innerHTML = rows.map(pr => `<a class="pr" href="${esc(pr.url)}" target="_blank">
+      <div class="t">${esc(pr.title)}</div>
+      <div class="m">#${esc(pr.number)} · ${esc((pr.author && pr.author.login) || '')} · ${esc(ago(new Date(pr.mergedAt).getTime()/1000))}</div>
+    </a>`).join('');
+}
+
+function renderFoot() {
+  const s = STATE.spend, b = STATE.build;
+  const total = s && s.spend ? s.spend.reduce((a, r) => a + (r.total_cost || 0), 0) : null;
+  $('foot').innerHTML = `
+    ${total !== null ? `Spent ${money(total)} in the last 24 hours.<br>` : ''}
+    ${b && b.sha ? `Live build ${esc(String(b.sha).slice(0, 7))}${b.started_at ? `, up since ${esc(ago(b.started_at))}` : ''}.<br>` : ''}
+    <a href="/classic">Classic console</a> · <a href="/classic#settings">Settings and sign in</a> · <a href="/status">Status</a> · updated ${esc(new Date().toLocaleTimeString('en-US', {timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit'}))} CT`;
+}
+
+document.addEventListener('click', async e => {
+  const row = e.target.closest('.row[data-agent]');
+  if (row) { OPEN = OPEN === row.dataset.agent ? null : row.dataset.agent; renderAgents(); return; }
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const box = btn.closest('.drawer, .ask');
+  const err = box && box.querySelector('[data-act="err"]');
+  btn.disabled = true;
+  try {
+    if (btn.dataset.act === 'rerun') { await postJSON('/api/run_now', {member: btn.dataset.member}); btn.textContent = 'Started'; }
+    else if (btn.dataset.act === 'toggle') { await postJSON('/api/fleet_toggle', {target: btn.dataset.member, value: btn.dataset.on !== 'true'}); await load(); }
+    else if (btn.dataset.act === 'answer' || btn.dataset.act === 'send') {
+      const answer = btn.dataset.act === 'answer' ? btn.dataset.answer : (box.querySelector('[data-act="text"]').value || '').trim();
+      if (!answer) throw new Error('write an answer first');
+      await postJSON('/api/asks/answer', {id: Number(box.dataset.id), answer});
+      await load();
+    }
+  } catch (ex) {
+    if (err) err.textContent = ex.message;
+    btn.disabled = false;
+  }
+});
+
+load().catch(ex => { $('number').innerHTML = `<div class="err">${esc(ex.message)}</div>`; });
+setInterval(() => load().catch(() => {}), 30000);
+</script>
+</body>
+</html>
