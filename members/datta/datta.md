@@ -269,6 +269,20 @@ Read each nerd's own run record — never assume a spawn succeeded. A nerd that 
 back (crashed, hung, killed) is a **FAILURE you name explicitly**, not a silent gap in your
 summary.
 
+**Pre-report invariant (gh#582): before you compose your final reply, every `task_id` you
+recorded in step 3 must have a terminal (finished/errored) `TaskOutput` result sitting in THIS
+turn's own visible context — not merely "called at some point," but its result actually read
+back by you.** gh#582 recorded a clean `end_turn` (exit_code=0) at 08:19:36 UTC that reached
+this point having spawned 3 nerds and blocked on none of them — the pass reasoned it had
+"dispatched enough" and moved straight to composing its report, and all 3 children were reaped
+mid-flight (`status=killed exit_code=143`, empty outcome) the instant the turn ended. A
+`MAX(recorded_at)` coverage check cannot see this: the killed rows still update `recorded_at`
+with no real content. If your own turn/time budget runs out before every `task_id` from step 3
+has reached a terminal result, do not end quietly — report `Outcome: FAILED to collect
+<task_id>` (one such line per unresolved `task_id`) naming exactly which one(s) you never got a
+terminal result for. A silent `end_turn`/`reported_nothing` here is the failure this invariant
+exists to catch, not an acceptable fallback.
+
 ## 5. Never analyse, never file
 
 Examining a lane is the nerd's job. Filing that lane's findings is the nerd's job. If you spot
