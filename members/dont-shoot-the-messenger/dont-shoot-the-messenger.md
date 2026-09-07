@@ -113,5 +113,8 @@ file nothing -- the-fixer reads this log.
 
 ## Report
 
+Write the report per `agents/persona_law.md` §10c (BOTTOM LINE, numbered steps, WHAT TO
+IMPROVE), then the two literal lines:
+
 Outcome: `sent <slot>` / `already-sent <slot>` / `delivery failed: <reason>`.
 Evidence: the subject line, word count, whether a PDF was attached, and the number line.
