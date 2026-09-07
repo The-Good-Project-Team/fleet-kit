@@ -3896,6 +3896,31 @@ def _judge_runs_the_closes_gate_and_reads_the_issue():
     assert (ROOT / "docs" / "quality-standard.md").exists()
 
 
+def _console_v2_is_one_phone_first_page_with_five_blocks():
+    """fk#645, Reif: "simplify down, way down." The landing page is fleet_home.html: five blocks
+    (the number, needs you, agents, landed today, footer), no framework, no CDN, under 40 KB,
+    44px tap targets, phone viewport; the old console stays at /classic; the server gains the
+    three reads the page needs (/api/asks, /api/build, /api/plan) and one write
+    (/api/asks/answer) behind the same sign-in gate as run_now.
+    """
+    page = (ROOT / "scripts" / "fleet_home.html").read_text()
+    assert len(page.encode()) < 40_000, "v2 must stay small"
+    for block in ('id="number"', 'id="asks"', 'id="agents"', 'id="landed"', 'id="foot"'):
+        assert block in page, f"missing block {block}"
+    assert 'name="viewport"' in page and "min-height: 44px" in page
+    assert "<script src=" not in page and "cdn" not in page.lower(), "no framework, no CDN"
+    for api in ("/api/number", "/api/asks", "/api/members", "/api/snapshot", "/api/kpi", "/api/build", "/api/plan", "/api/run_now", "/api/fleet_toggle", "/api/asks/answer"):
+        assert api in page, f"page does not use {api}"
+    assert 'href="/classic"' in page
+    sv = (ROOT / "scripts" / "fleet_view_server.py").read_text()
+    assert 'if path in ("/", "/classic"):' in sv and "PAGE_V2" in sv, "root must serve v2 and /classic the old page"
+    for route in ('if path == "/api/asks":', 'if path == "/api/build":', 'if path == "/api/plan":', 'if path == "/api/asks/answer":'):
+        assert route in sv, f"server lacks {route}"
+    gate = sv.index("if not self._authorized():")
+    assert sv.index('if path == "/api/asks/answer":') > gate, "answering an ask must sit behind the sign-in gate"
+    assert sv.index('if path == "/api/asks":') < gate, "listing asks is a read, before the gate"
+
+
 def _console_home_is_usable_on_a_phone_and_the_number_tile_reads_fleet_env():
     """Reif, from his phone, 2026-09-07: "look at how unmobile friendly". Home showed the
     number tile as "unavailable" and then nothing. Two causes, two pins: (1) /api/number runs
@@ -9135,6 +9160,7 @@ if __name__ == "__main__":
     check("deploy.sh rolls over via caddy without a cordon (gh#625)", _deploy_sh_rolls_over_via_caddy_without_a_cordon)
     check("console shows each member's emoji, role and the steps a pass takes", _console_shows_role_and_steps_per_member)
     check("console Home is usable on a phone and the number tile reads fleet.env", _console_home_is_usable_on_a_phone_and_the_number_tile_reads_fleet_env)
+    check("console v2 is one phone-first page with five blocks (fk#645)", _console_v2_is_one_phone_first_page_with_five_blocks)
     check("messenger_brief.py sends the brief through Resend once per kind per day (fk#558)", _messenger_brief_sends_through_resend_once_per_day)
     check("messenger is scheduled 3x/day with creds mounted and a send-only charter (fk#558)", _messenger_is_scheduled_three_times_a_day_with_creds_mounted)
     check("messenger brief restates the strategy and points every project step at a page (fk#558)", _messenger_brief_restates_the_strategy_and_points_at_pages)
