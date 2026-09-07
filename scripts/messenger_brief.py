@@ -316,7 +316,11 @@ def send(kind: str, md_path: pathlib.Path, want_pdf: bool, force: bool) -> int:
         if html_to_pdf(html_text, pdf):
             payload["attachments"] = [{"filename": pdf.name, "content": base64.b64encode(pdf.read_bytes()).decode()}]
     req = urllib.request.Request(RESEND_URL, data=json.dumps(payload).encode(), method="POST",
-                                 headers={"Authorization": f"Bearer {creds['RESEND_API_KEY']}", "Content-Type": "application/json"})
+                                 headers={"Authorization": f"Bearer {creds['RESEND_API_KEY']}", "Content-Type": "application/json",
+                                          # Resend sits behind Cloudflare, which answers a bare Python-urllib
+                                          # User-Agent with HTTP 403 "error code: 1010" (seen live 2026-09-07 on
+                                          # the first real morning brief). curl's UA passes; so does this one.
+                                          "User-Agent": "fleet-kit-messenger/1.0 (+https://github.com/The-Good-Project-Team/fleet-kit)"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             code = resp.status
