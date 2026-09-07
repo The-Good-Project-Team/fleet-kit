@@ -3170,6 +3170,84 @@ def _fixer_charter_handles_every_reason_check_sh_emits():
     )
 
 
+def _fixer_prod_down_env(diag_driver=None):
+    """FIXER_HEALTH_URL/PAGE_URL pointed at a discard port -- real curl gets a real connection
+    refusal, no stub needed, same technique nonprofit-atlas's own firefighter tests use."""
+    env = {"FIXER_HEALTH_URL": "http://127.0.0.1:9", "FIXER_PAGE_URL": "http://127.0.0.1:9"}
+    if diag_driver is not None:
+        env["FIXER_PROD_DIAG_DRIVER"] = str(diag_driver)
+    return env
+
+
+def _fixer_prod_down_captures_diag_output_when_driver_is_configured():
+    """gh#4546: a PROD DOWN fire used to hand the-fixer's charter nothing but the symptom --
+    FIXER_PROD_DIAG_DRIVER was referenced in the escalation text but never actually invoked
+    anywhere, so a configured driver made no difference at all. check.sh must now run it itself
+    the moment it sees PROD_DOWN and hand the charter a path to the RAW output, not a summary."""
+    with tempfile.TemporaryDirectory() as tmp:
+        driver = Path(tmp) / "fake_prod_diag.sh"
+        driver.write_text(
+            "#!/bin/bash\n"
+            'echo "section=$1 pid=142 state=active wait_event_type=Lock wait_event=tuple"\n'
+        )
+        driver.chmod(0o755)
+
+        out = _fixer_check_sh(tmp, "", env_extra=_fixer_prod_down_env(driver))
+        assert out.startswith("FIRE PROD DOWN"), f"a dark site did not fire: {out!r}"
+        m = re.search(r"diag=(\S+)", out)
+        assert m, f"a configured driver left no diag= path on the FIRE line: {out!r}"
+        diag_path = Path(m.group(1))
+        assert diag_path.exists(), f"FIRE line named a diag file that was never written: {diag_path}"
+        raw = diag_path.read_text()
+        assert raw == "section=pg pid=142 state=active wait_event_type=Lock wait_event=tuple\n", (
+            f"diag file does not hold the driver's output verbatim -- got {raw!r}"
+        )
+
+
+def _fixer_prod_down_logs_the_gap_when_no_driver_is_configured():
+    """The counterpart guard: no driver configured must still log the same gap the charter's
+    escalation text names, and must NOT claim a diag= file that was never written."""
+    with tempfile.TemporaryDirectory() as tmp:
+        out = _fixer_check_sh(tmp, "", env_extra=_fixer_prod_down_env(diag_driver=None))
+        assert out.startswith("FIRE PROD DOWN"), f"a dark site did not fire: {out!r}"
+        assert "diag=" not in out, f"no driver was configured but the FIRE line claims one: {out!r}"
+        log_text = (Path(tmp) / "logs" / "the-fixer.log").read_text()
+        assert "no FIXER_PROD_DIAG_DRIVER configured" in log_text, (
+            f"the unset-driver gap was not logged: {log_text!r}"
+        )
+
+
+def _fixer_prod_down_reports_a_nonzero_driver_without_pretending_it_succeeded():
+    """A driver that fails to run is not the same as 'production looks healthy' -- the FIRE
+    line must say the driver itself failed, distinct from both the configured-and-worked case
+    and the not-configured-at-all case, so a human reading the log doesn't mistake a broken
+    driver for a clean read."""
+    with tempfile.TemporaryDirectory() as tmp:
+        driver = Path(tmp) / "broken_driver.sh"
+        driver.write_text("#!/bin/bash\necho 'partial output'\nexit 1\n")
+        driver.chmod(0o755)
+
+        out = _fixer_check_sh(tmp, "", env_extra=_fixer_prod_down_env(driver))
+        assert "diag=" in out and "driver-nonzero" in out, (
+            f"a driver that exited nonzero was not distinguished from a working one: {out!r}"
+        )
+
+
+def _fixer_prod_diag_wiring_adds_no_new_write_capability():
+    """AC3 (gh#4546): the wiring only ever INVOKES whatever FIXER_PROD_DIAG_DRIVER already
+    points to -- it must not itself grow a raw ssh/mutating-command path, which would defeat
+    the entire reason this is a pluggable driver instead of a shell grant. Scoped to the new
+    PROD_DOWN diag block specifically, not the whole file, since check.sh's stale-PR/CI-check
+    machinery legitimately mentions unrelated things."""
+    body = (ROOT / "members" / "the-fixer" / "check.sh").read_text()
+    start = body.index("if [ -n \"$PROD_DOWN\" ]; then\n  # No single commit")
+    end = body.index("\nfi\n", start)
+    block = body[start:end]
+    for verb in ("ssh ", "INSERT ", "UPDATE ", "DELETE ", "DROP ", "TRUNCATE ",
+                 "systemctl restart", "systemctl stop", "rm -rf"):
+        assert verb not in block, f"the new PROD_DOWN diag block contains: {verb.strip()!r}"
+
+
 def _auto_deploy_race_check_dedups_an_already_recorded_line():
     """AC3/AC5: running the detector twice against a log that already contains one
     previously-recorded matching line must not duplicate the alert -- else every hourly tick
@@ -8521,6 +8599,10 @@ if __name__ == "__main__":
     check("the-fixer dedup still suppresses an unchanged batch", _fixer_dedup_still_suppresses_an_unchanged_batch)
     check("the-fixer dedup expires so a wedge cannot last forever", _fixer_dedup_expires_so_a_wedge_cannot_last_forever)
     check("the-fixer charter handles every reason check.sh emits", _fixer_charter_handles_every_reason_check_sh_emits)
+    check("the-fixer captures diag output when FIXER_PROD_DIAG_DRIVER is configured (gh#4546)", _fixer_prod_down_captures_diag_output_when_driver_is_configured)
+    check("the-fixer logs the gap when no diag driver is configured (gh#4546)", _fixer_prod_down_logs_the_gap_when_no_driver_is_configured)
+    check("the-fixer distinguishes a broken diag driver from a healthy read (gh#4546)", _fixer_prod_down_reports_a_nonzero_driver_without_pretending_it_succeeded)
+    check("the-fixer's diag wiring adds no new write capability (gh#4546 AC3)", _fixer_prod_diag_wiring_adds_no_new_write_capability)
     check("auto-deploy race check dedups an already-recorded line", _auto_deploy_race_check_dedups_an_already_recorded_line)
     check("auto-deploy race check escalates after 3 consecutive sanctioned ABORTs", _auto_deploy_race_check_escalates_after_three_consecutive_sanctioned_aborts)
     check("auto-deploy race check does not alert on a self-resolving sanctioned ABORT", _auto_deploy_race_check_does_not_alert_on_a_self_resolving_sanctioned_abort)

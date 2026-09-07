@@ -283,6 +283,29 @@ if [ -n "$PROD_DOWN" ]; then
   # a bad deploy) -- bucket by time so dedup has something stable while a live outage re-fires.
   FIRE_SHA="prod-$(( $(date +%s) / 1800 ))"
   FIRE_WHAT="PROD DOWN ($PROD_DOWN)"
+
+  # gh#4546: a PROD DOWN fire used to hand the-fixer's charter nothing but the symptom -- the
+  # LLM pass could see the site was down but had no live pg_stat_activity/svc read to reason
+  # from unless it invented ad hoc prod access (the charter explicitly forbids that). Capturing
+  # the driver's output HERE, deterministically, before any LLM turn spends anything, means the
+  # raw diagnosis already exists on disk the moment the charter starts reasoning -- see
+  # scripts/prod_diag_driver.md for the one-function contract. Unset/non-executable is a valid
+  # mode (no driver wired yet): log the gap loudly, same wording the charter itself uses, so a
+  # human grepping the log sees the SAME sentence the charter would have logged.
+  if [ -n "${FIXER_PROD_DIAG_DRIVER:-}" ] && [ -x "${FIXER_PROD_DIAG_DRIVER}" ]; then
+    DIAG_FILE="$LOG_DIR/the-fixer-diag-$(date +%s).txt"
+    if "${FIXER_PROD_DIAG_DRIVER}" "${FIXER_PROD_DIAG_SECTION:-pg}" > "$DIAG_FILE" 2>&1; then
+      log "prod diag captured via FIXER_PROD_DIAG_DRIVER -> $DIAG_FILE"
+      FIRE_WHAT="$FIRE_WHAT diag=$DIAG_FILE"
+    else
+      # The driver itself failing to run is not the same as "production looks unhealthy" --
+      # whatever it did print (if anything) is still on disk and still worth a human reading.
+      log "WARN: FIXER_PROD_DIAG_DRIVER exited nonzero -- partial output (if any) at $DIAG_FILE"
+      FIRE_WHAT="$FIRE_WHAT diag=$DIAG_FILE(driver-nonzero)"
+    fi
+  else
+    log "PROD DOWN and no FIXER_PROD_DIAG_DRIVER configured -- log the gap loudly and stop, do not invent ad hoc prod access (see scripts/prod_diag_driver.md)"
+  fi
 fi
 
 # 6-hourly liveness so a ghost/deadman audit can tell "quiet" from "dead".
