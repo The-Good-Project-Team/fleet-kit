@@ -81,6 +81,25 @@ class ClassifyCandidateTests(unittest.TestCase):
         self.assertEqual(status, vlg.STATUS_LINKED)
         self.assertIn("Signal rate", raw)
 
+    def test_lightweight_non_prd_comment_is_linked_gh4597(self):
+        # gh#4597: marie's PRD template (Part C4) only stamps this line on capped,
+        # `fleet:priority-high`-only PRD comments -- most of the backlog never gets a
+        # `fleet:prd` comment at all. The fix is a lightweight, PRD-less comment carrying just
+        # the one line; this script has no notion of `fleet:prd`/labels at all (candidates here
+        # carry no `labels` field), so a bare one-line comment must classify identically to a
+        # full PRD comment saying the same thing.
+        body = "A plain issue body with no Vision-link line of its own."
+        comments = [{"body": "Vision-link: Stripe MRR -- the number, gh#4597 lightweight backfill."}]
+        status, raw = vlg.classify_candidate(body, comments)
+        self.assertEqual(status, vlg.STATUS_LINKED)
+        self.assertIn("Stripe MRR", raw)
+
+    def test_lightweight_non_prd_maintenance_comment_gh4597(self):
+        body = "A plain issue body with no Vision-link line of its own."
+        comments = [{"body": "Vision-link: none (maintenance) -- lightweight backfill, gh#4597."}]
+        status, raw = vlg.classify_candidate(body, comments)
+        self.assertEqual(status, vlg.STATUS_MAINTENANCE)
+
 
 class GateCandidatesOrderingTests(unittest.TestCase):
     def test_maintenance_only_pool_is_all_eligible(self):
