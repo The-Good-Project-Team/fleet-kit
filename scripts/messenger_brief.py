@@ -152,6 +152,59 @@ def plan_bets() -> str:
     return ""
 
 
+def _section(text: str, heading_re: str, cap: int = 3500) -> str:
+    """The body under the first heading matching heading_re, up to the next heading of the
+    same or higher level."""
+    m = re.search(rf"^(#{{1,4}})\s*{heading_re}.*$", text, re.M | re.I)
+    if not m:
+        return ""
+    level = len(m.group(1))
+    rest = text[m.end():]
+    nxt = re.search(rf"^#{{1,{level}}}\s", rest, re.M)
+    body = rest[: nxt.start()] if nxt else rest
+    return body.strip()[:cap]
+
+
+def vision(repo: str | None = None) -> dict:
+    """The strategy the brief restates every morning (Reif, 2026-09-07: "we could reiterate
+    the entire strategy document and then show how it fits"): the objective, the key results,
+    where we actually are, and the plan's checkpoints on the number."""
+    repo = repo or os.environ.get("FLEET_REPO", "/repo")
+    out = {"objective": "", "key_results": "", "where_we_are": "", "checkpoints": "", "source": ""}
+    v = pathlib.Path(repo) / "docs" / "VISION.md"
+    if v.exists():
+        text = v.read_text(errors="ignore")
+        out["objective"] = _section(text, r"objective\b", 1500)
+        out["key_results"] = _section(text, r"key results\b", 3500)
+        out["where_we_are"] = _section(text, r"where we actually are", 2000)
+        out["source"] = "docs/VISION.md"
+    plan = pathlib.Path(repo) / "docs" / "plan" / "philanthropy.md"
+    if plan.exists():
+        m = re.search(r"^Checkpoints on the number:.*$", plan.read_text(errors="ignore"), re.M)
+        out["checkpoints"] = m.group(0) if m else ""
+    return out
+
+
+def pages(repo: str | None = None) -> list[str]:
+    """Every fixed GET page under /superadmin and /network the product serves, as full URLs,
+    so a project step can point at the page where the work happens instead of describing it.
+    Read from the route decorators; a path with a parameter is skipped."""
+    repo = repo or os.environ.get("FLEET_REPO", "/repo")
+    base = os.environ.get("FLEET_PUBLIC_APP_URL", "https://philanthropy.org").rstrip("/")
+    found: set[str] = set()
+    for f in pathlib.Path(repo).glob("src/**/api/*.py"):
+        try:
+            text = f.read_text(errors="ignore")
+        except OSError:
+            continue
+        for m in re.finditer(r"@[\w.]*(?:get|route)\(\s*\"(/(?:superadmin|network)[^\"{}]*)\"", text):
+            path = m.group(1)
+            if "/api/" in path or path.endswith((".csv", ".json")):
+                continue
+            found.add(base + path)
+    return sorted(found)
+
+
 def collect(since_hours: float) -> dict:
     now = dt.datetime.now(dt.timezone.utc)
     since = now - dt.timedelta(hours=since_hours)
@@ -171,6 +224,9 @@ def collect(since_hours: float) -> dict:
         "runs": runs_since(since.timestamp()),
         "deploys": deploys_since(since.astimezone(CENTRAL)),
         "plan_bets": plan_bets(),
+        "vision": vision(),
+        "pages": pages(),
+        "app_url": os.environ.get("FLEET_PUBLIC_APP_URL", "https://philanthropy.org"),
     }
 
 
