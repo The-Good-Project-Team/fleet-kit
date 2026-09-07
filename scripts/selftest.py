@@ -3814,6 +3814,23 @@ def _messenger_is_scheduled_three_times_a_day_with_creds_mounted():
     assert "messenger_brief.py collect" in charter and "messenger_brief.py send" in charter and "Afternoon block" in charter
 
 
+def _console_shows_role_and_steps_per_member():
+    """Reif, 2026-09-07: "emojis and role overview with the actual steps it takes, so someone
+    can prune it from actual knowledge." The agent page shows the member's emoji, its mandate
+    target as the role line, and the mandate checklist as the steps each pass takes, naming
+    the fleet.json to prune from. Every member spec carries an emoji and a checklist so the
+    block is never empty.
+    """
+    html_src = (ROOT / "scripts" / "fleet_view.html").read_text()
+    assert "function roleBlock(spec)" in html_src and "${roleBlock(m.spec)}" in html_src, "detail head does not render the role block"
+    assert "md.checklist" in html_src and "md.target" in html_src and ".fleet.json" in html_src
+    assert "spec.emoji" in html_src.split("function renderSidebar()")[1].split("function ")[0], "sidebar row lacks the emoji"
+    import member_spec
+    for spec in member_spec.load_all():
+        assert spec.get("emoji"), f"{spec['name']} has no emoji"
+        assert (spec.get("mandate") or {}).get("checklist"), f"{spec['name']} has no checklist to show"
+
+
 def _deploy_sh_rolls_over_via_caddy_without_a_cordon():
     """gh#625: on a caddy-fronted box deploy.sh cuts over by swapping the proxy upstream, never
     by cordoning the fleet and draining passes. Pins (a) the proxy path runs INSTEAD of
@@ -9013,6 +9030,7 @@ if __name__ == "__main__":
     check("auto_deploy.sh coalesces main moves inside FLEET_DEPLOY_MIN_INTERVAL_S (gh#619)", _auto_deploy_sh_coalesces_main_moves_inside_the_min_interval)
     check("deploy.sh kicks one gru pass right after cutover (gh#622)", _deploy_sh_kicks_a_gru_pass_right_after_cutover)
     check("deploy.sh rolls over via caddy without a cordon (gh#625)", _deploy_sh_rolls_over_via_caddy_without_a_cordon)
+    check("console shows each member's emoji, role and the steps a pass takes", _console_shows_role_and_steps_per_member)
     check("messenger_brief.py sends the brief through Resend once per kind per day (fk#558)", _messenger_brief_sends_through_resend_once_per_day)
     check("messenger is scheduled 3x/day with creds mounted and a send-only charter (fk#558)", _messenger_is_scheduled_three_times_a_day_with_creds_mounted)
     check("git_pull_guard.sh self-heals a stray branch and leaves a normal pull unchanged", _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged)

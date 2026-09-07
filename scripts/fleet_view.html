@@ -254,6 +254,14 @@
     .stats-card canvas { max-height: 200px; }
     .detail-actions, .dial-row { gap: 5px; }
   }
+.role-block{margin:6px 0 4px;font-size:13px;line-height:1.45}
+.role-line{opacity:.9;max-width:900px}
+.role-block details.steps{margin-top:4px}
+.role-block summary{cursor:pointer;color:var(--accent,#0b57d0);font-weight:600}
+.role-block ol{margin:6px 0 4px 18px;padding:0;max-width:900px}
+.role-block li{margin:2px 0}
+.role-esc{opacity:.85;margin:4px 0}
+.role-src{opacity:.6;font-size:12px}
 </style>
 <!-- Chart.js: Reif, 2026-08-25 -- "dont handroll, pick a nice graph element". This page already
      assumes internet access (calls GitHub's API, loads from a public domain), so a CDN script
@@ -477,7 +485,7 @@ function renderSidebar() {
         data-agent="${esc(name)}">
       <span class="astatus ${cls}"></span>
       <div class="atext">
-        <div class="aname">${esc(name)}</div>
+        <div class="aname">${m.spec.emoji ? esc(m.spec.emoji) + ' ' : ''}${esc(name)}</div>
         <div class="aago">${last ? ago(last.ts) : 'never run'}</div>
         ${kpiLine}
       </div>
@@ -545,6 +553,23 @@ function kpiTitleSuffix(name) {
   return ` · ${k.total} ${k.unit} today`;
 }
 
+// Role overview + the actual steps a pass takes, straight from the member's fleet.json mandate
+// (Reif, 2026-09-07: "emojis and role overview with the actual steps it takes, so someone can
+// prune it from actual knowledge"). The checklist IS the pass; pruning a step means editing
+// members/<name>/<name>.fleet.json, so the file path is shown next to it.
+function roleBlock(spec) {
+  const md = spec.mandate || {};
+  if (!md.target && !(md.checklist || []).length) return '';
+  const steps = (md.checklist || []).map(st => `<li>${esc(st)}</li>`).join('');
+  const esc_ = (md.escalation || '');
+  return `<div class="role-block">
+      ${md.target ? `<div class="role-line"><b>Role</b> ${esc(md.target)}</div>` : ''}
+      ${steps ? `<details class="steps"><summary>Steps each pass (${(md.checklist || []).length})</summary><ol>${steps}</ol>
+        ${esc_ ? `<div class="role-esc"><b>Escalates when</b> ${esc(esc_)}</div>` : ''}
+        <div class="role-src">from <code>members/${esc(spec.name)}/${esc(spec.name)}.fleet.json</code> — prune a step there</div></details>` : ''}
+    </div>`;
+}
+
 function renderDetailHead() {
   const m = SPECS.find(s => s.spec.name === SELECTED);
   if (!m) { detailHeadEl.innerHTML = ''; return; }
@@ -568,11 +593,12 @@ function renderDetailHead() {
 
   detailHeadEl.innerHTML = `
     <div class="title-row">
-      <h2>${esc(name)}${esc(kpiTitleSuffix(name))}</h2>
+      <h2>${m.spec.emoji ? esc(m.spec.emoji) + ' ' : ''}${esc(name)}${esc(kpiTitleSuffix(name))}</h2>
       <span class="lane">${esc(m.spec.kind)}${m.spec.lane ? ' · ' + esc(m.spec.lane) : ''}</span>
     </div>
     <div class="spend-line">${esc(spendLine)}${nextLine ? ' · ' + esc(nextLine) : ''}</div>
     ${overrideNote}
+    ${roleBlock(m.spec)}
     <div class="detail-actions">
       <button class="btn primary" data-act="run-now" data-member="${esc(name)}">▶ rerun now</button>
       <button class="btn ${enabled ? 'danger' : 'go'}" data-act="toggle-member" data-member="${esc(name)}" data-on="${enabled}">
