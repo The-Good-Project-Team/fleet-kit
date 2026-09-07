@@ -212,16 +212,18 @@ def main() -> int:
                 # gh#510: PR#501 (gh#460) marked a dial touched on bare `onclick`, so opening
                 # FLEET_SHARE_FRACTION's dropdown just to look at the options -- then dismissing
                 # it (Escape) without picking anything -- counted as touched and silently saved
-                # the browser-default index-0 value ('0.20'). Reproduce that exact sequence
-                # (open, then close without moving the selection) rather than
-                # page.select_option(), which synthesizes `change`/`input` unconditionally and
-                # would never exercise the click-only path this bug lived in.
+                # the browser-default index-0 value. Reproduce that exact sequence (open, then
+                # close without moving the selection) rather than page.select_option(), which
+                # synthesizes `change`/`input` unconditionally and would never exercise the
+                # click-only path this bug lived in.
+                # fk#648: the picker now lists every 5% step (PCT_STEPS in fleet_view.html), so
+                # the browser-default index-0 value is '0.05', not the old hand-typed '0.20'.
                 sel = '.dial-input[data-key="FLEET_SHARE_FRACTION"]'
-                assert page.eval_on_selector(sel, "el => el.value") == "0.20", \
-                    "test assumes FLEET_SHARE_FRACTION's unset default renders as index-0 '0.20'"
+                assert page.eval_on_selector(sel, "el => el.value") == "0.05", \
+                    "test assumes FLEET_SHARE_FRACTION's unset default renders as index-0 '0.05'"
                 page.click(sel)
                 page.keyboard.press("Escape")
-                assert page.eval_on_selector(sel, "el => el.value") == "0.20", \
+                assert page.eval_on_selector(sel, "el => el.value") == "0.05", \
                     "selection must not have changed -- this reproduces the open-and-dismiss case, not a real edit"
                 with page.expect_response("**/api/fleet_settings"):
                     page.click("#saveDials")
