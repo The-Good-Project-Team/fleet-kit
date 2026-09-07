@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -43,9 +44,13 @@ STATUS_LINKED = "linked"
 STATUS_MAINTENANCE = "maintenance"
 STATUS_MISSING = "missing"
 
-# Tolerate the punctuation a model actually produces ("none(maintenance)", "None (Maintenance)")
-# -- compared after lowercasing and stripping internal whitespace, never a fresh regex.
-_MAINTENANCE_TOKEN = "none(maintenance)"
+# Tolerate the punctuation a model actually produces: "none(maintenance)", "None (Maintenance)",
+# and a trailing qualifier with no dash separator at all ("none (fleet guardrail/maintenance).",
+# gh#584) -- matched as a prefix on the normalized (lowercased, whitespace-stripped) value, not
+# an exact-match on a dash-delimited head, so a reason clause after the parenthetical (dashed or
+# not) never defeats the match, and a real link that merely mentions "maintenance" (not starting
+# with "none(") is never swallowed by it.
+_MAINTENANCE_RE = re.compile(r"^none\(.*maintenance.*?\)")
 
 
 def _normalize(value: str) -> str:
@@ -71,10 +76,10 @@ def classify_candidate(body: str | None, comments: list[dict] | None) -> tuple[s
 
 def _classify_value(raw: str) -> tuple[str, str]:
     # A real link is often written "Stripe MRR -- it puts the number in front of every member"
-    # (#513's own example). Only the part before a dash is checked against the maintenance
-    # token; the reason clause after it must not accidentally defeat the match.
-    head = raw.split(" -- ", 1)[0].split(" — ", 1)[0]
-    if _normalize(head) == _MAINTENANCE_TOKEN:
+    # (#513's own example); a maintenance value is only ever "none (...maintenance...)", so a
+    # prefix match on the normalized value distinguishes them without depending on a dash
+    # separator being present at all (gh#584).
+    if _MAINTENANCE_RE.match(_normalize(raw)):
         return STATUS_MAINTENANCE, raw
     return STATUS_LINKED, raw
 

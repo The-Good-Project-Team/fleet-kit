@@ -952,6 +952,10 @@ def _vision_link_gate_eligibility_rule():
         vlg.STATUS_MAINTENANCE
     assert vlg.classify_candidate("Vision-link: None(Maintenance)", [])[0] == \
         vlg.STATUS_MAINTENANCE
+    # gh#584: #579's exact non-dash phrasing was misclassified as STATUS_LINKED because the old
+    # matcher only recognized the maintenance token before a " -- "/" — " dash separator.
+    assert vlg.classify_candidate(
+        "Vision-link: none (fleet guardrail/maintenance).", [])[0] == vlg.STATUS_MAINTENANCE
     status, raw = vlg.classify_candidate("just a bug report", [{"body": "claimed-by: gru"}])
     assert status == vlg.STATUS_MISSING and raw is None
 
@@ -989,6 +993,14 @@ def _vision_link_gate_eligibility_rule():
 
     out_clear = vlg.gate_candidates([{"number": 100, "body": "Vision-link: none (maintenance)"}])
     assert out_clear == {"eligible": [100], "dropped": []}, out_clear
+
+    # gh#584 AC6: #567's canonical dashed phrasing and #579's non-dash phrasing must both land
+    # as maintenance -- neither ever "linked" -- when nothing linked is open to block either.
+    out_both_maintenance = vlg.gate_candidates([
+        {"number": 567, "body": "Vision-link: none (maintenance) -- fixes the classifier itself"},
+        {"number": 579, "body": "Vision-link: none (fleet guardrail/maintenance)."},
+    ])
+    assert out_both_maintenance == {"eligible": [567, 579], "dropped": []}, out_both_maintenance
 
     # AC2's own verification scenario: a candidate missing the line is skipped when a
     # Vision-link'd candidate is available at the same tier.
