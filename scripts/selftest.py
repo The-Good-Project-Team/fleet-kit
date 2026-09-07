@@ -3812,6 +3812,53 @@ def _messenger_is_scheduled_three_times_a_day_with_creds_mounted():
     assert spec["enabled"] is True and spec["llm"]["model"] == "sonnet"
     charter = (ROOT / "members" / "dont-shoot-the-messenger" / "dont-shoot-the-messenger.md").read_text()
     assert "messenger_brief.py collect" in charter and "messenger_brief.py send" in charter and "Afternoon block" in charter
+def _closes_gate_blocks_a_partial_or_docs_only_pr_from_closing_an_issue():
+    """fk#629: a PR may only close an issue it finishes. The pure evaluator blocks (a) a PR
+    whose own body says it is partial, (b) a docs-only PR closing a product-lane item, and
+    passes a real fix; it always hands the reviewer the NEWEST acceptance-criteria block.
+    Reproduces the #4507 closure: 143 docs lines, "a measurement, not a fix", "Fixes #4507".
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("closes_gate", ROOT / "scripts" / "closes_gate.py")
+    cg = importlib.util.module_from_spec(spec); spec.loader.exec_module(cg)
+    issue = {"title": "Messenger feels bad -- get it to Telegram-level", "labels": [{"name": "lane:ui"}, {"name": "fleet:prd"}],
+             "body": "## Acceptance criteria\n- AC1 old\n\n## Notes\nx",
+             "comments": [{"createdAt": "2026-09-06T05:00:00Z", "body": "## Acceptance criteria\n- AC1 optimistic send from a deep link\n- AC2 delivered and read ticks\n"}]}
+    # the real #4589 shape
+    r = cg.evaluate("This PR itself is a measurement, not a fix.\n\nFixes #4507.", ["docs/messenger-audit.md", "docs/README.md"], {4507: issue})
+    assert r["verdict"] == "block" and r["closes"] == [4507], r
+    assert any("partial" in x for x in r["reasons"]) and any("only docs" in x for x in r["reasons"]), r["reasons"]
+    assert "AC2 delivered and read ticks" in r["intent"] and "AC1 old" not in r["intent"], "must hand over the NEWEST acceptance criteria"
+    # docs-only alone, on a product item, blocks
+    r = cg.evaluate("Closes #4507", ["docs/x.md"], {4507: issue})
+    assert r["verdict"] == "block" and len(r["reasons"]) == 1, r
+    # a real code fix passes the deterministic half (the model half judges the criteria)
+    r = cg.evaluate("Closes #4507\n\nAC1: screenshot below. AC2: test_read_ticks.", ["src/messages.js", "tests/test_read_ticks.py"], {4507: issue})
+    assert r["verdict"] == "ok" and "Acceptance criteria" in r["intent"], r
+    # docs-only closing a docs item is fine; "Part of" is not a close
+    r = cg.evaluate("Fixes #12", ["docs/plan.md"], {12: {"title": "plan drift", "labels": ["lane:docs"], "body": "fix the table", "comments": []}})
+    assert r["verdict"] == "ok", r
+    assert cg.closing_numbers("Part of #4507, follow-up to #4588") == [] and cg.closing_numbers("resolves #9, fixed #10, close #11") == [9, 10, 11]
+
+
+def _judge_runs_the_closes_gate_and_reads_the_issue():
+    """fk#629 wiring: judge-judy.sh runs closes_gate.py BEFORE the model call, posts a gate
+    block through the same post_block path as a review block, and the prompt carries the
+    issue's acceptance criteria plus the plain-language rule; the charter copy matches;
+    minion.md carries the Part-of rule; persona law has sections 13 and 14; the standard doc
+    exists.
+    """
+    js = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    gate = js.index('closes_gate.py" "$PR"'); call = js.index('claude -p "$PROMPT"')
+    assert gate < call, "closes gate must run before the review model call"
+    assert js.count("post_block") >= 3 and "post_block() {" in js, "gate and review blocks must share post_block()"
+    assert "EVERY acceptance criterion" in js and "freshman 101" in js, "prompt lacks the acceptance/plain-language rules"
+    md = (ROOT / "members" / "judge-judy" / "judge-judy.md").read_text()
+    assert "{{ISSUE_INTENT}}" in md and "EVERY acceptance criterion" in md, "judge-judy.md is out of sync with the prompt"
+    assert "Part of #N" in (ROOT / "members" / "minion" / "minion.md").read_text()
+    law = (ROOT / "agents" / "persona_law.md").read_text()
+    assert "## 13. Freshman 101 language" in law and "## 14. Definition of Done" in law
+    assert (ROOT / "docs" / "quality-standard.md").exists()
 
 
 def _deploy_sh_rolls_over_via_caddy_without_a_cordon():
@@ -9015,6 +9062,8 @@ if __name__ == "__main__":
     check("deploy.sh rolls over via caddy without a cordon (gh#625)", _deploy_sh_rolls_over_via_caddy_without_a_cordon)
     check("messenger_brief.py sends the brief through Resend once per kind per day (fk#558)", _messenger_brief_sends_through_resend_once_per_day)
     check("messenger is scheduled 3x/day with creds mounted and a send-only charter (fk#558)", _messenger_is_scheduled_three_times_a_day_with_creds_mounted)
+    check("closes gate blocks a partial or docs-only PR from closing an issue (fk#629)", _closes_gate_blocks_a_partial_or_docs_only_pr_from_closing_an_issue)
+    check("judge runs the closes gate and reads the issue; law has 13 and 14 (fk#629)", _judge_runs_the_closes_gate_and_reads_the_issue)
     check("git_pull_guard.sh self-heals a stray branch and leaves a normal pull unchanged", _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged)
     check("git_pull_guard.sh serializes via a lock on the .git directory", _git_pull_guard_serializes_via_a_lock_on_the_git_directory)
     check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)

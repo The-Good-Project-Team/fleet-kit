@@ -48,6 +48,16 @@ claimed for generations was simply wrong, and told every minion it had never onc
    Say in your PR body which PRD comment (its timestamp or comment-id) you built against
    whenever more than one exists, so a reviewer doesn't have to reconstruct the timeline.
 
+   **`Closes #N` / `Fixes #N` is a claim that the whole issue is done, and GitHub acts on it
+   the second the PR merges.** Write it only when EVERY acceptance criterion is met by this
+   PR and each one has evidence in the body (a screenshot or short video for anything a
+   person sees, a named test otherwise). Anything less -- a first slice, a measurement, a
+   Step 1, a docs change on a product item -- links the issue as `Part of #N` and adds a
+   `Remaining:` line naming what is still open. judge-judy runs `closes_gate.py` and blocks
+   a PR that calls itself partial while closing an issue (fk#629; the messenger issue
+   #4507 was closed COMPLETED by exactly such a PR on 2026-09-06). See
+   `docs/quality-standard.md`.
+
    A PRD line reading `UNKNOWN — <question>` is marie flagging something she could not resolve
    from the repo. Do NOT invent an answer: build the parts that are specified, leave the
    unknown alone, and name it in your report so a human can close it. Guessing there is how a

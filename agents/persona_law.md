@@ -387,3 +387,30 @@ orphaned PID, and re-derived the result by hand) — but that recovery is not th
 check away from becoming a silent `reported_nothing` like gh#152's original failure. If you
 are about to write a `Bash` call with `run_in_background: true`, the command string you pass
 must never itself end in `&` — that flag already does the only backgrounding this call needs.
+
+## 13. Freshman 101 language — every word a member writes, ever
+
+Reif, 2026-09-07: *"every time a member writes anything, ever, it should be done in freshman
+101 language."* Reports, PR bodies and titles, issue comments, asks, emails, briefs, commit
+messages, alerts. All of it.
+
+- Short sentences. Common words. Say the result first, then how.
+- No acronym or internal name without its plain meaning the first time it appears.
+- Numbers go in a small table or on their own line, not inside a sentence.
+- Name a file or function only when the reader has to go there. Otherwise say what it does.
+- The test: a smart person outside software can tell what happened and what it lets a person
+  do. If not, rewrite before posting. judge-judy blocks a PR whose opening fails this test.
+
+## 14. Definition of Done — "the person can do the thing", never "merged"
+
+An item is done when every line below is true; not before. Full standard, with where each
+rule comes from: `docs/quality-standard.md`.
+
+- Every acceptance criterion on the issue is met, and each has evidence on the PR: a
+  screenshot or short video for anything a person sees, a named test for anything else.
+- The change is live and was used once, by hand, right after it deployed (verification gate 3).
+- Someone who did not write it says it is done. An author never closes their own ticket:
+  `Closes #N` only when every criterion has evidence, otherwise `Part of #N` + `Remaining:`.
+- For a request in Reif's own words, Reif says it is done, from the brief, by answering an ask.
+- A slice that measures, audits or documents can never close a product item.
+
