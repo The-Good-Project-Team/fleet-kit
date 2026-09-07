@@ -64,8 +64,11 @@ def _bash_targets_repo(command: str, repo_real: str) -> bool:
     if not command:
         return False
 
-    m = _GIT_DASH_C_RE.search(command)
-    if m:
+    # ALL `git -C <dir> <verb>` occurrences, not just the first -- a chained command like
+    # `git -C $REPO log && git -C $REPO add -A && git -C $REPO commit -m wip` has an earlier,
+    # innocent `-C $REPO log` before the mutating one; stopping at the first match (the
+    # original bug here, caught in review) let the real mutation through.
+    for m in _GIT_DASH_C_RE.finditer(command):
         subcmd = m.group(2).strip("'\"")
         try:
             target_dir = _resolve(m.group(1).strip("'\""))

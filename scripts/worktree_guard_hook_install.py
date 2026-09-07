@@ -59,16 +59,30 @@ def merge_one(path: Path, hook_cmd: str) -> bool:
 
 def main(argv: list[str]) -> int:
     if not argv:
-        print("usage: worktree_guard_hook_install.py <settings.json-path> [...]", file=sys.stderr)
+        print("usage: worktree_guard_hook_install.py <settings.json-or-CLAUDE_CONFIG_DIR-path> [...]",
+              file=sys.stderr)
         return 2
     hook_cmd = _hook_command()
+    exit_code = 0
     for raw in argv:
         p = Path(raw)
-        if merge_one(p, hook_cmd):
-            print(f"worktree_guard_hook_install: registered gh#592 guard in {p}")
-        else:
-            print(f"worktree_guard_hook_install: {p} already up to date")
-    return 0
+        # entrypoint.sh's real call shape passes CLAUDE_CONFIG_DIR directories
+        # (/root/.claude, /root/.claude-<account>), not settings.json paths directly -- a bare
+        # directory here used to reach merge_one()'s `path.read_text()` and crash with
+        # IsADirectoryError (caught in review). Accept either: a path already ending in
+        # .json is used as-is, anything else is treated as the config dir and settings.json
+        # is appended.
+        if p.suffix != ".json":
+            p = p / "settings.json"
+        try:
+            if merge_one(p, hook_cmd):
+                print(f"worktree_guard_hook_install: registered gh#592 guard in {p}")
+            else:
+                print(f"worktree_guard_hook_install: {p} already up to date")
+        except OSError as exc:
+            print(f"worktree_guard_hook_install: could not install into {p} ({exc})", file=sys.stderr)
+            exit_code = 1
+    return exit_code
 
 
 if __name__ == "__main__":

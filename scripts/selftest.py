@@ -8406,6 +8406,18 @@ def _worktree_guard_allows_readonly_bash_reference_to_repo_gh592():
         assert p.returncode == 0, f"expected allow (exit 0) for a read-only ref, got {p.returncode}: {p.stderr}"
 
 
+def _worktree_guard_blocks_chained_git_dash_c_where_only_a_later_verb_mutates_gh592():
+    """Regression: an earlier version of _bash_targets_repo used `_GIT_DASH_C_RE.search()`
+    (first match only), so a chained command whose FIRST `git -C $REPO` call was read-only
+    (`log`) let a later, real mutation (`git -C $REPO commit`) slip through uncaught -- found
+    live in code review of this same PR. Must block on the mutating call anywhere in the
+    chain, not just when it happens to be first."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        cmd = f"git -C {repo} log --oneline -5 && git -C {repo} add -A && git -C {repo} commit -m wip"
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd})
+        assert p.returncode == 2, f"expected block (exit 2) on the chained mutating call, got {p.returncode}: {p.stderr}"
+
+
 def _worktree_guard_install_merges_without_clobbering_existing_settings_gh592():
     """gh#592: the installer must MERGE into an operator's existing settings.json (their own
     hooks/permissions survive) and must be idempotent -- a second run against the same file
@@ -8431,6 +8443,26 @@ def _worktree_guard_install_merges_without_clobbering_existing_settings_gh592():
         data2 = json.loads(settings_path.read_text())
         assert len(data2["hooks"]["PreToolUse"]) == 1, \
             f"expected exactly one PreToolUse entry after two installs, got {len(data2['hooks']['PreToolUse'])}"
+
+
+def _worktree_guard_install_cli_accepts_claude_config_dir_not_just_settings_json_gh592():
+    """Regression, found live in code review of this same PR: entrypoint.sh's real call shape
+    passes CLAUDE_CONFIG_DIR directories (`/root/.claude`, `/root/.claude-<account>`), never a
+    `settings.json` path directly -- an earlier version's `main()` handed that straight to
+    `merge_one()`'s `path.read_text()`, which raised an uncaught IsADirectoryError and made
+    every real boot's install call crash before registering the guard anywhere. Must accept a
+    bare config-dir path and write `settings.json` inside it."""
+    import subprocess
+    with tempfile.TemporaryDirectory() as d:
+        config_dir = Path(d) / ".claude-primary"  # does not exist yet -- entrypoint.sh's shape
+        p = subprocess.run(
+            [sys.executable, str(HERE / "worktree_guard_hook_install.py"), str(config_dir)],
+            capture_output=True, text=True, timeout=30)
+        assert p.returncode == 0, f"expected success against a bare config dir, got {p.returncode}: {p.stderr}"
+        settings_path = config_dir / "settings.json"
+        assert settings_path.exists(), "expected settings.json to be created inside the config dir"
+        data = json.loads(settings_path.read_text())
+        assert data["hooks"]["PreToolUse"], "expected the guard to be registered"
 
 
 if __name__ == "__main__":
@@ -8641,7 +8673,9 @@ if __name__ == "__main__":
     check("worktree_guard_hook exempts a pass with no $WT_PATH set (gh#592 AC4)", _worktree_guard_exempts_passes_with_no_wt_path_gh592)
     check("worktree_guard_hook blocks a mutating Bash command targeting $REPO (gh#592 AC2)", _worktree_guard_blocks_mutating_bash_against_repo_gh592)
     check("worktree_guard_hook allows a read-only Bash reference to $REPO (gh#592 AC3)", _worktree_guard_allows_readonly_bash_reference_to_repo_gh592)
+    check("worktree_guard_hook blocks a chained git -C command where only a later verb mutates (gh#592)", _worktree_guard_blocks_chained_git_dash_c_where_only_a_later_verb_mutates_gh592)
     check("worktree_guard_hook_install merges into existing settings.json and is idempotent (gh#592)", _worktree_guard_install_merges_without_clobbering_existing_settings_gh592)
+    check("worktree_guard_hook_install accepts a CLAUDE_CONFIG_DIR path, not just a settings.json path (gh#592)", _worktree_guard_install_cli_accepts_claude_config_dir_not_just_settings_json_gh592)
 
     for n in ok:
         print(f"  ok    {n}")
