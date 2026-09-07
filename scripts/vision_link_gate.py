@@ -13,14 +13,20 @@ free text is fine, per gh#525's own open question, until #513's `number.json` sh
 can validate against it instead) -- OR it is explicitly `Vision-link: none (maintenance)` AND
 no OTHER open candidate anywhere in the set carries a real Vision-link. A candidate with no
 `Vision-link:` line at all -- neither a real link nor an explicit `none (maintenance)` -- is
-never eligible on its own. marie's own PRD template (marie.md Part C4) does not require this
-line yet (changing marie's process is explicitly out of scope per gh#525's own "Out of scope"
-section), so most candidates will fail this gate until it does -- that is the gate working as
-specified, not a bug in this script.
+never eligible on its own. marie's PRD template (marie.md Part C4) stamps this line on every
+new/re-scored PRD as of PR#587, and gh#588 backfilled the pre-existing `fleet:prd` population --
+but a PRD only exists at all for `fleet:priority-high` items, capped at 5/pass. Most of the
+backlog (medium/low tier, or high-tier still waiting under the cap) never gets a `fleet:prd`
+comment, so it never got this line either, until gh#4597: marie.md Part C4 now also runs an
+uncapped, lightweight sweep posting a `Vision-link:`-only comment (no PRD) on every
+`fleet:backlog` candidate that has neither `fleet:prd` nor an existing line -- this script does
+not need to know or care which kind of comment supplied the line (see below).
 
-WHERE THE LINE LIVES. Per #513's own filed example, a `Vision-link:` line can live directly in
-an issue BODY (Reif filing an item names its link himself), or in a `fleet:prd` comment (marie
-scoring it) -- same "latest wins" rule gru.md and marie.md already use elsewhere for PRD
+WHERE THE LINE LIVES. A `Vision-link:` line can live directly in an issue BODY (Reif filing an
+item names its link himself), in a `fleet:prd` PRD comment (marie scoring it), or in a
+lightweight non-PRD comment (marie's gh#4597 backfill) -- this script reads every comment the
+same way regardless of what kind it is or what label the issue carries; it has no concept of
+`fleet:prd` at all. Same "latest wins" rule gru.md and marie.md already use elsewhere for PRD
 comments superseding an earlier one: the newest comment carrying the line wins over an older
 comment, which wins over the body. Reuses run_report._vision_claim's regex (tolerates markdown
 heading/bold wrapping) rather than a second parser for the same field.

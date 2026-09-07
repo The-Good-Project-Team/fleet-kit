@@ -208,7 +208,10 @@ spawns exactly one). Your job, in order:
    candidates from ever reaching the crowd-out rule.
 
    **Then gate the survivors on a Vision-link — gh#525.** A candidate is eligible only if its
-   body or its newest `fleet:prd` comment carries a `Vision-link:` line naming something real
+   body or its newest COMMENT (any comment — `vision_link_gate.py` never checks labels, so a
+   `fleet:prd` PRD comment and marie's lightweight non-PRD `Vision-link:`-only comment, gh#4597,
+   are read identically; do not read "fleet:prd comment" into this rule the way an earlier
+   version of this doc wrongly implied) carries a `Vision-link:` line naming something real
    (the number, the guardrail, or the channel introduced by #513 — free text is fine until
    #513's `number.json` ships and this can validate against it instead, per gh#525's own open
    question), OR it is explicitly `Vision-link: none (maintenance)` **and** no OTHER surviving
@@ -216,8 +219,11 @@ spawns exactly one). Your job, in order:
    nothing number-moving is still waiting). A candidate with no `Vision-link:` line at all —
    neither a real link nor an explicit `none (maintenance)` — is never eligible on its own;
    marie's PRD template did not require this line before PR#587 (gh#588 backfilled the 18
-   pre-existing `fleet:prd` issues that predated it), so a candidate still missing the line
-   outright is now a genuine gap worth flagging to marie, not "the gate working as designed."
+   pre-existing `fleet:prd` issues that predated it), and most medium/low-tier candidates never
+   get a `fleet:prd` comment at all (PRDs are capped at 5/pass, high-tier only) — marie.md's
+   Part C4 now also runs a lightweight, uncapped backfill sweep posting a `Vision-link:`-only
+   comment on those (gh#4597), so a candidate still missing the line outright after that sweep
+   is a genuine gap worth flagging to marie, not "the gate working as designed."
    Run it on the survivors from ALL tiers you've queried so far (high, then medium/low once you
    fall through to them), since "no linked-KR item open anywhere" has to see across tiers, not
    just within one:
