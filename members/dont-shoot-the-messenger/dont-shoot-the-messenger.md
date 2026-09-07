@@ -38,42 +38,69 @@ JSON. It carries: `number` (THE NUMBER header -- the target and the 7-day delta)
 (PRs merged in the window, kit and product repo, with line counts), `open_prs`, `asks` (open
 asks from ask.py, the things only he can answer), `runs` (per-member outcome counts plus the
 notable ones: killed, timed out, budget-declined, and every gru/jefe/dumbledore/datta outcome
-line), `deploys`, and `plan_bets` (the learner's plan, bets in order).
+line), `deploys`, `plan_bets` (the learner's plan, bets in order), `vision` (the objective, key
+results, where we are, and the checkpoints on the number, straight from the product's
+docs/VISION.md and plan), `pages` (every fixed admin page the product serves, as URLs) and
+`app_url`.
 
-## Step 2: write the brief -- his reading, then his one project
+## Step 2: write the brief -- the strategy first, then what moved it, then his one job
 
-Write markdown to `/tmp/brief.md`. First line is a `# ` title that says the one thing that
-matters today in under 10 words (it becomes the email subject). Plain words, short sentences,
-numbers in tables, links on every PR and issue you name. He knows the domain; do not explain
+Reif, 2026-09-07, on the first brief: *"we don't show the objective and the results"*, *"I
+couldn't understand the ask"*, *"show me the url where I can see it, make it concrete on what
+I need to do"*, and *"we could reiterate the entire strategy document and then show how it
+fits."* Every section below exists because of one of those lines.
+
+Write markdown to `/tmp/brief.md`. First line is a `# ` title: the one thing that matters
+today in under 10 words (it becomes the email subject). Plain words, short sentences, numbers
+in tables, a link on every PR, issue and page you name. He knows the domain; do not explain
 the fleet to him. Never paste a token, key or email address.
 
-**morning** (the PDF he wakes up to):
-- `## The number` -- MRR vs target, the delta, and one sentence on whether last night moved it.
-- `## What landed overnight` -- merged PRs grouped by what they do for the number (revenue,
-  channel, fleet plumbing), one line each with the link. Skip docs-only churn unless it changed
-  a charter.
-- `## What the fleet is building now` -- open PRs and the items gru claimed, one line each.
-- `## Needs you` -- every open ask: what it unblocks, the fleet's proposed answer, one tap to
-  reply. If none, say so in one line.
+**Words you may not use without saying what they mean in the same sentence:** bet N, band,
+ladder, KR1/KR2/KR3, Vision-link, guardrail, channel, lane, fanout, allowance. Say "orgs that
+can pay $3k to $50k a year", not "band 3k-50k". Say "the key result for interactions", not
+"KR2". If a smart person outside software could not follow the sentence, rewrite it.
+
+**morning** (the PDF he wakes up to), in this order:
+
+- `## Where we are against the plan` -- restate the strategy from `vision`: the objective in
+  one sentence, then one table with a row for THE NUMBER and one for each key result:
+  what it measures (plain), where it is now, the target, the next checkpoint date from
+  `vision.checkpoints`, and the 7-day change. Then one sentence: did last night move any row.
+- `## What landed, and what it moved` -- merged PRs, each one line: what a person can now do,
+  the link, then an arrow to the row it moves (`-> the number`, `-> interactions`,
+  `-> sign-ups`, `-> time to first interaction`, or `-> keeps the fleet shipping`). Group by
+  that row, biggest first. Skip docs-only churn unless it changed a charter.
+- `## What the fleet is building now` -- open PRs and the items gru claimed, one line each,
+  same arrow.
+- `## Needs you` -- every open ask: what it unblocks, the fleet's proposed answer, the link to
+  answer. If none, say so in one line.
 - `## Today's project (4 hours)` -- ONE project, chosen from `plan_bets` in order: the first
-  bet whose next step needs a human (a decision, a sales conversation, an idea, an account he
-  owns). Say why it is the one. Split it into **Morning block (2h)** and **Afternoon block
-  (2h)**, each a numbered list of concrete steps with the exact inputs linked, and what "done"
-  looks like. If the plan's next human step is thinking work, that is allowed: state the
-  question, the data he needs, and what a good answer looks like (ask class `idea`).
+  bet whose next step needs a human. Write it as:
+  - **The outcome, in his words.** One sentence: what will be true at 5pm.
+  - **Why this, today.** Two sentences, plain, naming the row it moves.
+  - **Where to look.** A URL for every input. Use `pages` (the product's own admin pages)
+    and `app_url`. If the data lives in the product but no page shows it, do not hand him a
+    data pull: file the page as an issue with `gh issue create --repo <product repo>`
+    (title "superadmin: <what the page shows>", body: the columns, why it is needed today,
+    `Vision-link:` line, plain language) and put that issue link here, then give him the
+    smallest human-only part that does not need the page.
+  - **Morning block (2h)** and **Afternoon block (2h)**: numbered steps. Every step starts
+    with a verb and contains either a link or the exact thing to type or send. No step may
+    say "pull", "export" or "somewhere the fleet can read" without the URL or the ask link.
+  - **Done looks like.** One line he can check against at 5pm.
+  A thinking project is allowed (ask class `idea`): the question, the data he needs (linked),
+  and what a good answer looks like.
 - `## Reading` -- three to six items max: the notable run outcomes and anything from the
-  window he should actually read (a judge verdict that changed direction, a killed pass that
-  lost real work, a deploy failure). Each one line with the link and why it earns his eyes.
+  window he should actually read. Each one line with the link and why it earns his eyes.
 
-**afternoon** (no PDF): `## What the morning changed` (merged since 06:30, the number),
-`## Afternoon block (2h)` (restate today's afternoon block from the morning brief -- read
-/var/log/fleet-kit/brief-morning-<today>.pdf's source in /tmp if present, else derive it again
-from `plan_bets`), `## Needs you` (asks that arrived since morning, else one line).
+**afternoon** (no PDF): `## What the morning changed` (merged since 06:30, the rows moved),
+`## Afternoon block (2h)` (restate today's afternoon block; derive it again from `plan_bets`
+and `pages` if /tmp/brief.md from the morning is gone), `## Needs you`.
 
-**wrap** (no PDF): `## What landed today`, `## Tonight the fleet` (what gru will claim next,
-from the top of `plan_bets` and open items), `## Tomorrow` -- one line.
+**wrap** (no PDF): `## What landed today` (with the arrows), `## Tonight the fleet` (what
+gru will claim next, from the top of `plan_bets` and open items), `## Tomorrow` -- one line.
 
-Length: morning under 700 words plus the project; afternoon and wrap under 250 words.
+Length: morning under 900 words plus the project; afternoon and wrap under 250 words.
 
 ## Step 3: send
 
@@ -85,9 +112,6 @@ is a no-op by design -- do not add `--force`), `no-credentials`, `transport-erro
 file nothing -- the-fixer reads this log.
 
 ## Report
-
-Write the report per `agents/persona_law.md` §10c (BOTTOM LINE, numbered steps, WHAT TO
-IMPROVE), then the two literal lines:
 
 Outcome: `sent <slot>` / `already-sent <slot>` / `delivery failed: <reason>`.
 Evidence: the subject line, word count, whether a PDF was attached, and the number line.

@@ -3794,6 +3794,40 @@ def _messenger_brief_sends_through_resend_once_per_day():
         srv.shutdown()
 
 
+def _messenger_brief_restates_the_strategy_and_points_at_pages():
+    """Reif, 2026-09-07, on the first brief: "we don't show the objective and the results",
+    "show me the url where I can see it, make it concrete". collect() now carries the
+    strategy (objective, key results, where we are, checkpoints) from the product's
+    docs/VISION.md and plan, and every fixed admin page as a URL; the charter opens with the
+    strategy table and forbids a project step without a link.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("messenger_brief", ROOT / "scripts" / "messenger_brief.py")
+    mb = importlib.util.module_from_spec(spec); spec.loader.exec_module(mb)
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        (repo / "docs" / "plan").mkdir(parents=True)
+        (repo / "docs" / "VISION.md").write_text(
+            "# Vision\n\n## The OKR\n\n### Objective\n\nEvery org finds its people.\n\n"
+            "### Where we actually are (prod)\n\n| KR1 | 12 |\n\n### Key results\n\n*KR1 -- supply.* text\n*KR2 -- interactions.* text\n\n### How this changes ranking\n\nx\n")
+        (repo / "docs" / "plan" / "philanthropy.md").write_text("# plan\n\n## Bets\n\n1. one\n\nCheckpoints on the number: $1,000 MRR by 2026-10-31 · $25,000 by 2026-12-31.\n\n## What the fleet does not do\n")
+        api = repo / "src" / "philanthropy" / "api"; api.mkdir(parents=True)
+        (api / "routes_admin.py").write_text(
+            '@router.get("/superadmin")\ndef a(): pass\n@router.get("/superadmin/audience")\ndef b(): pass\n'
+            '@router.get("/superadmin/api/fleet")\ndef c(): pass\n@router.get("/superadmin/downloads/{download_id}")\ndef d(): pass\n'
+            '@router.get("/network/hq")\ndef e(): pass\n@router.get("/superadmin/x.csv")\ndef f(): pass\n')
+        v = mb.vision(str(repo))
+        assert v["objective"].startswith("Every org finds its people"), v
+        assert "KR2 -- interactions" in v["key_results"] and "How this changes" not in v["key_results"], v["key_results"]
+        assert "| KR1 | 12 |" in v["where_we_are"]
+        assert v["checkpoints"].startswith("Checkpoints on the number: $1,000")
+        pg = mb.pages(str(repo))
+        assert pg == ["https://philanthropy.org/network/hq", "https://philanthropy.org/superadmin", "https://philanthropy.org/superadmin/audience"], pg
+    charter = (ROOT / "members" / "dont-shoot-the-messenger" / "dont-shoot-the-messenger.md").read_text()
+    assert "## Where we are against the plan" in charter and "Where to look" in charter and "Done looks like" in charter
+    assert "Words you may not use" in charter and "gh issue create" in charter
+
+
 def _messenger_is_scheduled_three_times_a_day_with_creds_mounted():
     """fk#558: entrypoint.sh schedules dont-shoot-the-messenger at 06:30/12:30/17:30 Central
     (11:30/17:30/22:30 UTC under CDT), one slot per task line, and it is a real cron member;
@@ -9081,6 +9115,7 @@ if __name__ == "__main__":
     check("console shows each member's emoji, role and the steps a pass takes", _console_shows_role_and_steps_per_member)
     check("messenger_brief.py sends the brief through Resend once per kind per day (fk#558)", _messenger_brief_sends_through_resend_once_per_day)
     check("messenger is scheduled 3x/day with creds mounted and a send-only charter (fk#558)", _messenger_is_scheduled_three_times_a_day_with_creds_mounted)
+    check("messenger brief restates the strategy and points every project step at a page (fk#558)", _messenger_brief_restates_the_strategy_and_points_at_pages)
     check("closes gate blocks a partial or docs-only PR from closing an issue (fk#629)", _closes_gate_blocks_a_partial_or_docs_only_pr_from_closing_an_issue)
     check("judge runs the closes gate and reads the issue; law has 13 and 14 (fk#629)", _judge_runs_the_closes_gate_and_reads_the_issue)
     check("git_pull_guard.sh self-heals a stray branch and leaves a normal pull unchanged", _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged)
