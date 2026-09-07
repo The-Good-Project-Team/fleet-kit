@@ -226,8 +226,168 @@ do_rollback() {
     exit 2
 }
 
+# --- proxy-fronted rolling cutover (gh#625) ----------------------------------------------
+# Reif, 2026-09-07: "our job is to always be deploying." The drain gate below exists because
+# the legacy cutover STOPS blue to free the live ports, which kills every pass mid-flight --
+# so it cordons the fleet and waits (median 270s, p90 990s, ~18x/day = 4-17% of every day with
+# no new passes starting). On a box where caddy already fronts the instance (dino: caddy :9000
+# reverse_proxy -> localhost:<view>/<webhook>), none of that is necessary: the new build comes
+# up on the OTHER port pair, caddy's upstream is swapped and reloaded (zero downtime), and the
+# old container keeps RUNNING with its cron removed until its in-flight passes finish, then a
+# detached reaper stops it. No cordon, no drain, no killed pass. Two builds run passes side by
+# side for a while -- the same concurrency the fleet already has inside one container, on the
+# same lock-serialized fleet.db, lease ledger and shared /repo checkout.
+#
+# Ports alternate between the A pair (FLEET_VIEW_PORT/FLEET_WEBHOOK_PORT) and the B pair
+# (FLEET_GREEN_VIEW_PORT/FLEET_GREEN_WEBHOOK_PORT); $LIVE_PORTS_FILE records which pair is live
+# so the next deploy (and any host check that wants the live port) can read it.
+#
+# Falls back to the legacy stop-and-recreate path when there is no Caddyfile naming this
+# instance's live port (a first deploy on a fresh box, a Mac host, the selftest fixture).
+PROXY_CADDYFILE="${FLEET_CADDYFILE:-$HOME/Caddyfile}"
+LIVE_PORTS_FILE="$INSTANCE_DIR/live_ports"
+RETIRED_PORTS_FILE="$INSTANCE_DIR/retired_ports"
+RETIRE_MAX_S="${FLEET_RETIRE_MAX_S:-7200}"
+
+live_ports() {
+    # "<view> <webhook>" of the container that is live NOW. Before the first proxy-mode deploy
+    # there is no record, and the legacy path always left the A pair live.
+    local v w
+    read -r v w < "$LIVE_PORTS_FILE" 2>/dev/null || true
+    [[ "${v:-}" =~ ^[0-9]+$ && "${w:-}" =~ ^[0-9]+$ ]] && { echo "$v $w"; return; }
+    echo "$VIEW_PORT $WEBHOOK_PORT"
+}
+
+proxy_mode() {
+    [ "${FLEET_PROXY_CUTOVER:-1}" = "1" ] || return 1
+    [ -f "$PROXY_CADDYFILE" ] || return 1
+    local v w; read -r v w < <(live_ports)
+    grep -qE "localhost:${v}([^0-9]|$)" "$PROXY_CADDYFILE" || return 1
+    command -v caddy >/dev/null 2>&1
+}
+
+# caddy_swap <file> <old_view> <old_webhook> <new_view> <new_webhook>: rewrite ONLY this
+# instance's two upstreams. Exact-port match ([^0-9]|$) so 8420 never touches 84200 and a
+# sibling instance's upstream on the same Caddyfile is left alone. Truncate-and-rewrite (same
+# inode) so an external watcher on the file keeps working.
+caddy_swap() {
+    local file="$1" ov="$2" ow="$3" nv="$4" nw="$5" tmp
+    tmp="$(mktemp)"
+    sed -E "s/localhost:${ov}([^0-9]|$)/localhost:${nv}\1/g; s/localhost:${ow}([^0-9]|$)/localhost:${nw}\1/g" "$file" > "$tmp"
+    cat "$tmp" > "$file"
+    rm -f "$tmp"
+}
+
+caddy_reload() {
+    caddy reload --config "$PROXY_CADDYFILE" --adapter caddyfile >/dev/null 2>&1
+}
+
+# Stop scheduling NEW passes in a container without touching the ones in flight: cron ignores
+# any file in /etc/cron.d whose name contains a dot, so a rename disables the crontab and keeps
+# it restorable for --rollback.
+disable_cron_in() { podman exec "$1" sh -c 'mv -f /etc/cron.d/fleet-kit /etc/cron.d/fleet-kit.retired 2>/dev/null || true' 9>&- 2>/dev/null || true; }
+enable_cron_in()  { podman exec "$1" sh -c 'mv -f /etc/cron.d/fleet-kit.retired /etc/cron.d/fleet-kit 2>/dev/null || true' 9>&- 2>/dev/null || true; }
+
+# Detached reaper: stop the retired container once its passes are done (or after RETIRE_MAX_S).
+# setsid + nohup so it outlives deploy.sh AND auto_deploy.sh's cron tick; 9>&- so it never
+# inherits the deploy flock. Exits quietly if the retired container is renamed away (rollback)
+# or already stopped.
+spawn_reaper() {
+    local name="$1"
+    setsid nohup bash -c '
+        name="$1"; max="$2"; log="$3"; waited=0
+        while :; do
+            state="$(podman inspect "$name" --format "{{.State.Running}}" 2>/dev/null || echo gone)"
+            [ "$state" = "true" ] || exit 0
+            n="$(podman exec "$name" pgrep -c -f "bash .*run_member[.]sh" 2>/dev/null | head -1 | tr -cd "0-9")"
+            [ -z "$n" ] && n=0
+            if [ "$n" -eq 0 ] || [ "$waited" -ge "$max" ]; then
+                podman stop -t 30 "$name" >/dev/null 2>&1 || true
+                echo "[deploy $(date "+%Y-%m-%d %H:%M:%S %Z")] reaper: stopped $name after ${waited}s with $n pass(es) left (gh#625)" >> "$log"
+                exit 0
+            fi
+            sleep 60; waited=$((waited + 60))
+        done' _ "$name" "$RETIRE_MAX_S" "$DEPLOY_LOG" >/dev/null 2>&1 9>&- &
+}
+
+proxy_deploy() {
+    local ov ow nv nw
+    read -r ov ow < <(live_ports)
+    if [ "$ov" = "$VIEW_PORT" ]; then nv="$GREEN_VIEW_PORT"; nw="$GREEN_WEBHOOK_PORT"; else nv="$VIEW_PORT"; nw="$WEBHOOK_PORT"; fi
+    log "rolling deploy (gh#625): live $CONTAINER on $ov/$ow, new build goes to $nv/$nw, no cordon"
+
+    # Only one retired generation is kept. If the previous one is still running (its passes
+    # outlived a whole deploy window) it has had its RETIRE_MAX_S; stop it now to free its ports.
+    if exists "$RETIRED_MARKER"; then
+        running "$RETIRED_MARKER" && { log "previous retired build still running -- stopping it to free $nv/$nw"; podman stop -t 30 "$RETIRED_MARKER" >/dev/null 2>&1 || true; }
+        podman rm -f "$RETIRED_MARKER" >/dev/null 2>&1 || true
+    fi
+    exists "${CONTAINER}-green" && podman rm -f "${CONTAINER}-green" >/dev/null 2>&1 || true
+
+    log "building $IMAGE from $KIT_DIR"
+    local sha; sha="$(git -C "$KIT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+    podman build --build-arg DEPLOY_SHA="$sha" -t "$IMAGE" "$KIT_DIR"
+
+    log "starting ${CONTAINER}-green on $nv/$nw"
+    # shellcheck disable=SC2046
+    podman run $(run_args "${CONTAINER}-green" "$nv" "$nw") >/dev/null 9>&-
+    log "health-checking green (up to ${HEALTH_TIMEOUT_S}s)"
+    if ! health_check "$nv"; then
+        log "FAILED: green never answered http://localhost:$nv/ within ${HEALTH_TIMEOUT_S}s -- live build untouched, no cordon happened"
+        podman stop -t 5 "${CONTAINER}-green" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    cp -f "$PROXY_CADDYFILE" "$PROXY_CADDYFILE.pre-deploy"
+    caddy_swap "$PROXY_CADDYFILE" "$ov" "$ow" "$nv" "$nw"
+    if ! caddy_reload; then
+        log "FAILED: caddy reload rejected the swapped Caddyfile -- restoring it, live build untouched"
+        cat "$PROXY_CADDYFILE.pre-deploy" > "$PROXY_CADDYFILE"; caddy_reload || true
+        podman stop -t 5 "${CONTAINER}-green" >/dev/null 2>&1 || true
+        return 1
+    fi
+    log "cutover: caddy upstream $ov/$ow -> $nv/$nw reloaded (zero downtime); $CONTAINER -> $RETIRED_MARKER keeps running until its passes finish"
+
+    if exists "$CONTAINER"; then
+        disable_cron_in "$CONTAINER"
+        podman rename "$CONTAINER" "$RETIRED_MARKER"
+        echo "$ov $ow" > "$RETIRED_PORTS_FILE"
+    fi
+    podman rename "${CONTAINER}-green" "$CONTAINER"
+    echo "$nv $nw" > "$LIVE_PORTS_FILE"
+    VIEW_PORT="$nv"; WEBHOOK_PORT="$nw"
+    exists "$RETIRED_MARKER" && spawn_reaper "$RETIRED_MARKER"
+    return 0
+}
+
+proxy_rollback() {
+    # Undo the last proxy-mode cutover: caddy back to the retired pair, retired build resumes
+    # scheduling, the current build is stopped and kept for inspection.
+    local rv rw cv cw
+    exists "$RETIRED_MARKER" || { log "ROLLBACK: no $RETIRED_MARKER to restore"; return 1; }
+    read -r rv rw < "$RETIRED_PORTS_FILE" 2>/dev/null || { log "ROLLBACK: no $RETIRED_PORTS_FILE -- cannot tell which ports the retired build holds"; return 1; }
+    read -r cv cw < <(live_ports)
+    running "$RETIRED_MARKER" || podman start "$RETIRED_MARKER" >/dev/null
+    health_check "$rv" || { log "ROLLBACK: retired build not healthy on $rv"; return 1; }
+    caddy_swap "$PROXY_CADDYFILE" "$cv" "$cw" "$rv" "$rw" && caddy_reload
+    enable_cron_in "$RETIRED_MARKER"
+    if exists "$CONTAINER"; then
+        disable_cron_in "$CONTAINER"
+        podman stop -t 30 "$CONTAINER" >/dev/null 2>&1 || true
+        podman rename "$CONTAINER" "${CONTAINER}-broken-$(date +%s)"
+    fi
+    podman rename "$RETIRED_MARKER" "$CONTAINER"
+    echo "$rv $rw" > "$LIVE_PORTS_FILE"; rm -f "$RETIRED_PORTS_FILE"
+    log "ROLLED BACK: caddy -> $rv/$rw, $CONTAINER is the previous build and scheduling again"
+    return 0
+}
+
 if [ "${1:-}" = "--rollback" ]; then
     log "manual rollback requested"
+    if [ -f "$RETIRED_PORTS_FILE" ] && [ -f "$PROXY_CADDYFILE" ]; then
+        proxy_rollback && exit 0
+        exit 1
+    fi
     do_rollback
 fi
 
@@ -403,6 +563,29 @@ drain_inflight_passes() {
         waited=$((waited + 15))
     done
 }
+finish_deploy() {
+    log "DEPLOYED: $CONTAINER live on $VIEW_PORT/$WEBHOOK_PORT, running $(podman exec "$CONTAINER" sh -c 'cd /fleet-kit && git log -1 --oneline' 2>/dev/null)"
+    log "previous build kept stopped as $RETIRED_MARKER -- roll back any time with: bash $0 --rollback"
+
+    # gh#622: a fix is tested the instant it lands. The cordon above skipped every hourly member
+    # tick that fell inside the drain (gru 13:03Z and 14:03Z on 2026-09-07 both exited on
+    # FLEET_ENABLED=false), so after cutover nothing exercised the new build until the next tick,
+    # up to an hour later. Kick one gru pass in the live container now -- detached, with the same
+    # env the crontab line hands it -- so the build runs its real path within seconds of landing
+    # and the fanout the cordon ate is replaced. Best-effort: a failed kick is logged, never fatal.
+    if podman exec -d "$CONTAINER" bash -c 'set -a; eval "$(grep -hE "^[A-Z_]+=" /etc/cron.d/* 2>/dev/null)"; set +a; export GH_TOKEN=$(cat /root/.gh_token 2>/dev/null); cd /fleet-kit && bash scripts/run_gru_fanout.sh >> /var/log/fleet-kit/gru.log 2>&1' 9>&- 2>/dev/null; then
+        log "post-deploy: kicked one gru pass in $CONTAINER so the new build runs its real path now, not at the next cron tick (gh#622)"
+    else
+        log "post-deploy: could not kick a gru pass in $CONTAINER -- the next cron tick will run it (gh#622)"
+    fi
+}
+
+if proxy_mode; then
+    proxy_deploy || exit 1
+    finish_deploy
+    exit 0
+fi
+log "no caddy upstream for this instance's live port in $PROXY_CADDYFILE -- legacy stop-and-recreate cutover (cordon + drain)"
 drain_inflight_passes
 
 log "building $IMAGE from $KIT_DIR"
@@ -497,17 +680,4 @@ if ! health_check "$VIEW_PORT"; then
     exit 1
 fi
 
-log "DEPLOYED: $CONTAINER live on $VIEW_PORT/$WEBHOOK_PORT, running $(podman exec "$CONTAINER" sh -c 'cd /fleet-kit && git log -1 --oneline' 2>/dev/null)"
-log "previous build kept stopped as $RETIRED_MARKER -- roll back any time with: bash $0 --rollback"
-
-# gh#622: a fix is tested the instant it lands. The cordon above skipped every hourly member
-# tick that fell inside the drain (gru 13:03Z and 14:03Z on 2026-09-07 both exited on
-# FLEET_ENABLED=false), so after cutover nothing exercised the new build until the next tick,
-# up to an hour later. Kick one gru pass in the live container now -- detached, with the same
-# env the crontab line hands it -- so the build runs its real path within seconds of landing
-# and the fanout the cordon ate is replaced. Best-effort: a failed kick is logged, never fatal.
-if podman exec -d "$CONTAINER" bash -c 'set -a; eval "$(grep -hE "^[A-Z_]+=" /etc/cron.d/* 2>/dev/null)"; set +a; export GH_TOKEN=$(cat /root/.gh_token 2>/dev/null); cd /fleet-kit && bash scripts/run_gru_fanout.sh >> /var/log/fleet-kit/gru.log 2>&1' 9>&- 2>/dev/null; then
-    log "post-deploy: kicked one gru pass in $CONTAINER so the new build runs its real path now, not at the next cron tick (gh#622)"
-else
-    log "post-deploy: could not kick a gru pass in $CONTAINER -- the next cron tick will run it (gh#622)"
-fi
+finish_deploy
