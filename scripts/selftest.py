@@ -7282,6 +7282,48 @@ def _maxx_week_reset_gaps_keep_list_order_and_gates_still_win():
     assert got == ["tgp", "gmail"], f"gated account no longer outranks: {got}"
 
 
+def _resolve_maxx_handle_follows_the_pools_week_reset_order():
+    """gh#616 follow-up: resolve_maxx_handle.sh must name the account account_pool_run will
+    actually spend from. Since #617 that is the soonest-week_reset account per maxx, not the
+    first in FLEET_ACCOUNTS -- so with FLEET_ACCOUNTS="tgp gmail" and a maxx cache saying gmail
+    resets sooner, the resolved handle must be gmail's. Metering the list head while spending
+    from the pool head is the exact wrong-account bug the script's own header documents.
+    """
+    import os
+    import subprocess
+
+    script = ROOT / "scripts" / "resolve_maxx_handle.sh"
+    now = int(time.time())
+    with tempfile.TemporaryDirectory() as tmp:
+        state = pathlib.Path(tmp) / "account-pool-exhausted.state"
+        state.write_text("")
+        cache = pathlib.Path(tmp) / "week-reset.cache"
+
+        def resolve(cache_lines):
+            cache.write_text("".join(l + "\n" for l in cache_lines))
+            env = dict(os.environ)
+            env.pop("FLEET_MAXX_URL", None)
+            env.update(FLEET_LOG_DIR=tmp, FLEET_ACCOUNTS="tgp gmail",
+                       ACCOUNT_POOL_STATE_FILE=str(state), ACCOUNT_POOL_WEEK_RESET_CACHE=str(cache),
+                       FLEET_MAXX_HANDLE_TGP="reif_tgp", FLEET_MAXX_KEY_TGP="k-tgp",
+                       FLEET_MAXX_HANDLE_GMAIL="reif", FLEET_MAXX_KEY_GMAIL="k-gmail")
+            proc = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=30)
+            assert proc.returncode == 0, f"resolve_maxx_handle.sh failed: {proc.stderr[:300]}"
+            return proc.stdout.strip()
+
+        # gmail resets sooner -> the pool drains gmail first -> meter gmail.
+        assert resolve([f"tgp {now + 300000} {now}", f"gmail {now + 86400} {now}"]) == "reif k-gmail", \
+            "resolved the FLEET_ACCOUNTS head, not the account the pool will spend from"
+        # ...and the reverse must not invert.
+        assert resolve([f"tgp {now + 86400} {now}", f"gmail {now + 300000} {now}"]) == "reif_tgp k-tgp"
+        # No maxx knowledge at all -> list order, exactly as before.
+        assert resolve([]) == "reif_tgp k-tgp", "empty cache changed the pre-#617 resolution"
+        # A gated pool head is skipped, same as before: gmail sooner but gated -> tgp.
+        state.write_text(f"gmail {now + 600}\n")
+        assert resolve([f"tgp {now + 300000} {now}", f"gmail {now + 86400} {now}"]) == "reif_tgp k-tgp", \
+            "a gated account was metered"
+
+
 def _every_configured_account_survives_ordering():
     """Ordering may reorder, never drop or duplicate -- a dropped account is an account that
     silently never gets tried, which is the failover-is-theater class this pool exists to end.
@@ -8842,6 +8884,7 @@ if __name__ == "__main__":
     check("ordering never drops an account", _every_configured_account_survives_ordering)
     check("healthy accounts are ordered by maxx week_reset, soonest first (gh#616)", _healthy_accounts_are_ordered_by_maxx_week_reset)
     check("maxx week_reset gaps keep list order; gates and stale cache still honoured (gh#616)", _maxx_week_reset_gaps_keep_list_order_and_gates_still_win)
+    check("resolve_maxx_handle.sh follows the pool's week_reset order (gh#616 follow-up)", _resolve_maxx_handle_follows_the_pools_week_reset_order)
     check("run loop actually uses the ordering", _run_loop_actually_uses_the_ordering)
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)
     check("exhaustion with no stated reset backs off minutes, not an hour", _unparseable_exhaustion_gates_briefly_not_for_an_hour)
