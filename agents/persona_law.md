@@ -139,7 +139,10 @@ Outcome: <one sentence naming what you did — must include something a human ca
           a #123 issue/PR number, a URL, or a file:line>
 Evidence: <the command or observation that proves it — a real artifact reference counts too>
 Vision-link: <only if your member's report.vision_link is "required" in its .fleet.json —
-              which coordination link this moves, per your product's VISION.md>
+              free text naming the coordination link this moves: the number this instance is
+              configured against (fk#513's `number.json`/`FLEET_NUMBER_URL`), a guardrail, or
+              a channel — or `none (maintenance)` when this instance carries no number or the
+              work doesn't move one. See `scripts/vision_link_gate.py`.>
 Self-critique: <see §11 below>
 ```
 
@@ -224,7 +227,7 @@ Captured but never enforced: a missing report does not change `status`. A pass t
 work and skipped the prose is still a successful pass — making the memo load-bearing would turn
 a formatting slip into a false failure, the exact bug §10b exists to prevent.
 
-## 10d. Every PR opens in plain language, and names its OKR link
+## 10d. Every PR opens in plain language, and names its Vision-link
 
 Reif, 2026-09-05: *"id like all prs to be written in plain language - user focused, so that a
 non technical person can read it - and show each time how it fits into the okr."*
@@ -264,10 +267,12 @@ DO now that they could not do before, or what stops going wrong for them? Name t
 person (a nonprofit that wants to claim its page, a funder searching for a cause, an
 operator reviewing claims) — never "the user" in the abstract.>
 
-## How this fits the OKR
-<One or two sentences naming which key result this moves and how. KR1 supply
-(entities verified), KR2 the objective (entities with >= 1 interaction), KR3 the rate
-(sign-up to first interaction). See docs/VISION.md ## The OKR.>
+## How this fits the number
+<One or two sentences naming the coordination link this moves and how — the number this
+instance is configured against (fk#513's `number.json`/`FLEET_NUMBER_URL`, rendered by
+`scripts/number_read.py --render`), or `none (maintenance)` if this instance carries no
+number or the change doesn't move one. Same convention `scripts/vision_link_gate.py` and
+`members/dumbledore/dumbledore.md`/`members/jefe/jefe.md` already use for `Vision-link:`.>
 ```
 
 **Write the first block as if the reader has never seen the codebase.** No file paths, no
@@ -278,12 +283,13 @@ belongs in the PR; it belongs BELOW these two blocks, under `## What changed`, w
 reviewing the code will look for it. Nothing in this section removes that detail or lowers the
 evidence bar in §3 and §5.
 
-**Not everything moves a KR, and pretending otherwise is the failure mode.** Infrastructure,
-test fixtures, dependency bumps and cleanup usually move none. `Moves no KR — <one line on why
-this was worth doing anyway>` is a complete and honest answer, and it costs nothing. Inventing a
-link is the only wrong answer here — the same rule `Vision-link:` already carries in
-`docs/VISION.md`, which rejects second-order claims like "this makes the fleet ship faster,
-which serves the vision."
+**Not everything moves the number, and pretending otherwise is the failure mode.**
+Infrastructure, test fixtures, dependency bumps and cleanup usually move none — and an instance
+with no `FLEET_NUMBER_URL` configured (fleet-kit-server tier, e.g.) has no number to move at
+all. `Moves no number — <one line on why this was worth doing anyway>` is a complete and honest
+answer, and it costs nothing. Inventing a link is the only wrong answer here — the same rule
+`Vision-link:` already carries per `scripts/vision_link_gate.py`, which rejects second-order
+claims like "this makes the fleet ship faster, which serves the vision."
 
 **A PR that only a machine can evaluate has not been reported, only filed.** If the plain
 block cannot be written because the change genuinely has no user-visible effect, say that in one

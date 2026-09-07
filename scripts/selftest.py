@@ -6891,12 +6891,12 @@ def _law_carries_the_pr_and_report_contracts():
 
     assert "## 10d" in law, \
         "the PR contract is not in the law every member inherits"
-    for needle in ("## What this does", "## How this fits the OKR"):
+    for needle in ("## What this does", "## How this fits the number"):
         assert needle in law, f"10d does not name the required PR block {needle!r}"
     assert "50 characters" in law, \
         "10d does not carry the PR title limit -- a 95-char title list is unscannable"
-    assert "docs/VISION.md" in law, \
-        "10d tells members to name a KR but never points at where the KRs are defined"
+    assert "vision_link_gate.py" in law, \
+        "10d tells members to name a Vision-link but never points at the gate that reads it"
 
 
 def _bash_eval(setup: str, expr: str) -> str:
