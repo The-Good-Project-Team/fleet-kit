@@ -27,6 +27,11 @@ mtime is newer than the watermark left by the last successful --execute run; a c
 that's already been scrubbed once never needs re-reading. --full-scan bypasses the watermark for
 the first run against a real corpus, or after the pattern list changes.
 
+CHECKPOINTING: an --execute run also saves the watermark every CHECKPOINT_EVERY_FILES files,
+not only after the whole scan finishes (see run_scrub()) -- a run killed mid-scan by its own
+timeout still banks the files it got through before the kill, rather than the next tick
+restarting from since=0.0 (gh#588).
+
 --full-scan ALSO reopens every already-compressed .jsonl.gz transcript (decompress, scrub,
 recompress if changed) -- an ordinary incremental tick never does, since gunzipping the whole
 archived corpus on every hourly run would defeat the watermark's purpose. This means a
@@ -56,6 +61,12 @@ DEFAULT_ROOT_GLOB = "/root/.claude-*/projects"
 DEFAULT_STATE_FILE = os.environ.get(
     "LIBRARIAN_STATE_FILE", os.path.expanduser("~/.cache/fleet-kit/librarian_state.json")
 )
+
+# How often (in files scanned) an --execute run checkpoints the watermark mid-loop, on top of
+# the final save once the whole scan finishes -- gh#588: a run SIGKILLed by its own 900s
+# timeout partway through a real corpus otherwise banks zero progress no matter how many files
+# it scrubbed before the kill.
+CHECKPOINT_EVERY_FILES = int(os.environ.get("LIBRARIAN_CHECKPOINT_FILES", "200"))
 
 # A directory with this exact name is a curated memory store, not a transcript dump, wherever
 # it appears in the tree (see module docstring) -- never scrub or age-sweep it.
@@ -233,6 +244,45 @@ def scrub_file(path: Path, stats: ScrubStats, execute: bool) -> bool:
     return changed
 
 
+def run_scrub(
+    roots: list[Path],
+    since: float,
+    execute: bool,
+    state_file: str,
+    run_started: float,
+    full_scan: bool,
+    checkpoint_every_files: int = CHECKPOINT_EVERY_FILES,
+) -> tuple[ScrubStats, int]:
+    """Scans every root and, in --execute mode, checkpoints the watermark every
+    checkpoint_every_files files rather than only once the whole scan finishes -- a run
+    SIGKILLed mid-scan by its own timeout still banks the files it processed before the kill,
+    instead of the next tick restarting from since=0.0 (gh#588).
+
+    Every checkpoint (and the final save) writes run_started -- the timestamp captured before
+    this run's very first file was touched, never a later "now" read at save time. Files are
+    walked in path order, not mtime order, so a checkpoint that stamped a fresher timestamp
+    could land past the mtime of a file this run hasn't reached yet, silently hiding that file
+    from the next incremental run once this one gets killed before reaching it. run_started
+    predates every file this run will touch, so nothing a kill leaves unprocessed can ever be
+    mistaken for already-scrubbed.
+    """
+    stats = ScrubStats()
+    changed_files = 0
+    since_checkpoint = 0
+    for root in roots:
+        for f in iter_transcripts(root, since=since, include_compressed=full_scan):
+            stats.files_scanned += 1
+            if scrub_file(f, stats, execute):
+                changed_files += 1
+            since_checkpoint += 1
+            if execute and since_checkpoint >= checkpoint_every_files:
+                save_watermark(state_file, run_started)
+                since_checkpoint = 0
+    if execute:
+        save_watermark(state_file, run_started)
+    return stats, changed_files
+
+
 def _compress(path: Path) -> Path:
     gz_path = path.with_name(path.name + ".gz")
     with open(path, "rb") as f_in, gzip.open(gz_path, "wb") as f_out:
@@ -317,13 +367,10 @@ def main() -> int:
     run_started = time.time()
     since = 0.0 if args.full_scan else load_watermark(args.state_file)
     if not args.skip_scrub:
-        for root in roots:
-            for f in iter_transcripts(root, since=since, include_compressed=args.full_scan):
-                stats.files_scanned += 1
-                if scrub_file(f, stats, args.execute):
-                    changed_files += 1
-        if args.execute:
-            save_watermark(args.state_file, run_started)
+        stats, changed_files = run_scrub(
+            roots, since=since, execute=args.execute, state_file=args.state_file,
+            run_started=run_started, full_scan=args.full_scan,
+        )
 
     watermark_note = "" if args.full_scan or since == 0.0 else f", since={time.ctime(since)}"
     print(f"librarian scrub [{mode}{watermark_note}]: {stats.files_scanned} file(s) scanned, "
