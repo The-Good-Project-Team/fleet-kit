@@ -157,6 +157,13 @@ case "${1:-cron-foreground}" in
       # a cron-triggered pass falls back to a per-instance/empty ledger and silently reports
       # reserved_pct: 0 even when the real shared bind-mount is populated.
       echo "FLEET_LEASE_DIR=${FLEET_LEASE_DIR:-}"
+      # gh#581: same env-forwarding gap as gh#569/gh#579 above, third sibling variable.
+      # publish_share.sh resolves this container's identity as
+      # `${FLEET_INSTANCE_NAME:-default}` -- unforwarded here, every cron-triggered process
+      # (including check_share_sum.sh) falls back to the literal string "default" and
+      # multiple real instances all publish their fraction under the same shared
+      # `default.json` key, each overwriting whichever instance's cron tick ran last.
+      echo "FLEET_INSTANCE_NAME=${FLEET_INSTANCE_NAME:-}"
       echo
       # Canary must record that cron FIRED, independent of whether git had anything to say
       # (2026-09-04, gh#4340): the old form only touched gitpull.log when git printed output,

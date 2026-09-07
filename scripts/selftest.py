@@ -3406,6 +3406,22 @@ def _entrypoint_crontab_forwards_fleet_lease_dir():
         "per-instance/empty ledger again (gh#579)")
 
 
+def _entrypoint_crontab_forwards_fleet_instance_name():
+    """gh#581: same env-forwarding gap as gh#569/gh#579 above, third sibling variable.
+    publish_share.sh resolves this container's identity as
+    `${FLEET_INSTANCE_NAME:-default}` -- unforwarded here, every cron-triggered process
+    (including check_share_sum.sh) falls back to the literal string "default" and multiple
+    real instances all publish their fraction under the same shared `default.json` key, each
+    overwriting whichever instance's cron tick ran last. Assert the crontab-wide block
+    forwards it so a future refactor can't silently drop it again.
+    """
+    entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
+    assert 'echo "FLEET_INSTANCE_NAME=' in entry, (
+        "entrypoint.sh's crontab-wide env block doesn't forward FLEET_INSTANCE_NAME -- "
+        "publish_share.sh (and any other cron-triggered reader) will silently fall back to "
+        "the shared 'default' key again (gh#581)")
+
+
 def _run_member_logs_critical_when_postflight_dirty_check_fails_to_source():
     """gh#183: /fleet-kit is a vendored copy that only refreshes via auto_deploy.sh (#140, no
     scheduler entry). A merged fix to postflight_dirty_check.sh can be absent there even though
@@ -8340,6 +8356,7 @@ if __name__ == "__main__":
     check("every entrypoint.sh-scheduled incident script is actually scheduled (gh#378, table-driven)", _every_entrypoint_scheduled_script_is_actually_scheduled)
     check("entrypoint.sh's crontab-wide env block forwards FLEET_SHARE_DIR (gh#569)", _entrypoint_crontab_forwards_fleet_share_dir)
     check("entrypoint.sh's crontab-wide env block forwards FLEET_LEASE_DIR (gh#579)", _entrypoint_crontab_forwards_fleet_lease_dir)
+    check("entrypoint.sh's crontab-wide env block forwards FLEET_INSTANCE_NAME (gh#581)", _entrypoint_crontab_forwards_fleet_instance_name)
     check("run_member.sh logs CRITICAL when postflight_dirty_check.sh fails to source", _run_member_logs_critical_when_postflight_dirty_check_fails_to_source)
     check("run_member.sh rejects a non-numeric --item", _run_member_rejects_a_non_numeric_item)
     check("both worktree callers check $REPO before tearing the worktree down", _run_member_and_builder_check_repo_before_removing_the_worktree)
