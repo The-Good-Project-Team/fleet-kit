@@ -1,0 +1,270 @@
+# journeys.yaml -- the catalog of things a PERSON comes to philanthropy.org to do.
+#
+# Written for issue #656 (seam 1 of 7 in #636's decomposition: "shouldn't we have bots use
+# our technology"). This file does not run anything -- it is data. #657 builds the walker
+# that reads it, runs the steps as the named test users with the image's Playwright, and
+# screenshots each step into qa-out/<run>/journeys/<id>/<viewport>/. A step whose
+# observable_result does not appear is a failed journey; #657 files it.
+#
+# ---------------------------------------------------------------------------------------
+# SCHEMA (append new entries in this shape -- #657's walker and #662's "every accepted
+# acceptance criterion becomes a journey" seam both parse this literally, do not rename
+# fields without updating them):
+#
+#   - id: kebab-case-slug          # stable identity. Referenced by filed issues, screenshot
+#                                   # directories, and visual-regression diffs (#659). Never
+#                                   # renamed once a run has used it -- add a new id instead.
+#     name: Human-readable name
+#     description: One sentence, what a PERSON is trying to do -- not how the code does it.
+#     preconditions:               # state the walker must establish before step 1
+#       - list of strings, e.g. "signed out", "signed in as alice", "alice and bob both
+#         have active sessions", "a thread already exists between alice and bob"
+#     test_users: [alice, bob]     # OPTIONAL. Named test users this journey needs, per the
+#                                   # #4507 audit's alice/bob fixtures and ATLAS_TEST_BYPASS.
+#                                   # Omit for journeys that need no authenticated user.
+#     viewports: [desktop, mobile_390]   # which of the two defined below this journey runs
+#                                   # at. Both unless viewport_invariant_reason is set.
+#     viewport_invariant_reason: >       # REQUIRED instead of a two-entry viewports list
+#       only when a journey is deliberately checked at one viewport only -- explain why
+#       (e.g. the surface has no distinct mobile layout to break).
+#     steps:                       # ordered; the walker executes top to bottom
+#       - action: one verb-first imperative, what the bot does ("navigate to ...", "fill
+#           the password field with alice's test password and submit", "click the row
+#           whose text matches the query")
+#         observable_result: what the walker checks immediately after this action, phrased
+#           so pass/fail needs NO human judgment -- a specific element, text, count, URL,
+#           or state that must be present or absent. Never "works" / "looks right" / "loads
+#           correctly". Include a concrete timeout where the result is asynchronous
+#           ("...within 30s"), since every message/read-receipt/typing-indicator check in
+#           this file is a race against a live backend, not an instant assertion.
+#         viewport_overrides:      # OPTIONAL, keyed by viewport name. Only present when a
+#           step's action or observable_result differs by viewport (e.g. mobile nav lives
+#           behind a hamburger menu instead of a top bar). Fields given here replace the
+#           step's action/observable_result for that viewport only; anything not overridden
+#           is inherited unchanged.
+#
+# Viewport definitions:
+#   desktop     -- 1280x800
+#   mobile_390  -- 390x844 (iPhone 12/13/14 width; matches sentry's existing desktop+mobile
+#                  screenshot convention in qa_crawl.py and the messenger scroll bug #4604,
+#                  which only reproduced at this width)
+#
+# What is NOT in this file (see #656's own non-goals): the walker that executes these
+# steps (#657), the visual-diff threshold logic (#659), issue-filing/dedupe (#660), and the
+# KPI tile (#661). This file is the catalog only.
+# ---------------------------------------------------------------------------------------
+
+version: 1
+
+viewports:
+  desktop:
+    width: 1280
+    height: 800
+  mobile_390:
+    width: 390
+    height: 844
+
+journeys:
+  - id: sign-in
+    name: Sign in
+    description: A returning person signs in with their email and password.
+    preconditions:
+      - signed out
+    test_users: [alice]
+    viewports: [desktop, mobile_390]
+    steps:
+      - action: Navigate to https://philanthropy.org/login
+        observable_result: >
+          The page renders a sign-in form containing an email field, a password field, and
+          a submit control.
+      - action: Fill the form with alice's test email and password and submit.
+        observable_result: >
+          Within 10s, the browser is no longer on /login (redirected to the signed-in
+          landing page or account page).
+      - action: Load the site's top navigation / account area.
+        observable_result: >
+          The nav shows alice's display name or avatar and a "Sign out" control; it does
+          not show a "Sign in" link.
+        viewport_overrides:
+          mobile_390:
+            action: Open the mobile nav (hamburger menu).
+            observable_result: >
+              The opened menu shows alice's display name and a "Sign out" control; it does
+              not show a "Sign in" link.
+
+  - id: search-and-open-org
+    name: Search and open an org
+    description: A person searches for a nonprofit by keyword and opens its page.
+    preconditions:
+      - signed out
+    viewports: [desktop, mobile_390]
+    steps:
+      - action: Navigate to https://philanthropy.org/990/?q=hospital
+        observable_result: >
+          The result list contains more than 0 rows, and every visible row has a non-empty
+          organization-name text.
+      - action: Click the first result row.
+        observable_result: >
+          The URL changes to a /990/report/<ein> page whose org-name heading text matches
+          the text of the row that was clicked.
+
+  - id: open-990-report
+    name: Open a 990 report
+    description: A person lands directly on an org's financial report page.
+    preconditions:
+      - signed out
+      - a known EIN with a filed 990 exists (fixture EIN, not chosen at random each run)
+    viewports: [desktop, mobile_390]
+    steps:
+      - action: Navigate directly to https://philanthropy.org/990/report/<fixture_ein>
+        observable_result: >
+          The page contains the organization's name, at least one non-empty revenue or
+          expense figure, and a filing year.
+      - action: Open the financials tab/section if the report is tabbed.
+        observable_result: >
+          A revenue-vs-expense figure or line-item table is visible with non-empty numeric
+          values (not a loading spinner or an empty state).
+
+  - id: claim-org-through-verify-screen
+    name: Claim an org through to the verify screen
+    description: >
+      A person who represents a nonprofit starts the claim flow and reaches the identity
+      verification step. (Scope per #656: through the verify screen, not completing it.)
+    preconditions:
+      - signed in as alice
+      - alice does not already have a pending or completed claim on the fixture org
+    test_users: [alice]
+    viewports: [desktop, mobile_390]
+    steps:
+      - action: >
+          On the fixture org's report page, click the "Claim this organization" (or
+          equivalent) control.
+        observable_result: The page transitions to the first step of the claim flow.
+      - action: >
+          Fill the required claim fields (name, role/title, relationship to the
+          organization) and submit.
+        observable_result: The claim flow advances past the initial form step.
+      - action: (No further input.)
+        observable_result: >
+          The page displays a verification prompt (identity verification, document
+          upload, or email/domain verification) as the current step. This is the last
+          step of this journey.
+
+  - id: verified-org-checkout-to-stripe
+    name: Verified Org checkout up to the Stripe page
+    description: >
+      A claimed org's admin starts upgrading to Verified Org and reaches Stripe checkout.
+      (Scope per #656: up to the Stripe page, no real payment is submitted.)
+    preconditions:
+      - signed in as alice
+      - alice has a claimed (or fixture-claimed) org to administer
+    test_users: [alice]
+    viewports: [desktop, mobile_390]
+    steps:
+      - action: >
+          From the org's admin/settings page, click "Upgrade to Verified" (or equivalent).
+        observable_result: A plan-selection or checkout-summary screen is displayed.
+      - action: Select the Verified Org plan and click continue/checkout.
+        observable_result: >
+          Within 15s, the browser is redirected to a URL whose host is
+          checkout.stripe.com (or the configured Stripe-hosted checkout domain). The
+          journey stops here; no payment form is submitted.
+
+  - id: message-send-and-read-receipt
+    name: Send a message as Alice and see it arrive for Bob, with Bob's read mark returning to Alice
+    description: >
+      Two people message each other and each sees the other's live state: the message
+      arriving, and the read receipt coming back.
+    preconditions:
+      - alice and bob both have active signed-in sessions (separate browser contexts)
+      - a thread already exists between alice and bob, or one can be opened from alice's
+        contact list
+    test_users: [alice, bob]
+    viewports: [desktop, mobile_390]
+    steps:
+      - action: >
+          As alice, open the thread with bob and send a message containing a unique
+          marker string generated for this run.
+        observable_result: >
+          Alice's own thread view shows the sent message with the marker text within 5s
+          (optimistic send confirmed, not just "no error").
+      - action: As bob, open (or reload) the same thread.
+        observable_result: >
+          Bob's message list contains the marker text within 30s of alice's send.
+      - action: As bob, leave the thread open/focused so the message is marked read.
+        observable_result: Bob's client reports the message as read (no separate check; feeds step 4).
+      - action: As alice, reload or poll the thread.
+        observable_result: >
+          Alice's view shows a read indicator (e.g. a "Read" label or double-checkmark) on
+          the sent message within 30s of bob viewing it.
+
+  - id: open-thread-from-notification-link-and-send
+    name: Open a thread from a notification link and send
+    description: >
+      A person clicks a notification (email or in-app) linking to a specific thread, lands
+      directly in that conversation, and replies.
+    preconditions:
+      - bob has received a notification (email or in-app) containing a deep link to the
+        thread used in message-send-and-read-receipt
+      - bob is signed in
+    test_users: [bob]
+    viewports: [desktop, mobile_390]
+    steps:
+      - action: Navigate directly to the notification's deep-link URL as bob.
+        observable_result: >
+          The loaded thread is the correct one -- it contains alice's marker message from
+          the message-send-and-read-receipt journey, not a generic inbox or thread list.
+      - action: >
+          Type and send a reply containing a new unique marker string generated for this
+          run.
+        observable_result: Bob's thread view shows the sent reply text within 5s.
+
+  - id: typing-indicator
+    name: Typing indicator
+    description: A person sees a live signal that the other party is composing a reply.
+    preconditions:
+      - alice and bob both have active signed-in sessions
+      - both are viewing the same thread
+    test_users: [alice, bob]
+    viewports: [desktop, mobile_390]
+    steps:
+      - action: As alice, begin typing in the message composer without sending.
+        observable_result: >
+          Bob's thread view shows a typing indicator (e.g. "alice is typing...") within 5s.
+      - action: As alice, stop typing and leave the composer idle for 5s.
+        observable_result: Bob's typing indicator disappears within 10s of alice stopping.
+
+  - id: sign-out
+    name: Sign out
+    description: A signed-in person ends their session and can no longer reach account pages.
+    preconditions:
+      - signed in as alice
+    test_users: [alice]
+    viewports: [desktop, mobile_390]
+    steps:
+      - action: Click the sign-out control.
+        observable_result: >
+          The browser is redirected to the signed-out landing/home page, and the nav shows
+          a "Sign in" link instead of alice's name.
+      - action: Attempt to navigate directly to an auth-required page (e.g. /account).
+        observable_result: >
+          The browser is redirected to /login rather than rendering the account page's
+          content.
+
+  - id: fleet-console-loads-with-runs
+    name: The fleet console loads with runs
+    description: >
+      An operator opens the fleet console and sees live run activity, not a blank or
+      stale page.
+    preconditions:
+      - console auth satisfied (signed in, or the console's configured access path)
+    viewports: [desktop, mobile_390]
+    steps:
+      - action: Navigate to the fleet console URL.
+        observable_result: >
+          The page returns 200, renders without an error boundary, and contains a runs or
+          "Needs you" section.
+      - action: Read the runs feed/list.
+        observable_result: >
+          The runs list contains at least one row whose timestamp is within the last 24
+          hours -- confirming live data, not an empty or stale cache.
