@@ -38,6 +38,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -85,6 +86,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b""
+        if self.path.rstrip("/").endswith("/inbox"):
+            self._handle_inbox(body)
+            return
         sig = self.headers.get("X-Hub-Signature-256", "")
 
         if not verify_signature(body, sig):
@@ -153,6 +157,35 @@ class Handler(BaseHTTPRequestHandler):
         log(f"FIRE: {wf_name} failed at {sha} -- launching the-fixer")
         _launch_member("the-fixer")
 
+    def _handle_inbox(self, body: bytes) -> None:
+        """fk#669: Resend's email.received webhook -- Reif replied to a brief. Svix signature
+        (a different scheme from GitHub's), sender allowlist, fetch the full message, store it,
+        kick the messenger's inbox pass. Never 5xx on a bad message: Resend would retry forever."""
+        import inbox as inbox_mod
+        secret = env_value("FLEET_INBOX_WEBHOOK_SECRET")
+        if not inbox_mod.verify_svix(body, dict(self.headers.items()), secret):
+            log(f"inbox REJECTED: bad or missing svix signature from {self.client_address[0]}")
+            self.send_response(401); self.end_headers(); return
+        try:
+            event = json.loads(body)
+        except json.JSONDecodeError:
+            self.send_response(400); self.end_headers(); return
+        if event.get("type") != "email.received":
+            self.send_response(204); self.end_headers(); return
+        data = event.get("data") or {}
+        sender = data.get("from") or ""
+        if not inbox_mod.allowed_sender(sender, env_value("FLEET_INBOX_FROM")):
+            log(f"inbox IGNORED: sender not allowed: {sender!r}")
+            self.send_response(200); self.end_headers(); self.wfile.write(b"ignored"); return
+        try:
+            email = inbox_mod.fetch_received(data.get("email_id") or "")
+        except Exception as exc:  # noqa: BLE001
+            log(f"inbox: fetch of {data.get('email_id')} failed: {exc} -- storing metadata only")
+            email = {"id": data.get("email_id"), "from": sender, "subject": data.get("subject"), "text": ""}
+        inbox_mod.store(email, data)
+        _launch_member("dont-shoot-the-messenger", ["--task", "inbox"])
+        self.send_response(200); self.end_headers(); self.wfile.write(b"stored")
+
     def _handle_pull_request(self, payload: dict) -> None:
         self.send_response(200)  # ack immediately, same reasoning as the workflow_run path
         self.end_headers()
@@ -171,14 +204,30 @@ class Handler(BaseHTTPRequestHandler):
         _launch_member("judge-judy")
 
 
-def _launch_member(name: str) -> None:
+def env_value(key: str) -> str:
+    """Process env first, then the instance's fleet.env -- this process is started by
+    entrypoint.sh with only the vars it was handed, and the inbox secret lives in fleet.env."""
+    if os.environ.get(key):
+        return os.environ[key]
+    path = os.environ.get("FLEET_ENV_FILE", "/fleet-kit/fleet.env")
+    try:
+        for line in open(path, errors="ignore"):
+            m = re.match(rf"^\s*(?:export\s+)?{key}\s*=\s*(.*?)\s*$", line)
+            if m:
+                return m.group(1).strip("\"'")
+    except OSError:
+        pass
+    return ""
+
+
+def _launch_member(name: str, args: list[str] | None = None) -> None:
     run_member = KIT_DIR / "scripts" / "run_member.sh"
     try:
         # Detached, best-effort: this receiver's job is to notice and hand off, not to wait
         # out a review/incident-response pass (which can run up to that member's own
         # timeout_s). A failure to LAUNCH is logged; the member's own log covers the rest.
         subprocess.Popen(
-            [str(run_member), name],
+            [str(run_member), name, *(args or [])],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
