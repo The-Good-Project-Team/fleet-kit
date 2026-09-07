@@ -446,7 +446,31 @@ This reflects a parse/format issue in the reviewer's own output, not a finding a
   else
     # Findings comment first, status second: a failure status pointing at nothing is worse
     # than no status at all.
-    post_block
+    gh pr comment "$PR" --body "**fleet-code-review: BLOCK** (local claude, model=$MODEL, head ${HEAD_SHA:0:12})
+
+$FINDINGS" >/dev/null 2>&1 || log "PR #$PR: WARN findings comment failed"
+    post_status "$HEAD_SHA" "failure" "Code review found blocking issues -- see PR comment" \
+      && log "PR #$PR: BLOCKED -- status + findings posted" \
+      || log "PR #$PR: WARN blocked but status POST failed"
+    unqueue_pr "$PR"
+
+    # gh#5: nothing downstream ever read a block verdict, so a blocked PR just sat until a
+    # human noticed. Reif's decision (quoted on gh#5): don't build a dedicated "fix" persona,
+    # file a priority-1 backlog item instead so gru's normal build lane picks it up like any
+    # other item. Filing failure must never crash this tick (`||` here, not `set -e`) -- the
+    # review verdict itself already landed above; this is best-effort follow-through.
+    FIX_SUMMARY=$(printf '%s' "$FINDINGS" | head -1 | cut -c1-80)
+    FIX_TITLE="fix: PR #$PR failed code review"
+    [ -n "$FIX_SUMMARY" ] && FIX_TITLE="$FIX_TITLE -- $FIX_SUMMARY"
+    FIX_BODY="judge-judy blocked PR #$PR at head ${HEAD_SHA:0:12} (fleet-code-review: failure).
+
+$FINDINGS"
+    python3 "$KIT_DIR/scripts/board_github.py" file "$FIX_TITLE" --context "$FIX_BODY" \
+        --priority high >>"$LOG" 2>&1 \
+      && log "PR #$PR: filed fix item for blocked review" \
+      || log "PR #$PR: WARN failed to file fix item for blocked review"
+
+    report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "blocked PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: failure, see PR comment" "$SELF_CRITIQUE"
   fi
 
   cleanup_pass
