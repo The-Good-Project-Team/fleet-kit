@@ -3721,6 +3721,93 @@ def _one_deploy_at_a_time_and_a_countable_drain():
     assert "tr -cd '0-9'" in line, "in-flight count is not sanitised to digits"
 
 
+def _messenger_brief_sends_through_resend_once_per_day():
+    """fk#558 deliverable 8: messenger_brief.py send renders the markdown brief and posts ONE
+    Resend email per kind per day -- from/to/subject from the alert env, HTML + text bodies,
+    a second send the same day is a logged no-op, and a missing credential is a clean
+    non-zero exit, never a blank or half-addressed mail. Runs the real script against a fake
+    Resend endpoint on localhost.
+    """
+    import http.server
+    import os
+    import subprocess
+    import threading
+
+    got = []
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            got.append((self.headers.get("Authorization"), json.loads(self.rfile.read(n))))
+            self.send_response(200); self.end_headers(); self.wfile.write(b'{"id":"x"}')
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "alert.env").write_text("RESEND_API_KEY=rk_test\nMAIL_FROM=Fleet <fleet@example.org>\nFLEET_ALERT_EMAIL=reif@example.org\n")
+            (tmp / "brief.md").write_text("# Atlas CTA shipped\n\n## The number\n\n| | value |\n|---|---|\n| MRR | $10.83 |\n\n- one **bold** [link](https://example.org/x)\n")
+            env = dict(os.environ, FLEET_LOG_DIR=str(tmp), FLEET_ALERT_ENV=str(tmp / "alert.env"),
+                       RESEND_API_URL=f"http://127.0.0.1:{srv.server_address[1]}/emails")
+            for k in ("RESEND_API_KEY", "MAIL_FROM", "FLEET_ALERT_EMAIL"):
+                env.pop(k, None)
+            script = str(ROOT / "scripts" / "messenger_brief.py")
+
+            def run(*args):
+                return subprocess.run([sys.executable, script, "send", "--md", str(tmp / "brief.md"), *args],
+                                      env=env, capture_output=True, text=True, timeout=60)
+
+            p = run("--kind", "wrap")
+            assert p.returncode == 0 and p.stdout.strip() == "sent", f"{p.stdout!r} {p.stderr[-300:]!r}"
+            assert len(got) == 1, "exactly one email must be posted"
+            auth, payload = got[0]
+            assert auth == "Bearer rk_test"
+            assert payload["from"] == "Fleet <fleet@example.org>" and payload["to"] == ["reif@example.org"]
+            assert payload["subject"].startswith("Wrap") and "Atlas CTA shipped" in payload["subject"], payload["subject"]
+            assert "<h1>Atlas CTA shipped</h1>" in payload["html"] and "<strong>bold</strong>" in payload["html"] \
+                and '<a href="https://example.org/x">link</a>' in payload["html"] and "<table>" in payload["html"], payload["html"][:400]
+            assert payload["text"].startswith("# Atlas CTA shipped")
+            assert "rk_test" not in payload["html"] and "rk_test" not in payload["text"]
+
+            p = run("--kind", "wrap")
+            assert p.returncode == 0 and p.stdout.strip() == "already-sent" and len(got) == 1, \
+                "a second send of the same kind the same day must be a no-op"
+            p = run("--kind", "morning", "--pdf")
+            assert p.returncode == 0 and p.stdout.strip() == "sent" and len(got) == 2, f"{p.stdout!r} {p.stderr[-300:]!r}"
+            log_text = (tmp / "messenger.log").read_text()
+            assert "send wrap: delivered" in log_text and "already sent today" in log_text, log_text
+
+            (tmp / "alert.env").write_text("MAIL_FROM=x@example.org\n")
+            p = run("--kind", "afternoon")
+            assert p.returncode == 1 and p.stdout.strip() == "no-credentials" and len(got) == 2, \
+                "missing RESEND_API_KEY must fail cleanly without posting"
+    finally:
+        srv.shutdown()
+
+
+def _messenger_is_scheduled_three_times_a_day_with_creds_mounted():
+    """fk#558: entrypoint.sh schedules dont-shoot-the-messenger at 06:30/12:30/17:30 Central
+    (11:30/17:30/22:30 UTC under CDT), one slot per task line, and it is a real cron member;
+    deploy.sh mounts the host alert.env read-only so the container can actually send; the
+    member is enabled on sonnet with a send-only charter.
+    """
+    ep = (ROOT / "entrypoint.sh").read_text()
+    assert "dont-shoot-the-messenger)" in ep.split("ALL_CRON_MEMBERS=(")[1].split("\n")[0], "messenger not in ALL_CRON_MEMBERS"
+    for minute_hour, slot in (("30 11", "morning"), ("30 17", "afternoon"), ("30 22", "wrap")):
+        assert re.search(rf'^\s*echo "{minute_hour} \* \* \* root .*run_member\.sh dont-shoot-the-messenger --task {slot} ', ep, re.M), \
+            f"no {slot} cron line at {minute_hour} UTC"
+    assert "if cron_member_enabled dont-shoot-the-messenger; then" in ep
+    dep = (ROOT / "scripts" / "deploy.sh").read_text()
+    assert ".config/maxx/alert.env:ro" in dep and '"${alert_mounts[@]}"' in dep, "deploy.sh does not mount alert.env"
+    spec = json.loads((ROOT / "members" / "dont-shoot-the-messenger" / "dont-shoot-the-messenger.fleet.json").read_text())
+    assert spec["enabled"] is True and spec["llm"]["model"] == "sonnet"
+    charter = (ROOT / "members" / "dont-shoot-the-messenger" / "dont-shoot-the-messenger.md").read_text()
+    assert "messenger_brief.py collect" in charter and "messenger_brief.py send" in charter and "Afternoon block" in charter
+
+
 def _deploy_sh_rolls_over_via_caddy_without_a_cordon():
     """gh#625: on a caddy-fronted box deploy.sh cuts over by swapping the proxy upstream, never
     by cordoning the fleet and draining passes. Pins (a) the proxy path runs INSTEAD of
@@ -8920,6 +9007,8 @@ if __name__ == "__main__":
     check("auto_deploy.sh coalesces main moves inside FLEET_DEPLOY_MIN_INTERVAL_S (gh#619)", _auto_deploy_sh_coalesces_main_moves_inside_the_min_interval)
     check("deploy.sh kicks one gru pass right after cutover (gh#622)", _deploy_sh_kicks_a_gru_pass_right_after_cutover)
     check("deploy.sh rolls over via caddy without a cordon (gh#625)", _deploy_sh_rolls_over_via_caddy_without_a_cordon)
+    check("messenger_brief.py sends the brief through Resend once per kind per day (fk#558)", _messenger_brief_sends_through_resend_once_per_day)
+    check("messenger is scheduled 3x/day with creds mounted and a send-only charter (fk#558)", _messenger_is_scheduled_three_times_a_day_with_creds_mounted)
     check("git_pull_guard.sh self-heals a stray branch and leaves a normal pull unchanged", _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged)
     check("git_pull_guard.sh serializes via a lock on the .git directory", _git_pull_guard_serializes_via_a_lock_on_the_git_directory)
     check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
