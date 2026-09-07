@@ -146,6 +146,23 @@ report_run() { # <pr> <head_sha> <usage_file> <outcome-line> <evidence-line> <se
     --pass-file - --usage-file "$3" --pr "$1" >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
 }
 
+# gh#267: a tick that finds no PR to review used to log to judge-judy.log and exit without ever
+# touching runs.jsonl/fleet.db -- fleet_view.html's sidebar dot and lane_kpi.py's
+# compute_and_record_datadog() (gh#352) both read "age of the last runs row" as the liveness
+# signal, so a long quiet-PR stretch (ticks happening fine, nothing to review) read identically
+# to judge-judy being dead. This writes a lightweight heartbeat row on that path so "last row
+# age" stays a true liveness signal even when there was nothing to review. STATUS_QUIET (an
+# Outcome starting "QUIET") is reused rather than a new status string -- fleet_view.html's
+# statusClass() already maps it to the "warn" (amber) dot with no code change needed here; per
+# marie's PRD comment on gh#267, whether amber is the right color for a healthy-idle tick (vs a
+# new, distinct status) is an open UNKNOWN left for a human to decide.
+report_heartbeat() { # <evidence-line>
+  printf 'Outcome: QUIET -- no PR needs review this tick\nEvidence: %s\nSelf-critique: none -- heartbeat only, no review performed\n' "$1" \
+    | python3 "$KIT_DIR/scripts/run_report.py" \
+      --member "judge-judy" --run-id "heartbeat-$(date -u +%s)-$$" --kind shell --exit-code 0 \
+      --pass-file - >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
+}
+
 EXPLICIT_PR="${1:-}"
 
 # --- single-tick mutex -------------------------------------------------------------------
@@ -200,7 +217,13 @@ while :; do
     break
   fi
 
-  PICK=$(pick_pr "$EXPLICIT_PR" "$SKIPPED_THIS_TICK") || { [ "$REVIEWED_COUNT" -eq 0 ] && log "no PR needs review this tick"; break; }
+  PICK=$(pick_pr "$EXPLICIT_PR" "$SKIPPED_THIS_TICK") || {
+    if [ "$REVIEWED_COUNT" -eq 0 ]; then
+      log "no PR needs review this tick"
+      report_heartbeat "queue checked via pick_pr, no eligible PR (explicit=${EXPLICIT_PR:-none}, skipped this tick=${SKIPPED_THIS_TICK:-none})"
+    fi
+    break
+  }
   PR=${PICK% *}
   HEAD_SHA=${PICK#* }
   log "PR #$PR head ${HEAD_SHA:0:12} -- reviewing (model=$MODEL)"
