@@ -61,6 +61,17 @@ nobody wrote a check for?* A checklist can only catch failures someone already s
 a floor, never the job. Most of what matters in a lane on any given week is not on it yet, and
 a pass that runs only the checklist is the pass that files "nothing new" forever.
 
+**A compelling operator-flagged thread is not license to skip this.** dumbledore found the
+identical self-critique across devops, datadog and a second devops run in the same 24h window
+(2026-09-07): the FULL pass budget spent re-verifying or re-confirming the one thread the
+`--task` operator instruction named, with the exploration half never reached — "the last 5/6
+passes' self-critiques all name this same pattern" in the members' own words. The operator
+instruction is one input, not the whole task: if the named thread is confirmed or resolved by
+roughly the half-way point of your pass, that is the checkpoint to switch to real step-3
+discovery, not a reason to keep digging on the same thread for the rest of the budget. Filing
+one strong confirmation and nothing from step 3 is the same failure as running only the
+checklist.
+
 ### Run a real discovery pass — in this order
 
 **1. What did I do last time?** You are one-shot and remember nothing, so start by reading your
