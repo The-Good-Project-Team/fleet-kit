@@ -263,9 +263,32 @@ def sync_offset(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT offset FROM sync_state WHERE id = 0").fetchone()[0]
 
 
+def _record_from_line(line: str) -> dict | None:
+    """Parse one runs.jsonl line into a record, or None for blank/corrupt lines. Shared by
+    sync() and backfill() so the two never drift on how `_recorded_at` gets filled in.
+    """
+    import time
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        rec = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    # `ts` is run_report.py's own wall-clock stamp, written the moment the pass
+    # finished (build_record). Prefer it over "now" -- if sync() ever falls behind
+    # (crashed poller, cron gap) and catches up on a backlog in one burst, every
+    # backlogged row would otherwise get recorded_at = the burst's moment, not its
+    # own run time, silently corrupting every "last N hours" freshness query against
+    # this table (including dumbledore's own self-critique query in persona_law.md
+    # §11 and fleet_view's trailing-spend charts). `_recorded_at` stays as an explicit
+    # override hook for callers that want ingestion-time instead (e.g. tests).
+    rec.setdefault("_recorded_at", rec.get("ts") or time.time())
+    return rec
+
+
 def sync(conn: sqlite3.Connection, runs_file: Path | None = None) -> int:
     """Read new lines since the last sync, upsert them. Returns rows synced."""
-    import time
     rf = runs_file or RUNS_FILE
     if not rf.exists():
         return 0
@@ -277,22 +300,9 @@ def sync(conn: sqlite3.Connection, runs_file: Path | None = None) -> int:
     with rf.open() as fh:
         fh.seek(offset)
         for line in fh:
-            line = line.strip()
-            if not line:
+            rec = _record_from_line(line)
+            if rec is None:
                 continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            # `ts` is run_report.py's own wall-clock stamp, written the moment the pass
-            # finished (build_record). Prefer it over "now" -- if sync() ever falls behind
-            # (crashed poller, cron gap) and catches up on a backlog in one burst, every
-            # backlogged row would otherwise get recorded_at = the burst's moment, not its
-            # own run time, silently corrupting every "last N hours" freshness query against
-            # this table (including dumbledore's own self-critique query in persona_law.md
-            # §11 and fleet_view's trailing-spend charts). `_recorded_at` stays as an explicit
-            # override hook for callers that want ingestion-time instead (e.g. tests).
-            rec.setdefault("_recorded_at", rec.get("ts") or time.time())
             row = _row_from_record(rec)
             run_id, recorded_at = row[0], row[-1]
             # fleet-kit#212 AC3: the composite key above stops two DISTINCT runs from
@@ -320,6 +330,41 @@ def sync(conn: sqlite3.Connection, runs_file: Path | None = None) -> int:
             n += 1
         new_offset = fh.tell()
     conn.execute("UPDATE sync_state SET offset = ? WHERE id = 0", (new_offset,))
+    conn.commit()
+    return n
+
+
+def backfill(conn: sqlite3.Connection, runs_file: Path | None = None) -> int:
+    """fleet-kit#241: one-time repair for verdicts lost to the pre-#212 bare-run_id PK.
+
+    PR#217's composite-key migration (`_migrate_composite_pk` above) stops NEW collisions but
+    by its own docstring never recovers rows that had already collided -- `sync_state.offset`
+    had already passed those runs.jsonl lines by the time the migration ran, so incremental
+    sync() alone never revisits them; the second verdict of each colliding pair is gone from
+    fleet.db even though runs.jsonl (the source of truth) still holds both.
+
+    This rereads runs.jsonl from byte 0 -- not from sync_state.offset, and without touching
+    it -- and INSERTs whatever the now-composite key still doesn't have. INSERT OR IGNORE, not
+    sync()'s OR REPLACE: a row already present must be left exactly as-is, this only fills
+    holes. Safe to run any number of times against the same jsonl (a present row is always a
+    no-op), and safe to run before or after a normal sync().
+    """
+    rf = runs_file or RUNS_FILE
+    if not rf.exists():
+        return 0
+    n = 0
+    with rf.open() as fh:
+        for line in fh:
+            rec = _record_from_line(line)
+            if rec is None:
+                continue
+            row = _row_from_record(rec)
+            cur = conn.execute(
+                f"""INSERT OR IGNORE INTO runs ({', '.join(RUN_COLUMNS)})
+                    VALUES ({', '.join('?' * len(RUN_COLUMNS))})""",
+                row,
+            )
+            n += cur.rowcount
     conn.commit()
     return n
 
@@ -407,6 +452,10 @@ def main(argv=None) -> int:
 
     p_rebuild = sub.add_parser("rebuild", help="drop + rebuild fleet.db from runs.jsonl entirely")
 
+    sub.add_parser("backfill", help="fleet-kit#241: insert any runs.jsonl rows fleet.db is "
+                                     "still missing (pre-#212 bare-run_id PK collisions), "
+                                     "without touching rows already present")
+
     p_spend = sub.add_parser("spend", help="trailing spend, grouped by member")
     p_spend.add_argument("--member")
     p_spend.add_argument("--hours", type=float, default=24.0)
@@ -433,6 +482,10 @@ def main(argv=None) -> int:
     if a.cmd == "sync" or a.cmd is None:
         n = sync(conn)
         print(f"synced {n} new runs")
+        return 0
+    if a.cmd == "backfill":
+        n = backfill(conn)
+        print(f"backfilled {n} missing rows")
         return 0
     if a.cmd == "spend":
         sync(conn)
