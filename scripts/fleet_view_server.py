@@ -1093,6 +1093,14 @@ class Handler(BaseHTTPRequestHandler):
             # instance has no FLEET_NUMBER_URL -- the frontend hides the tile entirely rather
             # than rendering a placeholder (the header's own law: no URL, no header).
             import number_read
+            # The dashboard process is launched by entrypoint.sh BEFORE fleet.env is sourced
+            # (only FLEET_ENV_FILE and FLEET_LOG_DIR reach it), so FLEET_NUMBER_URL was never in
+            # its environment and this tile read "unavailable" on an instance whose members
+            # print the number above every charter (Reif's phone, 2026-09-07). Same file-value
+            # read subprocess_env() already does; env wins when it is set.
+            for key, value in read_env_values().items():
+                if key.startswith("FLEET_NUMBER_") and value and not os.environ.get(key):
+                    os.environ[key] = value
             self._json(number_read.read_current())
             return
         if path == "/api/kpi":
