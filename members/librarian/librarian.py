@@ -30,7 +30,15 @@ the first run against a real corpus, or after the pattern list changes.
 CHECKPOINTING: an --execute run also saves the watermark every CHECKPOINT_EVERY_FILES files,
 not only after the whole scan finishes (see run_scrub()) -- a run killed mid-scan by its own
 timeout still banks the files it got through before the kill, rather than the next tick
-restarting from since=0.0 (gh#588).
+restarting from since=0.0 (gh#588). Candidates are processed in ascending mtime order (not
+path order) across all roots combined, and a checkpoint saves the mtime of the last file it
+actually finished, never a blanket "now" -- a kill can then only ever orphan files newer than
+the last one processed, and those are exactly the files a future incremental run's `since`
+filter still includes. Checkpointing to a constant "run started" timestamp instead (the
+original gh#588 shape) is unsafe: since candidates are the files whose mtime already predates
+this run's start, almost every one of them has mtime < run_started, so a kill partway through
+a path-ordered walk permanently hides every unreached file the moment the checkpoint fires --
+found live 2026-09-07, secrets in 305 transcripts survived weeks of "clean" incremental runs.
 
 --full-scan ALSO reopens every already-compressed .jsonl.gz transcript (decompress, scrub,
 recompress if changed) -- an ordinary incremental tick never does, since gunzipping the whole
@@ -244,6 +252,27 @@ def scrub_file(path: Path, stats: ScrubStats, execute: bool) -> bool:
     return changed
 
 
+def _collect_candidates(
+    roots: list[Path], since: float, include_compressed: bool
+) -> list[tuple[float, Path]]:
+    """Gathers every candidate transcript across all roots combined and sorts by mtime
+    ascending -- the ordering run_scrub()'s checkpoint safety depends on. Once the file at
+    index i has been processed, every file at index > i is guaranteed to have mtime >= that
+    file's mtime, so checkpointing to the last-processed file's mtime can never orphan an
+    unprocessed one. A per-root, path-sorted walk (the original shape) gives no such guarantee
+    across roots, or even within one root once a constant "now" is used as the checkpoint
+    value instead of a processed file's own mtime."""
+    candidates: list[tuple[float, Path]] = []
+    for root in roots:
+        for p in iter_transcripts(root, since=since, include_compressed=include_compressed):
+            try:
+                candidates.append((p.stat().st_mtime, p))
+            except OSError:
+                continue
+    candidates.sort(key=lambda t: t[0])
+    return candidates
+
+
 def run_scrub(
     roots: list[Path],
     since: float,
@@ -258,26 +287,28 @@ def run_scrub(
     SIGKILLed mid-scan by its own timeout still banks the files it processed before the kill,
     instead of the next tick restarting from since=0.0 (gh#588).
 
-    Every checkpoint (and the final save) writes run_started -- the timestamp captured before
-    this run's very first file was touched, never a later "now" read at save time. Files are
-    walked in path order, not mtime order, so a checkpoint that stamped a fresher timestamp
-    could land past the mtime of a file this run hasn't reached yet, silently hiding that file
-    from the next incremental run once this one gets killed before reaching it. run_started
-    predates every file this run will touch, so nothing a kill leaves unprocessed can ever be
-    mistaken for already-scrubbed.
+    Candidates across all roots are processed in ascending mtime order (see
+    _collect_candidates()), and each checkpoint saves the mtime of the last file actually
+    finished, capped at run_started in case a file's mtime somehow lands in the future relative
+    to when this run began. That is what makes a mid-scan kill safe: every file this run has
+    not yet reached is guaranteed to have mtime >= the checkpointed value, so the next
+    incremental run's `since` filter still picks it up. Checkpointing a constant run_started
+    value regardless of how far the walk actually got is NOT safe -- see the module docstring's
+    CHECKPOINTING section for the live incident this replaced.
     """
     stats = ScrubStats()
     changed_files = 0
     since_checkpoint = 0
-    for root in roots:
-        for f in iter_transcripts(root, since=since, include_compressed=full_scan):
-            stats.files_scanned += 1
-            if scrub_file(f, stats, execute):
-                changed_files += 1
-            since_checkpoint += 1
-            if execute and since_checkpoint >= checkpoint_every_files:
-                save_watermark(state_file, run_started)
-                since_checkpoint = 0
+    last_mtime = since
+    for mtime, f in _collect_candidates(roots, since, full_scan):
+        stats.files_scanned += 1
+        if scrub_file(f, stats, execute):
+            changed_files += 1
+        last_mtime = mtime
+        since_checkpoint += 1
+        if execute and since_checkpoint >= checkpoint_every_files:
+            save_watermark(state_file, min(run_started, last_mtime))
+            since_checkpoint = 0
     if execute:
         save_watermark(state_file, run_started)
     return stats, changed_files

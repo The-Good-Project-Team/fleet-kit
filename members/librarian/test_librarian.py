@@ -292,6 +292,54 @@ class WatermarkTest(unittest.TestCase):
         )
         self.assertEqual(librarian.load_watermark(self.state_file), run_started)
 
+    def test_interrupted_run_watermark_does_not_orphan_unprocessed_older_files(self):
+        """The bug this file's checkpoint fix (see librarian.py's CHECKPOINTING docstring)
+        replaced: the original gh#588 shape checkpointed a constant run_started value no
+        matter how far the path-ordered walk actually got. Since every real candidate file's
+        mtime already predates run_started by definition (it's why the file was a candidate at
+        all), a kill partway through permanently orphaned every unreached file the moment that
+        checkpoint fired -- confirmed live 2026-09-07, secrets in 305 transcripts survived
+        weeks of incremental runs that each reported success. This test seeds several
+        days-old files, kills the scan after only some of them are processed, and proves a
+        second incremental run (using the watermark the killed run left behind) still reaches
+        every file the first run never got to -- the old constant-run_started checkpoint would
+        leave zero candidates for this second call."""
+        for i in range(6):
+            f = self.root / f"f{i}.jsonl"
+            f.write_text(f"file {i} token gho_" + "Q" * 36)
+            self._age(f, 6.0 - i * 0.5)  # f0 oldest (6.0d) ... f5 newest (3.5d), strictly ascending
+
+        real_scrub_file = librarian.scrub_file
+        call_count = {"n": 0}
+
+        def flaky_scrub_file(path, stats, execute):
+            call_count["n"] += 1
+            if call_count["n"] > 3:
+                raise RuntimeError("simulated kill mid-scan")
+            return real_scrub_file(path, stats, execute)
+
+        run_started = time.time()
+        with mock.patch.object(librarian, "scrub_file", side_effect=flaky_scrub_file):
+            with self.assertRaises(RuntimeError):
+                librarian.run_scrub(
+                    [self.root], since=0.0, execute=True, state_file=self.state_file,
+                    run_started=run_started, full_scan=False, checkpoint_every_files=2,
+                )
+
+        watermark_after_kill = librarian.load_watermark(self.state_file)
+        # The old (buggy) code saved run_started here -- days newer than every seeded file --
+        # which would make the assertions below fail identically to the real incident.
+        self.assertLess(watermark_after_kill, run_started)
+
+        second_stats, _ = librarian.run_scrub(
+            [self.root], since=watermark_after_kill, execute=True, state_file=self.state_file,
+            run_started=time.time(), full_scan=False,
+        )
+        # f3, f4, f5 were never reached by the killed run (only 3 succeeded); the fix's
+        # contract is that a second incremental run still finds them via the watermark left
+        # behind, instead of silently treating them as already scrubbed.
+        self.assertGreaterEqual(second_stats.files_scanned, 3, "unprocessed older files were orphaned by the interrupted run's watermark")
+
     def test_full_scan_cli_ignores_watermark_even_with_checkpointing(self):
         """gh#588 AC5: --full-scan still ignores the on-disk watermark entirely, unaffected
         by the new mid-loop checkpointing."""
