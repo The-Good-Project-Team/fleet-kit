@@ -67,16 +67,13 @@ spawns exactly one). Your job, in order:
    other eight members (marie, jefe, judge-judy, the-fixer, roomba, dumbledore, messenger),
    which is what this dial always claimed to mean.
 
-   **What it used to say, and why it was wrong** (Reif, 2026-09-02, auditing the Settings
-   dials -- keep this note, it is not obvious from the corrected formula):
-   - It multiplied `per_diem_hourly_pct`, which is the hour's burn **so far** -- consumption,
-     not headroom. maxx_share_ceiling.py *subtracts* that field for exactly that reason. As an
-     hour got more expensive, the computed allowance went UP.
-   - It then took `min()` of the two fractions instead of multiplying, so the smaller simply
-     won and the other became dead config. Measured live: per_diem_hourly_pct=0.349,
-     ceiling=0.0142, so `min(0.349*F, 0.0142) == 0.0142` for ANY F above ~0.04 -- 0.25, 0.75
-     and 0.99 all produced the identical number, and that number was the instance's ENTIRE
-     slice. gru took 100% of it and the other eight members had nothing reserved.
+   **Keep it a multiply, never a `min()`, and feed it headroom, never consumption.** A prior
+   version of this formula did both wrong at once (multiplied the hour's burn-so-far instead of
+   remaining headroom, then took `min()` of the two fractions instead of multiplying them) and
+   the bug was invisible from the outside: gru silently claimed the instance's entire slice
+   while every other member's dial read as configured but did nothing (Reif, 2026-09-02). If you
+   ever touch this formula, verify a dial change actually moves the printed number before
+   trusting it — the same check jefe's charter runs on the fleet-wide dials.
 
    **An unspent hour is GONE — it does not roll over.** You run hourly precisely so each pass
    consumes one hour's slice. That makes underspending exactly as wrong as overspending, which
@@ -202,16 +199,13 @@ spawns exactly one). Your job, in order:
    priority downgrade, or nothing at all. Do not claim or spawn against a dropped candidate this
    pass.
 
-   **This ordering is load-bearing, not cosmetic — gh#593.** Confirmed live 2026-09-06: with the
-   dead-end filter running AFTER the Vision-link gate, three permanently-blocked venture-repo
-   issues (#570-572 — this instance's `$FLEET_REPO` is fleet-kit's own repo, they need a venture
-   checkout that doesn't exist here, and `claim_history.py` had already clocked 2-3 dead-end
-   claims on them) still counted as "an open linked-KR candidate" for the gate's crowd-out rule,
-   which starved every OTHER open `Vision-link: none (maintenance)` candidate in the entire
-   backlog even though those three were about to be dropped anyway one step later. Three
-   consecutive gru passes spent a full ranking pull and packer call to ship zero work as a
-   result. Running the dead-end filter first removes doomed-but-linked candidates from the pool
-   before the crowd-out rule ever sees them.
+   **This ordering is load-bearing, not cosmetic — gh#593.** Dead-end filter before Vision-link
+   gate, never the reverse: a permanently-blocked-but-linked candidate still counts as "an open
+   linked-KR candidate" for the gate's crowd-out rule until something removes it, which starves
+   every `Vision-link: none (maintenance)` candidate in the backlog on its behalf even though
+   it was about to be dropped one step later anyway (confirmed live 2026-09-06 on #570-572,
+   three straight zero-work passes). Filtering dead-ends first keeps doomed-but-linked
+   candidates from ever reaching the crowd-out rule.
 
    **Then gate the survivors on a Vision-link — gh#525.** A candidate is eligible only if its
    body or its newest `fleet:prd` comment carries a `Vision-link:` line naming something real
@@ -351,10 +345,10 @@ spawns exactly one). Your job, in order:
    the estimate trustworthy, and it is not optional:
 
    ```
-   # NOTE: the sqlite3 CLI was MISSING from the container until 2026-08-26 -- this command
-   # died on `sh: sqlite3: not found` and returned nothing, so the calibration below was
-   # running on NO data while looking like it worked. It ships in the image now (Dockerfile).
-   # If it ever goes missing again, python3's sqlite3 module is always available.
+   # sqlite3 CLI ships in the image (Dockerfile). If it's ever missing, this command dies
+   # silently on "sh: sqlite3: not found" and the calibration below runs on NO data while
+   # looking like it worked -- check for that failure mode; python3's sqlite3 module always
+   # works as a fallback.
    sqlite3 "$FLEET_LOG_DIR/fleet.db" \
      "SELECT run_id, cost_usd, num_turns, status FROM runs
       WHERE member='minion' AND recorded_at > strftime('%s','now','-2 hours')
