@@ -58,8 +58,20 @@ _suffix_for() {
   echo "$1" | tr '[:lower:]-' '[:upper:]_'
 }
 
+# gh#616 follow-up: walk the accounts in the POOL's order, not FLEET_ACCOUNTS order. Since #617
+# account_pool_run tries healthy accounts soonest-week_reset-first (read from maxx), so "the
+# account the pool WOULD pick" is _account_pool_order's head, not the list head. Metering the
+# list head while spending from the pool head re-creates the 2026-09-02 wrong-account bug this
+# script exists to end -- gru would pace against tgp's 0.09%/h while every call ran on gmail.
+FLEET_ACCOUNTS="$ACCOUNTS"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+. "$HERE/account_pool.sh"
+ORDERED="$(_account_pool_order 2>/dev/null | tr '\n' ' ')"
+[ -n "${ORDERED// /}" ] || ORDERED="$ACCOUNTS"
+
 now=$(date +%s)
-for acct in $ACCOUNTS; do
+for acct in $ORDERED; do
   # Skip accounts the pool itself would skip. Reading the same state file
   # account_pool.sh writes keeps one source of truth -- account_readiness.sh's
   # header records what re-deriving this costs (it read a different default log
