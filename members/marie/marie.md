@@ -443,6 +443,38 @@ supersedes-the-earlier-comment convention as a re-scored PRD) -- this one-time d
 no cap, unlike the 5-per-pass limit on writing PRDs from scratch, because every day it's
 undone is another day gru can build almost nothing. Count it in your report (C4).
 
+**Lightweight Vision-link backfill for everything else (gh#4597).** The backfill above only
+reaches issues that already carry `fleet:prd` -- but the 5-per-pass PRD cap means most of the
+backlog never gets there. Every open `fleet:backlog` candidate that is NOT `fleet:prd` --
+every medium/low-tier item, and any high-tier item still waiting its turn under the cap -- also
+never gets a `Vision-link:` line, and `vision_link_gate.py` (gh#525) drops every one of them as
+MISSING regardless of whether the work behind it is real. The gate does not require the line to
+come from a `fleet:prd` comment -- it reads the newest comment (or the body) carrying a
+`Vision-link:` line, full stop, from ANY comment (`test_vision_link_gate.py`'s
+`test_newest_comment_wins_over_body` already locks this in). So the fix is a lighter-weight
+comment, not a gate change and not a full PRD:
+
+```
+gh issue list --state open --label fleet:backlog --json number,labels,body,comments --limit 200
+```
+For each result: skip it if it already carries `fleet:prd` (that issue's Vision-link is the
+backfill step above's job -- **check the label before posting, gh#4597 AC3** -- never duplicate
+it here) or if its body/any comment already has a `Vision-link:` line (nothing to add). For
+everything left, post one comment with just the single line -- no Problem/Goal/AC sections,
+this is a determination, not a spec:
+
+```
+Vision-link: <the number, guardrail, or channel this moves -- or `none (maintenance)`>
+```
+
+This is a one-time debt-payoff pass with no per-pass cap, same reasoning as the PRD-Vision-link
+backfill just above. Whether an ONGOING cap is needed once the backlog is caught up (so this
+sweep doesn't itself become an unbounded per-pass cost as new candidates arrive) is still open
+-- gh#4597 left it `UNKNOWN` rather than guessing; flag it to Reif if the sweep is still finding
+a large uncleared count after a few passes rather than deciding it here. Count it in your report
+(C4): how many lightweight comments posted (issue numbers) and how many candidates still lack
+the line after this sweep (fleet:prd or not).
+
 **Judge EFFORT, not importance, and never re-rank here.** The PRD may make an item look
 bigger or smaller than its label — if your own spec changes your complexity estimate, update
 the `fleet:complexity-<n>` label (that is Part C2's job and the estimate should track reality)
@@ -490,7 +522,9 @@ that second number is the one to watch: it should fall every pass, and a run whe
 steady or rises means the backfill is not keeping up with new work and wants a bigger slice.
 (C4) how many PRDs you wrote (issue numbers), how many high-priority items are still
 waiting for one, how many existing `fleet:prd` issues you backfilled with a missing
-`Vision-link:` comment (issue numbers) and how many still need it, and every `UNKNOWN` you left
+`Vision-link:` comment (issue numbers) and how many still need it, how many NON-`fleet:prd`
+issues got a lightweight `Vision-link:`-only comment this pass (issue numbers, gh#4597) and how
+many still lack the line, and every `UNKNOWN` you left
 open — an accumulating UNKNOWN list is a human's 30-second fix and the single most useful thing
 this section surfaces. (D) how many issues were
 missing `fleet:backlog` despite holding a priority label, and their
