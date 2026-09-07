@@ -99,13 +99,33 @@ CLASS_LABELS = {
     "secret_env": "Secret-shaped env var",
 }
 
+# A plain \b at the START of a pattern requires a non-word char (or start-of-string)
+# immediately before the match. That's defeated whenever a secret sits immediately after a
+# JSON-escaped newline/tab/CR -- inside a raw .jsonl line, a bash command's embedded newline is
+# stored as the two literal characters \ and n (JSON string escape), not an actual newline
+# byte, so the escape's letter (n/r/t) is itself a word character and \b sees word-to-word,
+# never firing (philanthropy#4646, reproduced against a real transcript where a PGPASSWORD=
+# immediately followed `2>&1\n`). _BOUNDARY_START accepts that shape as a boundary too, on top
+# of everything an ordinary \b already accepts; it only needs to cover the start of each
+# pattern below since the same escape sequence never defeats a closing \b (the character right
+# after a match there is the backslash itself, already a non-word char).
+_BOUNDARY_START = r"(?:(?<!\w)|(?<=\\[nrt]))"
+
+# GitHub tokens are normally 36+ chars after their prefix, but a truncated capture (e.g. a
+# `head -c 20` mid-transcript) can leave far fewer -- philanthropy#4646 found a live
+# `gho_`-prefixed token with only 16. Lowered from 20 so a truncated-but-real exposure still
+# gets caught; still high enough that the prefix + this many random chars stays a strong signal
+# rather than a coincidental match.
+GITHUB_TOKEN_MIN_LEN = 8
+
+
 # Ordered: specific patterns before the generic secret_env catch-all, and each substitution's
 # marker text starts with "[REDACTED:" -- secret_env's own value group excludes anything already
 # starting with that prefix (see its regex below) so a key name that trips BOTH a specific
 # pattern and the generic one (e.g. "GH_TOKEN=gho_xxx" matches gho_ first, and would also look
 # like a *_TOKEN= pair to secret_env) never gets double-redacted into a less specific marker.
 def _github_token_pattern(prefix: str) -> re.Pattern:
-    return re.compile(rf"\b{prefix}_[A-Za-z0-9]{{20,255}}\b")
+    return re.compile(rf"{_BOUNDARY_START}{prefix}_[A-Za-z0-9]{{{GITHUB_TOKEN_MIN_LEN},255}}\b")
 
 
 PATTERNS: list[tuple[str, re.Pattern, "callable"]] = []
@@ -120,12 +140,12 @@ for _prefix in ("gho", "ghp", "ghs", "ghu", "ghr"):
 
 PATTERNS.append((
     "sk-ant",
-    re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{20,}\b"),
+    re.compile(rf"{_BOUNDARY_START}sk-ant-[A-Za-z0-9\-_]{{20,}}\b"),
     _simple_sub("sk-ant"),
 ))
 PATTERNS.append((
     "pgpassword",
-    re.compile(r"\bPGPASSWORD=\S+"),
+    re.compile(rf"{_BOUNDARY_START}PGPASSWORD=\S+"),
     # Whole match, key included: AC2 (philanthropy#4439) greps for the literal string
     # "PGPASSWORD=" post-scrub and expects 0 hits, so the key name can't survive either --
     # unlike secret_env below, there's only one key spelling here, so nothing useful is lost.
@@ -133,13 +153,13 @@ PATTERNS.append((
 ))
 PATTERNS.append((
     "postgres_url",
-    re.compile(r"\bpostgres(?:ql)?://[^:\s]+:[^@\s]+@\S+"),
+    re.compile(rf"{_BOUNDARY_START}postgres(?:ql)?://[^:\s]+:[^@\s]+@\S+"),
     _simple_sub("postgres_url"),
 ))
 PATTERNS.append((
     "secret_env",
     re.compile(
-        r"\b([A-Z][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|APIKEY)[A-Z0-9_]*)="
+        rf"{_BOUNDARY_START}([A-Z][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|APIKEY)[A-Z0-9_]*)="
         r"(?!\[REDACTED:)(\S+)"
     ),
     lambda m: f"{m.group(1)}=[REDACTED:secret_env]",
