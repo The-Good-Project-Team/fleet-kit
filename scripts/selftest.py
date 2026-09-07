@@ -4380,6 +4380,69 @@ def _judge_judy_skips_an_empty_diff_instead_of_blocking():
         "an empty diff must never reach a VERDICT -- it should skip before the model is ever called"
 
 
+def _judge_judy_writes_a_heartbeat_row_on_a_no_pr_tick():
+    """gh#267: a tick that finds no PR to review used to exit without ever touching
+    runs.jsonl/fleet.db -- fleet_view.html's sidebar dot and lane_kpi.py's
+    compute_and_record_datadog() (gh#352) both read "age of the last runs row" as judge-judy's
+    liveness signal, so a long quiet-PR stretch read identically to judge-judy being dead.
+
+    Static assertions, same style as this file's other judge-judy checks: report_heartbeat must
+    exist, must write via run_report.py with a non-"llm" --kind (no claude call happened, so this
+    is a mechanical row, not a review), and must be called on the exact branch where pick_pr found
+    nothing AND no PR was reviewed yet this tick -- not on every pick_pr failure (a tick that
+    reviewed some PRs then drained the queue already has a fresh row from that review), and NOT
+    on an explicit `judge-judy.sh <pr>` debug call -- only a real cron tick with no explicit PR
+    arg proves the WHOLE queue was scanned; a human debugging one PR by hand while cron itself is
+    dead must not refresh the liveness row and mask that outage (caught in self-review, gh#267).
+    """
+    src = (Path(__file__).parent.parent / "members" / "judge-judy" / "judge-judy.sh").read_text()
+
+    assert "report_heartbeat()" in src, "no report_heartbeat function -- gh#267's no-op-tick gap is unfixed"
+
+    hb_i = src.index("report_heartbeat()")
+    call_i = src.index("report_heartbeat ", hb_i)  # the call site, not the definition
+    hb_def = src[hb_i:call_i]
+    assert "run_report.py" in hb_def, "report_heartbeat must write through run_report.py, same as report_run"
+    assert '--kind shell' in hb_def, "a heartbeat is not an LLM review -- must not be logged --kind llm"
+    assert ">> \"$LOG_DIR/runs.jsonl\"" in hb_def, "report_heartbeat must append to the same runs.jsonl report_run uses"
+
+    pick_i = src.index('PICK=$(pick_pr "$EXPLICIT_PR" "$SKIPPED_THIS_TICK")')
+    branch = src[pick_i:pick_i + 700]
+    assert "report_heartbeat" in branch, "report_heartbeat is never called from the pick_pr-found-nothing branch"
+    assert '"$REVIEWED_COUNT" -eq 0' in branch, \
+        "heartbeat call must be guarded by REVIEWED_COUNT -eq 0, not fire after a tick that already reviewed PRs"
+    assert '-z "$EXPLICIT_PR"' in branch, \
+        "heartbeat call must be guarded by -z \"$EXPLICIT_PR\" -- an explicit `judge-judy.sh <pr>` " \
+        "debug call must not refresh the liveness row on behalf of the whole queue"
+
+
+def _judge_judy_heartbeat_status_is_distinct_from_a_real_review_outcome():
+    """gh#267 AC1: the heartbeat row's status must read distinctly from a real review outcome, so
+    a reader (or lane_kpi.py) can tell "ticked fine, nothing to review" apart from a genuine
+    review result. Behavioral, not just static: runs the same Outcome:/Evidence: text
+    report_heartbeat() actually emits through run_report.py's real classify() and checks it lands
+    on a different status than an approved PR review does.
+    """
+    import run_report
+
+    heartbeat = run_report.build_record(
+        member="judge-judy", run_id="heartbeat-1", kind="shell", exit_code=0,
+        pass_text="Outcome: QUIET -- no PR needs review this tick\n"
+                   "Evidence: queue checked via pick_pr, no eligible PR\n"
+                   "Self-critique: none -- heartbeat only, no review performed\n",
+        usage=None, vision_required=False)
+    reviewed = run_report.build_record(
+        member="judge-judy", run_id="review-1-abc123", kind="llm", exit_code=0,
+        pass_text="Outcome: approved PR #1\nEvidence: head abc123, fleet-code-review: success\n"
+                   "Self-critique: none -- clean single-pass verdict\n",
+        usage=None, vision_required=False)
+
+    assert heartbeat["status"] == "quiet", heartbeat["status"]
+    assert reviewed["status"] == "ok", reviewed["status"]
+    assert heartbeat["status"] != reviewed["status"], \
+        "a no-op heartbeat tick must not classify the same as a real review outcome"
+
+
 def _marie_sweeps_the_whole_backlog_not_just_the_new():
     """marie must re-judge the OLD backlog, not only what changed since last pass.
 
@@ -8821,6 +8884,8 @@ if __name__ == "__main__":
     check("board_github file_item can add a priority label alongside backlog/lane", _board_github_file_item_can_add_a_priority_label)
     check("judge-judy files a priority-high fix item when it blocks a PR", _judge_judy_files_a_fix_item_on_block)
     check("judge-judy skips an empty diff instead of blocking (gh#531)", _judge_judy_skips_an_empty_diff_instead_of_blocking)
+    check("judge-judy writes a heartbeat row on a no-PR tick (gh#267)", _judge_judy_writes_a_heartbeat_row_on_a_no_pr_tick)
+    check("judge-judy's heartbeat status reads distinct from a real review outcome (gh#267 AC1)", _judge_judy_heartbeat_status_is_distinct_from_a_real_review_outcome)
     check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
