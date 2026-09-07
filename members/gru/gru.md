@@ -39,9 +39,8 @@ spawns exactly one). Your job, in order:
    exactly `0.0` with `label: ok` even when the real hourly slice is healthy — 2026-08-26
    incident. If it ever reads exactly 0.0, check `week_bank_pct` before believing the week
    is actually spent.)
-   **Do not compute your allowance yourself — run the script.** This charter's own rule below
-   ("you are provably bad at this arithmetic") applied to the allowance formula too, and it was
-   wrong here for two years' worth of reasons in one line. Ask for the number:
+   **Do not compute your allowance yourself — run the script.** The "provably bad at this
+   arithmetic" rule below (about packing math) applies here too. Ask for the number:
 
    ```
    python3 /fleet-kit/scripts/gru_allowance.py     # reads FLEET_SHARE_CEILING_PCT + your dial
@@ -171,36 +170,34 @@ spawns exactly one). Your job, in order:
    marie hasn't gotten to yet (no priority label at all) is lowest priority by default, not an
    oversight you correct yourself.
 
-   **Before the Vision-link gate, drop any candidate that has already dead-ended past the
-   threshold — gh#64, moved ahead of the Vision-link gate below by gh#593.**
-   Nothing above this line distinguishes "never tried" from "tried and abandoned 10 times";
-   without this check the same chronically-blocked item gets reclaimed and respawned every
-   hour, burning a full claim/spawn/clear cycle on doomed work each time
-   ([[project_gru_repeat_claim_dead_end_gap_fleetkit64]]). For each remaining candidate:
+   **Three filters run on the survivors, in this fixed order — needs-human-op (above), then
+   dead-end, then Vision-link (both below).** The order is load-bearing, not cosmetic (gh#593):
+   dead-end must run before Vision-link because a permanently-blocked-but-linked candidate still
+   counts as "an open linked-KR candidate" for the Vision-link gate's crowd-out rule until
+   something removes it, starving every `Vision-link: none (maintenance)` candidate on its
+   behalf even though it was about to be dropped a step later anyway (confirmed live 2026-09-06
+   on #570-572, three straight zero-work passes). Each filter detects a different kind of block
+   (an explicit prior-pass label, silent repeated failure, or missing/absent linkage) so all
+   three stack rather than substitute for one another. **A candidate any of the three filters
+   drops is never silently missing from your report** — name it explicitly, by number and
+   reason, so a human can decide whether it needs `fleet:needs-human-op` applied, a priority
+   downgrade, or nothing at all (gh#3920 precedent). Do not claim or spawn against a dropped
+   candidate this pass.
+
+   **Dead-end filter — gh#64.** Nothing above distinguishes "never tried" from "tried and
+   abandoned 10 times"; without this, the same chronically-blocked item gets reclaimed and
+   respawned every hour, burning a full claim/spawn/clear cycle on doomed work each time
+   ([[project_gru_repeat_claim_dead_end_gap_fleetkit64]]). Unlike the needs-human-op label
+   (an explicit prior verdict), this signal is silent — nothing ever declared the item blocked,
+   it just keeps failing to close. For each remaining candidate:
    ```
    python3 /fleet-kit/scripts/claim_history.py --item <n>
    # exit 0 "ok count=<c> threshold=3"       -> keep in the candidate set
    # exit 1 "BLOCKED count=<c> threshold=3"  -> drop from this pass's candidate set
    ```
-   This is a DIFFERENT signal from the `fleet:needs-human-op` filter just above: that one is a
-   prior pass's *explicit* verdict that the item is structurally blocked on something no fleet
-   member holds (credentials, a human decision). This one is silent — nothing ever declared the
-   item blocked, it has just failed to close after repeated tries. The default threshold is 3
-   dead-end claims inside a 14-day window (reasoned default, not a human call — see
-   `claim_history.py`'s own docstring; the exact number was left `UNKNOWN` by this issue's PRD).
-   A dropped candidate is never silently missing from your report — name it explicitly
-   (issue number + the `count=` claim_history.py printed) the same way the `fleet:needs-human-op`
-   drops already are, so a human can decide whether it needs `fleet:needs-human-op` applied, a
-   priority downgrade, or nothing at all. Do not claim or spawn against a dropped candidate this
-   pass.
-
-   **This ordering is load-bearing, not cosmetic — gh#593.** Dead-end filter before Vision-link
-   gate, never the reverse: a permanently-blocked-but-linked candidate still counts as "an open
-   linked-KR candidate" for the gate's crowd-out rule until something removes it, which starves
-   every `Vision-link: none (maintenance)` candidate in the backlog on its behalf even though
-   it was about to be dropped one step later anyway (confirmed live 2026-09-06 on #570-572,
-   three straight zero-work passes). Filtering dead-ends first keeps doomed-but-linked
-   candidates from ever reaching the crowd-out rule.
+   Default threshold: 3 dead-end claims inside a 14-day window (reasoned default, not a human
+   call — see `claim_history.py`'s own docstring; the exact number was left `UNKNOWN` by this
+   issue's PRD).
 
    **Then gate the survivors on a Vision-link — gh#525.** A candidate is eligible only if its
    body or its newest COMMENT (any comment — `vision_link_gate.py` never checks labels, so a
@@ -228,14 +225,9 @@ spawns exactly one). Your job, in order:
    #  "dropped": [{"number":.., "reason":"no Vision-link line..." | "none (maintenance), but a
    #               linked-KR candidate is open: #.."}]}
    ```
-   This is a DIFFERENT signal from the `fleet:needs-human-op` filter above (that one is a label
-   a prior pass applied; this one is free text in the candidate's own spec) and from the
-   dead-end check above (that one is claim history; this one is content) — all three stack, in
-   this order: needs-human-op, then dead-end, then Vision-link.
-   **Never silently drop a candidate here** — name every one of `dropped`'s entries in your own
-   report by number and reason, the same way the `fleet:needs-human-op` filter's drops already
-   are (gh#3920 precedent). Only `eligible`'s candidates continue on to step 3's pack; a dropped
-   candidate is never claimed or spawned this pass.
+   Same "never silently drop" rule as above applies to every one of `dropped`'s entries — name
+   each by number and reason. Only `eligible`'s candidates continue on to step 3's pack; a
+   dropped candidate is never claimed or spawned this pass.
 
    **Within a tier, walk oldest-`createdAt`-first, never raw API order.** `gh issue list` with
    no explicit sort returns newest-created-first; since step 3's packer walks candidates
