@@ -138,6 +138,26 @@ if [ "$REMOTE_SHA" = "$LOCAL_SHA" ] && [ "$REMOTE_SHA" = "$LAST_DEPLOYED" ]; the
   exit 0  # quiet no-op tick -- nothing moved, nothing to log
 fi
 
+# gh#619: coalesce deploys. Every deploy cordons the fleet (FLEET_ENABLED=false) while in-flight
+# passes drain -- median 270s, p90 990s, ~18 times a day -- so main moving every few minutes cost
+# the fleet 4-17% of every day with no new passes starting. A runtime move that lands inside
+# FLEET_DEPLOY_MIN_INTERVAL_S of the last SUCCESSFUL deploy is deferred (logged once), and the
+# first tick after the window deploys everything that landed meanwhile in one drain. A failed
+# deploy does not stamp the window, so its retry is as immediate as before. Manual deploy.sh is
+# untouched. Set FLEET_DEPLOY_MIN_INTERVAL_S=0 in fleet.env to get the old deploy-every-move.
+DEPLOY_MIN_INTERVAL_S="${FLEET_DEPLOY_MIN_INTERVAL_S:-7200}"
+DEPLOYED_AT_FILE="$STATE.deployed_at"
+DEFER_FLAG="$STATE.deferring"
+LAST_DEPLOYED_AT="$(cat "$DEPLOYED_AT_FILE" 2>/dev/null || echo "")"
+NOW_S="$(date +%s)"
+if [[ "$LAST_DEPLOYED_AT" =~ ^[0-9]+$ ]] && [ $((NOW_S - LAST_DEPLOYED_AT)) -lt "$DEPLOY_MIN_INTERVAL_S" ]; then
+  if [ ! -f "$DEFER_FLAG" ]; then
+    log "main moved: remote=$REMOTE_SHA only $((NOW_S - LAST_DEPLOYED_AT))s after the last deploy -- COALESCING: deferring until FLEET_DEPLOY_MIN_INTERVAL_S=${DEPLOY_MIN_INTERVAL_S}s has elapsed; anything else that lands meanwhile rides the same deploy (gh#619)"
+    : > "$DEFER_FLAG"
+  fi
+  exit 0
+fi
+rm -f "$DEFER_FLAG"
 log "main moved: local=$LOCAL_SHA remote=$REMOTE_SHA -- pulling + deploying"
 # --ff-only, not a plain pull: this host checkout should never have local commits of its own
 # (it's a deploy target, not a dev workspace) -- if it ever diverges, that's a "stop and look",
@@ -172,6 +192,7 @@ exec 8>&-  # release the shared git lock before the (potentially half-hour) depl
 
 if FLEET_INSTANCE_DIR="${FLEET_INSTANCE_DIR:?set FLEET_INSTANCE_DIR}" bash "$KIT_DIR/scripts/deploy.sh" >> "$LOG" 2>&1; then
   echo "$REMOTE_SHA" > "$STATE"
+  date +%s > "$DEPLOYED_AT_FILE"
   log "deploy OK at $REMOTE_SHA"
 else
   log "DEPLOY FAILED at $REMOTE_SHA -- deploy.sh's own rollback already ran (blue untouched); see $LOG above for detail. NOT recording as last-deployed, will retry next tick."
