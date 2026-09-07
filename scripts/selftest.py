@@ -3648,9 +3648,12 @@ def _deploy_drains_inflight_passes():
     """
     src = (Path(__file__).parent / "deploy.sh").read_text()
     assert "drain_inflight_passes" in src, "no drain gate in deploy.sh"
-    i = src.find("drain_inflight_passes()")
-    j = src.find("log \"building $IMAGE")
-    assert i != -1 and j != -1 and i < j, "drain gate must run BEFORE the build/cutover"
+    # gh#625: the proxy-mode path (proxy_deploy, defined earlier in the file) builds without a
+    # drain on purpose -- it never stops the live container. The legacy stop-and-recreate path
+    # must still drain before it builds: anchor on the top-level drain CALL, not the definition.
+    i = src.find("\ndrain_inflight_passes\n")
+    j = src.find("log \"building $IMAGE", i)
+    assert i != -1 and j != -1 and i < j, "legacy drain gate must run BEFORE the build/cutover"
     # pgrep matches full command lines, so a bare `run_member.sh` pattern also matches the shell
     # podman spawns to run the check -- the gate would then see a pass forever and never deploy.
     assert "bash .*run_member[.]sh" in src, "drain pattern would self-match its own wrapper"
