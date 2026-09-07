@@ -35,11 +35,10 @@ spawns exactly one). Your job, in order:
    # {"headroom_fraction": .., "label": "ok", "per_diem_hourly_pct": 0.32, "reserved_pct": 0, ..}
    ```
    **`headroom_fraction` is not your allowance** -- it is a fleet-wide "is the week's bank
-   dry" gauge. Spend against `per_diem_hourly_pct` below. (Until 2026-08-26 this reader
-   emitted only the fraction, derived from ONE laptop session's pacing; a human mid-burn
-   pinned it to 0.0 and the build fleet sat idle for hours reporting QUIET while the real
-   hourly slice was healthy. If it ever reads exactly 0.0 again with `label: ok`, check
-   `week_bank_pct` before believing the week is actually spent.)
+   dry" gauge. Spend against `per_diem_hourly_pct` below. (A stale pin can make this read
+   exactly `0.0` with `label: ok` even when the real hourly slice is healthy — 2026-08-26
+   incident. If it ever reads exactly 0.0, check `week_bank_pct` before believing the week
+   is actually spent.)
    **Do not compute your allowance yourself — run the script.** This charter's own rule below
    ("you are provably bad at this arithmetic") applied to the allowance formula too, and it was
    wrong here for two years' worth of reasons in one line. Ask for the number:
@@ -68,9 +67,7 @@ spawns exactly one). Your job, in order:
    which is what this dial always claimed to mean.
 
    **Keep it a multiply, never a `min()`, and feed it headroom, never consumption.** A prior
-   version of this formula did both wrong at once (multiplied the hour's burn-so-far instead of
-   remaining headroom, then took `min()` of the two fractions instead of multiplying them) and
-   the bug was invisible from the outside: gru silently claimed the instance's entire slice
+   version got both wrong at once, invisibly: gru silently claimed the instance's entire slice
    while every other member's dial read as configured but did nothing (Reif, 2026-09-02). If you
    ever touch this formula, verify a dial change actually moves the printed number before
    trusting it — the same check jefe's charter runs on the fleet-wide dials.
@@ -108,13 +105,11 @@ spawns exactly one). Your job, in order:
    exhausting the pool. Whatever causes a decline is upstream of N.
 
    **Before doing steps 2-3's real work, check whether you already know the answer is zero.**
-   12 consecutive hourly passes, 2026-09-03 12:03 through 2026-09-04 22:04 UTC (`fleet.db`:
-   every `member='gru'` row in that window is `status='quiet'`, $0.48-0.77 each, ~$6.90 total),
-   each still spent the full ranking pull (`gh issue list ... --limit 200`) plus a
-   `fanout.py`/`cost_bridge.py` invocation to re-derive an `n=0` the PRIOR pass had already
-   shown, because the underlying blocker (maxx's `week_bank_pct`, filed needs-human-op at
-   gh#361) had not moved. That is real, avoidable spend during a drought this member cannot
-   fix itself. Check first, cheaply:
+   A blocked-budget drought (maxx's `week_bank_pct`, needs-human-op at gh#361) can persist for
+   many consecutive hourly passes; each one still re-spending the full ranking pull plus a
+   `fanout.py`/`cost_bridge.py` call to re-derive an `n=0` the PRIOR pass had already shown is
+   real, avoidable spend during a drought this member cannot fix itself (12 such passes cost
+   ~$6.90 for nothing, 2026-09-03/04). Check first, cheaply:
    ```
    sqlite3 "$FLEET_LOG_DIR/fleet.db" \
      "SELECT status FROM runs WHERE member='gru' ORDER BY recorded_at DESC LIMIT 6"
@@ -247,10 +242,8 @@ spawns exactly one). Your job, in order:
    front-to-back and never looks past what the hour's budget covers, that default order makes
    an old item's odds of ever being built purely a function of how many same-tier items happened
    to be filed after it — pure filing-order luck, not merit, even though marie ranked it
-   correctly. Documented in gh#360 (evidence gathered 2026-09-03): `#64` (filed 2026-08-25,
-   `fleet:priority-high` + `fleet:prd`, a build-ready spec) sat at position 22 of 23 in the high
-   tier and was still unclaimed 10 days later when this fix landed, purely because newer
-   high-priority items kept landing ahead of it. The
+   correctly (gh#360: a build-ready high-priority spec sat unclaimed 10 days, buried at position
+   22 of 23 in its tier, purely because newer same-tier items kept landing ahead of it). The
    `sort_by(.createdAt)` above fixes this — it only reorders WITHIN a tier (high still always
    precedes medium/low) and never drops or blocks a newer item, it just queues behind older
    same-tier work until the hour's budget reaches it.
@@ -307,10 +300,8 @@ spawns exactly one). Your job, in order:
    comes next — including one filed days after the one it skipped. Nothing shrinks the front of
    the queue when that happens, so a moderately-sized old item can be correctly first-in-line
    and still never ship: it just loses the same crumbs to a smaller, younger item every single
-   hour. Confirmed live 2026-09-05 (gh#427): `#225` (complexity-3, filed 08-29) was the first
-   entry in `skipped` in three straight passes while `#347` (complexity-1, filed 09-03, five
-   days younger) got chosen in that same pack() call purely because it was small enough to fit
-   what `#225` didn't.
+   hour (confirmed live 2026-09-05, gh#427 — a complexity-3 item sat first-in-`skipped` for three
+   straight passes while smaller, days-younger items kept getting chosen instead).
 
    Check: is the first entry in THIS pass's `skipped` list the same issue number as the first
    `skipped` entry in each of your previous 2 passes? Read those from `runs.jsonl`, not
@@ -446,6 +437,8 @@ spawns exactly one). Your job, in order:
 
 ## Report
 
-Your runway read, the priority call you made and your reasoning, and a one-line result per minion spawned (PR #, "already fixed", or "failed: reason"). A minion that never reports back (crashed, hung) is a FAILURE you name explicitly, not a silent gap in the summary. Any candidate step 2's dead-end check dropped for dead-ending past the threshold is named too (issue number + observed count) — never a silent absence from the candidate set. Same for every candidate step 2's Vision-link gate dropped (issue number + which branch of gh#525's rule failed it) — never a silent absence there either.
+The combined report step 7 already specifies (runway, priority call, one-line result per
+minion, every step-2 dead-end/Vision-link drop named by number) — nothing here adds to that
+list, this section only fixes the shape it must be written in.
 
 **Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.
