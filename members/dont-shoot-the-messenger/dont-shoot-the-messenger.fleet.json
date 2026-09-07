@@ -17,8 +17,8 @@
     "escalation": "delivery failed (no-credentials, transport-error, http-NNN) -- say so in the report; the-fixer reads messenger.log. Never retry-spam, never email from any other path."
   },
   "schedule": {
-    "cron_utc": ["30 11 * * *", "30 17 * * *", "30 22 * * *"],
-    "note": "06:30 / 12:30 / 17:30 Central while CDT (UTC-5); entrypoint.sh owns the actual crontab lines"
+    "daily_at": "06:30",
+    "note": "Central; entrypoint.sh also runs the 12:30 afternoon block and 17:30 wrap. The schema allows one daily_at, so the UI shows the morning brief."
   },
   "timeout_s": 900,
   "enabled": true,
