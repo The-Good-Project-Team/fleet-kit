@@ -3718,6 +3718,94 @@ def _one_deploy_at_a_time_and_a_countable_drain():
     assert "tr -cd '0-9'" in line, "in-flight count is not sanitised to digits"
 
 
+def _auto_deploy_sh_coalesces_main_moves_inside_the_min_interval():
+    """gh#619: a main move landing inside FLEET_DEPLOY_MIN_INTERVAL_S of the last successful
+    deploy is deferred (one log line, not one per 5-minute tick) and deployed by the first tick
+    after the window; a move after the window deploys at once; FLEET_DEPLOY_MIN_INTERVAL_S=0 in
+    fleet.env restores deploy-every-move.
+
+    Every deploy cordons the fleet while passes drain (median 270s, p90 990s, ~18/day), so
+    deploying on every one of main's ~25 daily moves idled the fleet 4-17% of each day. Runs
+    the REAL auto_deploy.sh against a git fixture with a stubbed deploy.sh, same harness shape
+    as the gh#278 self-heal check.
+    """
+    import os
+    import subprocess
+
+    def git(repo, *args, check=True):
+        return subprocess.run(["git", *args], cwd=repo, check=check, capture_output=True, text=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        origin = tmp / "origin.git"
+        git(tmp, "init", "-q", "--bare", "-b", "main", str(origin))
+        seed = tmp / "seed"
+        seed.mkdir()
+        for cmd in (("init", "-q", "-b", "main"), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(seed, *cmd)
+        git(seed, "remote", "add", "origin", str(origin))
+        (seed / "scripts").mkdir()
+        (seed / "scripts" / "auto_deploy.sh").write_text((ROOT / "scripts" / "auto_deploy.sh").read_text())
+        (seed / "scripts" / "deploy.sh").write_text('#!/bin/bash\necho "DEPLOY STUB OK"\necho x >> "${DEPLOY_STUB_MARKER:?}"\n')
+        (seed / "scripts" / "deploy.sh").chmod(0o755)
+        (seed / "foo.txt").write_text("v1\n")
+        git(seed, "add", "-A"); git(seed, "commit", "-q", "-m", "init"); git(seed, "push", "-q", "origin", "main")
+
+        checkout = tmp / "host"
+        git(tmp, "clone", "-q", str(origin), str(checkout))
+        instance = tmp / "instance"; instance.mkdir()
+        marker = tmp / "deploys"
+        home = tmp / "home"
+        state = home / ".cache" / "fleet-kit" / "auto_deploy.last_sha.test"
+
+        def tick(env_lines=""):
+            (instance / "fleet.env").write_text(env_lines)
+            env = dict(os.environ)
+            env.pop("FLEET_DEPLOY_MIN_INTERVAL_S", None)
+            env.update(HOME=str(home), FLEET_LOG_DIR=str(tmp / "logs"), FLEET_CONTAINER_NAME="test",
+                       FLEET_INSTANCE_DIR=str(instance), DEPLOY_STUB_MARKER=str(marker))
+            proc = subprocess.run(["bash", str(checkout / "scripts" / "auto_deploy.sh")], cwd=checkout,
+                                  env=env, capture_output=True, text=True, timeout=30)
+            assert proc.returncode == 0, f"auto_deploy.sh failed: {proc.stderr[:300]}"
+            log = tmp / "logs" / "auto_deploy.log"
+            return log.read_text() if log.exists() else ""
+
+        def deploys():
+            return len(marker.read_text().splitlines()) if marker.exists() else 0
+
+        def push(n):
+            (seed / "foo.txt").write_text(f"v{n}\n"); git(seed, "commit", "-aq", "-m", f"move {n}"); git(seed, "push", "-q", "origin", "main")
+
+        # First move ever: nothing recorded, deploys immediately and stamps the window.
+        push(2)
+        tick()
+        assert deploys() == 1, "first move did not deploy"
+        assert (state.parent / "auto_deploy.last_sha.test.deployed_at").exists(), "deploy did not stamp deployed_at"
+
+        # Second move 1s later: inside the window -> deferred, logged ONCE across two ticks.
+        push(3)
+        log = tick()
+        assert deploys() == 1, "a move inside FLEET_DEPLOY_MIN_INTERVAL_S deployed anyway (gh#619)"
+        assert log.count("COALESCING") == 1, f"expected one coalescing line: {log!r}"
+        log = tick()
+        assert deploys() == 1 and log.count("COALESCING") == 1, \
+            f"second tick inside the window re-deployed or re-logged: deploys={deploys()} log={log!r}"
+
+        # Window elapsed (stamp aged past the default 7200s): first tick deploys, picking up the move.
+        stamp = state.parent / "auto_deploy.last_sha.test.deployed_at"
+        stamp.write_text(str(int(time.time()) - 7201) + "\n")
+        tick()
+        assert deploys() == 2, "move was not deployed once the window elapsed"
+        assert git(checkout, "rev-parse", "HEAD").stdout.strip() == git(seed, "rev-parse", "HEAD").stdout.strip(), \
+            "host checkout did not land on origin/main after the coalesced deploy"
+        assert not (state.parent / "auto_deploy.last_sha.test.deferring").exists(), "defer flag not cleared after deploy"
+
+        # Opt-out: FLEET_DEPLOY_MIN_INTERVAL_S=0 in fleet.env -> deploy-every-move, as before.
+        push(4)
+        tick("FLEET_DEPLOY_MIN_INTERVAL_S=0\n")
+        assert deploys() == 3, "FLEET_DEPLOY_MIN_INTERVAL_S=0 did not restore deploy-every-move"
+
+
 def _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in():
     """gh#278: 3 confirmed occurrences (gh#245, gh#275, gh#278 itself) of the diverged-HEAD ABORT
     were all a squash-merged/rebased branch tip whose TREE already matched origin/main byte-for-
@@ -8661,6 +8749,7 @@ if __name__ == "__main__":
     check("deploy drains in-flight passes before cutover", _deploy_drains_inflight_passes)
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
     check("auto_deploy.sh self-heals a content-identical diverged HEAD only when opted in", _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in)
+    check("auto_deploy.sh coalesces main moves inside FLEET_DEPLOY_MIN_INTERVAL_S (gh#619)", _auto_deploy_sh_coalesces_main_moves_inside_the_min_interval)
     check("git_pull_guard.sh self-heals a stray branch and leaves a normal pull unchanged", _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged)
     check("git_pull_guard.sh serializes via a lock on the .git directory", _git_pull_guard_serializes_via_a_lock_on_the_git_directory)
     check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
