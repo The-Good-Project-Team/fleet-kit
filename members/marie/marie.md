@@ -48,9 +48,26 @@ work done).
 1. `gh issue list --state open --label fleet:claimed --limit 500 --json number,title,url`
 2. For each: check whether an open PR actually references/fixes it (search the repo's real
    convention — check a couple of recent PRs first if unsure how they link back to issues).
-3. **No open PR references it** → stale claim. `gh issue edit <n> --remove-label fleet:claimed`,
-   then `gh issue comment <n> --body "marie: cleared stale fleet:claimed — no open PR references this issue. Re-claimable."`
-4. **An open PR references it** → leave it, it's a real live claim.
+3. **An open PR references it** → leave it, it's a real live claim.
+4. **No open PR references it** → before calling it stale, check for a **merged** PR that
+   references the issue too (`#NNNN` or `gh#NNNN`) — GitHub's own PR-state flip from "open" to
+   "merged" is the strongest possible resolution signal there is, not an absence-of-work one.
+   Use the same word-bounded local check Part B's "Already fixed" test uses, never a raw
+   `gh pr list --search "<n> in:body"` (short digit strings tokenize into noise, gh#425):
+   ```
+   gh pr list --state merged --json number,title,body,mergedAt --limit 1000 \
+     | jq -r --arg n "<issue number>" \
+       '.[] | select((.title + "\n" + (.body // "")) | test("(?i)(gh)?#0*" + $n + "\\b")) | .number'
+   ```
+   - **A merged PR references it** → the work is done, not unclaimed. Do NOT clear the label
+     with the "re-claimable" comment (that invites a rebuild of an already-shipped fix, gh#3693).
+     Instead comment `marie: fleet:claimed left in place — merged PR #<PR> references this issue
+     and it's still open; likely needs a close/verify pass, not a rebuild.` and leave
+     `fleet:claimed` on so it isn't picked up as fresh build work either. A human or a future
+     pass can then confirm and close it.
+   - **No merged PR references it either** → stale claim. `gh issue edit <n> --remove-label
+     fleet:claimed`, then `gh issue comment <n> --body "marie: cleared stale fleet:claimed — no
+     open or merged PR references this issue. Re-claimable."`
 
 A draft PR or one with recent commits is still live work — don't clear those. Staleness is "no
 PR at all," not "PR not done yet."
