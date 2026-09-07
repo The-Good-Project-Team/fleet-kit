@@ -50,7 +50,13 @@ set -uo pipefail
 unset FLEET_API_KEY
 
 KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-REPO="${FLEET_REPO:?set FLEET_REPO in fleet.env}"
+# Exported (not just a local shell var): gh#592's worktree_guard_hook.py runs as a PreToolUse
+# hook, a SEPARATE subprocess `claude -p` spawns per tool call -- it can only see $REPO/$WT_PATH
+# by inheriting them from this process's environment, the same way any other exported var
+# reaches a child. Neither was exported before gh#592 (confirmed: nothing in this file did),
+# which is exactly the "authoritative env var name" that issue's own PRD flagged as UNKNOWN --
+# these are the real names, just never exported until now.
+export REPO="${FLEET_REPO:?set FLEET_REPO in fleet.env}"
 LOG_DIR="${FLEET_LOG_DIR:-$HOME/Library/Logs/fleet-kit}"
 mkdir -p "$LOG_DIR"
 
@@ -289,7 +295,13 @@ fi
 # the fix (fresh `git worktree add` off origin/<default>, same mkdir-lock pattern reused
 # verbatim below) -- this just gives the generic member path the isolation persona_law.md #6
 # already calls LAW and minion's own charter already claims it gets.
-WT_PATH=""
+#
+# Exported empty-by-default (see the $REPO export above for why): gh#592's worktree_guard_hook
+# reads an EMPTY $WT_PATH as its own exemption signal ("this pass isn't worktree-isolated" --
+# llm.worktree=false, e.g. jefe's advisory pass, never enters the block below and WT_PATH stays
+# ""). Exporting the empty default, not just the populated value further down, means that
+# exemption is real rather than the hook seeing an unset var by accident on the exempt path.
+export WT_PATH=""
 if [ "$WORKTREE_ENABLED" = "True" ] && [ "$DRY_RUN" -ne 1 ]; then
   DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
   DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
