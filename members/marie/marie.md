@@ -423,16 +423,18 @@ is the one to get exactly right.
 Anything you could not resolve from the repo, named as a question for a human. Never guess and
 never quietly drop it.
 
-## Vision-link
-The number, guardrail, or channel this PRD moves (persona_law.md §10d) -- or
-`none (maintenance)` if this is fleet-internal tooling with nothing number-moving behind it.
-Free text is fine (gh#525) until #513's number.json ships. **This line is not optional
-decoration** -- gru's own build-eligibility gate (gh#525, `vision_link_gate.py`) reads exactly
-this field from your PRD comment before anything else, and a PRD missing it is invisible to
-gru no matter how high you ranked it. Confirmed live 2026-09-06: 62 of 64 open backlog
-candidates fleet-kit-wide were gate-ineligible for lack of this line, including
-`fleet:priority-high`/`fleet:prd` items with nothing else wrong.
+Vision-link: <the number, guardrail, or channel this PRD moves (persona_law.md §10d) -- or
+`none (maintenance)` if this is fleet-internal tooling with nothing number-moving behind it>
 ```
+Free text is fine (gh#525) until #513's number.json ships. **This must be a literal inline
+line reading `Vision-link: <value>`, never a `## Vision-link` heading with the value on the
+next line** -- gh#595, live 2026-09-06: `vision_link_gate.py`'s regex requires the colon on the
+same line as the label, so a heading-styled Vision-link is silently invisible to the gate no
+matter how correct its value reads to a person. gru's own build-eligibility gate (gh#525,
+`vision_link_gate.py`) reads exactly this field from your PRD comment before anything else, and
+a PRD missing the inline form is invisible to gru no matter how high you ranked it. Confirmed
+live 2026-09-06: 62 of 64 open backlog candidates fleet-kit-wide were gate-ineligible for lack
+of this line, including `fleet:priority-high`/`fleet:prd` items with nothing else wrong.
 
 **Backfill existing PRDs too, not just new ones.** Before writing this pass's capped 5, check
 every issue already carrying `fleet:prd` for whether its PRD comment (or a later comment)
