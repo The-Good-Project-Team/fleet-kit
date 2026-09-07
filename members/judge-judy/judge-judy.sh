@@ -101,36 +101,6 @@ unqueue_pr() { # <pr>
   log "PR #$1: dequeued + auto-merge disarmed (blocked)"
 }
 
-# The BLOCK path, one function: the model's verdict and the deterministic closes gate (fk#629)
-# both land here, so a gate block is posted, unqueued and filed exactly like a review block.
-post_block() {
-    gh pr comment "$PR" --body "**fleet-code-review: BLOCK** (local claude, model=$MODEL, head ${HEAD_SHA:0:12})
-
-$FINDINGS" >/dev/null 2>&1 || log "PR #$PR: WARN findings comment failed"
-    post_status "$HEAD_SHA" "failure" "Code review found blocking issues -- see PR comment" \
-      && log "PR #$PR: BLOCKED -- status + findings posted" \
-      || log "PR #$PR: WARN blocked but status POST failed"
-    unqueue_pr "$PR"
-
-    # gh#5: nothing downstream ever read a block verdict, so a blocked PR just sat until a
-    # human noticed. Reif's decision (quoted on gh#5): don't build a dedicated "fix" persona,
-    # file a priority-1 backlog item instead so gru's normal build lane picks it up like any
-    # other item. Filing failure must never crash this tick (`||` here, not `set -e`) -- the
-    # review verdict itself already landed above; this is best-effort follow-through.
-    FIX_SUMMARY=$(printf '%s' "$FINDINGS" | head -1 | cut -c1-80)
-    FIX_TITLE="fix: PR #$PR failed code review"
-    [ -n "$FIX_SUMMARY" ] && FIX_TITLE="$FIX_TITLE -- $FIX_SUMMARY"
-    FIX_BODY="judge-judy blocked PR #$PR at head ${HEAD_SHA:0:12} (fleet-code-review: failure).
-
-$FINDINGS"
-    python3 "$KIT_DIR/scripts/board_github.py" file "$FIX_TITLE" --context "$FIX_BODY" \
-        --priority high >>"$LOG" 2>&1 \
-      && log "PR #$PR: filed fix item for blocked review" \
-      || log "PR #$PR: WARN failed to file fix item for blocked review"
-
-    report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "blocked PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: failure, see PR comment" "$SELF_CRITIQUE"
-}
-
 post_status() { # <sha> <state> <description>
   timeout 25s gh api -X POST "repos/${REPO_SLUG}/statuses/$1" \
     -f state="$2" -f context="$CONTEXT" -f description="${3:0:139}" >/dev/null 2>&1
@@ -348,12 +318,12 @@ except Exception: print("")' 2>/dev/null)
 This PR closes an issue it does not finish (closes_gate.py, fk#629). Change the closing keyword to \`Part of #N\` and list what remains under a \`Remaining:\` line. The issue closes when every acceptance criterion has evidence."
     echo '{}' > "$USAGE_FILE"
     SELF_CRITIQUE="none -- deterministic closes gate, no model call"
+    VERDICT="VERDICT: block"
     log "PR #$PR: closes gate BLOCK -- $(printf '%s' "$FINDINGS" | head -1 | cut -c1-120)"
-    post_block
-    cleanup_pass
-    [ -n "$EXPLICIT_PR" ] && break
-    continue
   fi
+  # The model review runs only when the gate did not already decide; either way the verdict
+  # lands in the ONE approve/block handler below (status, comment, unqueue, fix item, report).
+  if [ "$GATE_VERDICT" != "block" ]; then
 
   LEASE_ID=""
   if [ -n "${FLEET_SHARE_CEILING_PCT:-}" ]; then
@@ -463,6 +433,8 @@ This reflects a parse/format issue in the reviewer's own output, not a finding a
   rm -f "$STRIKE_FILE" "$STRIKE_DIR/pr-${PR}-${HEAD_SHA}".strike*.raw
   SELF_CRITIQUE="none -- clean single-pass verdict"
   [ "${PRIOR_STRIKES:-0}" -gt 0 ] && SELF_CRITIQUE="needed $PRIOR_STRIKES parse-strike(s) at this head before producing a parseable verdict (see gh#221) -- not a finding about the diff, a format miss on my own output"
+
+  fi  # end of the model-review section (closes gate may have set VERDICT already)
 
   if [ "$VERDICT" = "VERDICT: approve" ]; then
     post_status "$HEAD_SHA" "success" "Code review passed (local claude, model=$MODEL)" \

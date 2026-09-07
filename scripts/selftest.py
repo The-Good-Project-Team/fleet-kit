@@ -3851,7 +3851,8 @@ def _judge_runs_the_closes_gate_and_reads_the_issue():
     js = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
     gate = js.index('closes_gate.py" "$PR"'); call = js.index('claude -p "$PROMPT"')
     assert gate < call, "closes gate must run before the review model call"
-    assert js.count("post_block") >= 3 and "post_block() {" in js, "gate and review blocks must share post_block()"
+    assert 'VERDICT="VERDICT: block"' in js[gate:call], "a gate block must set the verdict the shared handler reads"
+    assert 'if [ "$GATE_VERDICT" != "block" ]; then' in js[gate:call], "the model call must be skipped when the gate blocked"
     assert "EVERY acceptance criterion" in js and "freshman 101" in js, "prompt lacks the acceptance/plain-language rules"
     md = (ROOT / "members" / "judge-judy" / "judge-judy.md").read_text()
     assert "{{ISSUE_INTENT}}" in md and "EVERY acceptance criterion" in md, "judge-judy.md is out of sync with the prompt"
