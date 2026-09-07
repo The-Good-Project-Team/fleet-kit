@@ -43,6 +43,11 @@ ACCOUNT_POOL_STATE_FILE="${ACCOUNT_POOL_STATE_FILE:-${FLEET_LOG_DIR:-$HOME/Libra
 # than an easy human tolerance for a bad string of ticks."
 ACCOUNT_POOL_STREAK_FILE="${ACCOUNT_POOL_STREAK_FILE:-${ACCOUNT_POOL_STATE_FILE}.streaks}"
 ACCOUNT_POOL_OTHER_FAILURE_THRESHOLD="${ACCOUNT_POOL_OTHER_FAILURE_THRESHOLD:-3}"
+# gh#616: per-account maxx week_reset cache -- "<account> <week_reset_epoch> <fetched_epoch>"
+# per line. _account_pool_order reads it (refreshing via maxx_budget when older than the TTL)
+# so HEALTHY accounts are also ordered soonest-reset-first, not just ones that already failed.
+ACCOUNT_POOL_WEEK_RESET_CACHE="${ACCOUNT_POOL_WEEK_RESET_CACHE:-${ACCOUNT_POOL_STATE_FILE}.week-reset}"
+ACCOUNT_POOL_WEEK_RESET_TTL="${ACCOUNT_POOL_WEEK_RESET_TTL:-600}"
 
 _account_pool_log() {
   mkdir -p "$(dirname "$ACCOUNT_POOL_LOG_FILE")" 2>/dev/null
@@ -261,8 +266,57 @@ _account_pool_budget_verdict() {
 #
 # Any malformed epoch is treated as never-gated rather than sorted as garbage -- an unreadable
 # state file must never reorder the pool into nonsense.
+# _account_pool_week_reset <account> -- print the epoch this account's WEEKLY window resets
+# at, or nothing if unknowable. Source of truth is maxx_budget.week_reset for the account's
+# FLEET_MAXX_HANDLE_<ACCOUNT>/FLEET_MAXX_KEY_<ACCOUNT> pair (same mapping resolve_maxx_handle.sh
+# uses). Cached in $ACCOUNT_POOL_WEEK_RESET_CACHE for $ACCOUNT_POOL_WEEK_RESET_TTL seconds so a
+# pass does not pay one curl per account per call; a stale cache line is still used when maxx
+# is unreachable (an old reset time beats no reset time -- it only moves once a week).
+#
+# WHY (gh#616, Reif 2026-09-07): the exhausted-state file only learns a reset when an account
+# FAILS, so two healthy accounts always ran in FLEET_ACCOUNTS order and the first-listed one was
+# drained every week while the other's window lapsed with ~60% unspent. maxx already knows both
+# week_reset epochs; this reads them.
+_account_pool_week_reset() {
+  local account="$1" now sfx hvar kvar handle key line epoch fetched out
+  now=$(date +%s)
+  epoch=""; fetched=""
+  if [ -f "$ACCOUNT_POOL_WEEK_RESET_CACHE" ]; then
+    line=$(awk -v a="$account" '$1==a' "$ACCOUNT_POOL_WEEK_RESET_CACHE" 2>/dev/null | tail -1)
+    epoch=$(awk '{print $2}' <<<"$line"); fetched=$(awk '{print $3}' <<<"$line")
+    [[ "$epoch" =~ ^[0-9]+$ ]] || epoch=""
+    if [ -n "$epoch" ] && [[ "$fetched" =~ ^[0-9]+$ ]] && [ $((now - fetched)) -lt "$ACCOUNT_POOL_WEEK_RESET_TTL" ]; then
+      echo "$epoch"; return 0
+    fi
+  fi
+  sfx=$(echo "$account" | tr '[:lower:]-' '[:upper:]_')
+  hvar="FLEET_MAXX_HANDLE_$sfx"; kvar="FLEET_MAXX_KEY_$sfx"
+  handle="${!hvar:-}"; key="${!kvar:-}"
+  if [ -n "${FLEET_MAXX_URL:-}" ] && [ -n "$handle" ]; then
+    out=$(curl -s --max-time 8 -X POST "$FLEET_MAXX_URL/mcp?handle=$handle&k=$key" \
+      -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"maxx_budget","arguments":{}}}' 2>/dev/null)
+    local fresh
+    fresh=$(python3 -c 'import json,sys
+d=json.load(sys.stdin); t=json.loads(d["result"]["content"][0]["text"]); v=t.get("week_reset")
+print(int(v)) if v else None' <<<"$out" 2>/dev/null)
+    if [[ "$fresh" =~ ^[0-9]+$ ]]; then
+      epoch="$fresh"
+      mkdir -p "$(dirname "$ACCOUNT_POOL_WEEK_RESET_CACHE")" 2>/dev/null
+      { [ -f "$ACCOUNT_POOL_WEEK_RESET_CACHE" ] && grep -v "^${account} " "$ACCOUNT_POOL_WEEK_RESET_CACHE"
+        echo "$account $epoch $now"; } > "${ACCOUNT_POOL_WEEK_RESET_CACHE}.tmp" 2>/dev/null
+      mv "${ACCOUNT_POOL_WEEK_RESET_CACHE}.tmp" "$ACCOUNT_POOL_WEEK_RESET_CACHE" 2>/dev/null
+      _account_pool_log "account=$account maxx week_reset=$epoch (in $((epoch - now))s)"
+    else
+      _account_pool_log "account=$account maxx week_reset unreadable, using cached=${epoch:-none}"
+    fi
+  fi
+  [ -n "$epoch" ] && echo "$epoch"
+  return 0
+}
+
 _account_pool_order() {
-  local account epoch now known="" lapsed="" unknown=""
+  local account epoch now wr known="" lapsed="" weekly="" unknown=""
   now=$(date +%s)
   for account in $ACCOUNT_POOL_ORDER; do
     epoch=""
@@ -274,12 +328,19 @@ _account_pool_order() {
     elif [[ "$epoch" =~ ^[0-9]+$ ]]; then
       lapsed="${lapsed}${epoch} ${account}"$'\n'
     else
-      unknown="${unknown}${account}"$'\n'
+      # gh#616: healthy account -- ask maxx when its WEEK resets and sort on that.
+      wr=$(_account_pool_week_reset "$account")
+      if [[ "$wr" =~ ^[0-9]+$ ]]; then
+        weekly="${weekly}${wr} ${account}"$'\n'
+      else
+        unknown="${unknown}${account}"$'\n'
+      fi
     fi
   done
   {
     [ -n "$known" ] && printf '%s' "$known" | sort -n | awk '{print $2}'
     [ -n "$lapsed" ] && printf '%s' "$lapsed" | sort -n | awk '{print $2}'
+    [ -n "$weekly" ] && printf '%s' "$weekly" | sort -n | awk '{print $2}'
     [ -n "$unknown" ] && printf '%s' "$unknown"
   } | grep -v '^$' || true
 }
