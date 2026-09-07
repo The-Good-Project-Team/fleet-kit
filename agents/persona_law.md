@@ -258,6 +258,13 @@ the issue link belongs in the body (`Fixes #NNNN`), where it is clickable and do
 characters a person is trying to read. Keep a conventional-commit prefix ONLY where a repo's own
 tooling parses it; this fleet's does not.
 
+**See it.** A PR that changes anything a person can see carries one line, `See it: <URL>`, with
+the live page where the change is visible once deployed (the path is enough if the host is
+obvious: `See it: /990/who-funds/education`). Reif, 2026-09-07, reading the morning brief: *"I
+need to have the urls to actually see what you mean."* A PR with no page a person can open
+writes `See it: (internal)`. judge-judy blocks a PR that touches templates, static files or a
+route without this line.
+
 **Every PR body opens with these two blocks, before any technical detail:**
 
 ```
