@@ -5206,10 +5206,20 @@ def _datta_dispatches_and_nerds_analyse():
     # topic without telling a pass what to actually do, which is how a lane ends up filing
     # "nothing new" forever.
     import re as _re
-    for lane in ("growth", "searchquality", "ui", "datadog", "devops", "lens", "revenue"):
+    _LANES = ("growth", "searchquality", "ui", "datadog", "devops", "lens", "revenue")
+    for lane in _LANES:
         i = nerd.find(f"**{lane}** \u2014")
         assert i != -1, f"{lane} lost its checklist heading"
-        j = nerd.find("\n\n**", i + 5)
+        # Bound the section on the NEXT LANE heading, not on any bold text -- a lane's own
+        # inline "**On fleet-kit specifically...**" aside is still part of its checklist, not
+        # a new section, and a naive "next bold paragraph" scan would truncate on it.
+        j = -1
+        for other in _LANES:
+            idx = nerd.find(f"**{other}** \u2014", i + 5)
+            if idx != -1 and (j == -1 or idx < j):
+                j = idx
+        if j == -1:
+            j = nerd.find("## Never build the fix", i + 5)
         body = nerd[i:j if j > 0 else i + 1200]
         assert len(body.split()) >= 90, f"{lane} checklist thinned back to a topic label"
     # The two failure modes every lane shares, stated where the pass will read them.
@@ -5384,12 +5394,19 @@ def _nerd_structural_na_marker_wires_to_datta_downrank():
     datta = (root / "members" / "datta" / "datta.md").read_text()
 
     for lane in ("growth", "searchquality", "revenue"):
-        # Each of these three lanes has TWO headings: the generic source-fleet checklist
-        # (nonprofit-atlas-shaped) earlier in the file, and fleet-kit's own N/A override
-        # paragraph later -- rfind gets the fleet-kit-specific one this issue targets.
-        heading = nerd.rfind(f"**{lane}** —")
+        # Each lane now has ONE heading (this PR consolidated the generic source-fleet
+        # checklist and fleet-kit's own N/A override into a single section, no more duplicated
+        # header) -- bound the search on the lane's own section, not a fixed char window, since
+        # how much generic checklist precedes the fleet-kit-specific N/A aside varies per lane.
+        heading = nerd.find(f"**{lane}** —")
         assert heading != -1, f"{lane} lost its fleet-kit-native N/A paragraph"
-        body = nerd[heading:heading + 1600]
+        next_heading = -1
+        for other in ("growth", "searchquality", "ui", "datadog", "devops", "lens", "revenue"):
+            idx = nerd.find(f"**{other}** —", heading + 5)
+            if idx != -1 and (next_heading == -1 or idx < next_heading):
+                next_heading = idx
+        end = next_heading if next_heading > heading else nerd.find("## Never build the fix", heading + 5)
+        body = nerd[heading:end if end > heading else heading + 1600]
         assert "STRUCTURAL-N/A" in body, \
             f"{lane}'s N/A paragraph never tells nerd to emit the marker datta.md keys on (gh#451)"
     assert "startswith(\"STRUCTURAL-N/A\")" in datta or "starts with the literal marker" in datta, \
