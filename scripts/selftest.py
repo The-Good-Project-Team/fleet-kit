@@ -3648,9 +3648,12 @@ def _deploy_drains_inflight_passes():
     """
     src = (Path(__file__).parent / "deploy.sh").read_text()
     assert "drain_inflight_passes" in src, "no drain gate in deploy.sh"
-    i = src.find("drain_inflight_passes()")
-    j = src.find("log \"building $IMAGE")
-    assert i != -1 and j != -1 and i < j, "drain gate must run BEFORE the build/cutover"
+    # gh#625: the proxy-mode path (proxy_deploy, defined earlier in the file) builds without a
+    # drain on purpose -- it never stops the live container. The legacy stop-and-recreate path
+    # must still drain before it builds: anchor on the top-level drain CALL, not the definition.
+    i = src.find("\ndrain_inflight_passes\n")
+    j = src.find("log \"building $IMAGE", i)
+    assert i != -1 and j != -1 and i < j, "legacy drain gate must run BEFORE the build/cutover"
     # pgrep matches full command lines, so a bare `run_member.sh` pattern also matches the shell
     # podman spawns to run the check -- the gate would then see a pass forever and never deploy.
     assert "bash .*run_member[.]sh" in src, "drain pattern would self-match its own wrapper"
@@ -3716,6 +3719,48 @@ def _one_deploy_at_a_time_and_a_countable_drain():
     line = dep[i:dep.find("\n", i)]
     assert "|| echo 0" not in line, "`|| echo 0` on pgrep -c yields '0\\n0', which never equals 0"
     assert "tr -cd '0-9'" in line, "in-flight count is not sanitised to digits"
+
+
+def _deploy_sh_rolls_over_via_caddy_without_a_cordon():
+    """gh#625: on a caddy-fronted box deploy.sh cuts over by swapping the proxy upstream, never
+    by cordoning the fleet and draining passes. Pins (a) the proxy path runs INSTEAD of
+    drain_inflight_passes, (b) caddy_swap rewrites only this instance's two upstreams -- exact
+    port match, a sibling instance's 8571 on the same Caddyfile untouched, same inode -- and
+    (c) the retired build is left running with its cron disabled and a reaper spawned, not
+    stopped at cutover.
+    """
+    import subprocess
+    src = (ROOT / "scripts" / "deploy.sh").read_text()
+    gate = src.find("if proxy_mode; then")
+    assert gate != -1, "deploy.sh has no proxy_mode gate (gh#625)"
+    assert src.find("\ndrain_inflight_passes\n") > gate, "drain must be reachable only on the legacy path, after the proxy gate"
+    body = src[src.index("proxy_deploy() {"):src.index("proxy_rollback() {")]
+    assert "disable_cron_in \"$CONTAINER\"" in body and "spawn_reaper" in body, "retired build must keep running: cron disabled + reaper, not stopped"
+    assert 'podman stop -t 10 "$CONTAINER"' not in body, "proxy path must never stop the live build at cutover"
+
+    fn = src[src.index("caddy_swap() {"):]
+    fn = fn[:fn.index("\n}\n") + 3]
+    with tempfile.TemporaryDirectory() as tmp:
+        cf = Path(tmp) / "Caddyfile"
+        before = (":9000 {\n  handle /fleet/philanthropy* {\n    reverse_proxy localhost:8420\n  }\n"
+                  "  handle /fleet/fleet-kit* {\n    reverse_proxy localhost:8571\n  }\n"
+                  "  handle /webhook* {\n    reverse_proxy localhost:8562\n  }\n"
+                  "  handle /other* {\n    reverse_proxy localhost:84200\n  }\n}\n")
+        cf.write_text(before)
+        ino = cf.stat().st_ino
+        proc = subprocess.run(["bash", "-c", fn + f'\ncaddy_swap "{cf}" 8420 8562 8591 8592\n'],
+                              capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, proc.stderr[:300]
+        after = cf.read_text()
+        assert "localhost:8591" in after and "localhost:8592" in after, after
+        import re as _re
+        assert not _re.search(r"localhost:8420([^0-9]|$)", after) and not _re.search(r"localhost:8562([^0-9]|$)", after), after
+        assert "localhost:8571" in after, "sibling instance upstream was touched"
+        assert "localhost:84200" in after, "prefix-overlapping port was rewritten"
+        assert cf.stat().st_ino == ino, "Caddyfile inode changed (must truncate-and-rewrite)"
+        # swapping back restores the original byte-for-byte
+        subprocess.run(["bash", "-c", fn + f'\ncaddy_swap "{cf}" 8591 8592 8420 8562\n'], check=True, timeout=30)
+        assert cf.read_text() == before
 
 
 def _deploy_sh_kicks_a_gru_pass_right_after_cutover():
@@ -8874,6 +8919,7 @@ if __name__ == "__main__":
     check("auto_deploy.sh self-heals a content-identical diverged HEAD only when opted in", _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in)
     check("auto_deploy.sh coalesces main moves inside FLEET_DEPLOY_MIN_INTERVAL_S (gh#619)", _auto_deploy_sh_coalesces_main_moves_inside_the_min_interval)
     check("deploy.sh kicks one gru pass right after cutover (gh#622)", _deploy_sh_kicks_a_gru_pass_right_after_cutover)
+    check("deploy.sh rolls over via caddy without a cordon (gh#625)", _deploy_sh_rolls_over_via_caddy_without_a_cordon)
     check("git_pull_guard.sh self-heals a stray branch and leaves a normal pull unchanged", _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged)
     check("git_pull_guard.sh serializes via a lock on the .git directory", _git_pull_guard_serializes_via_a_lock_on_the_git_directory)
     check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
