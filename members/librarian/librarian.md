@@ -28,50 +28,69 @@ if it refuses, that is it working correctly, not a bug to route around. You have
 tool in your own allowlist on purpose: every mutation goes through the vetted script, never a
 hand-edit of a transcript.
 
-**Before anything else, call TodoWrite with exactly these 5 items, then work them in order.**
+**Before anything else, call TodoWrite with exactly these 4 items, then work them in order.**
 
-1. Dry-run scrub + retention (below)
-2. Read the dry-run report, confirm every root is a transcript store
-3. Execute (below)
-4. Verify: grep the transcript store for the tracked patterns -- 0 hits is the bar
-5. Write the report (Report section below), literal Outcome:/Evidence: lines included
+1. Scrub + retention via `--execute` (below) -- one scan, not dry-run-then-execute
+2. Read the report: files scanned, classes found, occurrence counts, retention actions
+3. Verify: grep the transcript store for the tracked patterns -- 0 hits is the bar
+4. Write the report (Report section below), literal Outcome:/Evidence: lines included
 
 ## Scrub
 
-1. Run `python3 members/librarian/librarian.py` with no `--execute` (dry-run; this is the
-   default). It scans every `.jsonl` transcript under `/root/.claude-*/projects` (skipping any
-   directory literally named `memory` wherever it appears in that tree -- that holds a fleet
-   member's curated notes, not raw session logs) for:
-   - **After the first run, this is incremental**: only transcripts modified since the last
-     successful `--execute` (a watermark file, not something you manage by hand) get re-read --
-     a full-text scan of the whole store takes 20+ minutes cold against this fleet's real
-     corpus, which does not fit in your 900s timeout as a routine hourly tick. Pass
-     `--full-scan` only when you have a specific reason to re-read everything (e.g. the pattern
-     list just changed) -- the very first run ever (no watermark yet) already scans everything
-     without needing the flag.
-   - **If this Bash call still exceeds the tool's ~600s ceiling and gets moved to the
-     background** (a cold first-ever run, or `--full-scan`, both genuinely take 20+ minutes
-     against this corpus): do NOT end your turn believing you'll be notified later, and do NOT
-     call `ScheduleWakeup` -- that tool only exists inside a `/loop` context and errors
+1. Run `python3 members/librarian/librarian.py --execute` directly. Do **not** run a separate
+   dry-run first, and do not add one back -- this file used to mandate dry-run, then a manual
+   "confirm every root is a transcript store" review, then a second `--execute` re-run, and that
+   two-scan shape is what was actually causing this member's `reported_nothing` streak (gh#582 /
+   gh#588, closed 2026-09-07 but recurring live for hours after both closed -- see below). The
+   "review" step never gated anything real: there is no defined "if the dry-run looks wrong, do
+   X" branch, and the actual safety net is `looks_like_repo_root()` inside `librarian.py` itself
+   (refuses to run against a `.git` dir or anything named `repo`), which fires identically
+   whether or not a human/agent glanced at a prior dry-run. So the dry-run bought zero decision
+   value while paying the full cold-scan cost a second time every single pass.
+   Worse: `librarian.py`'s mid-scan checkpoint (every `CHECKPOINT_EVERY_FILES` files, gh#588 /
+   PR#603) only fires `if execute` -- a dry-run banks **zero** progress no matter how long it
+   runs. Since the dry-run was always the first scan attempted, and a cold scan against this
+   corpus takes 20+ minutes (see below), every real pass died mid-dry-run before ever reaching
+   `--execute`, which is why PR#603's checkpoint fix and PR#606's "stay in the turn, don't call
+   ScheduleWakeup" fix (also gh#582) each landed clean, each tested green, and the member kept
+   reporting nothing anyway: both fixes only take effect once `--execute` is actually running,
+   and the dry-run-first structure guaranteed it never got there. Running `--execute` as the
+   *only* scan means checkpointing is live from this pass's very first chunk, not after a
+   passing "review".
+   - It scans every `.jsonl` transcript under `/root/.claude-*/projects` (skipping any directory
+     literally named `memory` wherever it appears in that tree -- that holds a fleet member's
+     curated notes, not raw session logs), redacting each match in place to a stable
+     `[REDACTED:<class>]` marker (e.g. `[REDACTED:gho]`) -- the line stays, only the secret
+     substring changes. This is idempotent: re-scrubbing an already-redacted file changes
+     nothing, so running `--execute` unconditionally is safe to repeat.
+   - **After the first successful run, this is incremental**: only transcripts modified since
+     the last `--execute`'s watermark get re-read -- a full-text scan of the whole store takes
+     20+ minutes cold against this fleet's real corpus, which does not fit in your 900s timeout
+     as a routine hourly tick. Pass `--full-scan` only when you have a specific reason to
+     re-read everything (e.g. the pattern list just changed) -- the very first run ever (no
+     watermark yet) already scans everything without needing the flag.
+   - **If this Bash call exceeds the tool's ~600s ceiling and gets moved to the background** (a
+     cold first-ever run, or `--full-scan`, both genuinely take 20+ minutes against this
+     corpus): do NOT end your turn believing you'll be notified later, and do NOT call
+     `ScheduleWakeup` -- that tool only exists inside a `/loop` context and errors
      (`` `prompt` is required when `stop` is not true ``) outside one; this member is a one-shot
-     hourly pass, not a loop. Ending your turn here reaps the backgrounded job with it (SIGKILL)
-     and the whole pass reports nothing -- confirmed live, 3 separate hourly runs
-     (2026-09-07 04:55/05:55/06:55 UTC, then again at 07:05), every one landing
-     `reported_nothing` this exact way even after gh#588's watermark-checkpoint fix (PR#603)
-     shipped, because that fix addresses losing progress on a kill, not this: the turn ending at
-     all. Instead, stay in the SAME turn: re-check the backgrounded task's own output path (named
-     in the tool result) every minute or two with a short `Bash(sleep 90 && ...)` / `Read` call
-     until it finishes, then continue to step 2. Only move on once you hold the finished scan's
-     real output -- an unfinished scan is not something to defer past your own turn's end.
+     hourly pass, not a loop. Ending your turn here reaps the backgrounded job with it (SIGKILL).
+     Instead, stay in the SAME turn: re-check the backgrounded task's own output path (named in
+     the tool result) every minute or two with a short `Bash(sleep 90 && ...)` / `Read` call, or
+     `TaskOutput`, until it finishes, then continue to step 2.
+   - **If the backgrounded `--execute` scan itself gets killed by some other ceiling before
+     finishing** (observed 2026-09-07: SIGKILL'd, exit 137, roughly 15 minutes in, even while
+     correctly staying in-turn per the point above) -- that is now a non-event, not a failure to
+     route around: the watermark already checkpointed every 200 files up to the kill, so next
+     hour's tick resumes from there instead of from scratch. Report the partial run honestly
+     (files scanned before the kill, watermark position) rather than treating an interrupted
+     scan as nothing having happened.
    - `gho_`/`ghp_`/`ghs_`/`ghu_`/`ghr_` (GitHub OAuth) tokens
    - `sk-ant-` (Anthropic key) strings
    - `PGPASSWORD=...` and `postgresql://user:pass@...` (Postgres credentials)
    - secret-shaped `KEY=value` env pairs (key name contains `SECRET`/`TOKEN`/`PASSWORD`/
      `API_KEY`)
-2. Read the report: files scanned, classes found, occurrence counts.
-3. Re-run with `--execute` once the dry-run looks right. Each match is replaced in place with a
-   stable `[REDACTED:<class>]` marker (e.g. `[REDACTED:gho]`) -- the line stays, only the secret
-   substring changes. This is idempotent: re-scrubbing an already-redacted file changes nothing.
+2. Read the printed report: files scanned, classes found, occurrence counts, retention actions.
 
 ## Retention
 
