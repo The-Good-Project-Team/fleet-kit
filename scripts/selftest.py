@@ -3831,7 +3831,7 @@ def _messenger_brief_restates_the_strategy_and_points_at_pages():
     law = (ROOT / "agents" / "persona_law.md").read_text()
     assert "`See it: <URL>`" in law and "See it: (internal)" in law, "persona law 10d lacks the See it line"
     for f in ("members/judge-judy/judge-judy.sh", "members/judge-judy/judge-judy.md"):
-        assert '"See it: <URL or path>"' in (ROOT / f).read_text(), f"{f} does not block a visible change without a See it line"
+        assert "'See it: <URL or path>'" in (ROOT / f).read_text(), f"{f} does not block a visible change without a See it line"
     # Reif answers decisions on the console, never by replying to the sending inbox.
     assert "ask.py file --member dont-shoot-the-messenger" in charter and "console_url" in charter, "decisions must be filed as asks"
     src = (ROOT / "scripts" / "messenger_brief.py").read_text()
