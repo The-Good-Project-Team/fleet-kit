@@ -3900,6 +3900,21 @@ def _judge_runs_the_closes_gate_and_reads_the_issue():
     assert (ROOT / "docs" / "quality-standard.md").exists()
 
 
+def _share_dials_offer_every_five_percent_labelled_as_percent():
+    """Reif, 2026-09-07: "where is .3, etc. and show them as percents." The two fraction dials
+    list every 5% step from 5% to 100%, labelled as percents, and a stored "0.20" matches the
+    listed "0.2" instead of being flagged as an unlisted value.
+    """
+    html_src = (ROOT / "scripts" / "fleet_view.html").read_text()
+    assert "const PCT_STEPS = Array.from({length: 20}, (_, i) => String((i + 1) / 20));" in html_src
+    assert "PCT_LABELS" in html_src and "`${Math.round(Number(v) * 100)}%`" in html_src
+    for key in ("FLEET_SHARE_FRACTION", "FLEET_GRU_ALLOWANCE_FRACTION"):
+        i = html_src.index(f"['{key}',")
+        assert "PCT_STEPS, {labels: PCT_LABELS}" in html_src[i:i + 700], f"{key} does not use the percent presets"
+    assert "Number(v) === Number(cur)" in html_src, "stored 0.20 must match listed 0.2"
+    assert "'0.20', '0.25', '0.5'" not in html_src, "old hand-typed preset list still present"
+
+
 def _console_v2_is_one_phone_first_page_with_five_blocks():
     """fk#645, Reif: "simplify down, way down." The landing page is fleet_home.html: five blocks
     (the number, needs you, agents, landed today, footer), no framework, no CDN, under 40 KB,
@@ -9165,6 +9180,7 @@ if __name__ == "__main__":
     check("console shows each member's emoji, role and the steps a pass takes", _console_shows_role_and_steps_per_member)
     check("console Home is usable on a phone and the number tile reads fleet.env", _console_home_is_usable_on_a_phone_and_the_number_tile_reads_fleet_env)
     check("console v2 is one phone-first page with five blocks (fk#645)", _console_v2_is_one_phone_first_page_with_five_blocks)
+    check("share dials offer every 5% labelled as a percent", _share_dials_offer_every_five_percent_labelled_as_percent)
     check("messenger_brief.py sends the brief through Resend once per kind per day (fk#558)", _messenger_brief_sends_through_resend_once_per_day)
     check("messenger is scheduled 3x/day with creds mounted and a send-only charter (fk#558)", _messenger_is_scheduled_three_times_a_day_with_creds_mounted)
     check("messenger brief restates the strategy and points every project step at a page (fk#558)", _messenger_brief_restates_the_strategy_and_points_at_pages)
