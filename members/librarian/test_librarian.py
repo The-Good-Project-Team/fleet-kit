@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import librarian  # noqa: E402
@@ -243,6 +244,72 @@ class WatermarkTest(unittest.TestCase):
 
         subprocess.run(base_cmd + ["--execute"], capture_output=True, text=True, timeout=30)
         self.assertGreater(librarian.load_watermark(self.state_file), 0.0)
+
+    def test_checkpoint_saves_progress_before_a_simulated_mid_scan_kill(self):
+        """gh#588 AC1/AC3: a run interrupted mid-loop (simulating its own SIGKILLed timeout)
+        still leaves a watermark strictly newer than what existed before the run started,
+        because run_scrub() checkpoints every checkpoint_every_files rather than only after
+        the whole loop across all roots completes."""
+        for i in range(10):
+            (self.root / f"f{i}.jsonl").write_text(f"file {i}\n")
+
+        before = 111.0
+        librarian.save_watermark(self.state_file, before)
+
+        real_scrub_file = librarian.scrub_file
+        call_count = {"n": 0}
+
+        def flaky_scrub_file(path, stats, execute):
+            call_count["n"] += 1
+            if call_count["n"] > 4:
+                raise RuntimeError("simulated kill mid-scan")
+            return real_scrub_file(path, stats, execute)
+
+        run_started = time.time()
+        with mock.patch.object(librarian, "scrub_file", side_effect=flaky_scrub_file):
+            with self.assertRaises(RuntimeError):
+                librarian.run_scrub(
+                    [self.root], since=0.0, execute=True, state_file=self.state_file,
+                    run_started=run_started, full_scan=False, checkpoint_every_files=2,
+                )
+
+        # The kill hit after file 5 (4 succeeded, then the 5th raised); a checkpoint every 2
+        # files means files 1-2 and 3-4 each triggered a checkpoint before the kill, so the
+        # on-disk watermark must already be newer than what existed before the run.
+        after_kill = librarian.load_watermark(self.state_file)
+        self.assertGreater(after_kill, before)
+
+    def test_uninterrupted_run_final_watermark_is_run_start_time_not_finish_time(self):
+        """gh#588 AC4: checkpointing must not change the final saved value for an
+        uninterrupted run -- it's still run_started (captured before the first file was
+        touched), the same value the pre-checkpointing code saved at the end."""
+        for i in range(5):
+            (self.root / f"f{i}.jsonl").write_text(f"file {i}\n")
+        run_started = time.time() - 1000.0
+        librarian.run_scrub(
+            [self.root], since=0.0, execute=True, state_file=self.state_file,
+            run_started=run_started, full_scan=False, checkpoint_every_files=2,
+        )
+        self.assertEqual(librarian.load_watermark(self.state_file), run_started)
+
+    def test_full_scan_cli_ignores_watermark_even_with_checkpointing(self):
+        """gh#588 AC5: --full-scan still ignores the on-disk watermark entirely, unaffected
+        by the new mid-loop checkpointing."""
+        old_file = self.root / "old.jsonl"
+        old_file.write_text("gho_" + "Z" * 36)
+        self._age(old_file, 5)
+        # Seed a watermark newer than old.jsonl's mtime -- an ordinary incremental run would
+        # skip it, so redaction only happens here if --full-scan truly bypasses the watermark.
+        librarian.save_watermark(self.state_file, time.time())
+
+        script = Path(__file__).resolve().parent / "librarian.py"
+        proc = subprocess.run(
+            [sys.executable, str(script), "--root", str(self.root), "--execute",
+             "--full-scan", "--state-file", self.state_file, "--skip-retention"],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("[REDACTED:gho]", old_file.read_text())
 
 
 class RetentionTest(unittest.TestCase):
