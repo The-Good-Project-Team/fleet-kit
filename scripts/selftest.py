@@ -4372,7 +4372,10 @@ def _judge_judy_writes_a_heartbeat_row_on_a_no_pr_tick():
     exist, must write via run_report.py with a non-"llm" --kind (no claude call happened, so this
     is a mechanical row, not a review), and must be called on the exact branch where pick_pr found
     nothing AND no PR was reviewed yet this tick -- not on every pick_pr failure (a tick that
-    reviewed some PRs then drained the queue already has a fresh row from that review).
+    reviewed some PRs then drained the queue already has a fresh row from that review), and NOT
+    on an explicit `judge-judy.sh <pr>` debug call -- only a real cron tick with no explicit PR
+    arg proves the WHOLE queue was scanned; a human debugging one PR by hand while cron itself is
+    dead must not refresh the liveness row and mask that outage (caught in self-review, gh#267).
     """
     src = (Path(__file__).parent.parent / "members" / "judge-judy" / "judge-judy.sh").read_text()
 
@@ -4386,10 +4389,13 @@ def _judge_judy_writes_a_heartbeat_row_on_a_no_pr_tick():
     assert ">> \"$LOG_DIR/runs.jsonl\"" in hb_def, "report_heartbeat must append to the same runs.jsonl report_run uses"
 
     pick_i = src.index('PICK=$(pick_pr "$EXPLICIT_PR" "$SKIPPED_THIS_TICK")')
-    branch = src[pick_i:pick_i + 400]
+    branch = src[pick_i:pick_i + 700]
     assert "report_heartbeat" in branch, "report_heartbeat is never called from the pick_pr-found-nothing branch"
     assert '"$REVIEWED_COUNT" -eq 0' in branch, \
         "heartbeat call must be guarded by REVIEWED_COUNT -eq 0, not fire after a tick that already reviewed PRs"
+    assert '-z "$EXPLICIT_PR"' in branch, \
+        "heartbeat call must be guarded by -z \"$EXPLICIT_PR\" -- an explicit `judge-judy.sh <pr>` " \
+        "debug call must not refresh the liveness row on behalf of the whole queue"
 
 
 def _judge_judy_heartbeat_status_is_distinct_from_a_real_review_outcome():

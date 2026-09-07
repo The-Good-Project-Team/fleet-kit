@@ -220,7 +220,11 @@ while :; do
   PICK=$(pick_pr "$EXPLICIT_PR" "$SKIPPED_THIS_TICK") || {
     if [ "$REVIEWED_COUNT" -eq 0 ]; then
       log "no PR needs review this tick"
-      report_heartbeat "queue checked via pick_pr, no eligible PR (explicit=${EXPLICIT_PR:-none}, skipped this tick=${SKIPPED_THIS_TICK:-none})"
+      # Only a real cron tick (no explicit PR arg) proves the whole queue was scanned -- an
+      # `judge-judy.sh <pr>` debug call that finds its one target PR ineligible must NOT refresh
+      # the liveness row, or a human debugging a single PR while cron itself is dead would mask
+      # that exact outage.
+      [ -z "$EXPLICIT_PR" ] && report_heartbeat "queue checked via pick_pr, no eligible PR (skipped this tick=${SKIPPED_THIS_TICK:-none})"
     fi
     break
   }
