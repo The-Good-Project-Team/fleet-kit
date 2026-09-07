@@ -132,6 +132,35 @@ class RedactionTest(unittest.TestCase):
         self.assertTrue(any("GitHub OAuth" in l and "1 file" in l for l in lines), lines)
         self.assertTrue(any("Postgres" in l and "2 file" in l for l in lines), lines)
 
+    def test_truncated_github_token_still_redacted(self):
+        """philanthropy#4646 gap 1: a transcript that captured `head -c 20` output verbatim
+        holds a real token prefix truncated to only 16 chars after `gho_` -- short of the old
+        {20,255} minimum, but still a live credential fragment that must be caught."""
+        token = "gho_Oftwo9Zmxyl2Oeyd"  # 16 chars after the prefix, the exact shape gh#4646 found
+        f = self.root / "s.jsonl"
+        f.write_text(json.dumps({"text": f"here is a token={token}"}) + "\n")
+        stats = librarian.ScrubStats()
+        librarian.scrub_file(f, stats, execute=True)
+        text = f.read_text()
+        self.assertNotIn(token, text)
+        self.assertIn("[REDACTED:gho]", text)
+
+    def test_pgpassword_redacted_immediately_after_escaped_newline(self):
+        """philanthropy#4646 gap 2: in a raw .jsonl line, a bash command's embedded newline is
+        stored as the literal two characters \\ and n (JSON string escape), not a real newline
+        byte. When PGPASSWORD= starts right there with no separator, the literal 'n' right
+        before it is itself a word character, so a plain \\b never finds a transition and the
+        old pattern silently skipped the match. Reproduced against the exact shape found live
+        in a real transcript (createdb ... 2>&1\\nPGPASSWORD=postgres)."""
+        raw = 'ran createdb atlas_ci 2>&1\\nPGPASSWORD=postgres psql -c foo'
+        f = self.root / "s.jsonl"
+        f.write_text(json.dumps({"text": raw}) + "\n")
+        stats = librarian.ScrubStats()
+        librarian.scrub_file(f, stats, execute=True)
+        text = f.read_text()
+        self.assertNotIn("PGPASSWORD=postgres", text)
+        self.assertIn("[REDACTED:pgpassword]", text)
+
     def test_full_scan_rescans_already_compressed_transcript(self):
         """AC1: a credential archived to .jsonl.gz before a pattern existed for it is still
         reachable by a later --full-scan, decompress-scrub-recompress."""
