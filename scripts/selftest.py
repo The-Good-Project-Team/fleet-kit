@@ -7031,18 +7031,23 @@ def _run_loop_actually_uses_the_ordering():
         f"run loop ignored the ordering (tried {tried}) -- is account_pool_run still iterating $ACCOUNT_POOL_ORDER?"
 
 
-def _pool_order(state_lines, accounts="tgp gmail"):
-    """Return _account_pool_order's output as a list, given a seeded state file."""
+def _pool_order(state_lines, accounts="tgp gmail", week_cache=None):
+    """Return _account_pool_order's output as a list, given a seeded state file (and, gh#616,
+    an optional seeded maxx week_reset cache -- lines "<account> <week_reset> <fetched_at>")."""
     import subprocess
     pool = ROOT / "scripts" / "account_pool.sh"
     with tempfile.TemporaryDirectory() as tmp:
         state = pathlib.Path(tmp) / "account-pool-exhausted.state"
         state.write_text("".join(line + "\n" for line in state_lines))
+        cache = pathlib.Path(tmp) / "week-reset.cache"
+        cache.write_text("".join(line + "\n" for line in (week_cache or [])))
         script = (
             "set -uo pipefail\n"
             f'export FLEET_LOG_DIR="{tmp}"\n'
             f'export FLEET_ACCOUNTS="{accounts}"\n'
             f'export ACCOUNT_POOL_STATE_FILE="{state}"\n'
+            f'export ACCOUNT_POOL_WEEK_RESET_CACHE="{cache}"\n'
+            "unset FLEET_MAXX_URL\n"
             f'source "{pool}"\n'
             "_account_pool_order\n"
         )
@@ -7129,6 +7134,46 @@ def _lapsed_reset_sorts_ahead_of_known_future_gate_too():
         f"three-bucket ordering wrong: {got} "
         "(want known-future 'tgp' first, lapsed 'gmail' second, never-gated 'primary' last)"
     )
+
+
+def _healthy_accounts_are_ordered_by_maxx_week_reset():
+    """gh#616: two HEALTHY accounts (nothing gated, nothing ever failed) are ordered by the
+    week_reset maxx reports for each -- soonest first -- instead of FLEET_ACCOUNTS order.
+
+    The exhausted-state file only learns a reset when an account fails, so before this the
+    steady state always drained the first-listed account and let the other's week lapse
+    (2026-09-07: tgp 85% used with 3.5 days left, gmail 24% used with 24h left).
+    """
+    now = int(time.time())
+    # gmail's week ends in a day, tgp's in 3.5 days -> gmail first, inverting list order.
+    got = _pool_order([], week_cache=[f"tgp {now + 300000} {now}", f"gmail {now + 86400} {now}"])
+    assert got == ["gmail", "tgp"], f"maxx week_reset ordering not applied: {got}"
+    # ...and the reverse must not invert, or any reordering would pass.
+    got = _pool_order([], week_cache=[f"tgp {now + 86400} {now}", f"gmail {now + 300000} {now}"])
+    assert got == ["tgp", "gmail"], f"ordering ignored the week_reset epochs it was given: {got}"
+    # N accounts, not two: three healthy accounts sort fully.
+    got = _pool_order([], accounts="tgp gmail primary",
+                      week_cache=[f"tgp {now + 300000} {now}", f"gmail {now + 86400} {now}",
+                                  f"primary {now + 3600} {now}"])
+    assert got == ["primary", "gmail", "tgp"], f"three-account week_reset ordering wrong: {got}"
+
+
+def _maxx_week_reset_gaps_keep_list_order_and_gates_still_win():
+    """gh#616: an account maxx knows nothing about sorts AFTER every account with a known
+    week_reset (in list order among themselves); a still-gated account keeps winning the front
+    of the line exactly as before, and a stale cache line is still honoured when it is all
+    there is (no FLEET_MAXX_URL to refresh from).
+    """
+    now = int(time.time())
+    # only gmail known -> gmail first, tgp trails; a garbage line never sorts as a number.
+    got = _pool_order([], week_cache=[f"gmail {now + 86400} {now}", "tgp junk junk"])
+    assert got == ["gmail", "tgp"], f"unknown-to-maxx account did not trail: {got}"
+    # stale (fetched long ago) but no maxx to refresh from -> still used.
+    got = _pool_order([], week_cache=[f"tgp {now + 300000} {now - 99999}", f"gmail {now + 86400} {now - 99999}"])
+    assert got == ["gmail", "tgp"], f"stale cache with no maxx reachable was thrown away: {got}"
+    # a known future 5h gate on tgp still sorts it first (the verdict skip handles it later).
+    got = _pool_order([f"tgp {now + 600}"], week_cache=[f"tgp {now + 300000} {now}", f"gmail {now + 86400} {now}"])
+    assert got == ["tgp", "gmail"], f"gated account no longer outranks: {got}"
 
 
 def _every_configured_account_survives_ordering():
@@ -8687,6 +8732,8 @@ if __name__ == "__main__":
     check("lapsed reset outranks never-gated (gh#462)", _lapsed_reset_outranks_never_gated)
     check("lapsed reset still outranks never-gated alongside a known-future gate", _lapsed_reset_sorts_ahead_of_known_future_gate_too)
     check("ordering never drops an account", _every_configured_account_survives_ordering)
+    check("healthy accounts are ordered by maxx week_reset, soonest first (gh#616)", _healthy_accounts_are_ordered_by_maxx_week_reset)
+    check("maxx week_reset gaps keep list order; gates and stale cache still honoured (gh#616)", _maxx_week_reset_gaps_keep_list_order_and_gates_still_win)
     check("run loop actually uses the ordering", _run_loop_actually_uses_the_ordering)
     check("a real usage limit is still classified exhausted", _classifier_still_catches_a_real_limit)
     check("exhaustion with no stated reset backs off minutes, not an hour", _unparseable_exhaustion_gates_briefly_not_for_an_hour)
