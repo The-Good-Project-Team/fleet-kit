@@ -105,6 +105,17 @@ For each remaining open issue, look for real evidence it's dead:
       '.[] | select((.title + "\n" + (.body // "")) | test("(?i)(gh)?#0*" + $n + "\\b")) | .number'
   ```
   Or grep the repo for whether the described bug/gap still exists.
+
+  **A matching PR is not the end of the check — read the issue's own comments before you cite
+  it.** `gh issue view <n> --comments` and look at the newest one. A PR's own `Fixes #<n>` tag
+  plus a live spot-check of only the function that PR patched is not sufficient by itself: the
+  PR can be real and still leave the actual bug in place one layer away, and a comment already
+  sitting in the thread can already say so. philanthropy#4599 was closed this way twice — both
+  times citing a merged PR's `Fixes #4599` tag and a narrow check of the function it touched,
+  while a comment posted earlier in the same thread had already shown the bug still reproducing
+  because the real root cause was untouched by that PR (philanthropy#4637). If the newest
+  comment post-dates and contradicts the close evidence you're about to cite, do not close —
+  leave the issue open and say so in your report instead.
 - **Duplicate** — another still-open issue describes the same problem. Prefer keeping whichever has more detail/discussion; close the thinner one, pointing at the survivor.
 - **Obsolete** — the file/feature/route it describes was renamed, deleted, or retired since filing. Verify with a real `grep`/`git log` check, not a guess from the title alone.
 - **Superseded** — a newer, more specific issue replaced it on the same topic.
