@@ -37,6 +37,8 @@ A PR may close an issue only if this diff meets EVERY acceptance criterion above
 
 The PR body must read in plain language (freshman 101): a smart person outside software can tell what the change lets a person do. If the first two paragraphs do not, VERDICT: block and say so.
 
+If the diff touches a template, a static file, or a route (anything a person can see), the PR body must carry a line 'See it: <URL or path>' naming the live page where the change is visible, or 'See it: (internal)' when there is no such page. Missing: VERDICT: block and say so.
+
 DIFF:
 {{DIFF}}
 

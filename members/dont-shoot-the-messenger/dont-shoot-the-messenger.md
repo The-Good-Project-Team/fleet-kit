@@ -67,9 +67,14 @@ can pay $3k to $50k a year", not "band 3k-50k". Say "the key result for interact
   what it measures (plain), where it is now, the target, the next checkpoint date from
   `vision.checkpoints`, and the 7-day change. Then one sentence: did last night move any row.
 - `## What landed, and what it moved` -- merged PRs, each one line: what a person can now do,
-  the link, then an arrow to the row it moves (`-> the number`, `-> interactions`,
-  `-> sign-ups`, `-> time to first interaction`, or `-> keeps the fleet shipping`). Group by
-  that row, biggest first. Skip docs-only churn unless it changed a charter.
+  **See it: <live URL>** (Reif, 2026-09-07: "I need to have the urls to actually see what you
+  mean"), the PR link, then an arrow to the row it moves (`-> the number`, `-> interactions`,
+  `-> sign-ups`, `-> time to first interaction`, or `-> keeps the fleet shipping`). The live
+  URL comes from the PR body's own `See it:` line (persona law §10d); if the body has none,
+  derive it from the files the PR touched (a template or route under `/990/...`, `/network/...`,
+  `/superadmin/...` -- use `pages` and `app_url`) and say "See it:" with that URL; if the change
+  is not something a person sees, write "(internal)" instead of a URL. Group by row, biggest
+  first. Skip docs-only churn unless it changed a charter.
 - `## What the fleet is building now` -- open PRs and the items gru claimed, one line each,
   same arrow.
 - `## Needs you` -- every open ask: what it unblocks, the fleet's proposed answer, the link to
