@@ -61,9 +61,15 @@ state file so the same failing SHA never fires twice. It prints one line:
 ## Step 2: fix or revert, PR-backed only
 
 - **Prod-down outranks a build-red fire.** If `<what>` is `PROD DOWN (...)`, service comes back
-  FIRST; the tidy permanent fix is a normal follow-up PR after. If `FIXER_PROD_DIAG_DRIVER` is
-  configured, use it to diagnose read-only first, restore-oriented fix second. If not configured,
-  log the gap loudly and stop -- never invent ad hoc prod access.
+  FIRST; the tidy permanent fix is a normal follow-up PR after. `check.sh` itself already ran
+  `FIXER_PROD_DIAG_DRIVER` for you the moment it detected the outage (see
+  `scripts/prod_diag_driver.md`) -- don't invoke the driver yourself, read what it already
+  captured: if `check.sh`'s own line ends in `diag=<path>`, `cat` that file and paste its FULL
+  contents into the fire issue/PR verbatim before attempting a restore -- a summary loses
+  exactly the detail a human re-reads an incident for later. Diagnose read-only first,
+  restore-oriented fix second. If the line has no `diag=` at all (or ends `diag=<path>
+  (driver-nonzero)`, meaning the driver failed to run), `FIXER_PROD_DIAG_DRIVER` is not
+  configured or is broken -- log the gap loudly and stop, never invent ad hoc prod access.
 - If `<what>` is `stale-prs(N1:sha1:reason1 N2:sha2:reason2 ...)`: these are *existing* PRs,
   not one fresh incident, and they share no state with each other -- **do not fight them in
   sequence.** Reif, 2026-08-22: "if we have N issues we can deploy N independent units," the
