@@ -34,6 +34,21 @@ for acct in ${FLEET_ACCOUNTS:-primary}; do
   fi
 done
 
+# gh#592: register the worktree-isolation PreToolUse guard into every account's own
+# settings.json -- $CLAUDE_CONFIG_DIR is account-specific (see account_pool.sh), so this must
+# land in each /root/.claude-<account> dir above, not just the bare default; see
+# worktree_guard_hook_install.py's own header for why. Idempotent (safe every boot), merges
+# rather than overwrites, and never blocks boot on failure -- a missing guard is worse than a
+# silent one only if nobody is told, so this warns loudly instead of `set -e` killing the
+# container over it.
+guard_targets=("/root/.claude")
+for acct in ${FLEET_ACCOUNTS:-primary}; do
+  guard_targets+=("/root/.claude-$acct")
+done
+if ! python3 /fleet-kit/scripts/worktree_guard_hook_install.py "${guard_targets[@]}"; then
+  echo "[entrypoint] WARNING: worktree_guard_hook_install.py failed -- gh#592's mechanical worktree guard is NOT registered this boot"
+fi
+
 case "${1:-cron-foreground}" in
   once:*)
     script="${1#once:}"

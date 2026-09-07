@@ -8336,6 +8336,103 @@ def _gru_md_calls_ask_file_alongside_needs_human_op_stop_gh568():
         "ask.py file should be wired alongside the existing gh#361 needs-human-op stop, not before it"
 
 
+def _run_worktree_guard_hook(repo, wt_path, tool_name, tool_input):
+    """Runs the real worktree_guard_hook.py CLI (gh#592) as a subprocess, exactly as Claude
+    Code's PreToolUse hook mechanism would -- proving its ACTUAL exit-code behavior (AC5), not
+    just its importable decide() logic."""
+    import os
+    import subprocess
+    payload = json.dumps({"tool_name": tool_name, "tool_input": tool_input})
+    env = dict(os.environ)
+    if repo is None:
+        env.pop("REPO", None)
+    else:
+        env["REPO"] = repo
+    if wt_path is None:
+        env.pop("WT_PATH", None)
+    else:
+        env["WT_PATH"] = wt_path
+    return subprocess.run(
+        [sys.executable, str(HERE / "worktree_guard_hook.py")],
+        input=payload, capture_output=True, text=True, timeout=30, env=env)
+
+
+def _worktree_guard_blocks_edit_under_shared_repo_gh592():
+    """gh#592 AC2/AC5: an Edit targeting a path under the SHARED $REPO, while this pass is
+    isolated in its own $WT_PATH, must be BLOCKED (exit 2) -- this is the exact failure a
+    minion pass hit live under 12 hours after PR#577's prose-only fix."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        p = _run_worktree_guard_hook(repo, wt, "Edit",
+                                      {"file_path": str(Path(repo) / "pyproject.toml")})
+        assert p.returncode == 2, f"expected block (exit 2), got {p.returncode}: {p.stderr}"
+        assert "BLOCKED" in p.stderr and "gh#592" in p.stderr, p.stderr
+
+
+def _worktree_guard_allows_edit_under_own_worktree_gh592():
+    """gh#592 AC5's other required case: an Edit under the pass's OWN $WT_PATH is the normal,
+    correct flow and must be allowed (exit 0)."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        p = _run_worktree_guard_hook(repo, wt, "Edit",
+                                      {"file_path": str(Path(wt) / "pyproject.toml")})
+        assert p.returncode == 0, f"expected allow (exit 0), got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_exempts_passes_with_no_wt_path_gh592():
+    """gh#592 AC4: a member/flow not worktree-isolated (llm.worktree=false, e.g. jefe's
+    advisory pass -- run_member.sh only ever sets WT_PATH inside its WORKTREE_ENABLED block)
+    must never be blocked. No separate flag exists for this -- an empty/unset $WT_PATH IS the
+    exemption signal run_member.sh already produces for exactly this case."""
+    with tempfile.TemporaryDirectory() as repo:
+        p = _run_worktree_guard_hook(repo, None, "Edit",
+                                      {"file_path": str(Path(repo) / "pyproject.toml")})
+        assert p.returncode == 0, f"expected exempt/allow (exit 0), got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_blocks_mutating_bash_against_repo_gh592():
+    """gh#592 AC2: a mutating Bash command (git commit, in this case via `git -C $REPO`)
+    naming a path under $REPO must be blocked the same as a direct Edit/Write would be."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        p = _run_worktree_guard_hook(repo, wt, "Bash",
+                                      {"command": f"git -C {repo} commit -am wip"})
+        assert p.returncode == 2, f"expected block (exit 2), got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_allows_readonly_bash_reference_to_repo_gh592():
+    """gh#592 AC3: a read-only reference to $REPO (`git show origin/main:<path>`, the issue's
+    own named example) must NOT be blocked -- only mutating operations are in scope."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        p = _run_worktree_guard_hook(repo, wt, "Bash",
+                                      {"command": f"git -C {repo} show origin/main:foo.py"})
+        assert p.returncode == 0, f"expected allow (exit 0) for a read-only ref, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_install_merges_without_clobbering_existing_settings_gh592():
+    """gh#592: the installer must MERGE into an operator's existing settings.json (their own
+    hooks/permissions survive) and must be idempotent -- a second run against the same file
+    must not duplicate the registration."""
+    sys.path.insert(0, str(HERE))
+    import worktree_guard_hook_install as install
+    with tempfile.TemporaryDirectory() as d:
+        settings_path = Path(d) / "settings.json"
+        settings_path.write_text(json.dumps({"permissions": {"allow": ["Bash(git status)"]}}))
+        hook_cmd = "python3 /fleet-kit/scripts/worktree_guard_hook.py"
+
+        changed = install.merge_one(settings_path, hook_cmd)
+        assert changed is True
+        data = json.loads(settings_path.read_text())
+        assert data["permissions"]["allow"] == ["Bash(git status)"], \
+            "installer must not clobber an operator's existing settings"
+        pre = data["hooks"]["PreToolUse"]
+        assert any(h.get("command") == hook_cmd for entry in pre for h in entry.get("hooks", [])), \
+            "hook was not registered"
+
+        changed_again = install.merge_one(settings_path, hook_cmd)
+        assert changed_again is False, "a second install run must be a no-op, not a duplicate entry"
+        data2 = json.loads(settings_path.read_text())
+        assert len(data2["hooks"]["PreToolUse"]) == 1, \
+            f"expected exactly one PreToolUse entry after two installs, got {len(data2['hooks']['PreToolUse'])}"
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -8538,6 +8635,13 @@ if __name__ == "__main__":
     check("ask.py answer sets the row once; a second call is a no-op (gh#568 AC3)", _ask_answer_is_idempotent_gh568)
     check("ask.py file rate-limits its NTFY page to once per member per hour (gh#568 AC4)", _ask_file_rate_limits_ntfy_to_once_per_member_per_hour_gh568)
     check("gru.md calls ask.py file alongside its own needs-human-op stop (gh#568 AC6)", _gru_md_calls_ask_file_alongside_needs_human_op_stop_gh568)
+
+    check("worktree_guard_hook blocks an Edit under the shared $REPO when isolated (gh#592 AC2)", _worktree_guard_blocks_edit_under_shared_repo_gh592)
+    check("worktree_guard_hook allows an Edit under the pass's own $WT_PATH (gh#592 AC5)", _worktree_guard_allows_edit_under_own_worktree_gh592)
+    check("worktree_guard_hook exempts a pass with no $WT_PATH set (gh#592 AC4)", _worktree_guard_exempts_passes_with_no_wt_path_gh592)
+    check("worktree_guard_hook blocks a mutating Bash command targeting $REPO (gh#592 AC2)", _worktree_guard_blocks_mutating_bash_against_repo_gh592)
+    check("worktree_guard_hook allows a read-only Bash reference to $REPO (gh#592 AC3)", _worktree_guard_allows_readonly_bash_reference_to_repo_gh592)
+    check("worktree_guard_hook_install merges into existing settings.json and is idempotent (gh#592)", _worktree_guard_install_merges_without_clobbering_existing_settings_gh592)
 
     for n in ok:
         print(f"  ok    {n}")
