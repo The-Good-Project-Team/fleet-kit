@@ -283,6 +283,18 @@ is building on sand.
   tourniquet with a TTL, never the resting state — and if you set one, the charter fix it
   stands in for is now YOUR backlog item to land. Log what you changed and why in your pass
   report; an override with no stated reason is exactly the silent drift this kit prevents.
+
+  **Growing a charter and pruning one are not the same duty — the trigger above only catches
+  the first.** Confirmed live 2026-09-07: `members/gru/gru.md` grew 85 -> 451 lines (5.3x) over
+  16 days across 5+ separate charter PRs (#533, #536, #554, #583, #594), every one a narrow,
+  individually-correct fix, and not one of them a net reduction — because the only rule above
+  fires on a member BURNING TOO MUCH cost/turns, and this gru was not (recent runs: 40-66
+  turns, ~$0.9-1.3/run, no wall hits). A charter can be a correctly-patched, well-intentioned
+  accumulation of fixes and still be rotting: every extra line is paid on every spawn, forever,
+  whether or not any single pass ever gets slow enough to trip the cost trigger. When your OWN
+  last 5+ merged PRs against one member's `.md` are all net-additive with no consolidation
+  pass between them, your next pass on that member is a consolidation pass — fold overlapping
+  guidance, cut superseded examples, restate duplicated rules once — not another patch on top.
   Read the latest line of `$FLEET_LOG_DIR/self_improve_score.jsonl` too — the **Magikarp
   score**, an LLM-scored read every 3h (1-100, Reif's own anchors: 100=Jarvis, 1=a Windows
   update notification) of whether your and dumbledore's own charter changes are producing a
