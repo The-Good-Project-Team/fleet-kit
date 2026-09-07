@@ -322,7 +322,7 @@ def html_to_pdf(html_text: str, path: pathlib.Path) -> bool:
 
 
 def read_alert_env() -> dict[str, str]:
-    env = {k: os.environ[k] for k in ("RESEND_API_KEY", "MAIL_FROM", "FLEET_ALERT_EMAIL") if os.environ.get(k)}
+    env = {k: os.environ[k] for k in ("RESEND_API_KEY", "MAIL_FROM", "FLEET_ALERT_EMAIL", "FLEET_REPLY_TO") if os.environ.get(k)}
     if ALERT_ENV.exists():
         for line in ALERT_ENV.read_text().splitlines():
             m = re.match(r"^\s*(?:export\s+)?([A-Z_]+)\s*=\s*(.*?)\s*$", line)
@@ -368,6 +368,11 @@ def send(kind: str, md_path: pathlib.Path, want_pdf: bool, force: bool) -> int:
         "html": html_text,
         "text": md,
     }
+    # fk#669: replies steer the fleet. Reply-To is the Resend receiving address; the webhook
+    # receiver stores the reply and kicks the messenger's inbox pass.
+    reply_to = (creds.get("FLEET_REPLY_TO") or os.environ.get("FLEET_REPLY_TO") or "").strip()
+    if reply_to:
+        payload["reply_to"] = [reply_to]
     if want_pdf:
         pdf = LOG_DIR / f"brief-{kind}-{today}.pdf"
         if html_to_pdf(html_text, pdf):

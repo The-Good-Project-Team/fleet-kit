@@ -3794,6 +3794,46 @@ def _messenger_brief_sends_through_resend_once_per_day():
         srv.shutdown()
 
 
+def _reply_to_the_brief_steers_the_fleet():
+    """fk#669, Reif: "I can just respond to the email and it will take those updates in."
+    Pins the deterministic half: the Svix check accepts a correctly signed body and rejects a
+    tampered one or a stale timestamp; the sender allowlist matches 'Name <addr>'; the reply
+    parser turns 'yes 12', 'no 7: too expensive' and '3: send Tuesday' into ask answers and
+    keeps the rest as free text with the quoted brief stripped; pending/done is a ledger; the
+    receiver routes /webhook/inbox before the GitHub signature check and kicks the messenger's
+    inbox pass; the brief is sent with Reply-To; the charter has the inbox slot.
+    """
+    import base64, hashlib, hmac, importlib.util, os
+    spec = importlib.util.spec_from_file_location("inbox", ROOT / "scripts" / "inbox.py")
+    ib = importlib.util.module_from_spec(spec); spec.loader.exec_module(ib)
+    raw = base64.b64encode(b"k" * 24).decode(); secret = "whsec_" + raw
+    body = b'{"type":"email.received","data":{"email_id":"e1","from":"Reif <reif@philanthropy.org>"}}'
+    ts = str(int(time.time()))
+    sig = base64.b64encode(hmac.new(base64.b64decode(raw), f"m1.{ts}.".encode() + body, hashlib.sha256).digest()).decode()
+    hdr = {"svix-id": "m1", "svix-timestamp": ts, "svix-signature": "v1," + sig}
+    assert ib.verify_svix(body, hdr, secret)
+    assert not ib.verify_svix(body + b" ", hdr, secret), "tampered body accepted"
+    assert not ib.verify_svix(body, dict(hdr, **{"svix-timestamp": str(int(time.time()) - 900)}), secret), "stale timestamp accepted"
+    assert ib.allowed_sender("Reif <Reif@Philanthropy.org>", "reif@philanthropy.org, reiftauati@gmail.com")
+    assert not ib.allowed_sender("someone@example.org", "reif@philanthropy.org")
+    p = ib.parse_reply("yes 12\nno 7: too expensive\n3: send Tuesday\nAlso: stop building the person page until the messenger is fixed.\n\n> quoted brief")
+    assert p["answers"] == [{"ask_id": 12, "answer": "yes"}, {"ask_id": 7, "answer": "no: too expensive"}, {"ask_id": 3, "answer": "send Tuesday"}], p
+    assert p["free_text"].startswith("Also: stop building") and "quoted" not in p["free_text"], p
+    assert ib.strip_quotes("go\n\nOn Mon, Sep 7, Fleet wrote:\n> everything") == "go"
+    with tempfile.TemporaryDirectory() as tmp:
+        ib.LOG_DIR = Path(tmp); ib.INBOX = Path(tmp) / "inbox.jsonl"; ib.DONE = Path(tmp) / "inbox.done"
+        row = ib.store({"id": "e1", "from": "reif@philanthropy.org", "subject": "Re: brief", "text": "yes 12\n> old"}, {})
+        assert ib.pending()[0]["parsed"]["answers"] == [{"ask_id": 12, "answer": "yes"}]
+        ib.mark_done("e1"); assert ib.pending() == []
+    rec = (ROOT / "scripts" / "webhook_receiver.py").read_text()
+    assert rec.index('endswith("/inbox")') < rec.index('X-Hub-Signature-256', rec.index("def do_POST")), "inbox must route before the GitHub signature check"
+    assert '_launch_member("dont-shoot-the-messenger", ["--task", "inbox"])' in rec and "verify_svix" in rec and "allowed_sender" in rec
+    mb = (ROOT / "scripts" / "messenger_brief.py").read_text()
+    assert 'payload["reply_to"] = [reply_to]' in mb and "FLEET_REPLY_TO" in mb, "brief is not sent with Reply-To"
+    charter = (ROOT / "members" / "dont-shoot-the-messenger" / "dont-shoot-the-messenger.md").read_text()
+    assert "**inbox**" in charter and "inbox.py pending" in charter and "inbox.py done" in charter and "Ask #<id>" in charter
+
+
 def _messenger_brief_restates_the_strategy_and_points_at_pages():
     """Reif, 2026-09-07, on the first brief: "we don't show the objective and the results",
     "show me the url where I can see it, make it concrete". collect() now carries the
@@ -9207,6 +9247,7 @@ if __name__ == "__main__":
     check("messenger_brief.py sends the brief through Resend once per kind per day (fk#558)", _messenger_brief_sends_through_resend_once_per_day)
     check("messenger is scheduled 3x/day with creds mounted and a send-only charter (fk#558)", _messenger_is_scheduled_three_times_a_day_with_creds_mounted)
     check("messenger brief restates the strategy and points every project step at a page (fk#558)", _messenger_brief_restates_the_strategy_and_points_at_pages)
+    check("replying to the brief steers the fleet: svix, allowlist, parser, ledger, route, Reply-To (fk#669)", _reply_to_the_brief_steers_the_fleet)
     check("closes gate blocks a partial or docs-only PR from closing an issue (fk#629)", _closes_gate_blocks_a_partial_or_docs_only_pr_from_closing_an_issue)
     check("judge runs the closes gate and reads the issue; law has 13 and 14 (fk#629)", _judge_runs_the_closes_gate_and_reads_the_issue)
     check("git_pull_guard.sh self-heals a stray branch and leaves a normal pull unchanged", _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged)

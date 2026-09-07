@@ -27,7 +27,7 @@ charter as background and asked "what's the task?" instead of doing step 1.)
 
 ## Step 1: which slot, and what happened
 
-Your task line names the slot: `morning`, `afternoon` or `wrap`. No task line means `morning`.
+Your task line names the slot: `morning`, `afternoon`, `wrap` or `inbox`. No task line means `morning`.
 
 Run, with the ABSOLUTE path (your cwd is the product repo, not /fleet-kit):
 
@@ -77,8 +77,10 @@ can pay $3k to $50k a year", not "band 3k-50k". Say "the key result for interact
   first. Skip docs-only churn unless it changed a charter.
 - `## What the fleet is building now` -- open PRs and the items gru claimed, one line each,
   same arrow.
-- `## Needs you` -- every open ask: what it unblocks, the fleet's proposed answer, the link to
-  answer. If none, say so in one line.
+- `## Needs you` -- every open ask as `**Ask #<id>**: <why>` with what it unblocks, the fleet's
+  proposed answer, and one line on how to answer: on the console under Needs you, or by
+  replying to this email with `yes <id>`, `no <id>: <why>`, or `<id>: <your answer>`. If none,
+  say so in one line and add: "Reply to this email with anything else and the fleet takes it."
 - `## Today's project (4 hours)` -- ONE project, chosen from `plan_bets` in order: the first
   bet whose next step needs a human. Write it as:
   - **The outcome, in his words.** One sentence: what will be true at 5pm.
@@ -110,6 +112,26 @@ can pay $3k to $50k a year", not "band 3k-50k". Say "the key result for interact
 `## Afternoon block (2h)` (restate today's afternoon block; derive it again from `plan_bets`
 and `pages` if /tmp/brief.md from the morning is gone), `## Needs you`.
 
+**inbox** (Reif replied to a brief; fk#669: "I can just respond to the email and it will take
+those updates in"). Run `python3 /fleet-kit/scripts/inbox.py pending` -- a JSON list of his
+replies not yet handled, each with `text` (what he typed, quoted brief stripped) and `parsed`
+(`answers`: ask ids with his answer; `free_text`: everything else). For each reply, in order:
+1. Every entry in `answers`: `python3 /fleet-kit/scripts/ask.py answer <ask_id> --answer "<answer>"
+   --answered-by "reif (email)"`. An already-answered ask is a no-op; say so.
+2. `free_text`, if any, is steering. Read it as the person who owns the number. Decide what it
+   changes: a decision on today's project (write the answer as a comment on the project's issue
+   or the PR it names), copy he approved or edited (comment it verbatim on the issue that will
+   use it), a new instruction or idea (file a product-repo issue: title in his words under 60
+   characters, body quoting him verbatim under "Reif said", then "What the fleet will do" in
+   three lines, `Vision-link:` line; labels `fleet:reif-asked` and `fleet:priority-high`, create
+   the label first with `gh label create fleet:reif-asked --repo <repo> --force`). One reply
+   can produce more than one of these. Never build; you route.
+3. Send him a receipt: write `/tmp/receipt.md` with a `# Got it: <five words>` title and one
+   line per thing you did with its link, then `messenger_brief.py send --kind ask --md
+   /tmp/receipt.md`. Kind `ask` is not once-per-day, so every reply gets its receipt.
+4. `python3 /fleet-kit/scripts/inbox.py done <id>` for that reply. Then the next one.
+If `pending` is empty, Outcome is `inbox empty` and you stop.
+
 **wrap** (no PDF): `## What landed today` (with the arrows), `## Tonight the fleet` (what
 gru will claim next, from the top of `plan_bets` and open items), `## Tomorrow` -- one line.
 
@@ -129,5 +151,5 @@ file nothing -- the-fixer reads this log.
 Write the report per `agents/persona_law.md` §10c (BOTTOM LINE, numbered steps, WHAT TO
 IMPROVE), then the two literal lines:
 
-Outcome: `sent <slot>` / `already-sent <slot>` / `delivery failed: <reason>`.
+Outcome: `sent <slot>` / `already-sent <slot>` / `delivery failed: <reason>` / `inbox: <n> replies handled` / `inbox empty`.
 Evidence: the subject line, word count, whether a PDF was attached, and the number line.
