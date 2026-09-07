@@ -118,9 +118,8 @@ author's own record.
 Nothing before this re-surfaces an already-triaged issue to Part C once a *later* comment
 changes its real severity or scope — Part C's own oldest-first walk only distinguishes "never
 triaged" from "triaged," not "triaged against evidence that's since gone stale." Confirmed
-twice on this repo's own backlog (gh#376, gh#233 — the latter a "bad crontab value" triaged
-`complexity=4` that a comment two hours later escalated to unauthenticated root shell
-injection, uncaught for six days). This step is the fix: a label any pass can apply when it
+twice on this repo's own backlog (gh#376, gh#233 — a triaged severity that a later comment
+escalated, uncaught for days). This step is the fix: a label any pass can apply when it
 *recognizes* an escalation, not marie inferring one unprompted from comment text — that
 inference is explicitly out of scope (no sentiment/NLP heuristics here).
 
@@ -270,11 +269,10 @@ hour's unspent tokens do not roll over.
 Narrow: this only fires when C2 finds an item genuinely bigger than a 10. But when it does
 fire, until now there was no working procedure at all — the pointer above said "decompose it
 in Part D" while Part D had been repurposed into the label-consistency sweep, so the item
-just sat scored-10 with nowhere real to go. That gap is confirmed real cost, not theoretical:
-the nonprofit-atlas `#3188` saga (filed as one epic-scale issue, never split) burned three
-consecutive `budget_declined` dead-ends (~$8+) and ~17 hours before it finally shipped as three
-separate PRs through organic incremental narrowing — exactly what splitting at file time would
-have done on purpose instead of by accident.
+just sat scored-10 with nowhere real to go. That gap is confirmed real cost, not theoretical
+(precedent: an unsplit epic-scale issue on another venture burned repeated `budget_declined`
+dead-ends before shipping via organic incremental narrowing — exactly what splitting at file
+time would have done on purpose instead of by accident).
 
 1. **Split along the item's real seams**, not into equal-sized shares — the distinct defects
    or components the reporter already enumerated, or a natural build sequence, usually give you
