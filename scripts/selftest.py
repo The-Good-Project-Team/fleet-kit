@@ -3718,6 +3718,24 @@ def _one_deploy_at_a_time_and_a_countable_drain():
     assert "tr -cd '0-9'" in line, "in-flight count is not sanitised to digits"
 
 
+def _deploy_sh_kicks_a_gru_pass_right_after_cutover():
+    """gh#622: deploy.sh runs one gru pass in the live container immediately after DEPLOYED,
+    so a fix is exercised the instant it lands instead of waiting for the next cron tick (which
+    the cordon may have just skipped). Pins the kick to AFTER the DEPLOYED line, detached
+    (`podman exec -d`), through run_gru_fanout.sh, and with the cron.d env sourced -- a kick
+    without FLEET_SHARE_DIR/FLEET_LEASE_DIR would run the pass with the wrong lease ledger.
+    """
+    src = (ROOT / "scripts" / "deploy.sh").read_text()
+    deployed_at = src.index('log "DEPLOYED:')
+    kick = src.find("run_gru_fanout.sh", deployed_at)
+    assert kick != -1, "deploy.sh does not kick a gru pass after DEPLOYED (gh#622)"
+    kick_line = src[src.rfind("\n", 0, kick) + 1: src.find("\n", kick)]
+    assert 'podman exec -d "$CONTAINER"' in kick_line, f"kick must be detached in the live container: {kick_line[:120]!r}"
+    assert "/etc/cron.d/" in kick_line, "kick must source the cron.d env (FLEET_SHARE_DIR, FLEET_LEASE_DIR, FLEET_INSTANCE_NAME)"
+    assert "9>&-" in kick_line, "kick must close the auto_deploy flock fd (deploy.sh's own rule for every podman spawn)"
+    assert "gh#622" in src[kick:kick + 600], "kick outcome must be logged"
+
+
 def _auto_deploy_sh_coalesces_main_moves_inside_the_min_interval():
     """gh#619: a main move landing inside FLEET_DEPLOY_MIN_INTERVAL_S of the last successful
     deploy is deferred (one log line, not one per 5-minute tick) and deployed by the first tick
@@ -8750,6 +8768,7 @@ if __name__ == "__main__":
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
     check("auto_deploy.sh self-heals a content-identical diverged HEAD only when opted in", _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in)
     check("auto_deploy.sh coalesces main moves inside FLEET_DEPLOY_MIN_INTERVAL_S (gh#619)", _auto_deploy_sh_coalesces_main_moves_inside_the_min_interval)
+    check("deploy.sh kicks one gru pass right after cutover (gh#622)", _deploy_sh_kicks_a_gru_pass_right_after_cutover)
     check("git_pull_guard.sh self-heals a stray branch and leaves a normal pull unchanged", _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged)
     check("git_pull_guard.sh serializes via a lock on the .git directory", _git_pull_guard_serializes_via_a_lock_on_the_git_directory)
     check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
