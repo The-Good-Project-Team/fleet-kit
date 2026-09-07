@@ -303,7 +303,7 @@ is building on sand.
 
   **This check competes for attention with the rest of L1 and will lose every time unless you
   force it.** L1 also carries the fleet-wide budget/share dials above, which have produced a
-  live finding on most recent passes (gh#4607, fleet-kit#578) — "act at the first broken layer"
+  live finding on most recent passes (nonprofit-atlas#4607, fleet-kit#578) — "act at the first broken layer"
   in the pass checklist means that finding gets acted on and the pass exits before ever reaching
   this paragraph. Run the charter-bloat check (`wc -l members/*/*.md` against your own memory of
   last pass's counts, or the member's recent PR list) **at least once per calendar day
