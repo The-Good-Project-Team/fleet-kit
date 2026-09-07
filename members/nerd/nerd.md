@@ -237,6 +237,20 @@ substitute number you derived some other way.
 **growth** — MAXIMIZE INDEXED PAGES. That is the target, stated plainly: more useful pages
 that Google actually indexes. Everything below serves it.
 
+**On fleet-kit specifically: this lane is N/A.** fleet-kit is a private, zero-star, zero-fork
+internal tool (`gh repo view <org>/fleet-kit --json visibility,stargazerCount,forkCount`) with
+no public surface for a search engine to crawl, no search-console-style credentials configured
+anywhere, and no `lane_kpi` rows in `fleet.db` for any lane. **State N/A explicitly, every pass,
+and stop.** Prefix your `Outcome:` line with the literal marker `STRUCTURAL-N/A: ` (gh#451)
+followed by the free-text explanation, so `datta.md`'s down-rank rule (`datta.md:76-99`) can
+actually match a confirmed-N/A streak instead of re-dispatching this lane on staleness alone. Do
+not invent an indexation or acquisition proxy in its place (an onboarding-path check was tried
+and ruled out as a stand-in KPI — it stayed clean but gave a future pass nothing to act on), and
+do not spend the pass probing a different product in a different GitHub org from this one.
+
+The rest of this checklist is for a target that HAS a real growth surface (e.g. the product
+repo, not fleet-kit itself).
+
 *Know which number you are quoting.* Four different "indexation" numbers exist here and they
 are NOT interchangeable — comparing across them is the classic wrong finding:
 
@@ -327,6 +341,18 @@ picked because it looked good. **The zero-result and one-result queries are the 
 seam** — each is a person who wanted something and got nothing, and each is either a ranking
 bug or a page type that does not exist yet (hand that second kind to growth).
 
+**On fleet-kit specifically:** fleet-kit has no `?q=`-style search endpoint or search telemetry
+(`usage/searched`, `search/no results`) of its own. The closest real surface is gh#193:
+`fleet_view.html`'s PRs & Backlog page renders every open item with no search/filter/sort
+control, so the operator has to scroll the full list to find what they want — the same "did the
+searcher find what they wanted" question this lane asks, just framed there as UI friction
+rather than query-answering. Check gh#193's live status and whether its scope has grown to
+cover finding an item by content, not just filter/sort; if it has closed or been superseded, say
+so and name a fresh candidate rather than citing a stale reference. If gh#193 has closed and no
+fresh candidate surface exists, this lane is structurally N/A this pass — state that explicitly
+and prefix your `Outcome:` line with the literal marker `STRUCTURAL-N/A: `, the same convention
+growth uses above (gh#451).
+
 **ui** — every user-facing surface, and whether it renders for a human. KPI is friction DOWN,
 guardrail engaged-actions must not fall: the cheat is removing features until nothing can be
 clicked, so a friction win that also drops engagement is a BREACH.
@@ -338,6 +364,17 @@ including mobile widths; responsive and overflow boundaries; empty and error sta
 strings (a 90-character org name is common in this corpus). Verified 2026-08-26: the front page
 carries ~94 follow hooks and 2 login links — follow is the core conversion, so a page where it
 is missing or broken is a top finding.
+
+**On fleet-kit specifically: this lane has a real surface — `scripts/fleet_view.html` and its
+server, `scripts/fleet_view_server.py`.** It is not N/A the way growth/revenue are. This is the
+operator's own dashboard: the login gate, the dial editor, the PRs & Backlog tables. It overlaps
+with `lens` but asks a different question — lens checks whether a tile's DATA is fresh and
+correctly labeled, `ui` checks whether the SURFACE itself renders, responds, and survives a
+misclick, the same as it would on any other product. Real findings already produced under this
+framing: gh#233 (the dial editor wrote `fleet.env` with zero input validation — a bad value
+could silently stop the whole fleet's crontab) and gh#166 (the status dot mislabels an actively
+running member as "disabled" whenever its `enabled` flag reads false). Drive it with the
+browser like any other page — do not assume an internal tool is exempt from a broken-UI finding.
 
 **datadog** — the event spine, and the integrity of every number the team ranks work by.
 The KPI is signal freshness; the cheat is dropping stale metrics from the registry so freshness
@@ -352,6 +389,15 @@ crawler-inflated or double-counted events; identity/session integrity, which des
 funnel downstream when anon events collapse onto one fake identity; and events fired on one
 surface but not its siblings. **An unmeasured interaction is invisible work** — the fleet ranks
 by these numbers, so a gap here silently mis-ranks everything.
+
+**On fleet-kit specifically: this lane also has a real surface — `fleet.db`'s own `runs` table
+and `runs.jsonl`, fed by every member's own report.** There is no external analytics platform to
+audit here; the fleet's own run-logging pipeline IS its event spine, so hold it to the same
+standard. Real findings already produced under this framing: gh#437 (`fleet_stats.py`'s
+`runs_summary()` double-counts every run's provisional "started" row, deflating the Stats page's
+Signal rate) and gh#485 (`/status` has no tile for `fleet.db`'s own sync freshness, so a frozen
+sync would render every other tile as falsely live). Both are the same class of bug this lane
+looks for anywhere else — a number that is clean-looking but wrong.
 
 **devops** — production uptime and the DELIVERY half of the pipeline. KPI is deploy success
 rate; the cheat is shipping nothing, since 100% of zero deploys is perfect — so
@@ -387,82 +433,14 @@ capture (accounts, follows, emails) is the revenue PRECURSOR, price walls come s
 broken follow hook outranks a missing pricing page. Check: the gating strategy holding (facts
 free, leverage gated); the signup/follow/lead-capture path reachable in one click; gated
 content with no upgrade path, or a CTA that 404s. **Never add billing code without an explicit
-pricing decision from Reif** — its absence is deliberate, not an oversight to fix.
+pricing decision from Reif** — its absence is deliberate, not an oversight to fix. The checks
+above this sentence are for nonprofit-atlas, which does have a follow/lead-capture surface.
 
-**growth** — fleet-kit is a private, zero-star, zero-fork internal tool (`gh repo view
-<org>/fleet-kit --json visibility,stargazerCount,forkCount`) with no public surface for a
-search engine to crawl, no search-console-style credentials configured anywhere, and no
-`lane_kpi` rows in `fleet.db` for any lane. **There is no growth-lane surface here — state N/A
-explicitly, every pass, and stop.** Prefix your `Outcome:` line with the literal marker
-`STRUCTURAL-N/A: ` (gh#451) followed by the free-text explanation as before, so `datta.md`'s
-down-rank rule (`datta.md:76-99`) can actually match a confirmed-N/A streak instead of
-re-dispatching this lane on staleness alone. Do not invent an indexation or acquisition proxy in
-its place (an onboarding-path check was tried and ruled out as a stand-in KPI — it stayed clean
-but gave a future pass nothing to act on), and do not spend the pass probing a different product
-in a different GitHub org from this one.
-
-**searchquality** — fleet-kit has no `?q=`-style search endpoint or search telemetry
-(`usage/searched`, `search/no results`) of its own. The closest real surface is gh#193:
-`fleet_view.html`'s PRs & Backlog page renders every open item with no search/filter/sort
-control, so the operator has to scroll the full list to find what they want — the same "did the
-searcher find what they wanted" question this lane asks, just framed there as UI friction
-rather than query-answering. Check gh#193's live status and whether its scope has grown to
-cover finding an item by content, not just filter/sort; if it has closed or been superseded,
-say so and name a fresh candidate rather than citing a stale reference. If gh#193 has closed
-and no fresh candidate surface exists, this lane is structurally N/A this pass — state that
-explicitly and prefix your `Outcome:` line with the literal marker `STRUCTURAL-N/A: `, the same
-convention growth and revenue use below (gh#451).
-
-**ui** — every user-facing surface, and whether it renders for a human.
-The core conversion hook works on every page, mobile included; responsive and overflow
-boundaries; empty and error states; long strings. Verify like a user, not a template: load it,
-look at it, check the console. A blank page with green tests is a failed check, not a pass.
-
-**On fleet-kit specifically: this lane has a real surface — `scripts/fleet_view.html` and its
-server, `scripts/fleet_view_server.py`.** It is not N/A the way growth/revenue are. This is the
-operator's own dashboard: the login gate, the dial editor, the PRs & Backlog tables. It overlaps
-with `lens` but asks a different question — lens checks whether a tile's DATA is fresh and
-correctly labeled, `ui` checks whether the SURFACE itself renders, responds, and survives a
-misclick, the same as it would on any other product. Real findings already produced under this
-framing: gh#233 (the dial editor wrote `fleet.env` with zero input validation — a bad value
-could silently stop the whole fleet's crontab) and gh#166 (the status dot mislabels an actively
-running member as "disabled" whenever its `enabled` flag reads false). Drive it with the
-browser like any other page — do not assume an internal tool is exempt from a broken-UI finding.
-
-**datadog** — the event spine and the integrity of every number the team ranks work by.
-Pipelines that stopped firing; crawler-inflated or double-counted events; identity/session
-integrity (anon events collapsing onto one fake identity destroys every funnel downstream);
-metrics whose freshness has lapsed. You own metric integrity — a clean number that is wrong is
-worse than a missing one.
-
-**On fleet-kit specifically: this lane also has a real surface — `fleet.db`'s own `runs` table
-and `runs.jsonl`, fed by every member's own report.** There is no external analytics platform to
-audit here; the fleet's own run-logging pipeline IS its event spine, so hold it to the same
-standard. Real findings already produced under this framing: gh#437 (`fleet_stats.py`'s
-`runs_summary()` double-counts every run's provisional "started" row, deflating the Stats page's
-Signal rate) and gh#485 (`/status` has no tile for `fleet.db`'s own sync freshness, so a frozen
-sync would render every other tile as falsely live). Both are the same class of bug this lane
-looks for anywhere else — a number that is clean-looking but wrong.
-
-**devops** — production uptime and the delivery half of the deploy pipeline.
-Smoke monitor state; deploy success and failure classes; every prod regression class should
-have become a deploy-time gate so it cannot recur; migration state; capacity and cost. A red
-smoke check is an incident, not a finding — file it as one.
-
-**lens** — the operator dashboards and the wrangling behind them.
-Stale tiles (gray must mean broken, never zero); does each tile's label match the question its
-data actually answers; is what is ON FIRE at the top and plumbing at the bottom. The operator
-glances for seconds — lead with what changed.
-
-**revenue** — the path from free product to paid.
-Gating strategy holding (facts free, leverage gated); paid surfaces working end to end; lead
-capture from inbound intent. **Never add billing code without an explicit pricing decision** —
-its absence is deliberate. **On fleet-kit specifically: there is no revenue-lane surface at
-all** (confirmed 2026-08-29 — no stripe/billing/payment/signup/paywall code anywhere in the
-repo, no monetization mentioned in `README.md`/`docs/*.md`) — **state N/A explicitly, every
-pass, and stop**, the same as growth's paragraph above; prefix your `Outcome:` line with the
-literal marker `STRUCTURAL-N/A: ` exactly as growth's paragraph does (gh#451). The checks above
-this sentence are for nonprofit-atlas, which does have a follow/lead-capture surface to check.
+**On fleet-kit specifically: there is no revenue-lane surface at all** (confirmed 2026-08-29 —
+no stripe/billing/payment/signup/paywall code anywhere in the repo, no monetization mentioned in
+`README.md`/`docs/*.md`) — **state N/A explicitly, every pass, and stop**, the same as growth's
+paragraph above; prefix your `Outcome:` line with the literal marker `STRUCTURAL-N/A: ` exactly
+as growth's paragraph does (gh#451).
 
 ## Never build the fix
 
