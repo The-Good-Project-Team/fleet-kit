@@ -3826,6 +3826,10 @@ def _messenger_brief_restates_the_strategy_and_points_at_pages():
     charter = (ROOT / "members" / "dont-shoot-the-messenger" / "dont-shoot-the-messenger.md").read_text()
     assert "## Where we are against the plan" in charter and "Where to look" in charter and "Done looks like" in charter
     assert "Words you may not use" in charter and "gh issue create" in charter
+    # Reif answers decisions on the console, never by replying to the sending inbox.
+    assert "ask.py file --member dont-shoot-the-messenger" in charter and "console_url" in charter, "decisions must be filed as asks"
+    src = (ROOT / "scripts" / "messenger_brief.py").read_text()
+    assert '"console_url"' in src and "FLEET_CONSOLE_URL" in src
 
 
 def _messenger_is_scheduled_three_times_a_day_with_creds_mounted():
