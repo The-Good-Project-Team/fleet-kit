@@ -2561,7 +2561,13 @@ def _status_page_hourly_log_cadence_not_flattened_to_5min():
             fivemin_cells, _pct2 = status_data.read_component(
                 ["tunnel_health_check.cron.log", "tunnel_health_check.log"])
             fivemin_ok = sum(1 for c in fivemin_cells if c == status_data.OK)
-            assert fivemin_ok <= 3, (
+            # 26 lines * 5 minutes = 125 minutes back from `mtime`. Depending on where within
+            # the hour `mtime` falls, floor-to-hour on the oldest line drops either 2 or 3
+            # hours relative to the newest line's hour (125 min straddles a variable number of
+            # hour boundaries), so this spans 3 hour-buckets most of the time but 4 whenever
+            # the test happens to run in the first ~5 minutes of an hour (gh#618) -- <=4 is the
+            # tight, deterministic bound for both cases, not a widened tolerance for flakiness.
+            assert fivemin_ok <= 4, (
                 f"a .cron.log-suffixed (5-minute-cadence) file must NOT be re-cadenced -- "
                 f"26 lines at 5 minutes apart span ~2 hours, got {fivemin_ok} ok buckets: "
                 f"{fivemin_cells!r}")
