@@ -8,10 +8,11 @@ This is the independent job: it shares no process context with any devops/nerd a
 runs on its own cron tick (entrypoint.sh's crontab; see docstring below for why here and not
 scripts/auto_deploy.sh itself), and only ever reads auto_deploy.log and writes fleet.db.
 
-Currently computes one metric (devops/deploy_success_rate) because that is the one this issue
-names -- the table and CLI are generic (lane, metric) so a second lane's job can reuse the same
-store without a new table (kpi-doctrine.md rule 7's "every filed item names its KPI" already
-implies KPIs are plural; nothing here should need to change to add one).
+Computes two lanes' KPIs today: devops/deploy_success_rate (gh#324, parses auto_deploy.log) and
+datadog/signal_freshness_pct (gh#352, reads the `runs` table -- see compute_and_record_datadog).
+The table and CLI stayed generic (lane, metric) exactly so the second lane's job could reuse the
+same store without a new table (kpi-doctrine.md rule 7's "every filed item names its KPI"
+already implies KPIs are plural) -- nothing about the schema needed to change to add datadog.
 
 WHY THIS DOESN'T LIVE IN scripts/fleet_kpi.py: that module's _KPI_TABLE sums patterns out of a
 member's own `outcome` prose -- self-reported, and structurally fine for THAT file's stated
@@ -98,6 +99,21 @@ def classify_ticks(log_path: Path, since: float) -> tuple[int, int]:
     return successes, total
 
 
+def _insert_reading(conn, *, lane: str, metric: str, value: float | None, denominator: int,
+                     now: float) -> dict:
+    """Shared by every lane's job (gh#352): one INSERT shape, append-only, never UPDATEd or
+    REPLACEd -- see fleet_db.SCHEMA's lane_kpi comment for why (rule-3 swing detection needs
+    consecutive denominators both on record).
+    """
+    conn.execute(
+        "INSERT INTO lane_kpi (lane, metric, value, denominator, computed_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (lane, metric, value, denominator, now),
+    )
+    conn.commit()
+    return {"lane": lane, "metric": metric, "value": value, "denominator": denominator, "computed_at": now}
+
+
 def compute_and_record(
     conn,
     log_path: Path = DEPLOY_LOG,
@@ -113,13 +129,68 @@ def compute_and_record(
     # A window with zero ticks has no rate -- NULL, not 0.0 (see fleet_db.SCHEMA's lane_kpi
     # comment: 0.0 there would be indistinguishable from a real 0% success rate).
     value = (successes / total) if total else None
-    conn.execute(
-        "INSERT INTO lane_kpi (lane, metric, value, denominator, computed_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (lane, metric, value, total, now),
-    )
-    conn.commit()
-    return {"lane": lane, "metric": metric, "value": value, "denominator": total, "computed_at": now}
+    return _insert_reading(conn, lane=lane, metric=metric, value=value, denominator=total, now=now)
+
+
+DATADOG_LANE = "datadog"
+DATADOG_METRIC = "signal_freshness_pct"
+
+
+def _candidate_members(members: list[dict] | None = None) -> list[dict]:
+    """Every member spec to weigh for AC2, effective-override applied but NOT yet filtered by
+    `enabled` -- see _tracked_members, which does the filtering. Split out so a test can hand
+    in a synthetic roster (including disabled members, to prove they get excluded) the same
+    shape `member_spec.load_all()` + `overrides.apply()` would have produced for real.
+    """
+    if members is not None:
+        return members
+    import member_spec
+    import overrides
+    return [overrides.apply(spec)[0] for spec in member_spec.load_all()]
+
+
+def _tracked_members(members: list[dict] | None = None) -> list[dict]:
+    """gh#352 AC2: currently-enabled members with a determinable expected schedule tick.
+
+    Reads live overrides the same way fleet_view.html's own `m.effective.enabled` does
+    (gh#166) -- a dial-edit that disables a member should drop out of the tracked set on its
+    next tick, same as one committed to git. Dispatch-only members (nerd, minion) need no
+    separate carve-out: both are `enabled: false` today, so filtering on effective `enabled`
+    already excludes them, the same enabled-aware exclusion fleet_view.html's own sidebar
+    comment documents for a different purpose.
+    """
+    return [spec for spec in _candidate_members(members) if spec.get("enabled")]
+
+
+def compute_and_record_datadog(
+    conn,
+    *,
+    now: float | None = None,
+    members: list[dict] | None = None,
+) -> dict:
+    """gh#352 AC1/AC3/AC4: signal_freshness_pct = the fraction of tracked members (AC2) whose
+    latest `runs` row is within 2x THAT member's own expected schedule interval -- generalizes
+    read_latest's existing stale-at-2x convention (kpi-doctrine.md rule 5) per-member instead of
+    one shared EXPECTED_INTERVAL_S, since datadog has no single cadence the way devops's own
+    hourly cron does.
+    """
+    import member_spec
+    now = now if now is not None else time.time()
+    tracked = _tracked_members(members)
+    fresh = 0
+    for spec in tracked:
+        last = conn.execute(
+            "SELECT MAX(recorded_at) FROM runs WHERE member = ?", (spec["name"],)
+        ).fetchone()[0]
+        interval = member_spec.expected_interval_s(spec["schedule"])
+        if last is not None and (now - last) <= 2 * interval:
+            fresh += 1
+    total = len(tracked)
+    # Same NULL-vs-zero convention AC4 requires -- zero trackable members has no rate to
+    # report, and 0.0 there would be indistinguishable from "every one of them is stale."
+    value = (fresh / total) if total else None
+    return _insert_reading(conn, lane=DATADOG_LANE, metric=DATADOG_METRIC, value=value,
+                            denominator=total, now=now)
 
 
 def read_latest(
@@ -155,19 +226,25 @@ def read_latest(
 def main(argv=None) -> int:
     import json
 
-    ap = argparse.ArgumentParser(description="Independent devops-lane KPI job (gh#324).")
+    ap = argparse.ArgumentParser(description="Independent lane KPI job (gh#324, gh#352).")
     sub = ap.add_subparsers(dest="cmd")
-    sub.add_parser("record", help="parse auto_deploy.log, append one lane_kpi row")
-    sub.add_parser("read", help="print the latest recorded reading (or null if never run)")
+    sub.add_parser("record", help="append one lane_kpi row per lane this job computes")
+    read_ap = sub.add_parser("read", help="print the latest recorded reading (or null if never run)")
+    # AC5: today hardcoded to LANE/METRIC (devops); a datadog consumer needs its own pair.
+    # Defaults preserve the old bare `read` behavior for existing devops callers.
+    read_ap.add_argument("--lane", default=LANE)
+    read_ap.add_argument("--metric", default=METRIC)
     a = ap.parse_args(argv)
 
     conn = fleet_db.connect()
     if a.cmd == "read":
-        print(json.dumps(read_latest(conn)))
+        print(json.dumps(read_latest(conn, lane=a.lane, metric=a.metric)))
         return 0
-    # default: record
+    # default: record -- one job, multiple lanes (AC6), so both go on the same tick.
     result = compute_and_record(conn)
     print(json.dumps(result))
+    datadog_result = compute_and_record_datadog(conn)
+    print(json.dumps(datadog_result))
     return 0
 
 

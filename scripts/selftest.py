@@ -5464,6 +5464,48 @@ def _lane_kpi_is_append_only_and_distinguishes_missing_from_stale():
         assert r_empty["value"] is None and r_empty["denominator"] == 0, r_empty
 
 
+def _lane_kpi_datadog_freshness_excludes_disabled_and_flags_stale():
+    """gh#352 AC1-4/AC7: signal_freshness_pct against a synthetic `runs` table with a mix of
+    on-time, stale, and disabled members. A disabled member must never enter the denominator
+    (AC2) and a never-run tracked member counts as not-fresh, not as a missing/ignored row.
+    """
+    import lane_kpi, fleet_db
+    with tempfile.TemporaryDirectory() as d:
+        conn = fleet_db.connect(Path(d) / "fleet.db")
+        now = 10_000.0
+
+        members = [
+            {"name": "on-time", "enabled": True, "schedule": {"interval_s": 3600}},
+            {"name": "stale", "enabled": True, "schedule": {"interval_s": 3600}},
+            {"name": "never-run", "enabled": True, "schedule": {"hourly_at_minute": 12}},
+            {"name": "disabled", "enabled": False, "schedule": {"interval_s": 3600}},
+        ]
+        for member, ts in (("on-time", now - 1800), ("stale", now - 3 * 3600),
+                            ("disabled", now - 60)):
+            conn.execute(
+                "INSERT INTO runs (run_id, member, recorded_at) VALUES (?, ?, ?)",
+                (f"run-{member}", member, ts),
+            )
+        conn.commit()
+
+        result = lane_kpi.compute_and_record_datadog(conn, now=now, members=members)
+        # disabled excluded entirely (AC2) -- denominator is 3, not 4.
+        assert result["denominator"] == 3, result
+        # only "on-time" is within 2x its own interval_s=3600 (1800s ago); "stale" is 3x its
+        # own interval (10800s ago) and "never-run" has no runs row at all -- both not-fresh.
+        assert result["value"] == 1 / 3, result
+        assert result["lane"] == "datadog" and result["metric"] == "signal_freshness_pct", result
+
+        # zero tracked members -- NULL, never 0.0 (AC4), same convention devops's own test uses.
+        empty = lane_kpi.compute_and_record_datadog(conn, now=now, members=[])
+        assert empty["value"] is None and empty["denominator"] == 0, empty
+
+        # a stored datadog row round-trips through read_latest with an explicit lane/metric
+        # (AC5) exactly like devops's default pair already does.
+        latest = lane_kpi.read_latest(conn, lane="datadog", metric="signal_freshness_pct", now=now)
+        assert latest is not None and latest["denominator"] == 0, latest  # most recent insert
+
+
 def _fleet_kpi_roomba_catches_all_three_real_evaluated_phrasings():
     """gh#343: `_ROOMBA_PATTERNS` used to anchor only on a digit sitting immediately before the
     literal word "evaluated" ("N evaluated"), silently dropping the other two real phrasings
@@ -8465,6 +8507,7 @@ if __name__ == "__main__":
     check("gru.md clamps allowance_pct to FLEET_SHARE_CEILING_PCT", _gru_md_clamps_allowance_to_share_ceiling)
     check("lane_kpi classifies ticks and ignores in-progress drains", _lane_kpi_classifies_ticks_and_ignores_in_progress_drains)
     check("lane_kpi is append-only and distinguishes missing from stale", _lane_kpi_is_append_only_and_distinguishes_missing_from_stale)
+    check("lane_kpi datadog freshness excludes disabled members and flags stale ones (gh#352)", _lane_kpi_datadog_freshness_excludes_disabled_and_flags_stale)
     check("fleet_kpi's roomba pattern catches all three real 'evaluated' phrasings", _fleet_kpi_roomba_catches_all_three_real_evaluated_phrasings)
     check("fleet_kpi's marie pattern catches her real triage verb vocabulary", _fleet_kpi_marie_catches_her_real_triage_verb_vocabulary)
     check("fleet_kpi's marie pattern ignores an explicit-zero-counted verb (gh#409)", _fleet_kpi_marie_ignores_explicit_zero_counted_verb_gh409)

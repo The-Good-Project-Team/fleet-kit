@@ -117,6 +117,20 @@ def validate_schedule(sched, *, where: str = "") -> None:
                  f"{where}schedule.daily_at must look like 'HH:MM'")
 
 
+def expected_interval_s(sched: dict) -> float:
+    """How often a validated schedule expects a tick, in seconds (gh#352). Same exactly-one-of
+    shape validate_schedule already enforces, just read back as a duration instead of a launchd
+    calendar field -- hourly_at_minute is once every 3600s by definition, daily_at once every
+    86400s, same as the StartCalendarInterval distinction validate_schedule's own comment
+    explains.
+    """
+    if "interval_s" in sched:
+        return float(sched["interval_s"])
+    if "hourly_at_minute" in sched:
+        return 3600.0
+    return 86400.0  # daily_at
+
+
 def validate_max_turns(value, *, where: str = "") -> None:
     """Same reasoning as validate_schedule: shared with overrides.py's live dial-edit path."""
     _require(isinstance(value, int) and value > 0,
