@@ -227,6 +227,7 @@ def collect(since_hours: float) -> dict:
         "vision": vision(),
         "pages": pages(),
         "app_url": os.environ.get("FLEET_PUBLIC_APP_URL", "https://philanthropy.org"),
+        "console_url": os.environ.get("FLEET_CONSOLE_URL", "https://dino.luckymachines.co/fleet/philanthropy/"),
     }
 
 

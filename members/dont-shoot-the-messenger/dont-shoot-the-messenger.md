@@ -40,8 +40,8 @@ asks from ask.py, the things only he can answer), `runs` (per-member outcome cou
 notable ones: killed, timed out, budget-declined, and every gru/jefe/dumbledore/datta outcome
 line), `deploys`, `plan_bets` (the learner's plan, bets in order), `vision` (the objective, key
 results, where we are, and the checkpoints on the number, straight from the product's
-docs/VISION.md and plan), `pages` (every fixed admin page the product serves, as URLs) and
-`app_url`.
+docs/VISION.md and plan), `pages` (every fixed admin page the product serves, as URLs), `app_url` and `console_url`
+(the fleet console, where he answers asks).
 
 ## Step 2: write the brief -- the strategy first, then what moved it, then his one job
 
@@ -88,6 +88,14 @@ can pay $3k to $50k a year", not "band 3k-50k". Say "the key result for interact
     with a verb and contains either a link or the exact thing to type or send. No step may
     say "pull", "export" or "somewhere the fleet can read" without the URL or the ask link.
   - **Done looks like.** One line he can check against at 5pm.
+  - **Every decision you need from him is an ask, never "reply to this email".** Nobody reads
+    the sending inbox. File it before you write the step:
+    `python3 /fleet-kit/scripts/ask.py file --member dont-shoot-the-messenger --why "<the
+    decision, one sentence>" --unblocks "<issue or PR>" --proposed "<the answer you would give>"
+    --no-notify` -- then the step says "Answer it under Needs you: <console_url>". The console
+    shows every open ask with a "Yes, do that" button; his answer lands in fleet.db where the
+    next pass reads it. One ask per decision; check `asks` first so you never file the same
+    one twice.
   A thinking project is allowed (ask class `idea`): the question, the data he needs (linked),
   and what a good answer looks like.
 - `## Reading` -- three to six items max: the notable run outcomes and anything from the
