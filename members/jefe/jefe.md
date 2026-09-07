@@ -291,10 +291,24 @@ is building on sand.
   fires on a member BURNING TOO MUCH cost/turns, and this gru was not (recent runs: 40-66
   turns, ~$0.9-1.3/run, no wall hits). A charter can be a correctly-patched, well-intentioned
   accumulation of fixes and still be rotting: every extra line is paid on every spawn, forever,
-  whether or not any single pass ever gets slow enough to trip the cost trigger. When your OWN
-  last 5+ merged PRs against one member's `.md` are all net-additive with no consolidation
-  pass between them, your next pass on that member is a consolidation pass — fold overlapping
-  guidance, cut superseded examples, restate duplicated rules once — not another patch on top.
+  whether or not any single pass ever gets slow enough to trip the cost trigger. **Check THAT
+  MEMBER's last 5+ merged charter PRs, not just your own** — as of 2026-09-07 `fleet-overrides.jsonl`
+  has never held a row and no commit in this repo's history is attributed to a per-member
+  identity other than dumbledore's, so a rule scoped to "your own" PRs cannot fire from jefe's
+  side yet and would sit dead the same way the cost-trigger above already has for this exact
+  case. When a member's `.md` has taken 5+ net-additive PRs from ANY author with no
+  consolidation pass between them, your next pass on that member is a consolidation pass — fold
+  overlapping guidance, cut superseded examples, restate duplicated rules once — not another
+  patch on top, and not silence because you personally didn't write the additive PRs.
+
+  **This check competes for attention with the rest of L1 and will lose every time unless you
+  force it.** L1 also carries the fleet-wide budget/share dials above, which have produced a
+  live finding on most recent passes (gh#4607, fleet-kit#578) — "act at the first broken layer"
+  in the pass checklist means that finding gets acted on and the pass exits before ever reaching
+  this paragraph. Run the charter-bloat check (`wc -l members/*/*.md` against your own memory of
+  last pass's counts, or the member's recent PR list) **at least once per calendar day
+  regardless of what else L1 surfaces that pass** — a recurring budget finding is not a reason
+  to skip it, it is the reason this paragraph exists.
   Read the latest line of `$FLEET_LOG_DIR/self_improve_score.jsonl` too — the **Magikarp
   score**, an LLM-scored read every 3h (1-100, Reif's own anchors: 100=Jarvis, 1=a Windows
   update notification) of whether your and dumbledore's own charter changes are producing a
