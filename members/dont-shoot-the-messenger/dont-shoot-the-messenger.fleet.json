@@ -1,6 +1,6 @@
 {
   "name": "dont-shoot-the-messenger",
-  "emoji": "📮",
+  "emoji": "\ud83d\udcee",
   "lane": "plumbing",
   "mandate": {
     "target": "Reif gets the morning brief (PDF, the number, what landed, needs-you, the one 4-hour project, reading) at 06:30 Central, the afternoon block at 12:30 and the wrap at 17:30 -- one voice, nothing else in the fleet emails him",
@@ -25,6 +25,7 @@
   "llm": {
     "model": "sonnet",
     "prompt_file": "dont-shoot-the-messenger.md",
+    "worktree": false,
     "tools": {
       "allow": [
         "Read",
