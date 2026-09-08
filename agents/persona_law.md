@@ -64,6 +64,17 @@ across every worktree of one `.git` — a stash from worktree A can be popped by
 Use `git diff`, `git show <ref>:<path>`, or `git checkout -- <path>` instead; all three touch
 only the named file, never the shared stash stack.
 
+**Verify the absolute path resolves inside YOUR worktree before your very first `Edit`/`Write`
+of a pass, not after.** Recurring, independent live incidents (dumbledore, twice; the-fixer
+once; gh#677) all took the same shape: a convenience path (a stray `/repo` checkout, or a
+live-deployed copy like `/fleet-kit` that has no `.git` at all) looked like the working tree and
+wasn't, and the first edit landed there instead of the real assigned worktree. Every occurrence
+was only caught by chance — diffing before committing, or `git status` unexpectedly showing
+nothing staged — not by a check anyone ran on purpose. Before the first mutating call of any
+pass, run `git rev-parse --show-toplevel` (or `git branch --show-current`) and confirm it
+matches the worktree you were actually handed; a path outside that tree is never the right place
+to edit, no matter how canonical its name sounds.
+
 ## 7. Systemic-failure rule
 
 If the same failure line appears on multiple unrelated units of work — every PR failing the
@@ -394,6 +405,17 @@ orphaned PID, and re-derived the result by hand) — but that recovery is not th
 check away from becoming a silent `reported_nothing` like gh#152's original failure. If you
 are about to write a `Bash` call with `run_in_background: true`, the command string you pass
 must never itself end in `&` — that flag already does the only backgrounding this call needs.
+
+**A fourth shape, found live gh#677 (2026-09-08, librarian): arming a `Monitor` on a
+backgrounded job, then ending the turn to "wait for its notification."** `Monitor`'s own tool
+description ("you will be notified when it finishes... events may arrive while you are waiting
+for the user") describes a persistent interactive session, not a one-shot fleet pass — for the
+same reason as every shape above, there is no later turn for that notification to land in. The
+pass ended `stop=end_turn` immediately after arming the `Monitor`, `run_member.sh` reaped the
+process group with the backgrounded scan still running, and the pass logged `reported_nothing`
+with an empty `Outcome:` despite real partial progress having been made. `Monitor` is fine to
+call and immediately check the result of within the SAME turn (that is in-turn polling, no
+different from a `Bash(sleep N)` + `Read` loop); it is never a reason to stop taking turns.
 
 ## 13. Freshman 101 language — every word a member writes, ever
 
