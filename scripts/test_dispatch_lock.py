@@ -35,10 +35,31 @@ class DispatchLockWiringTests(unittest.TestCase):
     def test_uses_a_different_fd_than_claude_concurrency_and_worktree_lock(self):
         """fd 7 is claude_concurrency.sh's slot fd, fd 8 is worktree_lock.sh's fd -- both are
         sourced later in the SAME process. Reusing either number would have that later
-        `exec N>...` silently steal this lock's descriptor instead of failing loudly."""
+        `exec N>...` silently steal this lock's descriptor instead of failing loudly. Checking
+        the ACTUAL fd each file execs onto (not just the absence of a string this lock's own
+        code introduced, which is vacuously true for any untouched file) is what would catch a
+        real regression if either file's fd number ever changed."""
         text = RUN_MEMBER.read_text()
         self.assertIn("exec 9>", text)
-        self.assertNotIn("DISPATCH_LOCK", (KIT / "scripts" / "claude_concurrency.sh").read_text())
+        concurrency_text = (KIT / "scripts" / "claude_concurrency.sh").read_text()
+        worktree_lock_text = (KIT / "scripts" / "worktree_lock.sh").read_text()
+        self.assertIn("exec 7>", concurrency_text)
+        self.assertNotIn("exec 9>", concurrency_text)
+        self.assertIn("exec 8>", worktree_lock_text)
+        self.assertNotIn("exec 9>", worktree_lock_text)
+
+    def test_lock_key_includes_lane_not_just_item(self):
+        """datta's documented multi-nerd fanout (docs/gru-minions.md) dispatches several
+        `nerd --task "lane=<name> ..."` passes concurrently with no --item at all. Keying the
+        lock on member+item alone would collapse every one of those onto the single bare
+        "nerd" key and silently serialize a fanout that's meant to run in parallel (the exact
+        regression fleet-code-review flagged on this PR)."""
+        text = RUN_MEMBER.read_text()
+        key_pos = text.index("DISPATCH_LOCK_KEY=")
+        key_line = text[key_pos:text.index("\n", key_pos)]
+        self.assertIn("LANE", key_line,
+                       "DISPATCH_LOCK_KEY must incorporate $LANE so concurrent same-member "
+                       "different-lane dispatches don't collide")
 
 
 class DispatchLockContentionTests(unittest.TestCase):
@@ -89,6 +110,19 @@ class DispatchLockContentionTests(unittest.TestCase):
         lines = Path(self.log).read_text().splitlines()
         starts = [l for l in lines if l.startswith("START")]
         self.assertEqual(len(starts), 2, f"both distinct-item dispatches should have started: {lines}")
+
+    def test_different_lanes_on_same_member_do_not_collide(self):
+        """datta's multi-nerd fanout dispatches one `nerd --task "lane=<name> ..."` pass per
+        lane concurrently, with no --item at all -- the lock must key on member+lane too, or
+        every lane collapses onto the same bare "nerd" key and the fanout wrongly serializes."""
+        p1 = subprocess.Popen(["bash", "-c", self._acquirer_script("nerd-lanegrowth", hold_s=0.5)])
+        p2 = subprocess.Popen(["bash", "-c", self._acquirer_script("nerd-lanesearchquality", hold_s=0.5)])
+        self.assertEqual(p1.wait(timeout=5), 0)
+        self.assertEqual(p2.wait(timeout=5), 0)
+
+        lines = Path(self.log).read_text().splitlines()
+        starts = [l for l in lines if l.startswith("START")]
+        self.assertEqual(len(starts), 2, f"both distinct-lane dispatches should have started: {lines}")
 
 
 if __name__ == "__main__":

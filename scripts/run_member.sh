@@ -172,20 +172,25 @@ fleet_enabled_or_exit "$MEMBER"
 # (the-fixer self-critiques, 2026-09-08: "three the-fixer instances converging on the identical
 # PR", "5+ prior identical findings on the same PR").
 #
-# Keyed on member+item, not the full $RUN_ID (already unique per-process by design), so a
+# Keyed on member+item+lane, not the full $RUN_ID (already unique per-process by design), so a
 # top-level pass ("the-fixer") and its own intentional item-scoped sub-passes ("the-fixer-item
-# N", one per stale PR) never collide -- only two dispatches for the exact same (member, item)
-# pair do. Non-blocking: a loser here is genuine duplicate work, not a resource worth queuing
-# for -- the next cron tick (or the pass already holding the lock) re-evaluates from scratch, so
-# waiting would only delay a redundant pass rather than eliminate it. fd 9 is held for this
-# process's whole life and releases automatically on exit -- no trap needed, same as
-# claude_slot_acquire/release's fd 7 above. NOT fd 7 or 8: this same process later sources
-# claude_concurrency.sh (fd 7) and worktree_lock.sh (fd 8) -- reusing either number would have
-# `exec N>...` silently replace and lose THIS lock's descriptor the moment either of those
-# acquires, an invisible use-after-free of the lock rather than a loud failure.
+# N", one per stale PR) never collide -- only two dispatches for the exact same (member, item,
+# lane) triple do. Lane is part of the key, not just item: datta's documented multi-nerd fanout
+# (docs/gru-minions.md) dispatches several `nerd --task "lane=<name> ..."` passes concurrently
+# with no --item at all, one per lane (growth, searchquality, ui, ...) -- keying on member+item
+# alone would collapse every one of those onto the single bare "nerd" lock key and silently
+# serialize a fanout that's supposed to run in parallel. Non-blocking: a loser here is genuine
+# duplicate work, not a resource worth queuing for -- the next cron tick (or the pass already
+# holding the lock) re-evaluates from scratch, so waiting would only delay a redundant pass
+# rather than eliminate it. fd 9 is held for this process's whole life and releases
+# automatically on exit -- no trap needed, same as claude_slot_acquire/release's fd 7 above.
+# NOT fd 7 or 8: this same process later sources claude_concurrency.sh (fd 7) and
+# worktree_lock.sh (fd 8) -- reusing either number would have `exec N>...` silently replace and
+# lose THIS lock's descriptor the moment either of those acquires, an invisible use-after-free
+# of the lock rather than a loud failure.
 DISPATCH_LOCK_DIR="${TMPDIR:-/tmp}/fleet-kit-member-locks"
 mkdir -p "$DISPATCH_LOCK_DIR" 2>/dev/null || true
-DISPATCH_LOCK_KEY="${MEMBER}${ITEM:+-item${ITEM}}"
+DISPATCH_LOCK_KEY="${MEMBER}${ITEM:+-item${ITEM}}${LANE:+-lane${LANE}}"
 exec 9>"$DISPATCH_LOCK_DIR/${DISPATCH_LOCK_KEY}.lock"
 if ! flock -n 9; then
   log "SKIP: another $DISPATCH_LOCK_KEY pass already holds the dispatch lock -- exiting without doing anything (gh#3220 dispatch-race guard)"
@@ -193,7 +198,7 @@ if ! flock -n 9; then
     echo "[dry-run] SKIP: $DISPATCH_LOCK_KEY already locked -- would exit without running"
     exit 0
   fi
-  SKIP_RUN_ID="${MEMBER}${ITEM:+-item$ITEM}-skiplock-$$-$(date +%s)"
+  SKIP_RUN_ID="${MEMBER}${ITEM:+-item$ITEM}${LANE:+-lane$LANE}-skiplock-$$-$(date +%s)"
   printf "Outcome: dispatch skipped -- another %s pass already running (gh#3220 dispatch-race guard)\nEvidence: scripts/run_member.sh's per-member flock on %s was already held\n" \
       "$DISPATCH_LOCK_KEY" "$DISPATCH_LOCK_DIR/${DISPATCH_LOCK_KEY}.lock" \
     | python3 "$KIT_DIR/scripts/run_report.py" \
