@@ -110,18 +110,44 @@ post_status() { # <sha> <state> <description>
 # <skip_list> is a space-separated list of PR numbers already attempted this tick (a failed
 # claude call or an unresolved strike doesn't post a status, so without this pick_pr would
 # hand back the same broken PR every iteration and burn the whole tick budget on it alone).
+#
+# gh#627: return code carries the difference between "queue confirmed empty/ineligible" and
+# "couldn't tell, a gh call failed" -- the caller uses this to decide whether it's honest to
+# write gh#267's liveness heartbeat.
+#   0 -> a PR was picked; "<pr> <head>" on stdout.
+#   1 -> the whole queue was scanned with NO gh-call failure and nothing was eligible (a real
+#        confirmed-empty tick).
+#   2 -> `gh pr list` itself failed, or a `gh pr view`/`gh api` call failed partway through the
+#        per-PR scan -- the queue was NOT fully accounted for, so this must never be reported
+#        the same as case 1.
 pick_pr() {
   local pr head statuses review_seen checks explicit="${1:-}" skip_list="${2:-}"
+  local gh_failure=0 pr_list_json pr_list_rc view_rc api_rc
   # Oldest-created first: gh pr list's default (newest-first) order lets a steady stream of
   # new PRs starve a long-lived one indefinitely -- fleet-kit#181 measured PR#149 skipped 8
   # consecutive ticks (~2h) because newer PRs kept landing ahead of it in list order.
-  for pr in $(gh pr list --state open --json number,isDraft,createdAt \
-                -q 'sort_by(.createdAt) | .[] | select(.isDraft | not) | .number' 2>/dev/null); do
+  pr_list_json=$(gh pr list --state open --json number,isDraft,createdAt 2>/dev/null)
+  pr_list_rc=$?
+  if [ "$pr_list_rc" -ne 0 ]; then
+    return 2   # can't tell if the queue is empty -- the list call itself failed
+  fi
+  for pr in $(printf '%s' "$pr_list_json" | jq -r 'sort_by(.createdAt) | .[] | select(.isDraft | not) | .number' 2>/dev/null); do
     [ -n "$explicit" ] && [ "$pr" != "$explicit" ] && continue
     case " $skip_list " in *" $pr "*) continue ;; esac
-    head=$(gh pr view "$pr" --json headRefOid -q '.headRefOid' 2>/dev/null) || continue
+    head=$(gh pr view "$pr" --json headRefOid -q '.headRefOid' 2>/dev/null)
+    view_rc=$?
+    if [ "$view_rc" -ne 0 ]; then
+      gh_failure=1
+      continue
+    fi
     [ -z "$head" ] && continue
-    statuses=$(timeout 25s gh api "repos/${REPO_SLUG}/statuses/${head}" 2>/dev/null || echo "[]")
+    statuses=$(timeout 25s gh api "repos/${REPO_SLUG}/statuses/${head}" 2>/dev/null)
+    api_rc=$?
+    if [ "$api_rc" -ne 0 ]; then
+      gh_failure=1
+      continue
+    fi
+    [ -z "$statuses" ] && statuses="[]"
     review_seen=$(jq -r --arg c "$CONTEXT" '[.[] | select(.context==$c)] | length' <<<"$statuses" 2>/dev/null || echo 0)
     [ "${review_seen:-0}" -gt 0 ] && continue   # this head already has a verdict (any state)
     if [ -n "$REQUIRED_CHECKS" ]; then
@@ -137,6 +163,7 @@ pick_pr() {
     echo "$pr $head"
     return 0
   done
+  [ "$gh_failure" -eq 1 ] && return 2
   return 1
 }
 
@@ -217,17 +244,26 @@ while :; do
     break
   fi
 
-  PICK=$(pick_pr "$EXPLICIT_PR" "$SKIPPED_THIS_TICK") || {
+  PICK=$(pick_pr "$EXPLICIT_PR" "$SKIPPED_THIS_TICK")
+  PICK_RC=$?
+  if [ "$PICK_RC" -ne 0 ]; then
     if [ "$REVIEWED_COUNT" -eq 0 ]; then
-      log "no PR needs review this tick"
-      # Only a real cron tick (no explicit PR arg) proves the whole queue was scanned -- an
-      # `judge-judy.sh <pr>` debug call that finds its one target PR ineligible must NOT refresh
-      # the liveness row, or a human debugging a single PR while cron itself is dead would mask
-      # that exact outage.
-      [ -z "$EXPLICIT_PR" ] && report_heartbeat "queue checked via pick_pr, no eligible PR (skipped this tick=${SKIPPED_THIS_TICK:-none})"
+      # gh#627: pick_pr returns 2 (not 1) when a gh call failed partway through the scan (list,
+      # view, or statuses) -- that queue was never fully accounted for, so it must not be
+      # reported as the confirmed-empty tick gh#267's heartbeat exists for.
+      if [ "$PICK_RC" -eq 2 ]; then
+        log "pick_pr: a gh call failed while scanning the queue this tick -- not a confirmed-empty queue, skipping heartbeat"
+      else
+        log "no PR needs review this tick"
+        # Only a real cron tick (no explicit PR arg) proves the whole queue was scanned -- an
+        # `judge-judy.sh <pr>` debug call that finds its one target PR ineligible must NOT refresh
+        # the liveness row, or a human debugging a single PR while cron itself is dead would mask
+        # that exact outage.
+        [ -z "$EXPLICIT_PR" ] && report_heartbeat "queue checked via pick_pr, no eligible PR (skipped this tick=${SKIPPED_THIS_TICK:-none})"
+      fi
     fi
     break
-  }
+  fi
   PR=${PICK% *}
   HEAD_SHA=${PICK#* }
   log "PR #$PR head ${HEAD_SHA:0:12} -- reviewing (model=$MODEL)"

@@ -4742,6 +4742,12 @@ def _judge_judy_writes_a_heartbeat_row_on_a_no_pr_tick():
     on an explicit `judge-judy.sh <pr>` debug call -- only a real cron tick with no explicit PR
     arg proves the WHOLE queue was scanned; a human debugging one PR by hand while cron itself is
     dead must not refresh the liveness row and mask that outage (caught in self-review, gh#267).
+
+    gh#627 correction: "pick_pr found nothing" used to conflate a genuinely empty/ineligible
+    queue with a gh call failing partway through the scan -- both returned the same exit code, so
+    this heartbeat fired on either. It is now also gated on pick_pr's exit code being the
+    confirmed-empty one (1), not the gh-call-failure one (2) -- see
+    _judge_judy_heartbeat_skipped_when_gh_call_failed_mid_scan for that half.
     """
     src = (Path(__file__).parent.parent / "members" / "judge-judy" / "judge-judy.sh").read_text()
 
@@ -4755,13 +4761,16 @@ def _judge_judy_writes_a_heartbeat_row_on_a_no_pr_tick():
     assert ">> \"$LOG_DIR/runs.jsonl\"" in hb_def, "report_heartbeat must append to the same runs.jsonl report_run uses"
 
     pick_i = src.index('PICK=$(pick_pr "$EXPLICIT_PR" "$SKIPPED_THIS_TICK")')
-    branch = src[pick_i:pick_i + 700]
+    end_i = src.index('PR=${PICK% *}', pick_i)
+    branch = src[pick_i:end_i]
     assert "report_heartbeat" in branch, "report_heartbeat is never called from the pick_pr-found-nothing branch"
     assert '"$REVIEWED_COUNT" -eq 0' in branch, \
         "heartbeat call must be guarded by REVIEWED_COUNT -eq 0, not fire after a tick that already reviewed PRs"
     assert '-z "$EXPLICIT_PR"' in branch, \
         "heartbeat call must be guarded by -z \"$EXPLICIT_PR\" -- an explicit `judge-judy.sh <pr>` " \
         "debug call must not refresh the liveness row on behalf of the whole queue"
+    assert '"$PICK_RC" -eq 2' in branch, \
+        "heartbeat call must also be gated on pick_pr's exit code -- a gh-call failure (2) must not read as confirmed-empty (1), gh#627"
 
 
 def _judge_judy_heartbeat_status_is_distinct_from_a_real_review_outcome():
@@ -4789,6 +4798,124 @@ def _judge_judy_heartbeat_status_is_distinct_from_a_real_review_outcome():
     assert reviewed["status"] == "ok", reviewed["status"]
     assert heartbeat["status"] != reviewed["status"], \
         "a no-op heartbeat tick must not classify the same as a real review outcome"
+
+
+def _judge_judy_pick_pr_distinguishes_gh_failure_from_confirmed_empty():
+    """gh#627: pick_pr used to `return 1` (its "nothing to review" signal) whether the queue was
+    genuinely empty/ineligible OR a `gh pr list`/`gh pr view`/`gh api` call inside the scan simply
+    failed -- the caller then wrote gh#267's liveness heartbeat either way, so a stretch of gh
+    failures read as "ticked fine, nothing to review" instead of "couldn't tell". marie's PRD
+    pinpointed judge-judy.sh:113-227 with this exact failing scenario; judge-judy's own review
+    blocked PR#624 on it (head db69583c0702).
+
+    Behavioral, not static: extracts pick_pr's real function body and runs it for real under a
+    stub `gh` EXECUTABLE (not a shell function -- the statuses/check-run calls go through
+    `timeout`, which execs "gh" directly via PATH and never sees a shell function), covering the
+    three acceptance-criteria scenarios plus the untouched normal-pick happy path.
+    """
+    import os
+    import subprocess
+
+    src = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    start = src.index("pick_pr() {")
+    end = src.index("\nreport_run()", start)
+    fn_src = src[start:end]
+    assert "return 2" in fn_src, "pick_pr no longer signals a gh-call failure distinctly from a confirmed-empty queue"
+    assert "return 1" in fn_src, "pick_pr no longer signals a confirmed-empty queue"
+
+    def run_pick_pr(gh_body: str) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as td:
+            gh_path = Path(td) / "gh"
+            gh_path.write_text("#!/bin/bash\n" + gh_body)
+            gh_path.chmod(0o755)
+            script = f"""
+set -uo pipefail
+REPO_SLUG="acme/widgets"
+CONTEXT="fleet-code-review"
+REQUIRED_CHECKS=""
+{fn_src}
+pick_pr "" ""
+"""
+            env = dict(os.environ)
+            env["PATH"] = f"{td}:{env['PATH']}"
+            proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                                   timeout=15, env=env)
+            return proc.returncode, proc.stdout.strip()
+
+    # AC1: `gh pr list` itself fails -- must be distinguishable from a confirmed-empty queue.
+    rc, out = run_pick_pr('if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo boom >&2; exit 1; fi\necho "[]"; exit 0')
+    assert rc == 2, f"a failed `gh pr list` must not return the confirmed-empty code, got rc={rc} out={out!r}"
+
+    # AC2: `gh pr list` succeeds with open PRs, but every `gh pr view`/`gh api` call fails.
+    two_prs_calls_fail = (
+        'if [ "$1" = "pr" ] && [ "$2" = "list" ]; then\n'
+        '  echo \'[{"number":10,"isDraft":false,"createdAt":"2024-01-01T00:00:00Z"},'
+        '{"number":11,"isDraft":false,"createdAt":"2024-01-02T00:00:00Z"}]\'\n'
+        '  exit 0\n'
+        'fi\n'
+        'if [ "$1" = "pr" ] && [ "$2" = "view" ]; then echo boom >&2; exit 1; fi\n'
+        'if [ "$1" = "api" ]; then echo boom >&2; exit 1; fi\n'
+        'exit 1\n'
+    )
+    rc, out = run_pick_pr(two_prs_calls_fail)
+    assert rc == 2, f"gh pr view/api failing for every open PR must not return the confirmed-empty code, got rc={rc} out={out!r}"
+
+    # AC3: `gh pr list` succeeds, the one open PR is genuinely already-reviewed (ineligible), and
+    # no gh call fails -- the confirmed-empty code must still fire, unregressed from gh#267.
+    genuinely_ineligible = (
+        'if [ "$1" = "pr" ] && [ "$2" = "list" ]; then\n'
+        '  echo \'[{"number":10,"isDraft":false,"createdAt":"2024-01-01T00:00:00Z"}]\'\n'
+        '  exit 0\n'
+        'fi\n'
+        'if [ "$1" = "pr" ] && [ "$2" = "view" ]; then echo deadbeef1234; exit 0; fi\n'
+        'if [ "$1" = "api" ]; then echo \'[{"context":"fleet-code-review"}]\'; exit 0; fi\n'
+        'exit 1\n'
+    )
+    rc, out = run_pick_pr(genuinely_ineligible)
+    assert rc == 1, f"a genuinely scanned, ineligible queue must still return the confirmed-empty code, got rc={rc} out={out!r}"
+
+    # Sanity: an eligible PR is still picked normally (rc=0, "pr head" on stdout) -- the fix must
+    # not have broken the happy path.
+    eligible = (
+        'if [ "$1" = "pr" ] && [ "$2" = "list" ]; then\n'
+        '  echo \'[{"number":10,"isDraft":false,"createdAt":"2024-01-01T00:00:00Z"}]\'\n'
+        '  exit 0\n'
+        'fi\n'
+        'if [ "$1" = "pr" ] && [ "$2" = "view" ]; then echo deadbeef1234; exit 0; fi\n'
+        'if [ "$1" = "api" ]; then echo \'[]\'; exit 0; fi\n'
+        'exit 1\n'
+    )
+    rc, out = run_pick_pr(eligible)
+    assert rc == 0 and out == "10 deadbeef1234", f"an eligible PR must still be picked normally, got rc={rc} out={out!r}"
+
+
+def _judge_judy_heartbeat_skipped_when_gh_call_failed_mid_scan():
+    """gh#627 AC2: the caller must not fire gh#267's liveness heartbeat when pick_pr signals a
+    gh-call failure (return 2) instead of a confirmed-empty queue (return 1) -- see
+    _judge_judy_pick_pr_distinguishes_gh_failure_from_confirmed_empty for the behavioral half.
+
+    Static assertion, same style as this file's other judge-judy checks: the branch must capture
+    pick_pr's actual exit code (not just its truthiness) and gate report_heartbeat on the
+    confirmed-empty case only, logging a distinct line -- and never calling report_heartbeat --
+    on the gh-call-failure case.
+    """
+    src = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    pick_i = src.index('PICK=$(pick_pr "$EXPLICIT_PR" "$SKIPPED_THIS_TICK")')
+    end_i = src.index('PR=${PICK% *}', pick_i)
+    branch = src[pick_i:end_i]
+
+    assert 'PICK_RC=$?' in branch, "the caller must capture pick_pr's actual exit code, not just branch on truthiness"
+    assert '"$PICK_RC" -eq 2' in branch, "the caller never checks for pick_pr's gh-call-failure return code (2)"
+
+    fail_i = branch.index('"$PICK_RC" -eq 2')
+    heartbeat_i = branch.index('report_heartbeat "queue checked')
+    assert fail_i < heartbeat_i, \
+        "the gh-call-failure branch must be checked (and skip the heartbeat) before the confirmed-empty heartbeat call"
+
+    failure_branch = branch[fail_i:heartbeat_i]
+    assert "report_heartbeat" not in failure_branch, \
+        "report_heartbeat must not be called on the gh-call-failure path -- that would still write a false liveness row"
+    assert "log " in failure_branch, "the gh-call-failure path must log something distinct, not fail silently"
 
 
 def _marie_sweeps_the_whole_backlog_not_just_the_new():
@@ -9264,6 +9391,8 @@ if __name__ == "__main__":
     check("judge-judy skips an empty diff instead of blocking (gh#531)", _judge_judy_skips_an_empty_diff_instead_of_blocking)
     check("judge-judy writes a heartbeat row on a no-PR tick (gh#267)", _judge_judy_writes_a_heartbeat_row_on_a_no_pr_tick)
     check("judge-judy's heartbeat status reads distinct from a real review outcome (gh#267 AC1)", _judge_judy_heartbeat_status_is_distinct_from_a_real_review_outcome)
+    check("judge-judy's pick_pr distinguishes a gh-call failure from a confirmed-empty queue (gh#627)", _judge_judy_pick_pr_distinguishes_gh_failure_from_confirmed_empty)
+    check("judge-judy skips the liveness heartbeat when a gh call failed mid-scan (gh#627)", _judge_judy_heartbeat_skipped_when_gh_call_failed_mid_scan)
     check("marie re-judges the whole backlog, not just the new", _marie_sweeps_the_whole_backlog_not_just_the_new)
     check("marie writes a build-ready PRD and minion reads it", _marie_writes_a_prd_and_minion_reads_it)
     check("the-fixer catches a check that never answers", _fixer_catches_the_no_answer_class)
