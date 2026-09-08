@@ -74,11 +74,30 @@ ROOT = HERE.parent
 BYPASS_HEADER = "X-Atlas-Test-Bypass"
 
 
+def redact_secret(text: str, secret: str | None) -> str:
+    """Strips a literal secret value out of free text before it is stored in a step's
+    `detail`, a Blocked reason, or printed to stderr -- gh#729 AC6. A plain literal-value
+    replace (not a pattern like selftest.py's `_redact_secrets`) is correct here because
+    ATLAS_TEST_BYPASS is one known, opaque, already-in-hand value, not an unknown-shaped
+    leaked token to guess at."""
+    if not text or not secret:
+        return text
+    return text.replace(secret, "[REDACTED]")
+
+
 class Blocked(Exception):
-    """Required config/credentials for a journey are missing. Distinct from a step failing:
-    per sentry.md, this means the CHECKER couldn't run, not that the product is down. A
-    blocked journey is excluded from results.json's journeys[] entirely so
-    journey_issue_filer.py never files or closes anything for it."""
+    """Required config/credentials for a journey are missing, OR (gh#729) a request that DID
+    carry ATLAS_TEST_BYPASS still came back 403 -- still "the checker couldn't look", not "the
+    product is down". Distinct from a step failing: per sentry.md, this means the CHECKER
+    couldn't run, not that the product is down. A blocked journey is excluded from
+    results.json's journeys[] entirely so journey_issue_filer.py never files or closes
+    anything for it; it still lands in results.json's top-level `blocked` list, optionally
+    carrying the response status/headers that caused it (gh#729 AC4)."""
+
+    def __init__(self, message: str, status: int | None = None, headers: dict | None = None):
+        super().__init__(message)
+        self.status = status
+        self.headers = headers
 
 
 # --- catalog ---------------------------------------------------------------------------------
@@ -186,11 +205,25 @@ class JourneyCtx:
     def page(self, user: str | None = None):
         key = user or "_anon"
         if key not in self._contexts:
-            headers = {BYPASS_HEADER: self.users.bypass} if self.users.bypass else None
             context = self.browser.new_context(
                 viewport={"width": self.dims["width"], "height": self.dims["height"]},
-                extra_http_headers=headers,
             )
+            if self.users.bypass:
+                # Per-request, host-scoped injection (gh#729 AC3) -- NOT extra_http_headers on
+                # the whole context, which would attach the bypass to every request that
+                # context ever makes, including a journey (e.g. fleet-console-loads-with-runs)
+                # that navigates the SAME context to a non-philanthropy.org host like
+                # FLEET_CONSOLE_URL. A credential must never leak to an unrelated host.
+                target_host = urlsplit(self.users.base_url).netloc
+                bypass_value = self.users.bypass
+
+                def _inject_bypass(route, request, _host=target_host, _value=bypass_value):
+                    if urlsplit(request.url).netloc == _host:
+                        route.continue_(headers={**request.headers, BYPASS_HEADER: _value})
+                    else:
+                        route.continue_()
+
+                context.route("**/*", _inject_bypass)
             self._contexts[key] = (context, context.new_page())
         return self._contexts[key][1]
 
@@ -210,7 +243,8 @@ class JourneyCtx:
         except Blocked:
             raise
         except Exception as exc:  # noqa: BLE001 -- a step failing is DATA, not a crash (AC3)
-            status, detail = "fail", f"{type(exc).__name__}: {exc}"
+            status = "fail"
+            detail = redact_secret(f"{type(exc).__name__}: {exc}", self.users.bypass)
 
         result = {"index": index, "action": action, "observable_result": observable, "status": status}
         if detail:
@@ -264,6 +298,23 @@ def run_sign_in(ctx: JourneyCtx):
     ctx.step(2, s2, page)
 
 
+def _blocked_for_403(response, users: "TestUsers") -> Blocked | None:
+    """Returns a Blocked ready to raise if `response` is the Cloudflare/WAF 403 report pages
+    are known to sit behind (gh#729), else None. Shared so every journey that reaches a
+    `/990/report/<ein>` URL -- open-990-report's own visit, search-and-open-org's click-through,
+    and claim-org-through-verify-screen's own visit -- reads BLOCKED the same way, not only the
+    one journey whose implementation happens to call page.goto() on it directly."""
+    if response is None or response.status != 403:
+        return None
+    headers = {k: redact_secret(v, users.bypass) for k, v in dict(response.headers).items()}
+    reason = (
+        "report page returned 403 even with ATLAS_TEST_BYPASS configured"
+        if users.bypass
+        else "report page returned 403 (Cloudflare/WAF challenge) -- ATLAS_TEST_BYPASS not configured"
+    )
+    return Blocked(reason, status=response.status, headers=headers)
+
+
 def run_search_and_open_org(ctx: JourneyCtx):
     page = ctx.page()
 
@@ -283,7 +334,11 @@ def run_search_and_open_org(ctx: JourneyCtx):
     def s1():
         first = page.locator('a[href*="/990/report/"]').first
         clicked_text = first.inner_text().strip()
-        first.click()
+        with page.expect_response(lambda r: "/990/report/" in r.url) as resp_info:
+            first.click()
+        blocked = _blocked_for_403(resp_info.value, ctx.users)
+        if blocked:
+            raise blocked
         page.wait_for_url(re.compile(r"/990/report/"), timeout=10000)
         heading = page.get_by_role("heading").first.inner_text().strip()
         assert heading, "no org-name heading after opening a result"
@@ -297,7 +352,10 @@ def run_open_990_report(ctx: JourneyCtx):
     page = ctx.page()
 
     def s0():
-        page.goto(ctx.users.url(f"https://philanthropy.org/990/report/{ein}"), timeout=15000)
+        response = page.goto(ctx.users.url(f"https://philanthropy.org/990/report/{ein}"), timeout=15000)
+        blocked = _blocked_for_403(response, ctx.users)
+        if blocked:
+            raise blocked
         expect_visible(page.get_by_role("heading"))
         wait_text_matches(page, r"\$[0-9]|revenue|expense", timeout=8000)
 
@@ -329,7 +387,10 @@ def run_claim_org_through_verify_screen(ctx: JourneyCtx):
 
     def s0():
         sign_in_alice()
-        page.goto(users.url(f"https://philanthropy.org/990/report/{ein}"), timeout=15000)
+        response = page.goto(users.url(f"https://philanthropy.org/990/report/{ein}"), timeout=15000)
+        blocked = _blocked_for_403(response, users)
+        if blocked:
+            raise blocked
         page.get_by_role("button", name=re.compile("claim this organization|claim", re.I)).first.click()
         wait_text_matches(page, r"claim", timeout=8000)
 
@@ -563,8 +624,12 @@ def run_all(catalog: dict, users: TestUsers, browser, base_out: Path, run_id: st
             try:
                 runner(ctx)
             except Blocked as b:
-                print(f"journey_walker: BLOCKED {journey['id']} [{viewport}]: {b}", file=sys.stderr)
-                blocked.append({"id": journey["id"], "viewport": viewport, "reason": str(b)})
+                reason = redact_secret(str(b), users.bypass)
+                print(f"journey_walker: BLOCKED {journey['id']} [{viewport}]: {reason}", file=sys.stderr)
+                entry = {"id": journey["id"], "viewport": viewport, "reason": reason}
+                if b.status is not None:
+                    entry["response"] = {"status": b.status, "headers": b.headers or {}}
+                blocked.append(entry)
                 ctx.close()
                 continue
             except Exception:  # noqa: BLE001 -- a runner bug must not end the whole pass
