@@ -5874,6 +5874,76 @@ def _nerd_lane_validation_reads_target_own_registry():
     )
 
 
+def _registry_lanes_reads_list_shaped_registry_gh704():
+    """gh#704: `registry_lanes()` only recognised a dict-shaped `REGISTRY`. philanthropy's real
+    `src/philanthropy/ops/lane_kpis.py` defines `REGISTRY` as a LIST of `LaneKPI(lane=..., ...)`
+    calls, which `isinstance(node.value, ast.Dict)` never matches -- the walk found nothing,
+    `registry_lanes()` returned `[]`, and `run_member.sh` fell back to the fleet-kit seven,
+    rejecting `claim`, `audience` and `coordination` even though PR#681 had already closed
+    gh#638 for the dict shape. This is a direct unit test of `registry_lanes()` itself (AC1-4),
+    below the `run_member.sh` subprocess layer `_nerd_lane_validation_reads_target_own_registry`
+    already covers for the dict shape.
+    """
+    import importlib as _il
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    import lane_registry_lanes
+    _il.reload(lane_registry_lanes)
+
+    with tempfile.TemporaryDirectory() as td:
+        # AC1: list-shaped REGISTRY (philanthropy's real shape) -- sorted, deduplicated.
+        list_path = Path(td) / "lane_kpis_list.py"
+        list_path.write_text(
+            "REGISTRY = [\n"
+            '    LaneKPI(lane="coordination", weight=1),\n'
+            '    LaneKPI(lane="claim", weight=2),\n'
+            '    LaneKPI(lane="audience"),\n'
+            '    LaneKPI(lane="claim"),\n'  # duplicate -- must not appear twice
+            "]\n"
+        )
+        assert lane_registry_lanes.registry_lanes(str(list_path)) == [
+            "audience", "claim", "coordination",
+        ], f"list-shaped REGISTRY not read correctly: {lane_registry_lanes.registry_lanes(str(list_path))!r}"
+
+        # AC2: dict-shaped REGISTRY (fleet-kit's existing shape) must be unaffected.
+        dict_path = Path(td) / "lane_kpis_dict.py"
+        dict_path.write_text(
+            'REGISTRY = {\n    "growth": {}, "searchquality": {}, "ui": {},\n'
+            '    "devops": {}, "revenue": {},\n}\n'
+        )
+        assert lane_registry_lanes.registry_lanes(str(dict_path)) == [
+            "devops", "growth", "revenue", "searchquality", "ui",
+        ], f"dict-shaped REGISTRY regressed: {lane_registry_lanes.registry_lanes(str(dict_path))!r}"
+
+        # AC3: malformed list elements are skipped, not fatal.
+        messy_path = Path(td) / "lane_kpis_messy.py"
+        messy_path.write_text(
+            "REGISTRY = [\n"
+            '    LaneKPI(lane="claim"),\n'
+            "    NOT_A_CALL,\n"                      # not a call at all
+            "    LaneKPI(no_lane_kw=True),\n"         # call, but no lane= keyword
+            "    LaneKPI(lane=some_variable),\n"      # lane= is not a string literal
+            "]\n"
+        )
+        assert lane_registry_lanes.registry_lanes(str(messy_path)) == ["claim"], (
+            f"malformed list elements must be skipped, not raise or drop valid ones: "
+            f"{lane_registry_lanes.registry_lanes(str(messy_path))!r}"
+        )
+
+        # AC4: missing file, unparseable file, and a file with no top-level REGISTRY all
+        # return [] rather than raising -- run_member.sh's fallback depends on this.
+        assert lane_registry_lanes.registry_lanes(str(Path(td) / "does_not_exist.py")) == []
+
+        bad_syntax_path = Path(td) / "lane_kpis_bad_syntax.py"
+        bad_syntax_path.write_text("REGISTRY = [\n")
+        assert lane_registry_lanes.registry_lanes(str(bad_syntax_path)) == []
+
+        no_registry_path = Path(td) / "lane_kpis_no_registry.py"
+        no_registry_path.write_text("SOMETHING_ELSE = 1\n")
+        assert lane_registry_lanes.registry_lanes(str(no_registry_path)) == []
+
+
 def _every_pass_files_a_written_report():
     """A pass costs real money; it owes a memo, not three one-line fields.
 
@@ -9863,6 +9933,7 @@ if __name__ == "__main__":
     check("datta's structural-N/A streak has a reset path independent of ranking (gh#447)", _datta_structural_na_streak_has_a_reset_path)
     check("nerd rejects an invalid lane before any lane-specific work (gh#374)", _nerd_invalid_lane_rejected_before_lane_work)
     check("nerd lane validation reads the current target's own lane registry (gh#638)", _nerd_lane_validation_reads_target_own_registry)
+    check("registry_lanes() reads a list-shaped REGISTRY, e.g. philanthropy's (gh#704)", _registry_lanes_reads_list_shaped_registry_gh704)
     check("nerd's STRUCTURAL-N/A marker wires to datta's down-rank rule (gh#451)", _nerd_structural_na_marker_wires_to_datta_downrank)
     check("datta's gh#392 hold never suppresses a STALE or BREACHED verdict (gh#497)", _datta_gh392_hold_never_suppresses_stale_or_breached)
     check("a run records the item it worked", _a_run_records_the_item_it_worked)
