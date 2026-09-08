@@ -445,8 +445,12 @@ five that restate the title.
 (quality-standard.md §0 steps 1-5), never the build: a `References:` line naming the two or
 three best products at this exact interaction; Given/When/Then criteria for the reference
 screenshots in `docs/design/<item>/references/`, the parity matrix with the budgets people
-feel, the design spec, and the buy-vs-build ADR; and one criterion that files an ask of class
-`decision` for Reif to approve the spec. `quality_gate.py` lets a world-class item through
+feel, **the open-source pieces and design patterns the best already use** (Reif, 2026-09-08:
+*"find the open sourced or design patterns that the best used already"* -- the libraries, UI
+kits, and named patterns that reproduce each affordance, with stars and last release, one
+column each in the matrix), the design spec, and the buy-vs-build ADR that picks from those
+before any custom build; and one criterion that files an ask of class `decision` for Reif to
+approve the spec. `quality_gate.py` lets a world-class item through
 only while its criteria carry that `References:` line, or once a comment reads
 `Design approved: <ask id>`. Build slices (Part C2b) for a world-class item are filed only
 after that comment exists. Nobody builds the feel before Reif has seen the design.
