@@ -415,6 +415,42 @@ gh issue comment <n> --body-file <file>
 gh issue edit <n> --add-label fleet:prd
 ```
 
+### The quality dial — set the bar before anyone builds (fk#649, fk#651)
+
+Reif, 2026-09-07: *"I'd rather us push less code but better features"* and *"spend more time
+on marie's runs, really focusing on user benefit, and what amazing CX experiences look
+like."* A PRD is where that happens or does not, so this part gets the pass's time: three
+PRDs that name the person and the best experience in the world beat five that restate the
+title, and Parts A-C3 are bookkeeping that can wait a pass if C4 needs the budget. Every PRD
+you write carries **exactly one** of `quality:ship-it`,
+`quality:solid`, `quality:world-class` (docs/quality-standard.md §0). Defaults: a request that
+names a reference product ("Telegram-level", "like Snap", "Stripe quality") is world-class;
+anything else Reif asked for in his own words (`fleet:reif-asked`, `fleet:reif-priority`) is
+solid; fleet plumbing and auto-filed fix issues are ship-it. Reif can move the dial any time;
+never overwrite a `quality:` label a human set.
+
+```
+gh issue edit <n> --add-label quality:solid
+```
+
+**The label and the criteria are the gate, not decoration.** gru runs `quality_gate.py` on
+every candidate: no `quality:` label, or no Given/When/Then criterion, and the item is not
+buildable no matter how high you ranked it. A PRD whose criteria you cannot make testable from
+the repo is not written this pass — say so in your report (C4) as `UNKNOWN — <what a human
+must decide>` rather than shipping a vague one. Fewer PRDs that a builder cannot misread beat
+five that restate the title.
+
+**World-class means the research pass comes first, and Reif approves the design.** For a
+`quality:world-class` item the acceptance criteria in your PRD are the research pass itself
+(quality-standard.md §0 steps 1-5), never the build: a `References:` line naming the two or
+three best products at this exact interaction; Given/When/Then criteria for the reference
+screenshots in `docs/design/<item>/references/`, the parity matrix with the budgets people
+feel, the design spec, and the buy-vs-build ADR; and one criterion that files an ask of class
+`decision` for Reif to approve the spec. `quality_gate.py` lets a world-class item through
+only while its criteria carry that `References:` line, or once a comment reads
+`Design approved: <ask id>`. Build slices (Part C2b) for a world-class item are filed only
+after that comment exists. Nobody builds the feel before Reif has seen the design.
+
 ### The format — Google-level means falsifiable, not long
 
 A PRD that restates the title in five paragraphs is worse than no PRD: it reads like rigor and
@@ -429,6 +465,15 @@ Who hits this, how often, and what happens to them today. Name the file/route/fu
 it goes wrong (`orgs.py:420`), not a general area. If you cannot point at code, say so — that
 is itself the finding.
 
+## The person, and what amazing looks like
+Who the person is, what they are trying to get done in this moment, and what the best
+experience in the world at this exact interaction feels like -- name the product and the
+moment ("Telegram's thread: your message is in the list before your thumb leaves the key",
+"Stripe's checkout: one field, no page load, the receipt is already in your inbox"). Then the
+one thing about ours that falls short of that. One paragraph, plain words. This section is
+the reason the item exists; a PRD that cannot fill it is plumbing -- write `none (plumbing)`
+and label it `quality:ship-it`.
+
 ## Why now
 What makes this worth a pass THIS week rather than someday: the vision line it serves (quote
 it, from the vision you read in PART 0), the newer issue that made it urgent, or the user
@@ -440,10 +485,11 @@ builder would reasonably assume are in scope. Non-goals are the highest-value li
 whole document: they are what stops a complexity-3 becoming a complexity-8 mid-build.
 
 ## Acceptance criteria
-Numbered, each independently checkable, each phrased so a reviewer can say yes or no with no
-judgment call. "Handles errors gracefully" is not a criterion. "A POST with no auth header
-returns 401 and writes no row" is. This is the section minion actually builds against, so it
-is the one to get exactly right.
+Numbered, each independently checkable, each written as **Given / When / Then** (fk#651):
+"Given a signed-out visitor, when they POST /claim, then the API returns 401 and writes no
+row." "Handles errors gracefully" is not a criterion and `quality_gate.py` will drop the
+item. For anything a person sees, one criterion names the screenshot that proves it. This is
+the section minion actually builds against, so it is the one to get exactly right.
 
 ## Out of scope / open questions
 Anything you could not resolve from the repo, named as a question for a human. Never guess and
@@ -556,7 +602,7 @@ why). (C3) how many backlog issues you scored for
 complexity this pass, and **how many still carry a priority label with no complexity label** —
 that second number is the one to watch: it should fall every pass, and a run where it holds
 steady or rises means the backfill is not keeping up with new work and wants a bigger slice.
-(C4) how many PRDs you wrote (issue numbers), how many high-priority items are still
+(C4) how many PRDs you wrote (issue numbers) and the `quality:` label each got, how many you declined to write because the criteria could not be made testable (issue numbers + the UNKNOWN), how many high-priority items are still
 waiting for one, how many existing `fleet:prd` issues you backfilled with a missing
 `Vision-link:` comment (issue numbers) and how many still need it, how many NON-`fleet:prd`
 issues got a lightweight `Vision-link:`-only comment this pass (issue numbers, gh#4597) and how
