@@ -464,9 +464,20 @@ $FINDINGS" >/dev/null 2>&1 || log "PR #$PR: WARN findings comment failed"
     FIX_SUMMARY=$(printf '%s' "$FINDINGS" | head -1 | cut -c1-80)
     FIX_TITLE="fix: PR #$PR failed code review"
     [ -n "$FIX_SUMMARY" ] && FIX_TITLE="$FIX_TITLE -- $FIX_SUMMARY"
+    # gh#4597: vision_link_gate.py drops any candidate with no Vision-link line, and this
+    # filed issue never had one -- every PR judge-judy blocks was starving the whole claim
+    # funnel this way, recurring faster than marie's periodic backfill could sweep it (jefe
+    # hand-patched 18 instances across 2026-09-07 alone). Carry the blocked PR's own
+    # Vision-link line (mandatory on every PR since gh#525/10d) forward onto the fix issue
+    # instead of inventing one; a PR that predates the convention has none to carry, so fall
+    # back to an honest "none (maintenance)" rather than leaving the line off entirely.
+    PR_VISION_LINK=$(grep -iE '^[[:space:]]*#{0,6}[[:space:]]*[*_]{0,2}Vision-link' "$BODY_FILE" 2>/dev/null | head -1)
+    [ -z "$PR_VISION_LINK" ] && PR_VISION_LINK="Vision-link: none (maintenance)"
     FIX_BODY="judge-judy blocked PR #$PR at head ${HEAD_SHA:0:12} (fleet-code-review: failure).
 
-$FINDINGS"
+$FINDINGS
+
+$PR_VISION_LINK"
     python3 "$KIT_DIR/scripts/board_github.py" file "$FIX_TITLE" --context "$FIX_BODY" \
         --priority high >>"$LOG" 2>&1 \
       && log "PR #$PR: filed fix item for blocked review" \
