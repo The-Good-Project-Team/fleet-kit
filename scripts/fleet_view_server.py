@@ -629,7 +629,28 @@ def _budget_preview() -> dict:
         "account": None,
         "maxx_handle": None,
         "pool": (_env_all.get("FLEET_ACCOUNTS") or "").strip().strip('"\'') or None,
+        "week_bank_pct": None,
     }
+
+    # THE TOPBAR'S FIGURE. week_bank_pct is the same percent-of-week reading
+    # maxx_reader.get_headroom() hands gru (fanout.py:11 -- percent-of-week is the real
+    # constraint, dollars are not), independent of the FLEET_SHARE_FRACTION/gru dials below
+    # (those slice this instance's share; the week bank is the fleet-wide figure itself).
+    # Read via subprocess with subprocess_env(), same as maxx_share_ceiling.py just below --
+    # NOT by importing maxx_reader in-process, because this is a long-lived server that never
+    # re-sources fleet.env into its own os.environ. subprocess_env()'s own docstring above
+    # documents exactly this failure for maxx_share_ceiling.py (gh#295-adjacent): an in-process
+    # call would read FLEET_MAXX_URL/_HANDLE/_KEY as unset even when fleet.env has them
+    # configured, and silently show every operator "headroom unavailable" always. None (never
+    # a fabricated number) whenever the meter genuinely can't be read -- gh#561.
+    out["week_bank_pct"] = None
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(KIT_DIR / "scripts" / "maxx_reader.py")],
+            capture_output=True, text=True, timeout=20, env=subprocess_env())
+        out["week_bank_pct"] = json.loads(proc.stdout or "{}").get("week_bank_pct")
+    except Exception:  # noqa: BLE001 -- display route, a meter hiccup must never 500
+        pass
 
     # WHICH ACCOUNT these numbers describe. Settings rendered a ceiling and an allowance
     # derived from one account's meter while naming no account anywhere on the page, so an

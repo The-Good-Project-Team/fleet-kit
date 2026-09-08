@@ -6933,6 +6933,55 @@ def _fleet_settings_rejects_unsafe_or_malformed_dial_values():
         "/api/fleet_settings writes before validating -- not all-or-nothing"
 
 
+def _budget_preview_exposes_week_bank_pct():
+    """gh#561: the topbar's primary figure is percent-of-week headroom (maxx_reader's
+    week_bank_pct, the same value gru packs against per fanout.py:11), not the per-instance
+    ceiling/allowance _budget_preview() already computed. Read via a maxx_reader.py subprocess
+    (mocked here, same boundary maxx_share_ceiling.py's own call crosses), never by importing
+    maxx_reader in-process -- this is a long-lived server that never re-sources fleet.env into
+    its own os.environ (subprocess_env()'s docstring), so an in-process call would silently
+    read every credential as unset. Three cases: a real reading passes through untouched; an
+    unreadable/unconfigured meter degrades to None, never a fabricated number; and a raised
+    exception from the subprocess call (any meter hiccup) must not crash this display route.
+    """
+    import fleet_view_server as fvs
+
+    orig_run = fvs.subprocess.run
+
+    class _Result:
+        def __init__(self, stdout="", stderr=""):
+            self.stdout, self.stderr = stdout, stderr
+
+    # _budget_preview() also shells out to resolve_maxx_handle.sh (account-name resolution)
+    # regardless of week_bank_pct -- only the maxx_reader.py call matters to this test, so
+    # every other command gets a harmless empty result, same as an unresolved handle today.
+    def _dispatch(week_bank_stdout):
+        def _run(cmd, **kwargs):
+            if any("maxx_reader.py" in str(c) for c in cmd):
+                return _Result(stdout=week_bank_stdout)
+            return _Result()
+        return _run
+
+    try:
+        fvs.subprocess.run = _dispatch(json.dumps(
+            {"headroom_fraction": 0.42, "label": "ok", "week_bank_pct": 42.0}))
+        out = fvs._budget_preview()
+        assert out["week_bank_pct"] == 42.0, out
+
+        fvs.subprocess.run = _dispatch(json.dumps(
+            {"headroom_fraction": None, "label": "not_configured"}))
+        out = fvs._budget_preview()
+        assert out["week_bank_pct"] is None, out
+
+        def _fake_run_raises(cmd, **kwargs):
+            raise RuntimeError("meter hiccup")
+        fvs.subprocess.run = _fake_run_raises
+        out = fvs._budget_preview()  # must not raise
+        assert out["week_bank_pct"] is None, out
+    finally:
+        fvs.subprocess.run = orig_run
+
+
 def _fleet_view_ui_can_actually_authenticate_a_write():
     """The Settings dials (and every other write button) could never save from a browser.
 
@@ -9618,6 +9667,7 @@ if __name__ == "__main__":
     check("schedulers ship for macOS and Linux", _schedulers_for_both_platforms)
     check("fleet-view write routes are authenticated and fail closed", _write_routes_are_authenticated)
     check("fleet_settings rejects unsafe or malformed dial values (gh#233)", _fleet_settings_rejects_unsafe_or_malformed_dial_values)
+    check("budget_preview exposes week_bank_pct, None on an unreadable meter (gh#561)", _budget_preview_exposes_week_bank_pct)
     check("fleet-view UI can actually authenticate a write", _fleet_view_ui_can_actually_authenticate_a_write)
     check("fleet-view login is still fail-closed", _fleet_view_login_is_still_fail_closed)
     check("gru allowance dial actually changes the number", _gru_allowance_dial_actually_changes_the_number)
