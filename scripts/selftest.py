@@ -3511,6 +3511,7 @@ _ENTRYPOINT_SCHEDULED_SCRIPTS = (
     ("deploy_staleness_check.sh", "deploy_staleness_check.sh", "gh#201"),
     ("lane_kpi.py", "python3 /fleet-kit/scripts/lane_kpi.py record", "gh#324"),
     ("git_pull_guard.sh", "bash /fleet-kit/scripts/git_pull_guard.sh", "gh#68"),
+    ("vp_due.sh", "bash /fleet-kit/scripts/vp_due.sh", "vp loop, 2026-09-08"),
 )
 
 
