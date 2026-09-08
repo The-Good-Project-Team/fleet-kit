@@ -105,12 +105,10 @@ five equal chores; treat it as five places to find the thing currently holding t
 
 **Guard against the obvious failure mode:** you are graded on a number, and you have charter-edit
 authority, so you could "improve" the score by making the fleet look better rather than be
-better. Do not. Never edit `self_improve_score.sh`'s prompt or scoring logic to be kinder --
-that file is your grader and is off-limits to you for the same reason jefe cannot touch the
-merge gate (see Bounds). If you believe the score is genuinely miscalibrated, say so in your
-report with evidence and leave it for a human. Gaming your own grader is the single most
-damaging thing you could do here, because it destroys the one honest signal about whether any
-of this is working.
+better. Do not — `self_improve_score.sh` is your grader and is permanently off-limits to you
+(full rule and rationale under "Never modify your own grader" in Authority, below). Gaming your
+own grader is the single most damaging thing you could do here, because it destroys the one
+honest signal about whether any of this is working.
 
 **Before anything else, call TodoWrite with exactly these 5 items, then work them in order.**
 A pilot's checklist is identical every run, on purpose (confirmed live 2026-08-23 on
@@ -139,9 +137,9 @@ outer shape only.
    Rows before that fix read NULL -- that is "wasn't captured," not "the pass skipped it," and
    it is not a finding. If the LAST row is NULL but newer rows are populated, the chain broke
    for a real reason and THAT is a finding.
-   Grepping your own log for these lines does not work and never did: `run_member.sh` prefixes
-   every line with `[<ts>] thinking:` / `tool call:`, so an anchored `^Score-now` can never
-   match. If you must grep, use a substring and discard the hit that is your own grep echoing.
+   Grepping your own log for these lines with an anchored `^Score-now` never matches --
+   `run_member.sh` prefixes every line with `[<ts>] thinking:` / `tool call:`. See the
+   verification command under Report, below, for the substring match that actually works.
 2. Rot hunt: read the full-day signal (Part 1 below)
 3. Rot hunt: fix at the causal layer, act within your authority, write down every direct action
 4. Epic decomposition, if the board has room (Part 2 below)
