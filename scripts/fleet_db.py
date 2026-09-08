@@ -369,10 +369,28 @@ def backfill(conn: sqlite3.Connection, runs_file: Path | None = None) -> int:
     return n
 
 
-def spend(conn: sqlite3.Connection, member: str | None = None, hours: float = 24.0) -> list[dict]:
+def utc_day_start(now: float | None = None) -> float:
+    """Epoch seconds for the most recent UTC midnight at or before `now` (real clock if
+    omitted) -- the one calendar-day boundary this kit uses anywhere (gh#265), matching every
+    other clock here (runs.jsonl timestamps, recorded_at, every scheduler). No timezone picker,
+    no local-time boundary: UTC only, by design.
+    """
+    import datetime
+    import time as _time
+    dt = datetime.datetime.fromtimestamp(now if now is not None else _time.time(), tz=datetime.timezone.utc)
+    return dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def spend(conn: sqlite3.Connection, member: str | None = None, hours: float = 24.0,
+          since: float | None = None) -> list[dict]:
     """Per-member trailing spend -- the number a self-tuning pass reads before deciding
     anything. Grouped, not a raw dump: a member deciding whether to throttle ITSELF wants its
     own total, not 200 individual rows to sum by eye.
+
+    `since`, when given, is an explicit cutoff (epoch seconds) that overrides `hours` --
+    gh#265's calendar-day reading passes `utc_day_start()` here rather than a synthetic hours
+    value, so this function's `hours=` contract (README.md:428-429) stays exactly what every
+    existing caller already depends on.
 
     gh#185: `ok_runs`'s CASE now reuses fleet_stats.py's `_NOT_EXECUTED_STATUSES` set (#150) as
     an explicit exclusion, rather than relying on 'ok'/'quiet' happening to already be disjoint
@@ -385,7 +403,7 @@ def spend(conn: sqlite3.Connection, member: str | None = None, hours: float = 24
     import time
 
     import fleet_stats
-    since = time.time() - hours * 3600
+    since = since if since is not None else time.time() - hours * 3600
     not_executed = fleet_stats._NOT_EXECUTED_STATUSES
     not_executed_sql = ",".join("?" for _ in not_executed)
     q = f"""SELECT member, COUNT(*) as runs, SUM(cost_usd) as total_cost,

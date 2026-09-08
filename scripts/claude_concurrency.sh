@@ -33,9 +33,14 @@ mkdir -p "$CLAUDE_CONCURRENCY_DIR" 2>/dev/null || true
 # outrun by a fresh contender purely on poll timing, the same reasoning worktree_lock.sh
 # already applies to the single worktree-add lock. Past CLAUDE_CONCURRENCY_SLOT_TIMEOUT_S this
 # still returns 0 (see the timeout var's own comment above) -- the ceiling is best-effort, not
-# a hard cap a pass can be starved behind forever.
+# a hard cap a pass can be starved behind forever. gh#694: that best-effort wait keeps cycling
+# through EVERY slot even past the deadline -- it must never bind to one specific slot number
+# (slot 0 was tried once; a long-lived holder of slot 0 then parked every timed-out caller
+# behind it while other slots cycled freely, reintroducing the false "lost pass" alarm #692
+# was written to remove). The only change past the deadline is a one-time log line so an
+# operator can see a pass is still fair-queueing, not stuck.
 claude_slot_acquire() {
-  local n="$CLAUDE_CONCURRENCY_N" i deadline
+  local n="$CLAUDE_CONCURRENCY_N" i deadline warned=
   [ "$n" -ge 1 ] 2>/dev/null || n=4
   deadline=$(( $(date +%s) + CLAUDE_CONCURRENCY_SLOT_TIMEOUT_S ))
   while :; do
@@ -46,10 +51,9 @@ claude_slot_acquire() {
       fi
       exec 7>&-
     done
-    if [ "$(date +%s)" -ge "$deadline" ]; then
-      exec 7>"$CLAUDE_CONCURRENCY_DIR/slot-0.lock"
-      flock 7   # give up queueing politely and just wait for slot 0, however long that takes
-      return 0
+    if [ -z "$warned" ] && [ "$(date +%s)" -ge "$deadline" ]; then
+      warned=1
+      echo "claude_slot_acquire: past ${CLAUDE_CONCURRENCY_SLOT_TIMEOUT_S}s, still waiting for any of $n slots" >&2
     fi
   done
 }

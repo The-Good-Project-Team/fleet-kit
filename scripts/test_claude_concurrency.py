@@ -55,6 +55,22 @@ class ClaudeConcurrencyContentionTests(unittest.TestCase):
             claude_slot_release
         """)
 
+    def _direct_slot_holder_script(self, tag: str, slot: int, hold_s: float) -> str:
+        """Grabs one specific numbered slot file directly (bypassing claude_slot_acquire's
+        own round-robin), so a test can deterministically pin a slot without racing other
+        holders for it."""
+        slot_dir = os.path.join(self.tmp, "fleet-kit-claude-slots")
+        return textwrap.dedent(f"""
+            set -u
+            mkdir -p "{slot_dir}"
+            exec 7>"{slot_dir}/slot-{slot}.lock"
+            flock 7
+            echo "START {tag} $(date +%s.%N)" >> "{self.log}"
+            sleep {hold_s}
+            echo "END {tag} $(date +%s.%N)" >> "{self.log}"
+            flock -u 7
+        """)
+
     def test_beyond_ceiling_queues_instead_of_spawning_immediately(self):
         """5 attempts against a ceiling of 2: at no point are more than 2 STARTs open at once."""
         procs = [subprocess.Popen(["bash", "-c", self._worker_script(f"w{i}")], env=self.env)
@@ -90,6 +106,40 @@ class ClaudeConcurrencyContentionTests(unittest.TestCase):
         waiter = subprocess.Popen(["bash", "-c", self._worker_script("waiter", hold_s=0)], env=env)
         self.assertEqual(waiter.wait(timeout=10), 0, "waiter never returned from claude_slot_acquire")
         self.assertEqual(holder.wait(timeout=10), 0)
+
+    def test_timeout_past_deadline_does_not_bind_to_one_slot(self):
+        """gh#694: N=4, slot 0 held far longer than slots 1-3. A caller whose own deadline
+        elapses while ALL 4 slots happen to be busy must still take whichever of slots 1-3
+        frees first -- it must not hard-bind to slot 0 specifically and wait out its holder.
+
+        Against the unpatched claude_concurrency.sh (which falls back to `flock` on
+        slot-0.lock unconditionally once past its deadline), this reproduces the bug: the
+        waiter would sit blocked until slot 0's holder releases at ~9s, well past the 7s
+        bound asserted below, and the test fails.
+        """
+        env = dict(self.env)
+        env["FLEET_CLAUDE_CONCURRENCY"] = "4"
+        env["FLEET_CLAUDE_SLOT_TIMEOUT_S"] = "1"
+
+        holder0 = subprocess.Popen(
+            ["bash", "-c", self._direct_slot_holder_script("holder0", slot=0, hold_s=9)], env=env)
+        others = [
+            subprocess.Popen(
+                ["bash", "-c", self._direct_slot_holder_script(f"holder{i}", slot=i, hold_s=5)],
+                env=env)
+            for i in (1, 2, 3)
+        ]
+        time.sleep(0.3)  # let all four direct holders actually take their locks first
+
+        waiter = subprocess.Popen(["bash", "-c", self._worker_script("waiter", hold_s=0)], env=env)
+        self.assertEqual(
+            waiter.wait(timeout=7), 0,
+            "waiter did not return within 7s -- it bound to slot 0 instead of taking a "
+            "free slot from 1-3 (gh#694)")
+
+        self.assertEqual(holder0.wait(timeout=12), 0)
+        for p in others:
+            self.assertEqual(p.wait(timeout=8), 0)
 
 
 if __name__ == "__main__":
