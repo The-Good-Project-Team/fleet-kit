@@ -87,13 +87,11 @@ as the acceptance criteria -- so write each one so a builder can start without a
 
 **Then start the redo yourself, in this same pass.** Count the `Not yet (VP review):` comments
 on the item, yours included.
-- Fewer than three: spawn the fix pass with the `Bash` tool, `run_in_background: true` (never a
-  shell `&`), unless one is already running for this item
-  (`ps -eo args | grep "run_member.sh minion --item <n>" | grep -v grep`):
-  ```
-  FLEET_RUN_NOW=1 bash /fleet-kit/scripts/run_member.sh minion --item <n>
-  ```
-  Do not wait for it; write your report and end. gru spawns you again when its PR merges.
+- Fewer than three: the redo starts within 15 minutes without you. `scripts/vp_due.sh` (cron)
+  reads your `Not yet (VP review):` comment and spawns `run_member.sh minion --item <n>` detached.
+  Do NOT spawn it from your own pass: a child of your pass dies the minute your pass ends
+  (2026-09-08 16:53Z, minion started and killed in the same minute). Say in your report that
+  the redo is queued. vp_due spawns you again when the redo's PR merges.
 - Three or more: do not spawn. Label the issue `fleet:needs-retriage`, and say in one line what
   marie must re-scope (the row that never reaches the reference, the budget that cannot be met,
   the reference that was the wrong product). The morning brief tells Reif.
