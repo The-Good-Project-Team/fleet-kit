@@ -42,3 +42,9 @@ jobs:
         run: python3 scripts/test_settings_wiring.py
       - name: run members/librarian/test_librarian.py
         run: python3 members/librarian/test_librarian.py
+      - name: run test_worktree_lock.py
+        run: python3 scripts/test_worktree_lock.py
+      - name: run test_claude_concurrency.py
+        run: python3 scripts/test_claude_concurrency.py
+      - name: run test_deploy_health_and_retire.py
+        run: python3 scripts/test_deploy_health_and_retire.py
