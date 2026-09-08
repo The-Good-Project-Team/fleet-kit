@@ -72,6 +72,10 @@ messenger's morning brief lists every open `world-class` item so Reif can move t
 7. The VP review uses it, at phone and desktop width, against the reference captures, and
    posts `Accepted (VP review):` with screenshots and the measured budgets, then closes it.
    Reif reads the verdict in the brief and can veto with a comment starting `Reif:`.
+8. A `Not yet` is a work order, never a stop (Reif, 2026-09-08: *"I'm not paying money just so
+   we can deny building stuff. Preference is that we get the spec up to par."*). vp's numbered
+   fixes become the item's acceptance criteria and vp starts the redo minion in the same pass.
+   Three `Not yet` rounds without a pass means marie re-scopes the item; it is never abandoned.
 
 Enforced by: marie's PRD sets the label and, for `world-class`, files the research pass as
 slice 1 with the reference list in it; judge-judy blocks a `world-class` PR with no
