@@ -42,7 +42,17 @@ messenger's morning brief lists every open `world-class` item so Reif can move t
    the interaction. For a chat thread: Telegram, iMessage, WhatsApp.
 2. Screenshot or record every state of that interaction in each reference: empty, first
    message, sending, sent, delivered, read, typing, offline, reconnect, error, long thread,
-   phone width. Put them in `docs/design/<item>/references/`.
+   phone width. Put them in `docs/design/<item>/references/`. **No login is needed for this
+   and "could not sign in" is not a reason to skip it** (Reif, 2026-09-08: *"they can still
+   search for the UI screenshots, or on Dribbble, etc."*). The browser in the image reaches,
+   in this order: the product's own press kit and App Store / Google Play listing (real
+   screenshots of real states), Mobbin and Dribbble and Behance (flows and states, searchable
+   by product), YouTube walkthroughs (pause and capture the frame), Wikimedia Commons, and the
+   product's open-source client (Telegram's iOS, Android and desktop apps are public on
+   GitHub, so are Signal's and Element's: the file and line that does the thing is the best
+   reference there is). Every capture names its source URL in `references/README.md`. A
+   matrix cell reads `captured: <file>` or `code: <repo>/<file>:<line>`; `known: yes` and a
+   FAQ page are not a cell, and a pass that ships them has not done step 2.
 3. Write the parity matrix: one row per affordance, one column per reference, one column
    for ours today. Add the budgets people feel (respond within 100 ms, animate at 16 ms a
    frame, load under 1 s).
