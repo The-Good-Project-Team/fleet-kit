@@ -2088,7 +2088,7 @@ async function loadMembers() {
   const [{ members }, { spend }, { kpi }] = await Promise.all([
     fetchJSON('/api/members'),
     fetchJSON('/api/spend?hours=24'),
-    fetchJSON('/api/kpi?hours=24'),
+    fetchJSON('/api/kpi?day=1'), // gh#265: kpiTitleSuffix() renders "today", so the count must be a real UTC calendar day, not a rolling 24h window
   ]);
   const spendByMember = Object.fromEntries((spend || []).map(s => [s.member, s]));
   members.forEach(m => { m._spend = spendByMember[m.spec.name]; });

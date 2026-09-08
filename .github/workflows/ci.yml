@@ -50,3 +50,5 @@ jobs:
         run: python3 scripts/test_claude_concurrency.py
       - name: run test_deploy_health_and_retire.py
         run: python3 scripts/test_deploy_health_and_retire.py
+      - name: run test_kpi_calendar_day_gh265.py
+        run: python3 scripts/test_kpi_calendar_day_gh265.py

@@ -659,6 +659,58 @@ def _fleet_db_spend_ok_runs_unaffected_by_never_executed_statuses():
         assert row["runs"] == 5, f"runs = {row['runs']}, want 5 -- this fix must not touch it"
 
 
+def _fleet_db_spend_calendar_day_cutoff_gh265():
+    """gh#265 (marie PRD Part C4, AC1/AC2): the console's "today" figures were a rolling 24h
+    window mislabeled as a calendar day. `fleet_db.utc_day_start()` plus `spend()`'s new
+    `since=` cutoff give a real UTC-midnight boundary, exercised here against a synthetic clock
+    (never the real one) so this can't flake near an actual midnight.
+
+    AC1: at a synthetic 12:00 UTC "now", a run 25h earlier (before that day's midnight) is
+    excluded; one 1h earlier (after midnight) is included.
+    AC2: five minutes after midnight, a run recorded ten minutes BEFORE midnight must not
+    leak into the day's total.
+    """
+    import fleet_db
+
+    noon = fleet_db.utc_day_start(now=1_800_000_000) + 12 * 3600  # a fixed, arbitrary 12:00 UTC
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        runs = d / "runs.jsonl"
+        rows_in = [
+            {"run_id": "old", "member": "a", "status": "ok", "_recorded_at": noon - 25 * 3600,
+             "tokens": {"cost_usd": 10.0}},
+            {"run_id": "new", "member": "a", "status": "ok", "_recorded_at": noon - 1 * 3600,
+             "tokens": {"cost_usd": 1.0}},
+        ]
+        runs.write_text("\n".join(json.dumps(r) for r in rows_in) + "\n")
+        conn = fleet_db.connect(d / "fleet.db")
+        fleet_db.sync(conn, runs_file=runs)
+        rows = fleet_db.spend(conn, member="a", since=fleet_db.utc_day_start(now=noon))
+        assert len(rows) == 1, rows
+        assert rows[0]["total_cost"] == 1.0, \
+            f"total_cost = {rows[0]['total_cost']}, want 1.00 -- the 25h-old run is from before today's midnight"
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        midnight = fleet_db.utc_day_start(now=1_800_000_000)
+        five_past = midnight + 5 * 60
+        runs = d / "runs.jsonl"
+        rows_in = [
+            {"run_id": "before", "member": "a", "status": "ok", "_recorded_at": midnight - 10 * 60,
+             "tokens": {"cost_usd": 5.0}},
+            {"run_id": "after", "member": "a", "status": "ok", "_recorded_at": midnight + 60,
+             "tokens": {"cost_usd": 2.0}},
+        ]
+        runs.write_text("\n".join(json.dumps(r) for r in rows_in) + "\n")
+        conn = fleet_db.connect(d / "fleet.db")
+        fleet_db.sync(conn, runs_file=runs)
+        rows = fleet_db.spend(conn, member="a", since=fleet_db.utc_day_start(now=five_past))
+        assert len(rows) == 1, rows
+        assert rows[0]["total_cost"] == 2.0, \
+            f"total_cost = {rows[0]['total_cost']}, want 2.00 -- the pre-midnight run must not leak in"
+
+
 def _fleet_db_composite_pk_migration_is_lock_serialized():
     """#212: fleet_view_server.py calls `fleet_db.connect()` from several independent
     threads -- the background tail thread and per-request handlers -- and
@@ -9576,6 +9628,7 @@ if __name__ == "__main__":
     check("query_runs(item_id=) matches free-text #N mentions, not just the build-claim column (gh#405)", _fleet_db_query_runs_item_id_matches_free_text_mentions)
     check("query_runs(item_id=\"\") behaves like item_id=None, not an unlimited full-table scan (gh#484)", _fleet_db_query_runs_empty_item_id_is_treated_like_none)
     check("spend()'s ok_runs excludes never-executed statuses, runs stays untouched (gh#185)", _fleet_db_spend_ok_runs_unaffected_by_never_executed_statuses)
+    check("fleet_db.spend()'s since= gives a true UTC-calendar-day cutoff, not a rolling window (gh#265)", _fleet_db_spend_calendar_day_cutoff_gh265)
     check("fleet.db composite-PK migration is lock-serialized", _fleet_db_composite_pk_migration_is_lock_serialized)
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("cost_bridge converts real spend into fanout's --observed shape", _cost_bridge_converts_real_spend_into_fanouts_observed_shape)

@@ -1121,10 +1121,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/spend":
             qs = parse_qs(urlparse(self.path).query)
-            hours = float(qs.get("hours", ["24"])[0])
             member = qs.get("member", [None])[0]
             db = fleet_db.connect()
             fleet_db.sync(db)
+            # gh#265: `day=1` asks for the true UTC-calendar-day figure (fleet_db.utc_day_start())
+            # instead of a rolling window, for a caller that means to label its number "today"
+            # rather than "24h". An explicit `hours=` request is untouched -- same cutoff math,
+            # same response shape (README.md:428-429) -- so nothing that already depends on the
+            # rolling reading changes.
+            if qs.get("day", ["0"])[0] in ("1", "true"):
+                spend = fleet_db.spend(db, member=member, since=fleet_db.utc_day_start())
+                self._json({"spend": spend, "day": True})
+                return
+            hours = float(qs.get("hours", ["24"])[0])
             self._json({"spend": fleet_db.spend(db, member=member, hours=hours), "hours": hours})
             return
         if path == "/api/asks":
@@ -1181,8 +1190,17 @@ class Handler(BaseHTTPRequestHandler):
             # than a fresh gh/db query, since this only needs member+outcome+ts, all present
             # on every in-memory run record.
             qs = parse_qs(urlparse(self.path).query)
-            hours = float(qs.get("hours", ["24"])[0])
-            cutoff = time.time() - hours * 3600
+            # gh#265: `day=1` counts only runs recorded since the current UTC midnight -- the
+            # true reading for a caller (kpiTitleSuffix()) that renders its count next to the
+            # word "today". Same as /api/spend's `day` flag: an explicit `hours=` request is
+            # untouched.
+            day = qs.get("day", ["0"])[0] in ("1", "true")
+            if day:
+                cutoff = fleet_db.utc_day_start()
+                hours = None
+            else:
+                hours = float(qs.get("hours", ["24"])[0])
+                cutoff = time.time() - hours * 3600
             snap = STATE.snapshot()
             windowed = [r for r in snap["runs"] if (r.get("ts") or 0) >= cutoff]
             try:
@@ -1191,7 +1209,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 names = sorted({r.get("member") for r in windowed if r.get("member")})
             out = [fleet_kpi.sum_kpi_over_runs(name, windowed) for name in names]
-            self._json({"kpi": out, "hours": hours})
+            if day:
+                self._json({"kpi": out, "day": True})
+            else:
+                self._json({"kpi": out, "hours": hours})
             return
         if path == "/api/stats/runs_summary":
             qs = parse_qs(urlparse(self.path).query)
