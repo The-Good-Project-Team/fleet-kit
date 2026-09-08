@@ -41,10 +41,13 @@ alert_store.py's `record()` directly (not through fleet_alert.sh's own severity 
 this script needs the same page/no-page verdict alert_store already computes, to decide
 whether to ALSO file an incident issue this tick, so it asks once and reuses the answer
 rather than letting fleet_alert.sh ask a second time). alert_store's own `degraded`
-severity already pages only once a condition has persisted across 2 consecutive runs
-(see fleet-kit's test_alert_store.py, test_degraded_pages_only_after_it_persists) and
-re-pages on its own cadence during a sustained outage. A second debounce clock in this
-script could only disagree with that one, never improve on it.
+severity pages only once a condition has persisted across 2 consecutive runs (see
+fleet-kit's test_alert_store.py, test_degraded_pages_only_after_it_persists) -- and then
+STAYS silent for that same (check, problem) key forever, `record()` has no re-paging
+cadence of its own. That is why every tick also calls `alert_store.resolve_check()` with
+the set of problem keys still open THIS tick (gh#727): anything not in that set gets
+marked resolved, so if it recurs later it is treated as a fresh occurrence and can page
+again. Skipping that call would silently turn this into a fire-once pager.
 
 FILING TO THE PRODUCT BOARD (gh#727 AC2/AC4/AC5/AC6): the same tick that pages also
 files or updates ONE incident issue on The-Good-Project-Team/philanthropy, titled
@@ -311,35 +314,28 @@ def incident_title(url: str) -> str:
     return f"{INCIDENT_TITLE_PREFIX}{url}"
 
 
-def find_open_incident(title: str, runner=_run_gh) -> int | None:
+def _list_open_incidents(runner=_run_gh) -> list[dict]:
     code, out = runner(["gh", "issue", "list", "--repo", INCIDENT_REPO, "--label", "incident",
                          "--state", "open", "--json", "number,title", "--limit", "50"])
     if code != 0:
         print(f"prod_health_check: could not list incidents: {out[:300]}", file=sys.stderr)
-        return None
+        return []
     try:
-        issues = json.loads(out)
+        return json.loads(out)
     except ValueError:
-        return None
-    for issue in issues:
+        return []
+
+
+def find_open_incident(title: str, runner=_run_gh) -> int | None:
+    for issue in _list_open_incidents(runner):
         if issue.get("title") == title:
             return issue.get("number")
     return None
 
 
-def find_any_open_incident(runner=_run_gh) -> int | None:
-    code, out = runner(["gh", "issue", "list", "--repo", INCIDENT_REPO, "--label", "incident",
-                         "--state", "open", "--json", "number,title", "--limit", "50"])
-    if code != 0:
-        return None
-    try:
-        issues = json.loads(out)
-    except ValueError:
-        return None
-    for issue in issues:
-        if (issue.get("title") or "").startswith(INCIDENT_TITLE_PREFIX):
-            return issue.get("number")
-    return None
+def find_all_open_incidents(runner=_run_gh) -> list[int]:
+    return [issue["number"] for issue in _list_open_incidents(runner)
+            if (issue.get("title") or "").startswith(INCIDENT_TITLE_PREFIX)]
 
 
 def build_file_cmd(title: str, body: str) -> list[str]:
@@ -372,17 +368,20 @@ def file_or_update_incident(probes: list[ProbeResult], alerts: list[AlertCall],
     return {"action": "filed", "issue": int(m.group(1)) if m else None, "ok": code == 0}
 
 
-def report_recovery(runner=_run_gh) -> dict | None:
-    """gh#727 AC5: comment recovery on the open incident issue, if any -- never close it."""
-    number = find_any_open_incident(runner)
-    if number is None:
-        return None
-    code, _out = runner(build_comment_cmd(
-        number,
-        "Recovered: all probes healthy and the canary heartbeat is fresh on this tick "
-        "(prod_health_check.py, from dino). Leaving open for a human to confirm and close.",
-    ))
-    return {"issue": number, "ok": code == 0}
+def report_recovery(runner=_run_gh) -> list[dict]:
+    """gh#727 AC5: comment recovery on every still-open incident issue -- never close one.
+    Commenting on ALL of them (not just the first match) matters because a probe incident
+    and a later, separate heartbeat incident can both be open at once; leaving either one
+    without a recovery note would misleadingly look still-active to a human."""
+    results = []
+    for number in find_all_open_incidents(runner):
+        code, _out = runner(build_comment_cmd(
+            number,
+            "Recovered: all probes healthy and the canary heartbeat is fresh on this tick "
+            "(prod_health_check.py, from dino). Leaving open for a human to confirm and close.",
+        ))
+        results.append({"issue": number, "ok": code == 0})
+    return results
 
 
 def main() -> int:
@@ -400,10 +399,19 @@ def main() -> int:
         print(f"prod_health_check: could not write verdict log: {exc}", file=sys.stderr)
     print(line)
 
+    # alert_store.record()'s own per-key debounce pages a condition ONCE and then stays
+    # "already paged" forever for that key -- it has no re-paging cadence of its own (despite
+    # this module's earlier docstring claim; verified against alert_store.py directly). This
+    # check must therefore declare, every tick, which problem keys are STILL open (`keep`) so
+    # alert_store can resolve everything else -- without this, a condition that pages, clears,
+    # and recurs later would never page again.
+    still_open = {a.problem for a in alerts}
+    resolved = alert_store.resolve_check(CHECK, keep=still_open)
+
     if not alerts:
-        rec = report_recovery()
-        if rec is not None:
-            print(f"prod_health_check: recovery comment on #{rec['issue']} ok={rec['ok']}")
+        if any(r["was_paged"] for r in resolved):
+            for rec in report_recovery():
+                print(f"prod_health_check: recovery comment on #{rec['issue']} ok={rec['ok']}")
         return 0
 
     all_reported = True
