@@ -4096,6 +4096,29 @@ def _console_shows_role_and_steps_per_member():
         assert (spec.get("mandate") or {}).get("checklist"), f"{spec['name']} has no checklist to show"
 
 
+def _sidebar_shows_spawned_scheduled_disabled_not_strikethrough_gh565():
+    """gh#565, marie PRD: the sidebar collapsed three real member states -- self-scheduled,
+    dispatch-only (minion, nerd -- enabled:false but run inside the 24h window), and genuinely
+    off -- into two renderings, striking through a dispatch-only member as if it were dead.
+    Now every row carries a text `amode` badge naming its mode (scheduled/spawned/disabled),
+    none of them strikethrough, and the health dot (astatus, an orthogonal axis) is untouched.
+    """
+    html_src = (ROOT / "scripts" / "fleet_view.html").read_text()
+    assert "line-through" not in html_src, "strikethrough glyph must be gone, not overridden"
+    assert "disabled-agent" not in html_src.split("function renderSidebar()")[1].split("function homeAgentsHtml()")[0], \
+        "sidebar row must not carry the old disabled-agent class"
+    assert "function memberMode(enabled, last)" in html_src
+    assert "return hasRecentRun(last) ? 'spawned' : 'disabled';" in html_src
+    sidebar = html_src[html_src.index("function renderSidebar()"):html_src.index("function homeAgentsHtml()")]
+    assert "memberMode(enabled, last)" in sidebar, "sidebar must compute the mode"
+    assert "amode mode-${mode}" in sidebar and "${MODE_LABEL[mode]}" in sidebar, \
+        "sidebar row must render a real-text mode badge, not colour/typography alone"
+    assert "astatus ${cls}" in sidebar, "health dot (orthogonal axis, non-goal 2) must be untouched"
+    # the three modes are distinct CSS rules, not variations of one
+    for mode in ("scheduled", "spawned", "disabled"):
+        assert f".amode.mode-{mode} {{" in html_src, f"missing a distinct visual rule for {mode}"
+
+
 def _deploy_sh_rolls_over_via_caddy_without_a_cordon():
     """gh#625: on a caddy-fronted box deploy.sh cuts over by swapping the proxy upstream, never
     by cordoning the fleet and draining passes. Pins (a) the proxy path runs INSTEAD of
@@ -9903,6 +9926,7 @@ if __name__ == "__main__":
     check("deploy.sh kicks one gru pass right after cutover (gh#622)", _deploy_sh_kicks_a_gru_pass_right_after_cutover)
     check("deploy.sh rolls over via caddy without a cordon (gh#625)", _deploy_sh_rolls_over_via_caddy_without_a_cordon)
     check("console shows each member's emoji, role and the steps a pass takes", _console_shows_role_and_steps_per_member)
+    check("sidebar shows spawned/scheduled/disabled as distinct badges, not strikethrough (gh#565)", _sidebar_shows_spawned_scheduled_disabled_not_strikethrough_gh565)
     check("console Home is usable on a phone and the number tile reads fleet.env", _console_home_is_usable_on_a_phone_and_the_number_tile_reads_fleet_env)
     check("console v2 is one phone-first page with five blocks (fk#645)", _console_v2_is_one_phone_first_page_with_five_blocks)
     check("share dials offer every 5% labelled as a percent", _share_dials_offer_every_five_percent_labelled_as_percent)
