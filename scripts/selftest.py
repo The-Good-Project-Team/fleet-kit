@@ -5361,11 +5361,13 @@ def _datta_structural_na_streak_has_a_reset_path():
     assert "STRUCTURAL-N/A" in datta, "gh#339's down-rank itself got lost"
 
     # Scope to the gh#339 structural-N/A section specifically (bounded by its own streak
-    # marker and the following UNKNOWN paragraph) -- gh#392's unrelated reconfirmation-only
+    # marker and the following gh#392 section) -- gh#392's unrelated reconfirmation-only
     # hold legitimately uses "no separate reset step" for its own, real, self-reversing check
     # and must not be mistaken for the disproven gh#339 claim this test targets.
     streak_start = datta.find("check for a structural-N/A streak")
-    streak_end = datta.find("UNKNOWN, not resolved by this pass")
+    streak_end = datta.find(
+        "Separately, also check for reconfirmation-only staleness on a LIVE lane (gh#392)"
+    )
     assert 0 <= streak_start < streak_end, "gh#339 streak section markers not found"
     streak_section = datta[streak_start:streak_end]
 
