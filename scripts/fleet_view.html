@@ -1463,6 +1463,14 @@ async function renderStatsPage() {
         </div>`;
     }
   }
+  if (!siHistory.length) {
+    // gh#563 code review: clearing the skeleton unconditionally used to leave a genuinely
+    // blank 260px box here on a fresh install (no self_improve_score.jsonl rows in the 14-day
+    // window yet) -- the exact "reads as broken" complaint this issue is about, just for a
+    // narrower trigger than the loading-window case the skeleton itself covers.
+    const box = document.getElementById('chartSelfImproveBox');
+    if (box) box.innerHTML = '<div class="run-empty">no score history yet</div>';
+  }
   if (siHistory.length) {
     // Rows written before the 3h switch carry a bare "2026-08-25"; newer ones a full ISO
     // timestamp. Render the timestamps as "08-25 18h" -- a raw 20-char ISO string per point
