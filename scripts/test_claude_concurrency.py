@@ -78,6 +78,19 @@ class ClaudeConcurrencyContentionTests(unittest.TestCase):
         self.assertLessEqual(max_concurrent, 2,
                               f"more than the configured ceiling ran at once: {events}")
 
+    def test_acquire_still_returns_past_its_own_timeout(self):
+        """A caller that waits longer than FLEET_CLAUDE_SLOT_TIMEOUT_S still gets a slot
+        eventually (best-effort ceiling, not a hard cap a pass can be starved behind
+        forever) -- exercised with a tiny timeout so the test itself stays fast."""
+        env = dict(self.env)
+        env["FLEET_CLAUDE_CONCURRENCY"] = "1"
+        env["FLEET_CLAUDE_SLOT_TIMEOUT_S"] = "1"
+        holder = subprocess.Popen(["bash", "-c", self._worker_script("holder", hold_s=3)], env=env)
+        time.sleep(0.3)  # let the holder actually take the slot first
+        waiter = subprocess.Popen(["bash", "-c", self._worker_script("waiter", hold_s=0)], env=env)
+        self.assertEqual(waiter.wait(timeout=10), 0, "waiter never returned from claude_slot_acquire")
+        self.assertEqual(holder.wait(timeout=10), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
