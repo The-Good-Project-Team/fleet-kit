@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- fleet-kit prod-health pager — watches philanthropy.org from OFF the box it runs on,
+     scripts/prod_health_check.py (gh#727/#4898). The only monitor whose own liveness does not
+     share atlas-serve's failure domain; see com.fleetkit.sync-health.plist for the sibling
+     pager this one's unit shape is copied from. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fleetkit.prod-health</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python3</string>
+    <string>{{KIT_PATH}}/scripts/prod_health_check.py</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/{{USER}}</string>
+    <key>FLEET_LOG_DIR</key>
+    <string>{{LOG_DIR}}</string>
+    <key>PHILANTHROPY_CF_TEST_HEADER_VALUE</key>
+    <string>{{PHILANTHROPY_CF_TEST_HEADER_VALUE}}</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/{{USER}}/Library/Logs/fleet-kit/prod-health.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/{{USER}}/Library/Logs/fleet-kit/prod-health.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
