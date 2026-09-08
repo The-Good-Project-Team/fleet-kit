@@ -74,7 +74,17 @@ DEFAULT_STATE_FILE = os.environ.get(
 # the final save once the whole scan finishes -- gh#588: a run SIGKILLed by its own 900s
 # timeout partway through a real corpus otherwise banks zero progress no matter how many files
 # it scrubbed before the kill.
-CHECKPOINT_EVERY_FILES = int(os.environ.get("LIBRARIAN_CHECKPOINT_FILES", "200"))
+#
+# Lowered from 200 (dumbledore rot hunt, 2026-09-08): measured live against this fleet's real
+# transcript store, redact_text()'s per-file regex cost runs roughly 1-2.5s/MB (an instrumented
+# probe timed a lone 4MB file at 10.7s), so reaching file #200 alone took an *uncontended*
+# ~200s+. A real hourly pass shares the box under a concurrency ceiling of 7 other members, so
+# actual throughput is well below that uncontended measurement. Net effect: the watermark had
+# not moved in 10 days / ~240 hourly runs -- every single run was SIGKILLed by its own 900s
+# timeout before ever reaching file #200, so this safety net had never once fired in production
+# despite existing since gh#588/PR#603. 25 guarantees at least one checkpoint lands within any
+# 900s window even under heavy contention.
+CHECKPOINT_EVERY_FILES = int(os.environ.get("LIBRARIAN_CHECKPOINT_FILES", "25"))
 
 # A directory with this exact name is a curated memory store, not a transcript dump, wherever
 # it appears in the tree (see module docstring) -- never scrub or age-sweep it.
