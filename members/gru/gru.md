@@ -159,7 +159,9 @@ spawns exactly one). Your job, in order:
    respawned every hour, burning a full claim/spawn/clear cycle each time (unlike
    needs-human-op's explicit prior verdict, this signal is silent). For each remaining candidate:
    ```
-   python3 /fleet-kit/scripts/claim_history.py --item <n>
+   python3 /fleet-kit/scripts/claim_history.py --item <n> --labels "<comma list of its labels>"
+   # a quality:world-class item prints `ok world-class`: its research -> VP review -> redo
+   # cycles are the process, not dead ends (vp.md caps them at three Not-yet rounds)
    # exit 0 "ok count=<c> threshold=3"       -> keep in the candidate set
    # exit 1 "BLOCKED count=<c> threshold=3"  -> drop from this pass's candidate set
    ```
@@ -210,7 +212,9 @@ spawns exactly one). Your job, in order:
    ```
    FLEET_RUN_NOW=1 bash /fleet-kit/scripts/run_member.sh vp --item <n>
    ```
-   One `vp` per item per pass, counted against the hour like a minion (opus). Never file a
+   `scripts/vp_due.sh` on the crontab (every 15 min) does this deterministically; you only
+   spawn `vp` yourself when you can see it is due right now and `vp_due.py --repo-dir /repo`
+   agrees. One `vp` per item per pass, counted against the hour like a minion (opus). Never file a
    `decision`-class ask for a design or acceptance question again; Reif vetoes with a
    comment starting `Reif:` if he wants to.
    Same "never silently drop" rule: name every dropped candidate by number and reason, grouped

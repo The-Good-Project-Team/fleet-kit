@@ -78,6 +78,7 @@ def main(argv=None) -> int:
                      "threshold? Exit 1 (BLOCKED) if so -- gru.md's claim step should skip it "
                      "and name it in the report, not silently reclaim it.")
     ap.add_argument("--item", type=int, required=True)
+    ap.add_argument("--labels", default="", help="comma list of the item's labels; quality:world-class is never a dead end")
     ap.add_argument("--threshold", type=int, default=DEFAULT_DEAD_END_THRESHOLD)
     ap.add_argument("--window-days", type=float, default=DEFAULT_WINDOW_DAYS)
     ap.add_argument("--db-path", help="override fleet.db path (default: fleet_db.DB_FILE)")
@@ -86,6 +87,13 @@ def main(argv=None) -> int:
     conn = fleet_db.connect(Path(a.db_path) if a.db_path else None)
     fleet_db.sync(conn)
     run_ids = minion_runs_for_item(conn, a.item, window_days=a.window_days)
+    if "quality:world-class" in {l.strip() for l in (a.labels or "").split(",")}:
+        # Reif, 2026-09-08: "get the spec up to par." A world-class item cycles research ->
+        # VP review -> redo by design (members/vp/vp.md caps it at three Not-yet rounds); each
+        # cycle is a minion run against a still-open issue, which is exactly what this filter
+        # reads as a dead end. philanthropy#4863 hit BLOCKED count=4 mid-loop. vp owns the cap.
+        print(f"ok world-class (iteration is the process; vp.md caps rounds) item={a.item}")
+        return 0
     count = dead_end_claim_count(run_ids, a.item)
     blocked = is_dead_end_blocked(run_ids, a.item, threshold=a.threshold)
     print(f"{'BLOCKED' if blocked else 'ok'} count={count} threshold={a.threshold}")

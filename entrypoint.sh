@@ -343,6 +343,10 @@ case "${1:-cron-foreground}" in
       # nerd pass stumbled onto it. Hourly at :57 is unclaimed on the minute map above and
       # comfortably inside the default 4h staleness budget (FLEET_DEPLOY_STALENESS_BUDGET_S).
       echo "57 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/deploy_staleness_check.sh >> $LOG_DIR/deploy_staleness_check.log 2>&1"
+      # vp_due.sh: every 15 min, spawn a VP review for each quality:world-class item whose newest
+      # merged PR is newer than its newest VP verdict (members/vp/vp.md). Deterministic on
+      # purpose -- gru is a prompt and did not spawn vp for 2.5h after a redo merged (2026-09-08).
+      echo "*/15 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) FLEET_LOG_DIR=$LOG_DIR && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; bash /fleet-kit/scripts/vp_due.sh >> $LOG_DIR/vp_due.log 2>&1"
       # auto_deploy_race_check.sh (gh#255): auto_deploy.sh's own guarded fetch/pull cannot
       # produce a multi-branch fast-forward error or a ref-lock race -- when auto_deploy.cron.log
       # (the HOST crontab's raw stdout/stderr capture, same bind-mounted $FLEET_LOG_DIR as this
