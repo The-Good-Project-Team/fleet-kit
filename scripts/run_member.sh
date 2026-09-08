@@ -350,8 +350,26 @@ if [ "$WORKTREE_ENABLED" = "True" ] && [ "$DRY_RUN" -ne 1 ]; then
     # $WT_PATH, but a leak is easiest to attribute to this exact pass while its worktree
     # (and this trap) still exist -- see postflight_dirty_check.sh.
     check_repo_clean_postflight "$RUN_ID"
+    # gh#4727: `remove`/`prune` mutate the same $REPO/.git/worktrees admin dir that
+    # create_run_worktree's `add` does, but only `add` took $LOCK -- remove/prune ran
+    # unguarded, free to race a SIBLING pass's concurrent `add`/`remove`/`prune` on the
+    # same $REPO. Matches #4727's evidence: three the-fixer dispatches fired ~40s apart,
+    # then the earliest one's worktree admin dir vanished (`fatal: not a git repository`)
+    # while its `claude -p` child was still running -- exactly what an unguarded
+    # concurrent prune/remove produces. Same lock, same steal-a-lock-older-than-5min
+    # fallback as create_run_worktree, capped shorter (30s not 120s) since this runs at
+    # exit and a stuck cleanup must not wedge the pass from finishing.
+    local cleanup_waited=0 cleanup_held=0
+    while [ "$cleanup_waited" -lt 30 ]; do
+      if mkdir "$LOCK" 2>/dev/null; then cleanup_held=1; break; fi
+      if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
+        rmdir "$LOCK" 2>/dev/null || true; continue
+      fi
+      sleep 1; cleanup_waited=$((cleanup_waited + 1))
+    done
     git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
     git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+    if [ "$cleanup_held" -eq 1 ]; then rmdir "$LOCK" 2>/dev/null || true; fi
   }
   trap cleanup_run_worktree EXIT
   cd "$WT_PATH" || { log "FATAL: worktree created but cd failed: $WT_PATH"; exit 1; }
