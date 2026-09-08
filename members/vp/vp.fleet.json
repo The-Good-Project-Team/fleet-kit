@@ -27,6 +27,7 @@
   "llm": {
     "model": "opus",
     "prompt_file": "vp.md",
+    "worktree": false,
     "tools": {
       "allow": [
         "Read",
