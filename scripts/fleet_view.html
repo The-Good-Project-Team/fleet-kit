@@ -2030,17 +2030,15 @@ function renderSiblingSwitch(siblings) {
 }
 
 async function loadMembers() {
-  const [{ members }, { spend }, { kpi }, budgetPreview] = await Promise.all([
+  const [{ members }, { spend }, { kpi }] = await Promise.all([
     fetchJSON('/api/members'),
     fetchJSON('/api/spend?hours=24'),
     fetchJSON('/api/kpi?hours=24'),
-    fetchJSON('/api/budget_preview'),
   ]);
   const spendByMember = Object.fromEntries((spend || []).map(s => [s.member, s]));
   members.forEach(m => { m._spend = spendByMember[m.spec.name]; });
   SPECS = members;
   KPI_BY_MEMBER = Object.fromEntries((kpi || []).map(k => [k.member, k]));
-  renderGlobalSpend(budgetPreview);
   if (!SELECTED && SPECS.length) SELECTED = SPECS[0].spec.name;
 }
 
@@ -2053,6 +2051,21 @@ async function loadMembers() {
 // fact as a real, honest zero (maxx_reader.py's own over-vs-unreadable distinction).
 // The dollar figure is not removed -- it still shows on each member's detail view,
 // via renderDetailHead()'s spendLine.
+//
+// Deliberately NOT folded into loadMembers()'s Promise.all -- /api/budget_preview shells
+// out through maxx_reader.py to a real remote meter and can legitimately take seconds, and
+// a slow or failing read here has nothing to do with whether the member/spend/KPI tiles
+// loaded. Same reasoning renderAlerts() documents at its own try/catch: awaited inside
+// boot()'s Promise.all, an uncaught throw here would surface as a full-page "dashboard
+// failed to load" for what is really just this one tile misbehaving.
+async function refreshGlobalSpend() {
+  try {
+    renderGlobalSpend(await fetchJSON('/api/budget_preview'));
+  } catch (err) {
+    console.error('refreshGlobalSpend() failed:', err);
+    renderGlobalSpend(null);
+  }
+}
 function renderGlobalSpend(preview) {
   const el = document.getElementById('globalSpend');
   const pct = preview && preview.week_bank_pct;
@@ -2116,6 +2129,7 @@ async function boot() {
         loadMembers(),
         renderAlerts(),
         renderTheNumberTile(),
+        refreshGlobalSpend(),
       ]);
       ALL_RUNS = snap.runs || [];
       GH = snap.gh || { prs: [], issues: [], merged: [], self_evolution: [] };
@@ -2145,6 +2159,7 @@ async function boot() {
       // most once a night (number_read.py's cron), so there is no case for its own timer.
       renderAlerts();
       renderTheNumberTile();
+      refreshGlobalSpend();
     }, 30000);
     setInterval(renderQueue, 15000);
 
