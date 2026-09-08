@@ -1,0 +1,18 @@
+[Unit]
+Description=fleet-kit prod-health pager — watches philanthropy.org from OFF the box it runs on (scripts/prod_health_check.py, gh#727/#4898)
+
+[Service]
+Type=oneshot
+# Plain host process, same shape as account/sync/tunnel-health's own units: no Claude Code
+# dependency, so Environment= per var here rather than FLEET_ENV_FILE.
+Environment=FLEET_LOG_DIR={{LOG_DIR}}
+# The Cloudflare bypass header's value -- a secret provisioned on this host by a human (see
+# philanthropy repo's docs/ops/monitoring.md), never committed to either repo. Unset means
+# the report-page probe is SKIPPED rather than a false page (gh#727 AC9).
+Environment=PHILANTHROPY_CF_TEST_HEADER_VALUE={{PHILANTHROPY_CF_TEST_HEADER_VALUE}}
+# python3 for the check itself, gh for the incident-filing calls to the product repo (assumes
+# `gh auth login` has already been run on this host, same as this repo's other gh-calling
+# scripts e.g. worktree_builder.sh).
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=/usr/bin/env python3 {{KIT_PATH}}/scripts/prod_health_check.py
+User={{USER}}

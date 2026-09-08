@@ -8,7 +8,10 @@ topic the health pagers below page to), `{{PUBLIC_URL}}` (the public tunnel URL
 tunnel-health checks, e.g. `https://your-fleet.example.com/`), `{{VIEW_PORT}}` (your
 `FLEET_VIEW_PORT`, e.g. `8420`), `{{INSTANCE_DIR}}` (this instance's state dir, e.g.
 `instances/<name>` under `up.sh`'s own layout — where its `fleet.env` lives), and
-`{{CONTAINER_NAME}}` (the podman container this instance runs as, e.g. `fleet-kit-<name>`), and `{{INSTANCE_NAME}}` (the label the member-liveness pager names in its page) —
+`{{CONTAINER_NAME}}` (the podman container this instance runs as, e.g. `fleet-kit-<name>`), and `{{INSTANCE_NAME}}` (the label the member-liveness pager names in its page), and
+`{{PHILANTHROPY_CF_TEST_HEADER_VALUE}}` (prod-health's Cloudflare bypass header value — a
+secret a human provisions per philanthropy repo's `docs/ops/monitoring.md`, leave unset and
+prod-health simply skips the one probe that needs it rather than false-paging) —
 then install per your platform's normal mechanism.
 
 | Job | Cadence | Script | Required? |
@@ -24,7 +27,7 @@ then install per your platform's normal mechanism.
 | tunnel-health | 5 min | `scripts/tunnel_health_check.sh` | **required** if you expose the fleet through a public tunnel — self-heals ingress drift, pages when the public URL is not serving |
 | path-health | hourly | `scripts/path_health_check.sh` | **required** if you route instances by path behind a reverse proxy (e.g. Caddy `/fleet/<name>`) — pages when an instance's own dashboard path stops returning 200, the one thing tunnel-health's root-hostname check can't see |
 | sync-health | 5 min | `scripts/sync_health_check.sh` | **required** — pages when `fleet_view_server.py`'s `tail_runs_forever` thread has fallen behind `runs.jsonl`, the only thing keeping `fleet.db` in sync for nerd/gru/dumbledore's direct reads |
-| prod-health | 5 min | `scripts/prod_health_check.py` | optional, but the ONLY external vantage point on philanthropy.org today (gh#4898) — probes prod's home/search/report pages plus its app-canary heartbeat from THIS host, not from the box being watched, so a dead product-side cron or box doesn't take its own pager down with it. Needs `PHILANTHROPY_CF_TEST_HEADER_VALUE` (a human-provisioned secret, see philanthropy repo's `docs/ops/monitoring.md`) to probe report pages without a false-positive page |
+| prod-health | 5 min | `scripts/prod_health_check.py` | optional, but the ONLY external vantage point on philanthropy.org today (gh#727/#4898) — probes prod's home/search/report pages (each against an 8s latency budget) plus its app-canary heartbeat from THIS host, not from the box being watched, so a dead product-side cron or box doesn't take its own pager down with it. Two consecutive failures page AND file/update one deduped incident issue on the product repo, and comment (never auto-close) on recovery. Needs `PHILANTHROPY_CF_TEST_HEADER_VALUE` (a human-provisioned secret, see philanthropy repo's `docs/ops/monitoring.md`) to probe the report page — unset simply skips that one probe rather than false-paging. `fleetkit-prod-health.service`/`.timer` (or `com.fleetkit.prod-health.plist`) |
 | view | always-on (not interval-scheduled) | `scripts/fleet_view_server.py` | optional — a live window onto `runs.jsonl` + `gh` state; kill it and the loop above is untouched. See `fleetkit-view.service` / `com.fleetkit.view.plist` (a long-running service, not a timer/interval job like the rest of this table). |
 
 launchd: `cp <file> ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/<file>`

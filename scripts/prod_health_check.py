@@ -10,16 +10,25 @@ calm night. gh#4363 was exactly this: a 38.5h cron-restart loop discovered only 
 reading logs after it had already ended. This script runs from dino instead, sharing
 no failure domain with atlas-serve.
 
-WHAT IT PROBES (gh#4898 AC3/AC4): three real philanthropy.org pages -- the home/search
-page, the site search, and one report page. The report page sits behind a Cloudflare
-managed-challenge rule that 403s any non-interactive client (philanthropy repo's own
-docs/ops/cloudflare-waf.md, "Known Gap"), so it also carries the documented bypass
-header (`x-atlas-test`, same doc's "Test Bypass Header" section) and the required
-explicit User-Agent (that doc's "Default urllib User-Agent gets 403'd" section) --
-without both, the report probe cannot tell "prod is down" from "Cloudflare is doing its
-job", which would make it a false pager, not a true one. EIN 530196605 (American Red
-Cross) is that same doc's own worked example of a report page under this rule, reused
-here rather than picked fresh.
+WHAT IT PROBES (gh#727 AC3, gh#4898 AC3/AC4): three real philanthropy.org pages -- the
+home/search page, the site search, and one report page, each against an 8s latency
+budget (gh#727 AC3): a 200 that takes longer is recorded as a `slow` failure, distinct
+from a non-200 status, so a reader isn't left assuming a timeout was a normal down. The
+report page sits behind a Cloudflare managed-challenge rule that 403s any
+non-interactive client (philanthropy repo's own docs/ops/cloudflare-waf.md, "Known
+Gap"), so it also carries the documented bypass header (`x-atlas-test`, same doc's "Test
+Bypass Header" section) and the required explicit User-Agent (that doc's "Default
+urllib User-Agent gets 403'd" section) -- without both, the report probe cannot tell
+"prod is down" from "Cloudflare is doing its job", which would make it a false pager,
+not a true one. EIN 530196605 (American Red Cross) is that same doc's own worked
+example of a report page under this rule, reused here rather than picked fresh.
+
+WHEN THE BYPASS TOKEN IS MISSING (gh#727 AC9): the report probe is SKIPPED, not failed.
+A missing secret cannot be told apart from a real Cloudflare challenge from the HTTP
+response alone, and paging on that ambiguity would be a false page -- worse here than a
+missed one, since a human who gets paged for a misconfigured secret learns to ignore
+this pager. The home/search probes are unaffected (docs/ops/cloudflare-waf.md: they are
+not challenged) and still run either way.
 
 WHAT IT PAGES ON, INDEPENDENTLY (gh#4898 AC5): philanthropy.org's own
 `GET /990/health/canary` (added alongside this script in the philanthropy repo) reports
@@ -27,13 +36,22 @@ how long app_error_canary.py has been silent. An app that keeps serving 200s whi
 cron watching IT has died (gh#4363's actual failure) would pass every HTTP probe here
 and still be an outage -- this is the one check in this script that can catch that.
 
-DEBOUNCE IS NOT REIMPLEMENTED HERE. Every observed condition is reported to
-alert_store.py (via fleet_alert.sh's --check/--problem/--severity gate) on every tick;
-alert_store's own `degraded` severity already pages only once a condition has persisted
-across 2 consecutive runs (see fleet-kit's test_alert_store.py,
-test_degraded_pages_only_after_it_persists) and re-pages on its own cadence during a
-sustained outage. A second debounce clock in this script could only disagree with that
-one, never improve on it.
+DEBOUNCE IS NOT REIMPLEMENTED HERE. Every observed condition is recorded to
+alert_store.py's `record()` directly (not through fleet_alert.sh's own severity gate --
+this script needs the same page/no-page verdict alert_store already computes, to decide
+whether to ALSO file an incident issue this tick, so it asks once and reuses the answer
+rather than letting fleet_alert.sh ask a second time). alert_store's own `degraded`
+severity already pages only once a condition has persisted across 2 consecutive runs
+(see fleet-kit's test_alert_store.py, test_degraded_pages_only_after_it_persists) and
+re-pages on its own cadence during a sustained outage. A second debounce clock in this
+script could only disagree with that one, never improve on it.
+
+FILING TO THE PRODUCT BOARD (gh#727 AC2/AC4/AC5/AC6): the same tick that pages also
+files or updates ONE incident issue on The-Good-Project-Team/philanthropy, titled
+`prod down: <first failing url>` and labelled `fleet:backlog, lane:devops,
+fleet:priority-high, incident`. Dedup is by open title -- a further failure while that
+issue is still open comments on it rather than filing a second one. Recovery comments
+on the same issue but never closes it (closing is a human decision).
 
 CONFIG (env vars):
   PROD_HEALTH_BASE_URL             default https://philanthropy.org
@@ -41,8 +59,8 @@ CONFIG (env vars):
   PHILANTHROPY_CF_TEST_HEADER_VALUE  the Cloudflare bypass header's value -- a secret
                                     provisioned on dino by a human (see philanthropy
                                     repo's docs/ops/monitoring.md), NOT in either repo.
-                                    Unset means the report probe will 403 and page --
-                                    loud, not silent.
+                                    Unset means the report probe is SKIPPED (gh#727 AC9),
+                                    not treated as a site outage.
   FLEET_LOG_DIR                    default /home/ubuntu/fleet-kit-logs -- where the
                                     verdict line lands (status_data.py's "Prod
                                     (philanthropy.org)" component reads it from
@@ -61,6 +79,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -69,11 +88,23 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import alert_store  # noqa: E402
+
 KIT_DIR = Path(__file__).resolve().parent.parent
 CHECK = "prod_external"
 
 BASE_URL = os.environ.get("PROD_HEALTH_BASE_URL", "https://philanthropy.org").rstrip("/")
 TIMEOUT_S = float(os.environ.get("PROD_HEALTH_TIMEOUT_S", "10"))
+
+# gh#727 AC3: a 200 that takes longer than this is a failure in its own right, distinct
+# from a non-200 status -- not configurable, the PRD names this number specifically.
+SLOW_BUDGET_S = 8.0
+
+# gh#727 AC4/AC6: where and how the incident issue is filed/deduped/labelled.
+INCIDENT_REPO = "The-Good-Project-Team/philanthropy"
+INCIDENT_TITLE_PREFIX = "prod down: "
+INCIDENT_LABELS = ["fleet:backlog", "lane:devops", "fleet:priority-high", "incident"]
 
 # (name, path). philanthropy repo's docs/ops/cloudflare-waf.md: /990 and /990/?q=... are
 # NOT challenged (the search clause is exempted), only /990/report/* is -- but the bypass
@@ -96,6 +127,7 @@ class ProbeResult:
     name: str
     ok: bool
     detail: str
+    skipped: bool = False
 
 
 @dataclass
@@ -111,6 +143,7 @@ class AlertCall:
     severity: str
     title: str
     body: str
+    reason: str = ""
 
 
 def _headers() -> dict:
@@ -126,32 +159,42 @@ def _headers() -> dict:
 def _get(url: str, timeout: float = TIMEOUT_S):
     """One GET. Never raises -- a probe that cannot reach the network IS the failure this
     script exists to report, not a bug in the reporter. Returns (status_code_or_None, body,
-    detail_on_failure)."""
+    detail_on_failure, elapsed_seconds)."""
     req = urllib.request.Request(url, headers=_headers())
+    start = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read(), None
+            return resp.status, resp.read(), None, time.monotonic() - start
     except urllib.error.HTTPError as e:
-        return e.code, b"", None
+        return e.code, b"", None, time.monotonic() - start
     except Exception as e:  # noqa: BLE001 -- DNS, timeout, connection refused, TLS, etc.
-        return None, b"", f"{type(e).__name__}: {e}"
+        return None, b"", f"{type(e).__name__}: {e}", time.monotonic() - start
 
 
 def run_probes() -> list[ProbeResult]:
     results = []
     for name, path in PROBES:
-        code, _body, err = _get(BASE_URL + path)
+        if name == "report" and not CF_BYPASS_VALUE:
+            # gh#727 AC9: without the bypass token this probe cannot tell "prod is down"
+            # from "Cloudflare is doing its job" -- skip rather than page on that guess.
+            results.append(ProbeResult(name, True, "SKIPPED (no bypass token)", skipped=True))
+            continue
+        code, _body, err, elapsed = _get(BASE_URL + path)
         if err is not None:
             results.append(ProbeResult(name, False, err))
-        elif code == 200:
-            results.append(ProbeResult(name, True, "200"))
-        else:
+        elif code != 200:
             results.append(ProbeResult(name, False, f"http {code}"))
+        elif elapsed > SLOW_BUDGET_S:
+            # gh#727 AC3: distinguishable from a non-200 status, both in this reason string
+            # and in evaluate()'s alert title/body.
+            results.append(ProbeResult(name, False, f"slow ({elapsed:.1f}s > {SLOW_BUDGET_S}s budget)"))
+        else:
+            results.append(ProbeResult(name, True, "200"))
     return results
 
 
 def check_heartbeat() -> HeartbeatResult:
-    code, body, err = _get(BASE_URL + HEARTBEAT_PATH)
+    code, body, err, _elapsed = _get(BASE_URL + HEARTBEAT_PATH)
     if err is not None or code != 200:
         # Unreachable (not "stale") is deliberately not alerted on its own -- see evaluate()'s
         # docstring for why this and the home probe failing together must not become two
@@ -187,6 +230,7 @@ def evaluate(probes: list[ProbeResult], heartbeat: HeartbeatResult) -> list[Aler
             body=(f"External check from dino: {BASE_URL}{dict(PROBES)[p.name]} returned "
                   f"{p.detail}. Other probes this tick: {others}. "
                   "See philanthropy repo's docs/ops/monitoring.md for the verify command."),
+            reason=p.detail,
         ))
     if heartbeat.reachable and heartbeat.stale:
         alerts.append(AlertCall(
@@ -197,34 +241,148 @@ def evaluate(probes: list[ProbeResult], heartbeat: HeartbeatResult) -> list[Aler
                   "app_error_canary.py has not ticked in 3+ of its 5-minute intervals. "
                   "The app may still be serving 200s (gh#4363: a cron/box outage HTTP "
                   "probes alone would miss)."),
+            reason=heartbeat.detail,
         ))
     return alerts
 
 
-def verdict_line(alerts: list[AlertCall]) -> str:
+def verdict_line(alerts: list[AlertCall], probes: list[ProbeResult] | None = None) -> str:
     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    skipped = [p.name for p in (probes or []) if p.skipped]
+    skip_note = f" (skipped: {', '.join(skipped)})" if skipped else ""
     if not alerts:
-        return f"[prod_health_check {ts} UTC] ok all probes healthy, canary heartbeat fresh"
-    return f"[prod_health_check {ts} UTC] FAILED {', '.join(a.problem for a in alerts)}"
+        return f"[prod_health_check {ts} UTC] ok all probes healthy, canary heartbeat fresh{skip_note}"
+    parts = ", ".join(f"{a.problem} ({a.reason})" if a.reason else a.problem for a in alerts)
+    return f"[prod_health_check {ts} UTC] FAILED {parts}{skip_note}"
 
 
-def page(problem: str, severity: str, title: str, body: str) -> bool:
-    """Fire via fleet_alert.sh -- a local call, no ssh bridge needed: unlike philanthropy's
-    own claim_queue_age_alert.py (which bridges FROM atlas-serve), this script already runs
-    on the fleet-kit host that owns fleet_alert.sh. Never raises; returns False on failure
-    so the caller can surface it without the whole run crashing."""
-    argv = ["--check", CHECK, "--problem", problem, "--severity", severity, title, body]
-    cmd = ["bash", str(KIT_DIR / "scripts" / "fleet_alert.sh"), *argv]
+def page(problem: str, severity: str, title: str, body: str) -> bool | None:
+    """Ask alert_store's own debounce whether THIS condition should page now, then deliver
+    through fleet_alert.sh if so. Decided here (not inside fleet_alert.sh's own
+    --check/--severity gate) because the caller needs the same page/no-page verdict to
+    decide whether to ALSO file an incident issue this tick (gh#727 AC2) -- asking twice
+    could disagree with itself, and would double-count this observation in alert_store.
+
+    Returns True if paged this tick, False if correctly suppressed (too young, or already
+    paged for this open condition), None if delivery itself failed."""
+    try:
+        verdict = alert_store.record(CHECK, problem, severity, detail=body)
+    except Exception as exc:  # noqa: BLE001 -- alert_store fails open, but stay defensive
+        verdict = {"page": True, "reason": f"alert_store.record raised: {exc}"}
+
+    if not verdict.get("page"):
+        print(f"prod_health_check: suppressed ({verdict.get('reason')}) -- {problem}")
+        return False
+
+    cmd = ["bash", str(KIT_DIR / "scripts" / "fleet_alert.sh"), title, body]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
         if p.returncode != 0:
             print(f"prod_health_check: fleet_alert.sh failed rc={p.returncode} "
                   f"{(p.stderr or p.stdout or '')[:300]}", file=sys.stderr)
-            return False
+            return None
+        print(f"prod_health_check: reported -- {problem}")
         return True
     except Exception as exc:  # noqa: BLE001
         print(f"prod_health_check: could not page: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return False
+        return None
+
+
+def _run_gh(cmd: list[str]) -> tuple[int, str]:
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        return p.returncode, (p.stdout or p.stderr or "")
+    except Exception as exc:  # noqa: BLE001
+        return 1, f"{type(exc).__name__}: {exc}"
+
+
+def first_failing_url(probes: list[ProbeResult]) -> str | None:
+    """gh#727 AC4: the incident title is keyed on the FIRST failing probe, in PROBES order,
+    not whichever one evaluate() happens to list first."""
+    by_name = {p.name: p for p in probes}
+    for name, path in PROBES:
+        p = by_name.get(name)
+        if p is not None and not p.ok:
+            return BASE_URL + path
+    return None
+
+
+def incident_title(url: str) -> str:
+    return f"{INCIDENT_TITLE_PREFIX}{url}"
+
+
+def find_open_incident(title: str, runner=_run_gh) -> int | None:
+    code, out = runner(["gh", "issue", "list", "--repo", INCIDENT_REPO, "--label", "incident",
+                         "--state", "open", "--json", "number,title", "--limit", "50"])
+    if code != 0:
+        print(f"prod_health_check: could not list incidents: {out[:300]}", file=sys.stderr)
+        return None
+    try:
+        issues = json.loads(out)
+    except ValueError:
+        return None
+    for issue in issues:
+        if issue.get("title") == title:
+            return issue.get("number")
+    return None
+
+
+def find_any_open_incident(runner=_run_gh) -> int | None:
+    code, out = runner(["gh", "issue", "list", "--repo", INCIDENT_REPO, "--label", "incident",
+                         "--state", "open", "--json", "number,title", "--limit", "50"])
+    if code != 0:
+        return None
+    try:
+        issues = json.loads(out)
+    except ValueError:
+        return None
+    for issue in issues:
+        if (issue.get("title") or "").startswith(INCIDENT_TITLE_PREFIX):
+            return issue.get("number")
+    return None
+
+
+def build_file_cmd(title: str, body: str) -> list[str]:
+    cmd = ["gh", "issue", "create", "--repo", INCIDENT_REPO, "--title", title, "--body", body]
+    for label in INCIDENT_LABELS:
+        cmd += ["--label", label]
+    return cmd
+
+
+def build_comment_cmd(number: int, body: str) -> list[str]:
+    return ["gh", "issue", "comment", str(number), "--repo", INCIDENT_REPO, "--body", body]
+
+
+def file_or_update_incident(probes: list[ProbeResult], alerts: list[AlertCall],
+                             runner=_run_gh) -> dict:
+    """Called only on the tick where page() actually paged (gh#727 AC2's debounce). Files
+    one incident issue on the product board, or comments the existing open one -- never a
+    second issue for the same open incident (AC4)."""
+    url = first_failing_url(probes) or (BASE_URL + HEARTBEAT_PATH)
+    title = incident_title(url)
+    detail = "\n".join(f"- {a.title}: {a.body}" for a in alerts)
+    existing = find_open_incident(title, runner)
+    if existing is not None:
+        code, out = runner(build_comment_cmd(existing, f"Still failing:\n\n{detail}"))
+        return {"action": "commented", "issue": existing, "ok": code == 0}
+    body = (f"Detected by `prod_health_check.py` running on dino, outside atlas-serve "
+            f"(gh#727).\n\n{detail}")
+    code, out = runner(build_file_cmd(title, body))
+    m = re.search(r"/issues/(\d+)\s*$", out.strip())
+    return {"action": "filed", "issue": int(m.group(1)) if m else None, "ok": code == 0}
+
+
+def report_recovery(runner=_run_gh) -> dict | None:
+    """gh#727 AC5: comment recovery on the open incident issue, if any -- never close it."""
+    number = find_any_open_incident(runner)
+    if number is None:
+        return None
+    code, _out = runner(build_comment_cmd(
+        number,
+        "Recovered: all probes healthy and the canary heartbeat is fresh on this tick "
+        "(prod_health_check.py, from dino). Leaving open for a human to confirm and close.",
+    ))
+    return {"issue": number, "ok": code == 0}
 
 
 def main() -> int:
@@ -232,7 +390,7 @@ def main() -> int:
     heartbeat = check_heartbeat()
     alerts = evaluate(probes, heartbeat)
 
-    line = verdict_line(alerts)
+    line = verdict_line(alerts, probes)
     log_dir = Path(os.environ.get("FLEET_LOG_DIR", "/home/ubuntu/fleet-kit-logs"))
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -243,15 +401,27 @@ def main() -> int:
     print(line)
 
     if not alerts:
+        rec = report_recovery()
+        if rec is not None:
+            print(f"prod_health_check: recovery comment on #{rec['issue']} ok={rec['ok']}")
         return 0
 
     all_reported = True
+    any_paged = False
     for a in alerts:
-        if page(a.problem, a.severity, a.title, a.body):
-            print(f"prod_health_check: reported -- {a.problem}")
-        else:
-            print(f"prod_health_check: REPORT FAILED (see stderr) -- {a.problem}", file=sys.stderr)
+        paged = page(a.problem, a.severity, a.title, a.body)
+        if paged is None:
             all_reported = False
+        elif paged:
+            any_paged = True
+
+    if any_paged:
+        result = file_or_update_incident(probes, alerts)
+        print(f"prod_health_check: incident {result['action']} "
+              f"#{result.get('issue')} ok={result['ok']}")
+        if not result["ok"]:
+            all_reported = False
+
     return 0 if all_reported else 1
 
 

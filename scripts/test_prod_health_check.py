@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
-"""test_prod_health_check.py -- gh#4898 AC2/AC4/AC5's own tests.
+"""test_prod_health_check.py -- gh#4898 AC2/AC4/AC5 and gh#727 AC1-AC6/AC9's own tests.
 
 AC2 ("first run sends nothing, second triggers exactly one notification, not two, not
 zero"), AC4 ("a failure of any one probe is attributable to which probe failed") and
 AC5 ("the heartbeat pages independently of whether the HTTP probes pass") are each a
 named test below, run against synthetic ProbeResult/HeartbeatResult sequences -- no
 network, no live philanthropy.org.
+
+gh#727's own acceptance criteria add: the flap-guard now also gates exactly one
+issue-filing command (AC2), dedup by open issue title (AC4), a non-closing recovery
+comment (AC5), the exact incident label set (AC6), an 8s slow-probe budget distinguishable
+from a non-200 status (AC3), and the missing-bypass-token SKIPPED behavior (AC9) --
+tested with a FakeGh stand-in for `gh issue {create,list,comment}`, same "pure builders,
+mocked execution" split test_journey_issue_filer.py's FakeGh uses.
 """
+import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,6 +25,35 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import alert_store  # noqa: E402
 import prod_health_check as phc  # noqa: E402
+
+
+class FakeGh:
+    """Replays enough of `gh issue {create,list,comment}` to drive the incident-filing
+    functions for real, no network."""
+
+    def __init__(self):
+        self.issues = {}  # number -> {"title": str, "body": str, "open": bool, "comments": [str]}
+        self._next = 100
+
+    def __call__(self, cmd: list[str]) -> tuple[int, str]:
+        assert cmd[0] == "gh" and cmd[1] == "issue"
+        sub = cmd[2]
+        if sub == "create":
+            title, body = cmd[cmd.index("--title") + 1], cmd[cmd.index("--body") + 1]
+            n = self._next
+            self._next += 1
+            self.issues[n] = {"title": title, "body": body, "open": True, "comments": []}
+            return 0, f"https://github.com/x/y/issues/{n}"
+        if sub == "list":
+            open_issues = [
+                {"number": n, "title": v["title"]} for n, v in self.issues.items() if v["open"]
+            ]
+            return 0, json.dumps(open_issues)
+        if sub == "comment":
+            n, body = int(cmd[3]), cmd[cmd.index("--body") + 1]
+            self.issues[n]["comments"].append(body)
+            return 0, "commented"
+        raise AssertionError(f"unexpected gh subcommand: {sub}")
 
 
 def ok(name: str) -> phc.ProbeResult:
@@ -115,6 +154,158 @@ class TwoTickPagingTest(unittest.TestCase):
             self.assertTrue(second["page"], f"never paged on the second tick: {second['reason']}")
             third = self._record(alerts[0])
             self.assertFalse(third["page"], "paged a third time for the same open condition")
+        finally:
+            alert_store.DEGRADED_MIN_SEC = orig
+
+
+class SlowProbeBudgetTest(unittest.TestCase):
+    """gh#727 AC3: a 200 that exceeds the 8s budget is its own failure, distinguishable
+    from a non-200 status in the reason string."""
+
+    def setUp(self):
+        self._orig_get = phc._get
+        self._orig_token = phc.CF_BYPASS_VALUE
+        phc.CF_BYPASS_VALUE = "test-token"  # so the report probe isn't SKIPPED here
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        phc._get = self._orig_get
+        phc.CF_BYPASS_VALUE = self._orig_token
+
+    def test_slow_200_fails_with_a_reason_distinct_from_a_status_code(self):
+        phc._get = lambda url, timeout=phc.TIMEOUT_S: (200, b"ok", None, phc.SLOW_BUDGET_S + 1.0)
+        probes = phc.run_probes()
+        self.assertTrue(all(not p.ok for p in probes))
+        for p in probes:
+            self.assertIn("slow", p.detail)
+            self.assertNotRegex(p.detail, r"^http \d+$")
+
+    def test_fast_200_still_passes(self):
+        phc._get = lambda url, timeout=phc.TIMEOUT_S: (200, b"ok", None, 0.2)
+        probes = phc.run_probes()
+        self.assertTrue(all(p.ok for p in probes))
+
+
+class BypassTokenSkipTest(unittest.TestCase):
+    """gh#727 AC9: with no bypass token configured, the report probe is SKIPPED (and does
+    not count as a site outage), not silently treated as a failure or a false pass."""
+
+    def setUp(self):
+        self._orig_get = phc._get
+        self._orig_token = phc.CF_BYPASS_VALUE
+        phc.CF_BYPASS_VALUE = ""
+        phc._get = lambda url, timeout=phc.TIMEOUT_S: (200, b"ok", None, 0.2)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        phc._get = self._orig_get
+        phc.CF_BYPASS_VALUE = self._orig_token
+
+    def test_missing_token_skips_report_probe_and_pages_nothing(self):
+        probes = phc.run_probes()
+        report = next(p for p in probes if p.name == "report")
+        self.assertTrue(report.skipped)
+        self.assertTrue(report.ok)
+        self.assertIn("SKIPPED", report.detail)
+
+        alerts = phc.evaluate(probes, FRESH_HEARTBEAT)
+        self.assertEqual(alerts, [])
+
+        line = phc.verdict_line(alerts, probes)
+        self.assertIn("skipped", line.lower())
+        self.assertIn("report", line)
+
+
+class IncidentFilingTest(unittest.TestCase):
+    """gh#727 AC4/AC5/AC6: one incident issue per open outage (deduped by open title),
+    the exact label set, and a non-closing recovery comment -- against FakeGh, no network."""
+
+    def test_first_failure_files_one_issue_with_exact_labels(self):
+        gh = FakeGh()
+        probes = [fail("home", "http 500"), ok("search"), ok("report")]
+        alerts = phc.evaluate(probes, FRESH_HEARTBEAT)
+        result = phc.file_or_update_incident(probes, alerts, runner=gh)
+        self.assertEqual(result["action"], "filed")
+        issue = gh.issues[result["issue"]]
+        self.assertEqual(issue["title"], phc.incident_title(phc.BASE_URL + "/990"))
+
+    def test_incident_labels_are_exactly_the_prd_set(self):
+        cmd = phc.build_file_cmd("prod down: x", "body")
+        labels = [cmd[i + 1] for i, tok in enumerate(cmd) if tok == "--label"]
+        self.assertEqual(
+            labels, ["fleet:backlog", "lane:devops", "fleet:priority-high", "incident"])
+
+    def test_further_failure_comments_not_a_second_issue(self):
+        gh = FakeGh()
+        probes = [fail("home", "http 500"), ok("search"), ok("report")]
+        alerts = phc.evaluate(probes, FRESH_HEARTBEAT)
+        first = phc.file_or_update_incident(probes, alerts, runner=gh)
+        second = phc.file_or_update_incident(probes, alerts, runner=gh)
+        self.assertEqual(second["action"], "commented")
+        self.assertEqual(second["issue"], first["issue"])
+        self.assertEqual(len(gh.issues), 1)
+
+    def test_recovery_comments_but_leaves_the_issue_open(self):
+        gh = FakeGh()
+        probes = [fail("home", "http 500"), ok("search"), ok("report")]
+        alerts = phc.evaluate(probes, FRESH_HEARTBEAT)
+        filed = phc.file_or_update_incident(probes, alerts, runner=gh)
+        rec = phc.report_recovery(runner=gh)
+        self.assertEqual(rec["issue"], filed["issue"])
+        self.assertTrue(gh.issues[filed["issue"]]["open"])
+        self.assertIn("Recovered", gh.issues[filed["issue"]]["comments"][-1])
+
+    def test_recovery_with_no_open_incident_is_a_noop(self):
+        gh = FakeGh()
+        self.assertIsNone(phc.report_recovery(runner=gh))
+
+
+class PageGatesIncidentFilingTest(unittest.TestCase):
+    """gh#727 AC2: page()'s return value -- driven by the same alert_store debounce as
+    TwoTickPagingTest above -- is what a caller uses to decide whether to ALSO file/update
+    the incident issue this tick. First sighting: suppressed, nothing delivered. Second
+    consecutive tick: pages exactly once."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._orig_state_env = os.environ.get("FLEET_ALERT_STATE_FILE")
+        os.environ["FLEET_ALERT_STATE_FILE"] = str(Path(self.tmp.name) / "alerts.json")
+        self.addCleanup(self._restore_env)
+
+        self.delivered = []
+        self._orig_run = phc.subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            self.delivered.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        phc.subprocess.run = fake_run
+        self.addCleanup(lambda: setattr(phc.subprocess, "run", self._orig_run))
+
+    def _restore_env(self):
+        if self._orig_state_env is None:
+            os.environ.pop("FLEET_ALERT_STATE_FILE", None)
+        else:
+            os.environ["FLEET_ALERT_STATE_FILE"] = self._orig_state_env
+
+    def test_first_tick_suppressed_second_tick_pages_exactly_once(self):
+        a = phc.evaluate([fail("home")], FRESH_HEARTBEAT)[0]
+
+        first = phc.page(a.problem, a.severity, a.title, a.body)
+        self.assertFalse(first)
+        self.assertEqual(self.delivered, [])
+
+        orig = alert_store.DEGRADED_MIN_SEC
+        alert_store.DEGRADED_MIN_SEC = 0
+        try:
+            second = phc.page(a.problem, a.severity, a.title, a.body)
+            self.assertTrue(second)
+            self.assertEqual(len(self.delivered), 1)
+
+            third = phc.page(a.problem, a.severity, a.title, a.body)
+            self.assertFalse(third)
+            self.assertEqual(len(self.delivered), 1)
         finally:
             alert_store.DEGRADED_MIN_SEC = orig
 
