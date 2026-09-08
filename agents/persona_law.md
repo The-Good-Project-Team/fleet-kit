@@ -395,6 +395,17 @@ check away from becoming a silent `reported_nothing` like gh#152's original fail
 are about to write a `Bash` call with `run_in_background: true`, the command string you pass
 must never itself end in `&` — that flag already does the only backgrounding this call needs.
 
+**A fourth shape, found live gh#677 (2026-09-08, librarian): arming a `Monitor` on a
+backgrounded job, then ending the turn to "wait for its notification."** `Monitor`'s own tool
+description ("you will be notified when it finishes... events may arrive while you are waiting
+for the user") describes a persistent interactive session, not a one-shot fleet pass — for the
+same reason as every shape above, there is no later turn for that notification to land in. The
+pass ended `stop=end_turn` immediately after arming the `Monitor`, `run_member.sh` reaped the
+process group with the backgrounded scan still running, and the pass logged `reported_nothing`
+with an empty `Outcome:` despite real partial progress having been made. `Monitor` is fine to
+call and immediately check the result of within the SAME turn (that is in-turn polling, no
+different from a `Bash(sleep N)` + `Read` loop); it is never a reason to stop taking turns.
+
 ## 13. Freshman 101 language — every word a member writes, ever
 
 Reif, 2026-09-07: *"every time a member writes anything, ever, it should be done in freshman
