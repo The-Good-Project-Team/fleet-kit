@@ -434,6 +434,66 @@ class ReportPage403BlockedTest(unittest.TestCase):
         self.assertNotIn("sekrit-val-123", json.dumps(blocked))  # AC6, defense in depth
 
 
+class SearchClickThrough403BlockedTest(unittest.TestCase):
+    """gh#729 AC4, second call site: search-and-open-org reaches the same `/990/report/<ein>`
+    URL pattern by CLICKING a result link rather than calling page.goto() directly. A fix
+    that only checked the goto() call site would leave this journey misreporting a still-403
+    report page as a generic BROKEN assertion failure instead of BLOCKED."""
+
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+
+        class _SearchThenChallengeHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith("/990/report/"):
+                    self.send_response(403)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("X-Test-Marker", "cf-challenge")
+                    self.end_headers()
+                    self.wfile.write(b"<html><body>Checking your browser...</body></html>")
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    self.wfile.write(
+                        b'<html><body><a href="/990/report/123456789">Example Org</a></body></html>'
+                    )
+
+            def log_message(self, *a):  # quiet -- keep test output readable
+                pass
+
+        cls.port = _free_port()
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", cls.port), _SearchThenChallengeHandler)
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def test_click_through_to_a_403_report_page_is_blocked_not_broken(self):
+        catalog = jw.load_catalog(CATALOG_PATH)
+        search = next(j for j in catalog["journeys"] if j["id"] == "search-and-open-org")
+        search["viewports"] = ["desktop"]
+        # TestUsers.url() already swaps scheme+host for a literal https://philanthropy.org/...
+        # URL onto PHILANTHROPY_BASE_URL, so no monkeypatch is needed here.
+        users = jw.TestUsers(env={"PHILANTHROPY_BASE_URL": f"http://127.0.0.1:{self.port}"})
+
+        journeys_out, blocked = jw.run_all(catalog, users, self.browser, Path("/tmp"),
+                                            "search-blocked-run", journey_filter=["search-and-open-org"])
+
+        self.assertEqual(journeys_out, [])  # not a silent pass, and never filed as BROKEN
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0]["id"], "search-and-open-org")
+        self.assertEqual(blocked[0]["response"]["status"], 403)
+
+
 class WalkerOutputFeedsIssueFilerTest(unittest.TestCase):
     """The other half of the seam: gh#660's journey_issue_filer.py already ships expecting
     exactly this file's results.json shape. Runs the real walker against the broken fixture,

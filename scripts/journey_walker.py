@@ -298,6 +298,23 @@ def run_sign_in(ctx: JourneyCtx):
     ctx.step(2, s2, page)
 
 
+def _blocked_for_403(response, users: "TestUsers") -> Blocked | None:
+    """Returns a Blocked ready to raise if `response` is the Cloudflare/WAF 403 report pages
+    are known to sit behind (gh#729), else None. Shared so every journey that reaches a
+    `/990/report/<ein>` URL -- open-990-report's own visit, search-and-open-org's click-through,
+    and claim-org-through-verify-screen's own visit -- reads BLOCKED the same way, not only the
+    one journey whose implementation happens to call page.goto() on it directly."""
+    if response is None or response.status != 403:
+        return None
+    headers = {k: redact_secret(v, users.bypass) for k, v in dict(response.headers).items()}
+    reason = (
+        "report page returned 403 even with ATLAS_TEST_BYPASS configured"
+        if users.bypass
+        else "report page returned 403 (Cloudflare/WAF challenge) -- ATLAS_TEST_BYPASS not configured"
+    )
+    return Blocked(reason, status=response.status, headers=headers)
+
+
 def run_search_and_open_org(ctx: JourneyCtx):
     page = ctx.page()
 
@@ -317,7 +334,11 @@ def run_search_and_open_org(ctx: JourneyCtx):
     def s1():
         first = page.locator('a[href*="/990/report/"]').first
         clicked_text = first.inner_text().strip()
-        first.click()
+        with page.expect_response(lambda r: "/990/report/" in r.url) as resp_info:
+            first.click()
+        blocked = _blocked_for_403(resp_info.value, ctx.users)
+        if blocked:
+            raise blocked
         page.wait_for_url(re.compile(r"/990/report/"), timeout=10000)
         heading = page.get_by_role("heading").first.inner_text().strip()
         assert heading, "no org-name heading after opening a result"
@@ -332,18 +353,9 @@ def run_open_990_report(ctx: JourneyCtx):
 
     def s0():
         response = page.goto(ctx.users.url(f"https://philanthropy.org/990/report/{ein}"), timeout=15000)
-        if response is not None and response.status == 403:
-            # gh#729 AC4: a report page is the one surface known to sit behind a Cloudflare
-            # challenge. 403 here means the CHECKER was turned away -- even with the bypass
-            # header sent, per the bypass-unset message below -- not that the product broke,
-            # so this must read BLOCKED, not a content-assertion timeout misread as BROKEN.
-            headers = {k: redact_secret(v, ctx.users.bypass) for k, v in dict(response.headers).items()}
-            reason = (
-                "report page returned 403 even with ATLAS_TEST_BYPASS configured"
-                if ctx.users.bypass
-                else "report page returned 403 (Cloudflare/WAF challenge) -- ATLAS_TEST_BYPASS not configured"
-            )
-            raise Blocked(reason, status=response.status, headers=headers)
+        blocked = _blocked_for_403(response, ctx.users)
+        if blocked:
+            raise blocked
         expect_visible(page.get_by_role("heading"))
         wait_text_matches(page, r"\$[0-9]|revenue|expense", timeout=8000)
 
@@ -375,7 +387,10 @@ def run_claim_org_through_verify_screen(ctx: JourneyCtx):
 
     def s0():
         sign_in_alice()
-        page.goto(users.url(f"https://philanthropy.org/990/report/{ein}"), timeout=15000)
+        response = page.goto(users.url(f"https://philanthropy.org/990/report/{ein}"), timeout=15000)
+        blocked = _blocked_for_403(response, users)
+        if blocked:
+            raise blocked
         page.get_by_role("button", name=re.compile("claim this organization|claim", re.I)).first.click()
         wait_text_matches(page, r"claim", timeout=8000)
 
