@@ -918,6 +918,20 @@ def watch_and_broadcast():
         time.sleep(1)
 
 
+def _window_since(qs: dict) -> tuple[float, dict]:
+    """Cutoff (epoch seconds) for a `day=1`/`hours=` windowed read, plus the response-meta
+    fields to merge into the JSON body -- gh#265: /api/spend and /api/kpi both offer a `day=1`
+    reading (a true UTC-calendar-day cutoff, `fleet_db.utc_day_start()`) alongside their
+    original rolling `hours=` one, and share this one cutoff decision so the two routes can't
+    drift out of sync. An explicit `hours=` request is untouched -- same cutoff math, same
+    response shape (README.md:428-429) -- for every existing caller that doesn't pass `day`.
+    """
+    if qs.get("day", ["0"])[0] in ("1", "true"):
+        return fleet_db.utc_day_start(), {"day": True}
+    hours = float(qs.get("hours", ["24"])[0])
+    return time.time() - hours * 3600, {"hours": hours}
+
+
 PAGE = (KIT_DIR / "scripts" / "fleet_view.html")
 # fk#645: Console v2 -- one page, phone first -- is the landing page; the previous console stays
 # reachable at /classic until Reif accepts v2 on his phone (docs/quality-standard.md rule 5).
@@ -1124,17 +1138,8 @@ class Handler(BaseHTTPRequestHandler):
             member = qs.get("member", [None])[0]
             db = fleet_db.connect()
             fleet_db.sync(db)
-            # gh#265: `day=1` asks for the true UTC-calendar-day figure (fleet_db.utc_day_start())
-            # instead of a rolling window, for a caller that means to label its number "today"
-            # rather than "24h". An explicit `hours=` request is untouched -- same cutoff math,
-            # same response shape (README.md:428-429) -- so nothing that already depends on the
-            # rolling reading changes.
-            if qs.get("day", ["0"])[0] in ("1", "true"):
-                spend = fleet_db.spend(db, member=member, since=fleet_db.utc_day_start())
-                self._json({"spend": spend, "day": True})
-                return
-            hours = float(qs.get("hours", ["24"])[0])
-            self._json({"spend": fleet_db.spend(db, member=member, hours=hours), "hours": hours})
+            since, meta = _window_since(qs)
+            self._json({"spend": fleet_db.spend(db, member=member, since=since), **meta})
             return
         if path == "/api/asks":
             # fk#645 block 2, "Needs you": the open asks ask.py holds (gh#568), for the human to
@@ -1190,29 +1195,16 @@ class Handler(BaseHTTPRequestHandler):
             # than a fresh gh/db query, since this only needs member+outcome+ts, all present
             # on every in-memory run record.
             qs = parse_qs(urlparse(self.path).query)
-            # gh#265: `day=1` counts only runs recorded since the current UTC midnight -- the
-            # true reading for a caller (kpiTitleSuffix()) that renders its count next to the
-            # word "today". Same as /api/spend's `day` flag: an explicit `hours=` request is
-            # untouched.
-            day = qs.get("day", ["0"])[0] in ("1", "true")
-            if day:
-                cutoff = fleet_db.utc_day_start()
-                hours = None
-            else:
-                hours = float(qs.get("hours", ["24"])[0])
-                cutoff = time.time() - hours * 3600
+            since, meta = _window_since(qs)  # gh#265: `day=1` -- see _window_since()
             snap = STATE.snapshot()
-            windowed = [r for r in snap["runs"] if (r.get("ts") or 0) >= cutoff]
+            windowed = [r for r in snap["runs"] if (r.get("ts") or 0) >= since]
             try:
                 members = member_spec.load_all()
                 names = [m["name"] for m in members]
             except Exception:
                 names = sorted({r.get("member") for r in windowed if r.get("member")})
             out = [fleet_kpi.sum_kpi_over_runs(name, windowed) for name in names]
-            if day:
-                self._json({"kpi": out, "day": True})
-            else:
-                self._json({"kpi": out, "hours": hours})
+            self._json({"kpi": out, **meta})
             return
         if path == "/api/stats/runs_summary":
             qs = parse_qs(urlparse(self.path).query)

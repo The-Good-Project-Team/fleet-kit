@@ -122,7 +122,7 @@ async function load() {
     getJSON('/api/asks').catch(() => ({asks: []})),
     getJSON('/api/members').catch(() => ({members: []})),
     getJSON('/api/snapshot').catch(() => ({runs: [], gh: {}})),
-    getJSON('/api/kpi?day=1').catch(() => ({kpi: []})), // gh#265: rendered next to the word "today" below, must be a real UTC calendar day
+    getJSON('/api/kpi').catch(() => ({kpi: []})),
     getJSON('/api/spend?hours=24').catch(() => null),
     getJSON('/api/build').catch(() => null),
     getJSON('/api/fleet_state').catch(() => null),

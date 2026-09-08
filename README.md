@@ -425,8 +425,8 @@ from the dashboard URL. All of these return JSON and send
 | `/api/stats/runs_summary?hours=24` | ~3KB | `signal_rate`, `executed`, `total`, `budget_wall`, `declined`, `dormant[]`, `statuses`, `agent_rates`, `hourly[]` |
 | `/api/stats/token_usage?hours=24` | ~2KB | hourly buckets: input/output tokens, `cost_usd` |
 | `/api/stats/backlog_history` | ~1.6KB | open-backlog trend (does its own `gh` calls; cached 120s) |
-| `/api/spend` | ~1.3KB | per member: `runs`, `total_cost`, `avg_cost`, `total_turns`, `ok_runs` |
-| `/api/kpi?hours=24` | ~1KB | per-member KPI rollup out of outcome prose |
+| `/api/spend` | ~1.3KB | per member: `runs`, `total_cost`, `avg_cost`, `total_turns`, `ok_runs`. `?day=1` reads a true UTC-calendar-day cutoff instead of the rolling `hours=` window, and the response carries `"day": true` in place of `"hours"` (gh#265) |
+| `/api/kpi?hours=24` | ~1KB | per-member KPI rollup out of outcome prose. Same `?day=1` calendar-day option as `/api/spend` (gh#265) |
 | `/api/members` | ~37KB | full member specs (mandate, lane, schedule) |
 | `/api/next_fires` | ~1.2KB | when each member fires next |
 | `/api/fleet_state` | small | env flags: `FLEET_ENABLED`, `REPO_URL`, per-member on/off |
