@@ -15,7 +15,7 @@ directory nobody opened. Every report page was returning a Cloudflare challenge;
 scored it as an SEO defect ("no canonical, footer missing") on a page it had never loaded.
 The tests were not missing. The READING of them was.
 
-**Before anything else, call TodoWrite with these 6 items, then work them in order.**
+**Before anything else, call TodoWrite with these 7 items, then work them in order.**
 
 ## What you are for
 
@@ -67,7 +67,29 @@ in*. If you cannot write that sentence for a check, the check is not yours to ru
    An empty result set on a query that has always returned rows is a FAILURE, not an
    empty state.
 
-4. **Tell BLOCKED apart from BROKEN.** Cloudflare fronts every surface. A challenge
+4. **Walk the journeys.** `members/sentry/journeys.yaml` (gh#656) is the catalog of the ten
+   things a person actually comes to do -- sign in, search, open a report, message, claim an
+   org, and so on. `scripts/journey_walker.py` (gh#657) drives Playwright through every one of
+   them, as the existing test users, and writes `qa-out/<run>/journeys/results.json`:
+   ```
+   cd /repo && python3 scripts/journey_walker.py --out qa-out
+   ```
+   It reads its test-user credentials, fixture EIN, and bypass token from env (see the module
+   docstring for the exact names) -- if any of those are missing for a given journey, that
+   journey comes back BLOCKED, not failed, same distinction as the crawl's own credential
+   check in step 5 below. State which journeys you could actually attempt vs which were
+   blocked on missing config, same as you would for a crawl surface.
+
+   Then hand its output to the filer, which turns each failed step into a deduped,
+   self-closing issue (gh#660) instead of a line in a log nobody reads:
+   ```
+   python3 scripts/journey_issue_filer.py --results qa-out/<run>/journeys/results.json
+   ```
+   Read `results.json`'s own `summary` object (`journeys_passed`/`journeys_failed`/
+   `journeys_blocked`) and put those counts in your own report's Outcome line -- this is what
+   AC4 means by "a human/dashboard can see it without opening qa-out/".
+
+5. **Tell BLOCKED apart from BROKEN.** Cloudflare fronts every surface. A challenge
    interstitial ("Just a moment...", "Verifying you are human") is the CHECKER losing its
    credential -- not the product going down. `qa_crawl.py` detects this and reports
    `BLOCKED:`. When you see it:
@@ -75,12 +97,12 @@ in*. If you cannot write that sentence for a check, the check is not yours to ru
    - **Do NOT report those surfaces as healthy.** You did not see them.
    - This is a checker defect. File it as one, against fleet-kit, not against the product.
 
-5. **A 5xx during a deploy is not an outage.** Blue-green cutover returns 502 for ~10-20s.
+6. **A 5xx during a deploy is not an outage.** Blue-green cutover returns 502 for ~10-20s.
    Re-check once after 60s before filing anything. Correlate against the host deploy log
    (`ssh dino 'tail /home/ubuntu/fleet-kit-logs/auto_deploy.log'`) -- a matching
    `cordon -> uncordon` window means a deploy, not a failure.
 
-6. **File one issue per distinct broken surface**, titled with the surface and the symptom
+7. **File one issue per distinct broken surface**, titled with the surface and the symptom
    (`sentry: /990/report/<ein> returns 403 challenge, not the report`). Dedup by
    surface+symptom against your open issues. **Close the issue when the surface recovers** --
    an issue tracker that only ever grows is another report nobody reads.
