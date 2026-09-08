@@ -337,23 +337,14 @@ if [ "$WORKTREE_ENABLED" = "True" ] && [ "$DRY_RUN" -ne 1 ]; then
   DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
   WT_PATH="${TMPDIR:-/tmp}/fleet-run-${MEMBER}${ITEM:+-item$ITEM}-$$"
   WT_BRANCH="member/${MEMBER}${ITEM:+-item$ITEM}-$$-$(date +%s)"
-  LOCK="${TMPDIR:-/tmp}/fleet-kit-worktree-add.lock"
+  . "$KIT_DIR/scripts/worktree_lock.sh"
 
   create_run_worktree() {
-    local attempt rc=1 waited held
+    local attempt rc=1
     for attempt in 1 2 3; do
-      waited=0; held=0
-      while [ "$waited" -lt 120 ]; do
-        if mkdir "$LOCK" 2>/dev/null; then held=1; break; fi
-        # Steal a lock older than 5 min: a sibling killed mid-add would otherwise wedge every
-        # later attempt (this script's or worktree_builder.sh's -- same lock, same hazard).
-        if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
-          rmdir "$LOCK" 2>/dev/null || true; continue
-        fi
-        sleep 2; waited=$((waited + 2))
-      done
-      if [ "$held" -ne 1 ]; then
+      if ! worktree_lock_acquire 120; then
         log "create_run_worktree: could not acquire lock within 120s (attempt $attempt)"
+        worktree_lock_release
         sleep $((attempt * 3)); continue
       fi
       git -C "$REPO" fetch origin "$DEFAULT_BRANCH" >/dev/null 2>&1
@@ -363,7 +354,7 @@ if [ "$WORKTREE_ENABLED" = "True" ] && [ "$DRY_RUN" -ne 1 ]; then
       fi
       git -C "$REPO" worktree add "$WT_PATH" -b "$WT_BRANCH" "origin/$DEFAULT_BRANCH"
       rc=$?
-      rmdir "$LOCK" 2>/dev/null || true   # safe: reached only when held=1
+      worktree_lock_release
       [ "$rc" -eq 0 ] && return 0
       log "create_run_worktree: attempt $attempt failed (rc=$rc), retrying"
       sleep $((attempt * 3))
@@ -381,25 +372,18 @@ if [ "$WORKTREE_ENABLED" = "True" ] && [ "$DRY_RUN" -ne 1 ]; then
     # (and this trap) still exist -- see postflight_dirty_check.sh.
     check_repo_clean_postflight "$RUN_ID"
     # gh#4727: `remove`/`prune` mutate the same $REPO/.git/worktrees admin dir that
-    # create_run_worktree's `add` does, but only `add` took $LOCK -- remove/prune ran
+    # create_run_worktree's `add` does, but only `add` took the lock -- remove/prune ran
     # unguarded, free to race a SIBLING pass's concurrent `add`/`remove`/`prune` on the
     # same $REPO. Matches #4727's evidence: three the-fixer dispatches fired ~40s apart,
     # then the earliest one's worktree admin dir vanished (`fatal: not a git repository`)
     # while its `claude -p` child was still running -- exactly what an unguarded
-    # concurrent prune/remove produces. Same lock, same steal-a-lock-older-than-5min
-    # fallback as create_run_worktree, capped shorter (30s not 120s) since this runs at
-    # exit and a stuck cleanup must not wedge the pass from finishing.
-    local cleanup_waited=0 cleanup_held=0
-    while [ "$cleanup_waited" -lt 30 ]; do
-      if mkdir "$LOCK" 2>/dev/null; then cleanup_held=1; break; fi
-      if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
-        rmdir "$LOCK" 2>/dev/null || true; continue
-      fi
-      sleep 1; cleanup_waited=$((cleanup_waited + 1))
-    done
+    # concurrent prune/remove produces. Same lock as create_run_worktree, capped shorter
+    # (30s not 120s) since this runs at exit and a stuck cleanup must not wedge the pass
+    # from finishing.
+    worktree_lock_acquire 30
     git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
     git -C "$REPO" worktree prune >/dev/null 2>&1 || true
-    if [ "$cleanup_held" -eq 1 ]; then rmdir "$LOCK" 2>/dev/null || true; fi
+    worktree_lock_release
   }
   trap cleanup_run_worktree EXIT
   cd "$WT_PATH" || { log "FATAL: worktree created but cd failed: $WT_PATH"; exit 1; }
@@ -643,10 +627,19 @@ ACCOUNT_POOL_SELECTED_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_acct.XXXXXX")
 ACCOUNT_POOL_REASON_FILE=$(mktemp "${TMPDIR:-/tmp}/fleet_reason.XXXXXX")
 export ACCOUNT_POOL_SELECTED_FILE ACCOUNT_POOL_REASON_FILE
 
+# gh#672: gru's own fanout, the-fixer's stale-PR sub-passes and minion's dispatches all reach
+# `claude -p` through THIS one call site, regardless of which member spawned them -- so a
+# ceiling here caps the fleet's real concurrent `claude -p` count no matter which caller is
+# fanning out. Blocks (queues) for a free slot rather than spawning immediately once the
+# ceiling is already held by $CLAUDE_CONCURRENCY_N other passes; see claude_concurrency.sh.
+. "$KIT_DIR/scripts/claude_concurrency.sh"
+claude_slot_acquire
+log "pass start: acquired concurrency slot (ceiling=$CLAUDE_CONCURRENCY_N)"
+
 ( account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" \
     --model "$MODEL" --dangerously-skip-permissions --setting-sources user \
     --output-format stream-json --verbose \
-    "${CAP_ARGS[@]}" "${TOOL_ARGS[@]}" 2>>"$LOG" \
+    "${CAP_ARGS[@]}" "${TOOL_ARGS[@]}" 2>>"$LOG" 7>&- \
     | python3 "$KIT_DIR/scripts/stream_log.py" --result-out "$RESULT_FILE" \
         --trailing-loss-out "$TRAILING_LOSS_FILE" \
     | while IFS= read -r line; do log "$line"; done
@@ -654,6 +647,7 @@ export ACCOUNT_POOL_SELECTED_FILE ACCOUNT_POOL_REASON_FILE
 PASS_PID=$!
 wait "$PASS_PID"
 RC=$?
+claude_slot_release
 
 # Recover what the subshell selected. Fall back to the (empty) exported vars if the pool
 # never wrote -- e.g. the account_pool_run shim on line 235 when the pool is absent.

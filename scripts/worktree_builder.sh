@@ -78,23 +78,14 @@ log "claimed item #$ITEM_ID: $ITEM_TEXT"
 # --- STEP 2: fresh worktree, with the collision + stale-branch lock ----------------------------
 WT_PATH="${TMPDIR:-/tmp}/fleet-build-${ITEM_ID}-$$"
 WT_BRANCH="build/${ITEM_ID}-${WORKER_NAME}"
-LOCK="${TMPDIR:-/tmp}/fleet-kit-worktree-add.lock"
+. "$KIT_DIR/scripts/worktree_lock.sh"
 
 create_build_worktree() {
-  local attempt rc=1 waited held
+  local attempt rc=1
   for attempt in 1 2 3; do
-    waited=0; held=0
-    while [ "$waited" -lt 120 ]; do
-      if mkdir "$LOCK" 2>/dev/null; then held=1; break; fi
-      # Steal a lock older than 5 min: a builder killed mid-add would otherwise wedge every
-      # later attempt forever.
-      if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
-        rmdir "$LOCK" 2>/dev/null || true; continue
-      fi
-      sleep 2; waited=$((waited + 2))
-    done
-    if [ "$held" -ne 1 ]; then
+    if ! worktree_lock_acquire 120; then
       log "create_build_worktree: could not acquire lock within 120s (attempt $attempt)"
+      worktree_lock_release
       sleep $((attempt * 3)); continue
     fi
     git worktree prune >/dev/null 2>&1
@@ -105,7 +96,7 @@ create_build_worktree() {
     fi
     git worktree add "$WT_PATH" -b "$WT_BRANCH" origin/main
     rc=$?
-    rmdir "$LOCK" 2>/dev/null || true   # safe: reached only when held=1
+    worktree_lock_release
     [ "$rc" -eq 0 ] && return 0
     log "create_build_worktree: attempt $attempt failed (rc=$rc), retrying"
     sleep $((attempt * 3))
@@ -134,21 +125,14 @@ cleanup() {
   check_repo_clean_postflight "${RUN_ID:-build-$ITEM_ID-$WORKER_NAME}"
   # gh#4727: `remove`/`prune` mutate the same $REPO/.git/worktrees admin dir that
   # create_build_worktree's `add` does (and that run_member.sh's own `add` does too --
-  # both scripts share this exact $LOCK file), but only `add` took $LOCK -- remove/prune
+  # both scripts share this exact lock file), but only `add` took the lock -- remove/prune
   # ran unguarded, free to race a SIBLING pass's concurrent `add`/`remove`/`prune` on the
   # same $REPO. Same fix as run_member.sh's cleanup_run_worktree; see its comment for the
   # full incident writeup (#4727).
-  local cleanup_waited=0 cleanup_held=0
-  while [ "$cleanup_waited" -lt 30 ]; do
-    if mkdir "$LOCK" 2>/dev/null; then cleanup_held=1; break; fi
-    if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
-      rmdir "$LOCK" 2>/dev/null || true; continue
-    fi
-    sleep 1; cleanup_waited=$((cleanup_waited + 1))
-  done
+  worktree_lock_acquire 30
   git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
   git -C "$REPO" worktree prune >/dev/null 2>&1 || true
-  if [ "$cleanup_held" -eq 1 ]; then rmdir "$LOCK" 2>/dev/null || true; fi
+  worktree_lock_release
   rm -f "${USAGE_FILE:-}"
   if [ "$BUILD_SUCCEEDED" -ne 1 ]; then
     python3 "$KIT_DIR/scripts/board_github.py" release "$ITEM_ID" \
