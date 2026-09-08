@@ -29,7 +29,7 @@ Three settings, one label on the issue:
 |---|---|---|
 | `quality:ship-it` | working and safe is enough | Definition of Done only; diff review |
 | `quality:solid` | a competent product team would be proud of it | Given/When/Then criteria, a test per criterion, screenshot evidence, plain-language PR |
-| `quality:world-class` | the interface and delight of the best in the world at this | everything in solid, plus the research pass below, a design spec Reif approves before build, buy-vs-build spike, design QA against the references, Reif accepts by using it |
+| `quality:world-class` | the interface and delight of the best in the world at this | everything in solid, plus the research pass below, a design spec the VP review approves before build, buy-vs-build spike, design QA against the references, the VP review accepts by using it (Reif can veto) |
 
 Defaults: a request that names a reference product ("Telegram-level", "like Snap", "Stripe
 quality") is `world-class`. Any other request from Reif is `solid`. Fleet plumbing is
@@ -57,7 +57,11 @@ messenger's morning brief lists every open `world-class` item so Reif can move t
    for ours today. Add the budgets people feel (respond within 100 ms, animate at 16 ms a
    frame, load under 1 s).
 4. Write the design spec against the references: annotated screenshots or a mock, with the
-   states above. Reif approves it (an ask of class `decision`) before anything is built.
+   states above. The VP review approves it before anything is built: gru spawns `vp`
+   (members/vp/vp.md, opus), who reads it as a Google VP of Product and posts
+   `Design approved (VP review):` or `Not yet (VP review):` with numbered fixes. Reif,
+   2026-09-08: *"It's appropriate to have our system decide what is acceptable instead of
+   having a human decide it. Just say: OK, I'm a Google VP, would this pass?"*
 5. Find what the best already use: the open-source libraries, UI kits, and named design
    patterns that reproduce each affordance in the matrix (Reif, 2026-09-08: *"find the open
    sourced or design patterns that the best used already"*). Add one column per candidate
@@ -65,12 +69,14 @@ messenger's morning brief lists every open `world-class` item so Reif can move t
    before any custom build, and names the one reason.
 6. Build in vertical slices. After each: design QA against the reference screenshots, side
    by side, at desktop and phone width, in the PR.
-7. Reif uses it and says done. Then it closes.
+7. The VP review uses it, at phone and desktop width, against the reference captures, and
+   posts `Accepted (VP review):` with screenshots and the measured budgets, then closes it.
+   Reif reads the verdict in the brief and can veto with a comment starting `Reif:`.
 
 Enforced by: marie's PRD sets the label and, for `world-class`, files the research pass as
 slice 1 with the reference list in it; judge-judy blocks a `world-class` PR with no
 side-by-side design QA; the closes gate blocks every `Closes` on a `world-class` item until
-Reif's acceptance ask is answered. (Label and gates: filed as the next item.)
+the VP review has posted `Accepted (VP review):`. (Label and gates: filed as the next item.)
 
 ## The standard, rule by rule
 
@@ -86,7 +92,8 @@ done until every line is true. Ours:
 - The change is live and was used once, by hand, right after it deployed (the verification
   law's third gate: a fix is tested the instant it lands).
 - Someone who did not write it says it is done. The author never closes their own ticket.
-- For anything Reif asked for in his own words, Reif says it is done.
+- For anything Reif asked for in his own words, the VP review (members/vp/vp.md) says it is
+  done, in his seat: "would a Google VP of Product ship this today?" Reif can veto.
 
 Enforced by: `closes_gate.py` in judge-judy (a PR that calls itself partial, or is docs-only
 on a product item, cannot close an issue), the judge's prompt (it now reads the acceptance

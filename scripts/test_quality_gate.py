@@ -67,6 +67,11 @@ class GateTests(unittest.TestCase):
                                        comments=[GWT, "Design approved: ask #12 answered yes by Reif"])])
         self.assertEqual(out["eligible"], [8])
 
+    def test_world_class_vp_review_form_is_eligible(self):
+        out = qg.gate_candidates([item(10, ["quality:world-class"],
+                                        comments=[GWT, "Design approved (VP review): clears the bar.\nChecked: 12 captures."])])
+        self.assertEqual(out["eligible"], [10])
+
     def test_newest_criteria_comment_wins(self):
         out = qg.gate_candidates([item(9, ["quality:solid"], comments=[VAGUE, GWT])])
         self.assertEqual(out["eligible"], [9])

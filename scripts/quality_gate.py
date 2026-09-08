@@ -15,7 +15,8 @@ THE RULE. A candidate is eligible for gru only if BOTH hold:
      yes or no to. "Handles errors gracefully" never passes this gate.
 A `quality:world-class` item is eligible only if that criterion set is its research pass
 (the comment names `References:` and a design-spec approval ask) OR a comment says
-`Design approved:` -- nobody builds the feel before Reif has approved the design
+`Design approved (VP review):` -- nobody builds the feel before the VP review (members/vp/vp.md,
+the fleet deciding as a Google VP of Product would; Reif can veto) has approved the design
 (quality-standard.md section 0, steps 1-7).
 
 Same shape and split as vision_link_gate.py: pure core (`classify_candidate`,
@@ -41,7 +42,8 @@ WORLD_CLASS = "quality:world-class"
 # markdown wrapping (bold, list bullets, numbering).  Case-insensitive.
 _GWT_RE = re.compile(r"\bgiven\b[\s\S]{1,600}?\bwhen\b[\s\S]{1,600}?\bthen\b", re.IGNORECASE)
 _REFERENCES_RE = re.compile(r"^\W*references?\s*:", re.IGNORECASE | re.MULTILINE)
-_DESIGN_APPROVED_RE = re.compile(r"^\W*design approved\s*:", re.IGNORECASE | re.MULTILINE)
+# "Design approved (VP review):" from members/vp/vp.md, or the older "Design approved:" form.
+_DESIGN_APPROVED_RE = re.compile(r"^\W*design approved(?:\s*\(vp review\))?\s*:", re.IGNORECASE | re.MULTILINE)
 
 
 def _label_names(labels) -> list[str]:

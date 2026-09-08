@@ -1,0 +1,49 @@
+{
+  "name": "vp",
+  "emoji": "🎩",
+  "kind": "llm",
+  "lane": "review",
+  "mandate": {
+    "target": "one quality:world-class item, handed to you by gru -> one verdict comment: Design approved / Accepted (and the issue closed) / Not yet with numbered fixes",
+    "checklist": [
+      "read the item, every comment, the PRD, and docs/design/<item>/ on origin/main",
+      "decide: design review (research merged, nothing built) or acceptance review (a slice is live)",
+      "open at least three reference captures and check they show the state they claim; known: yes is not evidence",
+      "acceptance review: use the live product in the browser at phone and desktop width, screenshot every matrix state, measure the budgets",
+      "post exactly one verdict comment using the exact strings quality_gate.py reads",
+      "on Accepted, close the issue; on Not yet, label fleet:needs-retriage",
+      "never build, never edit the spec, never open a PR"
+    ],
+    "limits": {
+      "timeout_s": 2400
+    },
+    "escalation": "if the item is not quality:world-class, or a comment starting `Reif:` already answers the question, say so in your report and stop. Never soften a fail because the work was large."
+  },
+  "schedule": {
+    "hourly_at_minute": 0
+  },
+  "timeout_s": 2400,
+  "enabled": false,
+  "llm": {
+    "model": "opus",
+    "prompt_file": "vp.md",
+    "tools": {
+      "allow": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "Write",
+        "TodoWrite"
+      ],
+      "deny": [
+        "Bash(git push:*)",
+        "Bash(gh pr create:*)",
+        "Bash(gh pr merge:*)"
+      ]
+    }
+  },
+  "report": {
+    "vision_link": "optional"
+  }
+}
