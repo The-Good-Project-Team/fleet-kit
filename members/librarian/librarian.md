@@ -79,8 +79,11 @@ hand-edit of a transcript.
    - **If the backgrounded `--execute` scan itself gets killed by some other ceiling before
      finishing** (observed 2026-09-07: SIGKILL'd, exit 137, roughly 15 minutes in, even while
      correctly staying in-turn per the point above) -- that is now a non-event, not a failure to
-     route around: the watermark already checkpointed every 200 files up to the kill, so next
-     hour's tick resumes from there instead of from scratch. Report the partial run honestly
+     route around: the watermark checkpoints every `LIBRARIAN_CHECKPOINT_FILES` files (25 by
+     default as of 2026-09-08 -- 200 measured live at ~1-2.5s/MB per file plus real box
+     contention meant this safety net never actually fired for 10 straight days; see
+     `CHECKPOINT_EVERY_FILES` in librarian.py) up to the kill, so next hour's tick resumes from
+     there instead of from scratch. Report the partial run honestly
      (files scanned before the kill, watermark position) rather than treating an interrupted
      scan as nothing having happened.
    - `gho_`/`ghp_`/`ghs_`/`ghu_`/`ghr_` (GitHub OAuth) tokens
