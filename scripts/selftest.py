@@ -2518,7 +2518,7 @@ def _status_data_other_components_unaffected_by_members_fix():
     labels = [label for label, _names, _desc in status_data.COMPONENTS]
     assert labels == [
         "Account pool", "Public path", "Tunnel", "Budget meter (tgp)",
-        "Budget meter (gmail)", "Deploy",
+        "Budget meter (gmail)", "Deploy", "Prod (philanthropy.org)",
     ], f"COMPONENTS list drifted: {labels!r}"
 
     old = _os.environ.get("FLEET_LOG_DIR")
