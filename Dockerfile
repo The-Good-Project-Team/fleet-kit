@@ -51,7 +51,10 @@ RUN apt-get update -qq && apt-get install -y -qq \
 # No --break-system-packages: this base ships pip 22.0.2, which predates that flag and exits
 # "no such option", failing the build. Verified against the real image 2026-08-26 rather than
 # assumed -- the flag is correct on newer bases and would have looked right in review.
-RUN pip3 install --no-cache-dir requests google-auth playwright
+#   pyyaml        : members/sentry/journeys.yaml (gh#656) is sentry's journey catalog;
+#                   scripts/journey_walker.py (gh#657) parses it to drive Playwright through
+#                   each journey. Nothing else in this image reads YAML today.
+RUN pip3 install --no-cache-dir requests google-auth playwright pyyaml
 
 # A real browser, because some numbers exist ONLY in a rendered page. Google's Page Indexing
 # report -- the one holding "3.7M discovered, currently not indexed" and "1.68M excluded by
