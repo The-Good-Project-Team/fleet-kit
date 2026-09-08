@@ -39,7 +39,10 @@ worktree_container_id() {
 worktree_stamp_container_id() {
   local repo="$1" wt_path="$2" cid d gd
   cid="$(worktree_container_id)"
-  [ -n "$cid" ] || return 0
+  if [ -z "$cid" ]; then
+    echo "worktree_prune.sh: could not resolve this container's identity (\$HOSTNAME unset, /etc/hostname unreadable) -- $wt_path will never be reclaimed by worktree_prune_own_container" >&2
+    return 0
+  fi
   for d in "$repo"/.git/worktrees/*/; do
     [ -f "${d}gitdir" ] || continue
     gd="$(cat "${d}gitdir" 2>/dev/null)"
@@ -56,7 +59,7 @@ worktree_stamp_container_id() {
 # with THIS container's own identity. Locked entries are skipped exactly as git's own prune
 # would skip them.
 worktree_prune_own_container() {
-  local repo="$1" cid d gd wt_path entry_cid
+  local repo="$1" cid d gd wt_path entry_cid warned=0
   cid="$(worktree_container_id)"
   [ -d "$repo/.git/worktrees" ] || return 0
   for d in "$repo"/.git/worktrees/*/; do
@@ -66,7 +69,13 @@ worktree_prune_own_container() {
     gd="$(cat "${d}gitdir" 2>/dev/null)"
     wt_path="${gd%/.git}"
     [ -e "$wt_path" ] && continue
-    [ -n "$cid" ] || continue
+    if [ -z "$cid" ]; then
+      if [ "$warned" -eq 0 ]; then
+        echo "worktree_prune.sh: could not resolve this container's identity (\$HOSTNAME unset, /etc/hostname unreadable) -- refusing to prune any stale worktree entry this pass" >&2
+        warned=1
+      fi
+      continue
+    fi
     entry_cid="$(cat "${d}container-id" 2>/dev/null || true)"
     if [ "$entry_cid" = "$cid" ]; then
       rm -rf "$d"

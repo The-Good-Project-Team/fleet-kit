@@ -354,7 +354,7 @@ if [ "$WORKTREE_ENABLED" = "True" ] && [ "$DRY_RUN" -ne 1 ]; then
         sleep $((attempt * 3)); continue
       fi
       git -C "$REPO" fetch origin "$DEFAULT_BRANCH" >/dev/null 2>&1
-      worktree_prune_own_container "$REPO"
+      worktree_prune_own_container "$REPO" 2>>"$LOG"
       if git -C "$REPO" rev-parse --verify --quiet "refs/heads/$WT_BRANCH" >/dev/null 2>&1; then
         git -C "$REPO" branch -D "$WT_BRANCH" >/dev/null 2>&1
       fi
@@ -362,7 +362,7 @@ if [ "$WORKTREE_ENABLED" = "True" ] && [ "$DRY_RUN" -ne 1 ]; then
       rc=$?
       # Stamp BEFORE releasing the lock: a concurrent prune (this container or another)
       # must never observe a registered-but-unstamped entry.
-      [ "$rc" -eq 0 ] && worktree_stamp_container_id "$REPO" "$WT_PATH"
+      [ "$rc" -eq 0 ] && worktree_stamp_container_id "$REPO" "$WT_PATH" 2>>"$LOG"
       worktree_lock_release
       [ "$rc" -eq 0 ] && return 0
       log "create_run_worktree: attempt $attempt failed (rc=$rc), retrying"
@@ -391,7 +391,7 @@ if [ "$WORKTREE_ENABLED" = "True" ] && [ "$DRY_RUN" -ne 1 ]; then
     # from finishing.
     worktree_lock_acquire 30
     git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
-    worktree_prune_own_container "$REPO" || true
+    worktree_prune_own_container "$REPO" 2>>"$LOG" || true
     worktree_lock_release
   }
   trap cleanup_run_worktree EXIT
