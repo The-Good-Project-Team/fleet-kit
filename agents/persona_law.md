@@ -64,6 +64,17 @@ across every worktree of one `.git` — a stash from worktree A can be popped by
 Use `git diff`, `git show <ref>:<path>`, or `git checkout -- <path>` instead; all three touch
 only the named file, never the shared stash stack.
 
+**Verify the absolute path resolves inside YOUR worktree before your very first `Edit`/`Write`
+of a pass, not after.** Recurring, independent live incidents (dumbledore, twice; the-fixer
+once; gh#677) all took the same shape: a convenience path (a stray `/repo` checkout, or a
+live-deployed copy like `/fleet-kit` that has no `.git` at all) looked like the working tree and
+wasn't, and the first edit landed there instead of the real assigned worktree. Every occurrence
+was only caught by chance — diffing before committing, or `git status` unexpectedly showing
+nothing staged — not by a check anyone ran on purpose. Before the first mutating call of any
+pass, run `git rev-parse --show-toplevel` (or `git branch --show-current`) and confirm it
+matches the worktree you were actually handed; a path outside that tree is never the right place
+to edit, no matter how canonical its name sounds.
+
 ## 7. Systemic-failure rule
 
 If the same failure line appears on multiple unrelated units of work — every PR failing the
