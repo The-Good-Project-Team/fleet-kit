@@ -111,7 +111,14 @@ CREATE TABLE IF NOT EXISTS asks (
   answer       TEXT,
   answered_by  TEXT,
   answered_at  REAL,
-  filed_at     REAL NOT NULL
+  filed_at     REAL NOT NULL,
+  -- gh#650: which kind of human call this is -- `decision` (approve a design spec before
+  -- build, quality-standard.md §0 step 4) or `acceptance` (Reif accepts a finished slice,
+  -- rule 5). NULL for every ask filed before this column existed, and for any ask that isn't
+  -- either (see ask.py's ASK_CLASSES for the enforced set); quality_gate.py's `Design
+  -- approved:` check reads the id out of the comment text, not this column, so a NULL class
+  -- here never blocks that gate.
+  class        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_asks_status ON asks(status);
 CREATE INDEX IF NOT EXISTS idx_asks_member ON asks(member);
@@ -135,6 +142,15 @@ _ADD_COLUMNS = (
     # Replaces datta's prior keyword-match of outcome/evidence prose for lane attribution --
     # only set on lane-dispatched passes (nerd today), NULL everywhere else.
     ("lane", "TEXT"),
+)
+
+# Same expand-contract mechanism as _ADD_COLUMNS above, scoped to `asks` instead of `runs`
+# (gh#650 AC2): a fleet.db written before this column existed still has an `asks` table with
+# no `class`, and CREATE TABLE IF NOT EXISTS no-ops against it, so this is what actually
+# reaches it. Kept as its own tuple/table rather than folding into _ADD_COLUMNS because that
+# name and every caller of it (selftest.py, the migration below) is hardcoded to `runs`.
+_ASK_ADD_COLUMNS = (
+    ("class", "TEXT"),
 )
 
 
@@ -210,6 +226,10 @@ def _migrate(conn: sqlite3.Connection, db_path: Path) -> None:
     for name, decl in _ADD_COLUMNS:
         if name not in have:
             conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {decl}")
+    have_asks = {r[1] for r in conn.execute("PRAGMA table_info(asks)")}
+    for name, decl in _ASK_ADD_COLUMNS:
+        if name not in have_asks:
+            conn.execute(f"ALTER TABLE asks ADD COLUMN {name} {decl}")
 
 
 def connect(db_path: Path | None = None) -> sqlite3.Connection:

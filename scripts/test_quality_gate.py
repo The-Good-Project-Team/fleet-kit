@@ -81,6 +81,28 @@ class GateTests(unittest.TestCase):
         self.assertEqual(out["eligible"], [])
         self.assertNotIn("stale_prd", out["dropped"][0])
 
+    def test_real_decision_ask_approval_clears_the_world_class_gate(self):
+        """gh#650 AC8: a `class=decision` ask filed through ask.py, answered, and referenced
+        from a real `Design approved: <id>` comment must clear this gate end to end -- not
+        just the string match `test_world_class_design_approved_is_eligible` above checks."""
+        import sys
+        import tempfile
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import ask, fleet_db
+
+        with tempfile.TemporaryDirectory() as d:
+            conn = fleet_db.connect(Path(d) / "fleet.db")
+            ask_id = ask.file_ask(conn, "marie", "approve design spec for #12",
+                                  ask_class="decision")
+            ask.answer_ask(conn, ask_id, "approved", "reif")
+
+            criteria = "References: Telegram, iMessage, WhatsApp\n" + GWT
+            approval = f"Design approved: ask #{ask_id}"
+            out = qg.gate_candidates([item(12, ["quality:world-class"],
+                                           comments=[criteria, approval])])
+            self.assertEqual(out["eligible"], [12])
+
 
 if __name__ == "__main__":
     unittest.main()

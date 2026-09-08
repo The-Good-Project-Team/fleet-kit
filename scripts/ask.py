@@ -30,17 +30,26 @@ import fleet_db  # noqa: E402
 
 ASK_COLUMNS = (
     "id", "member", "why", "unblocks", "proposed", "status",
-    "answer", "answered_by", "answered_at", "filed_at",
+    "answer", "answered_by", "answered_at", "filed_at", "class",
 )
+
+# gh#650: the closed set quality_gate.py's world-class seam needs -- `decision` (approve a
+# design spec before build, quality-standard.md §0 step 4) and `acceptance` (Reif accepts a
+# finished slice, rule 5). A closed set, not an open string, so `--class banana` is caught
+# here rather than silently stored (issue #650's own open question; a builder who wants an
+# open string instead should say so on the PR, not choose it silently).
+ASK_CLASSES = ("decision", "acceptance")
 
 
 def file_ask(conn, member: str, why: str, unblocks: str | None = None,
-            proposed: str | None = None, filed_at: float | None = None) -> int:
+            proposed: str | None = None, filed_at: float | None = None,
+            ask_class: str | None = None) -> int:
     """Insert a new open ask. Returns its id."""
     cur = conn.execute(
-        "INSERT INTO asks (member, why, unblocks, proposed, status, filed_at) "
-        "VALUES (?, ?, ?, ?, 'open', ?)",
-        (member, why, unblocks, proposed, filed_at if filed_at is not None else time.time()),
+        "INSERT INTO asks (member, why, unblocks, proposed, status, filed_at, class) "
+        "VALUES (?, ?, ?, ?, 'open', ?, ?)",
+        (member, why, unblocks, proposed,
+         filed_at if filed_at is not None else time.time(), ask_class),
     )
     conn.commit()
     return cur.lastrowid
@@ -122,6 +131,8 @@ def main(argv=None) -> int:
     p_file.add_argument("--why", required=True, help="why this needs a human")
     p_file.add_argument("--unblocks", help="what gets unstuck once this is answered")
     p_file.add_argument("--proposed", help="a proposed answer, if the filer has one")
+    p_file.add_argument("--class", dest="ask_class", choices=ASK_CLASSES,
+                        help=f"ask class: {', '.join(ASK_CLASSES)} (optional)")
     p_file.add_argument("--no-notify", action="store_true",
                         help="skip the NTFY/email page (tests, or a caller paging separately)")
 
@@ -140,7 +151,7 @@ def main(argv=None) -> int:
     conn = fleet_db.connect(Path(a.db_path) if a.db_path else None)
 
     if a.cmd == "file":
-        ask_id = file_ask(conn, a.member, a.why, a.unblocks, a.proposed)
+        ask_id = file_ask(conn, a.member, a.why, a.unblocks, a.proposed, ask_class=a.ask_class)
         print(f"ask {ask_id} filed")
         if not a.no_notify:
             _notify(a.member, ask_id, a.why)

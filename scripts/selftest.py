@@ -9450,6 +9450,150 @@ def _ask_file_rate_limits_ntfy_to_once_per_member_per_hour_gh568():
             f"a different member's first ask this hour must still page: {_redact_secrets(sent)!r}"
 
 
+def _ask_class_column_round_trips_and_is_migrated_gh650():
+    """gh#650 AC1/AC2: `ask.py file --class decision` stores it and `ask.py list` renders it,
+    AND a fleet.db predating the `class` column (an `asks` table built from the pre-#650
+    SCHEMA, same slicing trick `_ask_schema_presence_and_clean_migration_gh568` uses for the
+    whole table) migrates in place -- every pre-existing row stays readable with a null class,
+    no manual step."""
+    import ask, fleet_db, sqlite3
+
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        rc = ask.main(["--db-path", str(db_path), "file", "--member", "marie",
+                      "--why", "approve design spec for #634", "--class", "decision",
+                      "--no-notify"])
+        assert rc == 0, f"ask.py file --class decision must exit 0, got {rc}"
+        conn = fleet_db.connect(db_path)
+        rows = ask.list_asks(conn, status="open")
+        assert len(rows) == 1 and rows[0]["class"] == "decision", \
+            f"filed ask should carry class=decision, got {rows}"
+
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        # A "legacy" db: the asks table as it existed before gh#650, i.e. today's SCHEMA minus
+        # the `class` column and its own comment lines -- built by stripping the two lines this
+        # issue added, so the fixture can never silently drift from the real schema shape.
+        start = fleet_db.SCHEMA.index("  filed_at     REAL NOT NULL,")
+        end = fleet_db.SCHEMA.index("  class        TEXT\n") + len("  class        TEXT\n")
+        legacy_schema = (fleet_db.SCHEMA[:start]
+                          + "  filed_at     REAL NOT NULL\n"
+                          + fleet_db.SCHEMA[end:])
+        assert "class" not in legacy_schema.split("CREATE TABLE IF NOT EXISTS asks")[1].split(");")[0], \
+            "fixture still declares a class column -- bad slice"
+
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(legacy_schema)
+        pre_id = conn.execute(
+            "INSERT INTO asks (member, why, status, filed_at) VALUES (?, ?, 'open', ?)",
+            ("gru", "a pre-migration ask with no class column at all", time.time()),
+        ).lastrowid
+        conn.commit()
+        conn.close()
+
+        conn = fleet_db.connect(db_path)  # triggers _migrate -> _ASK_ADD_COLUMNS
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(asks)")}
+        assert "class" in cols, "connect() against a pre-existing asks table never added class"
+        row = ask.list_asks(conn, status="all")[0]
+        assert row["id"] == pre_id and row["why"] == "a pre-migration ask with no class column at all", \
+            "the pre-existing row must survive the migration unchanged"
+        assert row["class"] is None, f"a pre-migration row's class must read NULL, got {row['class']!r}"
+
+
+def _ask_file_no_class_is_unchanged_gh650():
+    """gh#650 AC3: `ask.py file` with no `--class` at all -- the overwhelming majority of
+    existing callers -- must still exit 0 and file the same shape of row it always has, with
+    class simply NULL."""
+    import ask, fleet_db
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        rc = ask.main(["--db-path", str(db_path), "file", "--member", "gru",
+                      "--why", "no class given at all", "--no-notify"])
+        assert rc == 0, f"ask.py file with no --class must still exit 0, got {rc}"
+        conn = fleet_db.connect(db_path)
+        row = ask.list_asks(conn, status="open")[0]
+        assert row["class"] is None, f"an ask filed with no --class should read class=None, got {row['class']!r}"
+
+
+def _ask_file_rejects_unknown_class_gh650():
+    """gh#650 AC4: an unrecognised `--class` (e.g. `banana`) must exit nonzero and name the
+    accepted classes, rather than being stored -- argparse's own `choices=` gives this for
+    free, so this proves that wiring rather than re-implementing the check by hand."""
+    import ask, subprocess
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        p = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "ask.py"), "--db-path", str(db_path),
+             "file", "--member", "gru", "--why", "x", "--class", "banana", "--no-notify"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert p.returncode != 0, "ask.py file --class banana must exit nonzero"
+        for name in ask.ASK_CLASSES:
+            assert name in p.stderr, \
+                f"error message must name accepted class {name!r}, got: {p.stderr!r}"
+
+
+def _ask_class_decision_closes_the_world_class_gate_end_to_end_gh650():
+    """gh#650 AC8: file a real `class=decision` ask, post `Design approved: <that id>` as a
+    comment, and prove quality_gate.py reports the item eligible -- the whole channel this
+    issue built, exercised together rather than each half in isolation."""
+    import ask, fleet_db, quality_gate as qg
+
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        conn = fleet_db.connect(db_path)
+        ask_id = ask.file_ask(conn, "marie", "approve design spec for #634",
+                              ask_class="decision")
+
+        gwt = ("Given the reference screenshots in docs/design/634/references/, when the "
+               "parity matrix is reviewed, then every affordance has a RAIL budget.")
+        criteria_comment = f"References: Telegram, iMessage, WhatsApp\n{gwt}"
+        approval_comment = f"Design approved: ask #{ask_id}"
+
+        item = {"number": 634, "labels": [{"name": "quality:world-class"}], "body": "",
+                "comments": [{"body": criteria_comment}, {"body": approval_comment}]}
+        out = qg.gate_candidates([item])
+
+        assert out["eligible"] == [634], f"expected #634 eligible once its design ask is approved, got {out}"
+
+
+def _docs_design_readme_states_convention_gh650():
+    """gh#650 AC5: `docs/design/README.md` exists and states the `docs/design/<item>/
+    references/` convention, the twelve-state list quality-standard.md §0 step 2 names, and
+    points a reader at both templates."""
+    text = (ROOT / "docs" / "design" / "README.md").read_text()
+    assert "docs/design/<item>/references/" in text, \
+        "README must state the docs/design/<item>/references/ convention"
+    for state in ("empty", "first message", "sending", "sent", "delivered", "read", "typing",
+                  "offline", "reconnect", "error", "long thread", "phone width"):
+        assert state in text, f"README is missing state {state!r} from quality-standard.md §0 step 2"
+    assert "TEMPLATE-parity-matrix.md" in text, "README must point at the parity-matrix template"
+    assert "adr/TEMPLATE.md" in text or "TEMPLATE.md" in text, "README must point at the ADR template"
+
+
+def _docs_design_parity_matrix_template_has_required_columns_gh650():
+    """gh#650 AC6: `docs/design/TEMPLATE-parity-matrix.md` carries every column
+    quality-standard.md §0 steps 3 and 5 name (reference products, ours today, RAIL budgets,
+    candidate open-source libraries/patterns with stars and last release) and reads as a
+    one-row-per-affordance table."""
+    text = (ROOT / "docs" / "design" / "TEMPLATE-parity-matrix.md").read_text()
+    assert "Affordance" in text, "template must have one row per affordance"
+    assert "Ours today" in text, "template is missing the 'ours today' column"
+    for budget in ("100ms", "16ms", "1s"):
+        assert budget in text, f"template is missing the RAIL budget {budget!r}"
+    assert "stars" in text.lower(), "template is missing a stars column for candidates"
+    assert "last release" in text.lower(), "template is missing a last-release column for candidates"
+
+
+def _docs_adr_template_has_buy_vs_build_shape_gh650():
+    """gh#650 AC7: `docs/adr/TEMPLATE.md` carries the buy-vs-build decision shape step 5 asks
+    for -- candidates drawn from the matrix, the one chosen, and a single named reason."""
+    text = (ROOT / "docs" / "adr" / "TEMPLATE.md").read_text()
+    assert "Candidates considered" in text, "ADR template must list candidates considered"
+    assert "## Decision" in text, "ADR template must name the decision"
+    assert "## Reason" in text, "ADR template must carry a single named reason"
+
+
 def _redact_secrets_strips_bearer_tokens_from_assertion_messages_gh682():
     """gh#682: on dino (the only box with real alert credentials), a failing assertion in
     either `_ask_file_rate_limits_ntfy_to_once_per_member_per_hour_gh568` or
@@ -9914,6 +10058,14 @@ if __name__ == "__main__":
     check("check() redacts secrets from every failure message it records (gh#682)", _check_redacts_secrets_from_every_failure_message_gh682)
     check("check() calls _redact_secrets (gh#682)", _check_calls_redact_secrets_gh682)
     check("gru.md calls ask.py file alongside its own needs-human-op stop (gh#568 AC6)", _gru_md_calls_ask_file_alongside_needs_human_op_stop_gh568)
+
+    check("asks.class round-trips through ask.py file/list and migrates a pre-existing db (gh#650 AC1/AC2)", _ask_class_column_round_trips_and_is_migrated_gh650)
+    check("ask.py file with no --class still exits 0, class reads None (gh#650 AC3)", _ask_file_no_class_is_unchanged_gh650)
+    check("ask.py file --class banana exits nonzero and names the accepted classes (gh#650 AC4)", _ask_file_rejects_unknown_class_gh650)
+    check("Design approved: <ask id> from a real class=decision ask clears the world-class gate (gh#650 AC8)", _ask_class_decision_closes_the_world_class_gate_end_to_end_gh650)
+    check("docs/design/README.md states the references/ convention and the twelve states (gh#650 AC5)", _docs_design_readme_states_convention_gh650)
+    check("docs/design/TEMPLATE-parity-matrix.md has every column steps 3/5 name (gh#650 AC6)", _docs_design_parity_matrix_template_has_required_columns_gh650)
+    check("docs/adr/TEMPLATE.md carries the buy-vs-build decision shape (gh#650 AC7)", _docs_adr_template_has_buy_vs_build_shape_gh650)
 
     check("worktree_guard_hook blocks an Edit under the shared $REPO when isolated (gh#592 AC2)", _worktree_guard_blocks_edit_under_shared_repo_gh592)
     check("worktree_guard_hook allows an Edit under the pass's own $WT_PATH (gh#592 AC5)", _worktree_guard_allows_edit_under_own_worktree_gh592)
