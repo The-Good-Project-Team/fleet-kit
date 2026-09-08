@@ -58,6 +58,11 @@ COMPONENTS = [
     ("Deploy",
      ["deploy_staleness_check.cron.log", "deploy_staleness_check.log"],
      "fleet-kit's own deploy pipeline"),
+    ("Prod (philanthropy.org)",
+     # gh#4898: the first monitor of philanthropy.org that runs OFF atlas-serve (the box
+     # it watches) rather than on it -- see prod_health_check.py's own docstring.
+     ["prod_health_check.cron.log"],
+     "external probes (home/search/report) + app_error_canary heartbeat, from dino"),
 ]
 
 
