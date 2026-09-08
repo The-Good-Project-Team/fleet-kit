@@ -170,5 +170,116 @@ class ProcessEndToEndTest(unittest.TestCase):
         self.assertEqual(summary["filed"], [])
 
 
+def _step0_results(run: str, sha: str, desktop_status: str, mobile_status: str) -> dict:
+    """A results.json where journey `x` step 0 ran at both viewports, per journey_walker.py's
+    own id convention (`x` for desktop, `x--mobile_390` for the other)."""
+    step = {
+        "index": 0,
+        "action": "Navigate to the fleet console URL.",
+        "observable_result": "The console loads.",
+    }
+    desktop = {**step, "status": desktop_status,
+               "screenshot": f"qa-out/{run}/journeys/x/desktop/0.png"}
+    mobile = {**step, "status": mobile_status,
+              "screenshot": f"qa-out/{run}/journeys/x/mobile_390/0.png"}
+    return {
+        "run": run,
+        "deploy_sha": sha,
+        "journeys": [
+            {"id": "x", "name": "Fleet console loads", "steps": [desktop]},
+            {"id": "x--mobile_390", "name": "Fleet console loads (mobile_390)", "steps": [mobile]},
+        ],
+    }
+
+
+class ViewportCollapsingTest(unittest.TestCase):
+    """gh#660 PRD (Part C4): a step-0 (viewport-independent) failure at both viewports must
+    file/comment/close ONCE, not once per viewport -- live proof #690/#691."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state_path = Path(self.tmp.name) / "state.json"
+        self.gh = FakeGh()
+
+    def _write(self, name: str, results: dict) -> Path:
+        p = Path(self.tmp.name) / name
+        p.write_text(json.dumps(results))
+        return p
+
+    def test_ac1_one_issue_not_two_for_same_step0_defect(self):
+        r = self._write("r1.json", _step0_results("run-1", "sha1", "fail", "fail"))
+        summary = jif.process(r, self.state_path, runner=self.gh)
+        self.assertEqual(len(summary["filed"]), 1, "must collapse both viewports into one issue")
+        self.assertEqual(len(self.gh.issues), 1)
+
+    def test_ac2_body_names_both_affected_viewports(self):
+        r = self._write("r1.json", _step0_results("run-1", "sha1", "fail", "fail"))
+        summary = jif.process(r, self.state_path, runner=self.gh)
+        issue_no = summary["filed"][0]["issue"]
+        body = self.gh.issues[issue_no]["body"]
+        self.assertIn("desktop", body)
+        self.assertIn("mobile_390", body)
+
+    def test_ac3_non_step0_failure_keeps_per_viewport_key(self):
+        step = {"index": 3, "action": "Check layout.", "observable_result": "Renders correctly."}
+        results = {
+            "run": "run-1",
+            "deploy_sha": "sha1",
+            "journeys": [
+                {"id": "x", "name": "X", "steps": [{**step, "status": "pass"}]},
+                {"id": "x--mobile_390", "name": "X (mobile_390)", "steps": [{**step, "status": "fail"}]},
+            ],
+        }
+        r = self._write("r1.json", results)
+        summary = jif.process(r, self.state_path, runner=self.gh)
+        self.assertEqual(len(summary["filed"]), 1)
+        self.assertEqual(summary["filed"][0]["key"], "x--mobile_390::step3")
+
+    def test_ac4_recurrence_of_collapsed_failure_comments_once(self):
+        r1 = self._write("r1.json", _step0_results("run-1", "sha1", "fail", "fail"))
+        jif.process(r1, self.state_path, runner=self.gh)
+
+        r2 = self._write("r2.json", _step0_results("run-2", "sha1", "fail", "fail"))
+        summary2 = jif.process(r2, self.state_path, runner=self.gh)
+        self.assertEqual(summary2["filed"], [])
+        self.assertEqual(len(summary2["commented"]), 1)
+        self.assertEqual(len(self.gh.issues), 1)
+
+    def test_ac5_full_recovery_at_both_viewports_closes_once(self):
+        r1 = self._write("r1.json", _step0_results("run-1", "sha1", "fail", "fail"))
+        summary1 = jif.process(r1, self.state_path, runner=self.gh)
+        issue_no = summary1["filed"][0]["issue"]
+
+        r2 = self._write("r2.json", _step0_results("run-2", "sha2", "pass", "pass"))
+        summary2 = jif.process(r2, self.state_path, runner=self.gh)
+        self.assertEqual(len(summary2["closed"]), 1)
+        self.assertEqual(summary2["closed"][0]["issue"], issue_no)
+        self.assertFalse(self.gh.issues[issue_no]["open"])
+
+    def test_new_issue_names_only_the_viewports_that_actually_failed(self):
+        # desktop passes, mobile_390 fails -- a first-ever occurrence, so a new issue is filed;
+        # its body must not claim desktop is affected just because it shares the collapsed key.
+        r = self._write("r1.json", _step0_results("run-1", "sha1", "pass", "fail"))
+        summary = jif.process(r, self.state_path, runner=self.gh)
+        self.assertEqual(len(summary["filed"]), 1)
+        issue_no = summary["filed"][0]["issue"]
+        body = self.gh.issues[issue_no]["body"]
+        self.assertIn("mobile_390", body)
+        self.assertNotIn("desktop, mobile_390", body)
+        self.assertNotIn("mobile_390, desktop", body)
+
+    def test_ac6_partial_recovery_does_not_close(self):
+        r1 = self._write("r1.json", _step0_results("run-1", "sha1", "fail", "fail"))
+        jif.process(r1, self.state_path, runner=self.gh)
+
+        # desktop recovers, mobile_390 still fails: must not read as a full recovery.
+        r2 = self._write("r2.json", _step0_results("run-2", "sha2", "pass", "fail"))
+        summary2 = jif.process(r2, self.state_path, runner=self.gh)
+        self.assertEqual(summary2["closed"], [])
+        self.assertEqual(len(summary2["commented"]), 1)
+        self.assertTrue(all(v["open"] for v in self.gh.issues.values()))
+
+
 if __name__ == "__main__":
     unittest.main()
