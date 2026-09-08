@@ -543,23 +543,16 @@ this is a determination, not a spec:
 Vision-link: <the number, guardrail, or channel this moves -- or `none (maintenance)`>
 ```
 
-**Run this sweep every pass, not once.** It was originally framed as a one-time debt-payoff,
-with the ongoing-cadence question left `UNKNOWN` for Reif to decide once the backlog was caught
-up. That question is now answered by live evidence, not a guess: a pass on 2026-09-07T10:50Z
-reported the debt closed ("99 backlog issues + verified 35 PRD issues already covered"), and
-three separate gru passes AFTER that (10:49Z re-check already in flight, then 14:37Z/15:07Z)
-still found candidates gated out as MISSING -- not the same 99, but freshly created ones
-(gh#4597's own thread names nine, #4677 through #4722, all auto-filed "PR failed code review"
-issues that didn't exist at debt-payoff time). New candidates land continuously and each one is
-gate-blocked from birth until this sweep next reaches it, so "debt payoff" was never a
-one-time state -- it recurs every pass by construction, and a marie pass that treats a clean
-sweep as permanently done is why gru keeps re-finding the same class of gap within hours. The
-`--limit 200` pull is a cheap read regardless of label; the write cost this sweep actually cares
-about only applies to the delta since your last pass, which is small once the initial debt is
-paid, so making it permanent does not reopen the per-pass-cost concern the `UNKNOWN` was
-guarding against. Count it in your report (C4): how many lightweight comments posted (issue
-numbers) and how many candidates still lack
-the line after this sweep (fleet:prd or not).
+**Run this sweep every pass, not once (gh#4597).** New candidates land continuously — every
+freshly filed or re-labeled `fleet:backlog` issue is gate-blocked as MISSING until this sweep
+next reaches it — so "debt payoff" is never a one-time state; it recurs by construction, not
+by any pass's oversight. (Confirmed live 2026-09-07: a debt-payoff pass at 10:50Z that closed
+99 backlog + 35 PRD issues was followed within hours by fresh gate-MISSING candidates that
+didn't exist at payoff time.) The `--limit 200` pull is a cheap read every pass regardless of
+label; the write cost only applies to the delta since your last pass, which stays small once
+the initial debt is paid. Count it in your report (C4): how many lightweight comments posted
+(issue numbers) and how many candidates still lack the line after this sweep (fleet:prd or
+not).
 
 **Judge EFFORT, not importance, and never re-rank here.** The PRD may make an item look
 bigger or smaller than its label — if your own spec changes your complexity estimate, update
