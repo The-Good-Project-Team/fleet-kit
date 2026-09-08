@@ -444,7 +444,9 @@ five that restate the title.
 `quality:world-class` item the acceptance criteria in your PRD are the research pass itself
 (quality-standard.md §0 steps 1-5), never the build: a `References:` line naming the two or
 three best products at this exact interaction; Given/When/Then criteria for the reference
-screenshots in `docs/design/<item>/references/`, the parity matrix with the budgets people
+screenshots in `docs/design/<item>/references/` (from press kits, store listings, Mobbin,
+Dribbble, YouTube frames, and the product's open-source client -- never "could not sign in",
+never `known: yes`; quality-standard.md §0 step 2), the parity matrix with the budgets people
 feel, **the open-source pieces and design patterns the best already use** (Reif, 2026-09-08:
 *"find the open sourced or design patterns that the best used already"* -- the libraries, UI
 kits, and named patterns that reproduce each affordance, with stars and last release, one
