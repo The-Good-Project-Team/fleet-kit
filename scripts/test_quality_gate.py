@@ -71,6 +71,16 @@ class GateTests(unittest.TestCase):
         out = qg.gate_candidates([item(9, ["quality:solid"], comments=[VAGUE, GWT])])
         self.assertEqual(out["eligible"], [9])
 
+    def test_dropped_with_fleet_prd_is_flagged_stale(self):
+        out = qg.gate_candidates([item(10, ["fleet:priority-high", "fleet:prd"])])
+        self.assertEqual(out["eligible"], [])
+        self.assertTrue(out["dropped"][0]["stale_prd"])
+
+    def test_dropped_without_fleet_prd_is_not_flagged_stale(self):
+        out = qg.gate_candidates([item(11, ["fleet:priority-high"])])
+        self.assertEqual(out["eligible"], [])
+        self.assertNotIn("stale_prd", out["dropped"][0])
+
 
 if __name__ == "__main__":
     unittest.main()
