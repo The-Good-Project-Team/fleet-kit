@@ -338,6 +338,12 @@ if [ "$WORKTREE_ENABLED" = "True" ] && [ "$DRY_RUN" -ne 1 ]; then
   WT_PATH="${TMPDIR:-/tmp}/fleet-run-${MEMBER}${ITEM:+-item$ITEM}-$$"
   WT_BRANCH="member/${MEMBER}${ITEM:+-item$ITEM}-$$-$(date +%s)"
   . "$KIT_DIR/scripts/worktree_lock.sh"
+  # gh#684: a blanket `git worktree prune` deletes a SIBLING container's still-live worktree
+  # entry during a rolling cutover (#626) -- $REPO/.git/worktrees is a shared mount, but the
+  # worktree paths registered in it are per-container ($TMPDIR). worktree_prune_own_container
+  # only reclaims entries this container itself stamped, so a foreign container's live entry
+  # is left registered.
+  . "$KIT_DIR/scripts/worktree_prune.sh"
 
   create_run_worktree() {
     local attempt rc=1
@@ -348,12 +354,15 @@ if [ "$WORKTREE_ENABLED" = "True" ] && [ "$DRY_RUN" -ne 1 ]; then
         sleep $((attempt * 3)); continue
       fi
       git -C "$REPO" fetch origin "$DEFAULT_BRANCH" >/dev/null 2>&1
-      git -C "$REPO" worktree prune >/dev/null 2>&1
+      worktree_prune_own_container "$REPO" 2>>"$LOG"
       if git -C "$REPO" rev-parse --verify --quiet "refs/heads/$WT_BRANCH" >/dev/null 2>&1; then
         git -C "$REPO" branch -D "$WT_BRANCH" >/dev/null 2>&1
       fi
       git -C "$REPO" worktree add "$WT_PATH" -b "$WT_BRANCH" "origin/$DEFAULT_BRANCH"
       rc=$?
+      # Stamp BEFORE releasing the lock: a concurrent prune (this container or another)
+      # must never observe a registered-but-unstamped entry.
+      [ "$rc" -eq 0 ] && worktree_stamp_container_id "$REPO" "$WT_PATH" 2>>"$LOG"
       worktree_lock_release
       [ "$rc" -eq 0 ] && return 0
       log "create_run_worktree: attempt $attempt failed (rc=$rc), retrying"
@@ -382,7 +391,7 @@ if [ "$WORKTREE_ENABLED" = "True" ] && [ "$DRY_RUN" -ne 1 ]; then
     # from finishing.
     worktree_lock_acquire 30
     git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
-    git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+    worktree_prune_own_container "$REPO" 2>>"$LOG" || true
     worktree_lock_release
   }
   trap cleanup_run_worktree EXIT
