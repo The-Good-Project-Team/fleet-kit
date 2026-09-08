@@ -52,13 +52,9 @@ work done).
 4. **No open PR references it** → before calling it stale, check for a **merged** PR that
    references the issue too (`#NNNN` or `gh#NNNN`) — GitHub's own PR-state flip from "open" to
    "merged" is the strongest possible resolution signal there is, not an absence-of-work one.
-   Use the same word-bounded local check Part B's "Already fixed" test uses, never a raw
-   `gh pr list --search "<n> in:body"` (short digit strings tokenize into noise, gh#425):
-   ```
-   gh pr list --state merged --json number,title,body,mergedAt --limit 1000 \
-     | jq -r --arg n "<issue number>" \
-       '.[] | select((.title + "\n" + (.body // "")) | test("(?i)(gh)?#0*" + $n + "\\b")) | .number'
-   ```
+   Use the exact same word-bounded local check as Part B's "Already fixed" test (never a raw
+   `gh pr list --search "<n> in:body"` — short digit strings tokenize into noise, gh#425), just
+   add `,mergedAt` to the `--json` field list so you can see when it landed.
    - **A merged PR references it** → the work is done, not unclaimed. Do NOT clear the label
      with the "re-claimable" comment (that invites a rebuild of an already-shipped fix, gh#3693).
      Instead comment `marie: fleet:claimed left in place — merged PR #<PR> references this issue
@@ -294,13 +290,9 @@ hour's unspent tokens do not roll over.
 
 ## Part C2b — decomposition (for anything that scores above the complexity-10 ceiling)
 
-Narrow: this only fires when C2 finds an item genuinely bigger than a 10. But when it does
-fire, until now there was no working procedure at all — the pointer above said "decompose it
-in Part D" while Part D had been repurposed into the label-consistency sweep, so the item
-just sat scored-10 with nowhere real to go. That gap is confirmed real cost, not theoretical
-(precedent: an unsplit epic-scale issue on another venture burned repeated `budget_declined`
-dead-ends before shipping via organic incremental narrowing — exactly what splitting at file
-time would have done on purpose instead of by accident).
+Narrow: this only fires when C2 finds an item genuinely bigger than a 10. Split it here rather
+than scoring it 10 and moving on — an unsplit epic-scale item just sits oversized with no real
+build path, and later passes end up narrowing it piecemeal anyway. Do it on purpose, now.
 
 1. **Split along the item's real seams**, not into equal-sized shares — the distinct defects
    or components the reporter already enumerated, or a natural build sequence, usually give you
