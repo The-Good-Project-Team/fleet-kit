@@ -3550,6 +3550,29 @@ def _entrypoint_cron_never_resources_fleet_env_after_exporting_the_port():
     assert not bad, "crontab line(s) export a port and then re-source fleet.env, which overrides it:\n" + "\n".join(bad)
 
 
+def _every_charter_survives_the_frontmatter_strip():
+    """run_member.sh feeds a charter to the model as everything after the SECOND `---` line
+    (frontmatter stripped) and FATALs with "charter empty after frontmatter strip" if nothing
+    is left. A charter written without frontmatter is therefore empty at runtime: vp.md shipped
+    that way in #733 and its first live pass died at 13:08Z on 2026-09-08. Assert every
+    prompt_file named by a fleet.json yields a non-empty prompt the same way run_member does.
+    """
+    import glob, json, subprocess
+    root = Path(__file__).parent.parent
+    empty = []
+    for f in sorted(glob.glob(str(root / "members" / "*" / "*.fleet.json"))):
+        cfg = json.load(open(f))
+        pf = (cfg.get("llm") or {}).get("prompt_file")
+        if not pf:
+            continue
+        charter = Path(f).parent / pf
+        out = subprocess.run(["awk", "BEGIN{d=0} /^---$/{d++; next} d>=2{print}", str(charter)],
+                             capture_output=True, text=True, timeout=10).stdout
+        if not out.strip():
+            empty.append(str(charter.relative_to(root)))
+    assert not empty, "charter(s) empty after run_member.sh's frontmatter strip (missing the --- block): " + ", ".join(empty)
+
+
 def _entrypoint_container_port_env_wins_over_fleet_env():
     """Rolling deploys (gh#625) hand each container its own port pair with `-e FLEET_VIEW_PORT`
     / `-e FLEET_WEBHOOK_PORT`. PR#708 made entrypoint.sh `set -a; . fleet.env` at boot, and
@@ -9963,6 +9986,7 @@ if __name__ == "__main__":
     check("auto-deploy race check does not alert on a self-resolving sanctioned ABORT", _auto_deploy_race_check_does_not_alert_on_a_self_resolving_sanctioned_abort)
     check("every entrypoint.sh-scheduled incident script is actually scheduled (gh#378, table-driven)", _every_entrypoint_scheduled_script_is_actually_scheduled)
     check("entrypoint.sh's crontab-wide env block forwards FLEET_SHARE_DIR (gh#569)", _entrypoint_crontab_forwards_fleet_share_dir)
+    check("every charter survives run_member.sh's frontmatter strip (vp.md, 2026-09-08)", _every_charter_survives_the_frontmatter_strip)
     check("entrypoint.sh: the container's port env wins over fleet.env (rolling deploy pairs, gh#625/#708)", _entrypoint_container_port_env_wins_over_fleet_env)
     check("entrypoint.sh: no crontab line exports a port and then re-sources fleet.env", _entrypoint_cron_never_resources_fleet_env_after_exporting_the_port)
     check("entrypoint.sh's crontab-wide env block forwards FLEET_LEASE_DIR (gh#579)", _entrypoint_crontab_forwards_fleet_lease_dir)
