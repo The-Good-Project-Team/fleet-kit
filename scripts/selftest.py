@@ -4131,6 +4131,33 @@ def _console_v2_is_one_phone_first_page_with_five_blocks():
     assert sv.index('if path == "/api/asks":') < gate, "listing asks is a read, before the gate"
 
 
+def _console_run_panel_shows_everything_about_one_run_fk748():
+    """fk#748, Reif (with a screenshot of the Agents list): "right slider, 1/3 page on click for
+    more infos. Should publish its report each run and let me see it." A run row opens a
+    right-hand panel (a third of the viewport, full width on a phone) with the full outcome,
+    evidence, report, self-critique, cost, links, and a live transcript for a running pass;
+    a run with no report says so instead of going blank; script members and judge-judy now
+    carry a report on every run.
+    """
+    page = (ROOT / "scripts" / "fleet_home.html").read_text()
+    for needle in ('id="side"', 'id="sideBack"', 'width: 33.333vw', '@media (max-width: 700px) { .side { width: 100vw',
+                   'data-run=', 'no written report for this run', '/api/pass_log', "e.key === 'Escape'",
+                   "section('Outcome', rec.outcome)", "section('Evidence', rec.evidence)", "section('Self-critique'"):
+        assert needle in page, f"fleet_home.html lacks {needle!r}"
+    assert len(page.encode()) < 40_000, "v2 must stay small"
+    import run_report
+    sh = run_report.build_record(member="roomba", run_id="r", kind="shell", exit_code=0,
+                                 pass_text="Outcome: pruned 3 worktrees\nEvidence: ls\nremoved /tmp/a\nremoved /tmp/b\n",
+                                 usage=None, vision_required=False)
+    assert sh["report"] and sh["report"].startswith("(script output)"), f"shell run has no report: {sh['report']!r}"
+    llm = run_report.build_record(member="gru", run_id="r", kind="llm", exit_code=0,
+                                  pass_text="Outcome: x\nEvidence: y\n", usage=None, vision_required=False)
+    assert llm["report"] is None, "an llm pass with no Report: block must stay None (reported_nothing stays honest)"
+    jj = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    assert "Report:\\n%s" in jj or "Report:\n%s" in jj, "judge-judy's report_run must carry the review text as Report:"
+    assert jj.count('"$FINDINGS"') >= 1 and "sed '/^VERDICT: /d' \"$OUT_FILE\"" in jj, "both verdict paths must pass the review text"
+
+
 def _console_home_is_usable_on_a_phone_and_the_number_tile_reads_fleet_env():
     """Reif, from his phone, 2026-09-07: "look at how unmobile friendly". Home showed the
     number tile as "unavailable" and then nothing. Two causes, two pins: (1) /api/number runs
@@ -10008,6 +10035,7 @@ if __name__ == "__main__":
     check("entrypoint.sh's crontab-wide env block forwards FLEET_SHARE_DIR (gh#569)", _entrypoint_crontab_forwards_fleet_share_dir)
     check("every charter survives run_member.sh's frontmatter strip (vp.md, 2026-09-08)", _every_charter_survives_the_frontmatter_strip)
     check("entrypoint.sh: the container's port env wins over fleet.env (rolling deploy pairs, gh#625/#708)", _entrypoint_container_port_env_wins_over_fleet_env)
+    check("console v2: a run row opens a right-hand panel with the whole run; every run has a report (fk#748)", _console_run_panel_shows_everything_about_one_run_fk748)
     check("entrypoint.sh: no crontab line exports a port and then re-sources fleet.env", _entrypoint_cron_never_resources_fleet_env_after_exporting_the_port)
     check("entrypoint.sh's crontab-wide env block forwards FLEET_LEASE_DIR (gh#579)", _entrypoint_crontab_forwards_fleet_lease_dir)
     check("entrypoint.sh's crontab-wide env block forwards FLEET_INSTANCE_NAME (gh#581)", _entrypoint_crontab_forwards_fleet_instance_name)
