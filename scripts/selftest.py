@@ -3550,7 +3550,7 @@ def _entrypoint_container_port_env_wins_over_fleet_env():
                      if l.startswith("[ -f") and 'set -a; . "${FLEET_ENV_FILE' in l)
     with tempfile.TemporaryDirectory() as td:
         env_file = Path(td) / "fleet.env"
-        env_file.write_text("FLEET_VIEW_PORT=8420\nFLEET_WEBHOOK_PORT=8562\nFLEET_ACCOUNTS=gmail tgp\n")
+        env_file.write_text("FLEET_VIEW_PORT=8420\nFLEET_WEBHOOK_PORT=8562\nFLEET_ACCOUNTS=\"gmail tgp\"\n")
         script = block + '\necho "$FLEET_VIEW_PORT $FLEET_WEBHOOK_PORT $FLEET_ACCOUNTS"\n'
         proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10,
                               env={"PATH": "/usr/bin:/bin", "FLEET_ENV_FILE": str(env_file),
