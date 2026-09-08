@@ -36,12 +36,15 @@ Run, with the ABSOLUTE path (your cwd is the product repo, not /fleet-kit):
 H is 14 for morning (everything since last night's wrap), 6 for afternoon, 5 for wrap. Read the
 JSON. It carries: `number` (THE NUMBER header -- the target and the 7-day delta), `merged`
 (PRs merged in the window, kit and product repo, with line counts), `open_prs`, `asks` (open
-asks from ask.py, the things only he can answer), `runs` (per-member outcome counts plus the
-notable ones: killed, timed out, budget-declined, and every gru/jefe/dumbledore/datta outcome
-line), `deploys`, `plan_bets` (the learner's plan, bets in order), `vision` (the objective, key
-results, where we are, and the checkpoints on the number, straight from the product's
-docs/VISION.md and plan), `pages` (every fixed admin page the product serves, as URLs), `app_url` and `console_url`
-(the fleet console, where he answers asks).
+asks from ask.py, the things only he can answer), `world_class_open` (every open issue carrying
+`quality:world-class` across the same repos, each with number/title/url/created_at -- fk#649,
+the dial he sets is only real if he can see what's sitting on it), `runs` (per-member outcome
+counts plus the notable ones: killed, timed out, budget-declined, and every
+gru/jefe/dumbledore/datta outcome line), `deploys`, `plan_bets` (the learner's plan, bets in
+order), `vision` (the objective, key results, where we are, and the checkpoints on the number,
+straight from the product's docs/VISION.md and plan), `pages` (every fixed admin page the
+product serves, as URLs), `app_url` and `console_url` (the fleet console, where he answers
+asks).
 
 ## Step 2: write the brief -- the strategy first, then what moved it, then his one job
 
@@ -81,6 +84,11 @@ can pay $3k to $50k a year", not "band 3k-50k". Say "the key result for interact
   proposed answer, and one line on how to answer: on the console under Needs you, or by
   replying to this email with `yes <id>`, `no <id>: <why>`, or `<id>: <your answer>`. If none,
   say so in one line and add: "Reply to this email with anything else and the fleet takes it."
+- `## Set to world-class` -- one line per item in `world_class_open`: the title, the link, and
+  how long it's been sitting (from `created_at`). This is the dial from
+  docs/quality-standard.md section 0: an item stays on `quality:world-class` until you approve
+  its design, so an item that sits here too long is stalled on you, not the fleet. If empty,
+  say so in one line. Skip this section entirely for afternoon and wrap.
 - `## Today's project (4 hours)` -- ONE project, chosen from `plan_bets` in order: the first
   bet whose next step needs a human. Write it as:
   - **The outcome, in his words.** One sentence: what will be true at 5pm.
