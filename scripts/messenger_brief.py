@@ -138,6 +138,28 @@ def asks_open() -> list[dict]:
         return []
 
 
+WORLD_CLASS_LABEL = "quality:world-class"
+
+
+def world_class_open() -> list[dict]:
+    """Every open `quality:world-class` issue across the repos the brief already tracks
+    (fk#649): the dial only means something if Reif can see what's set to it. gru and marie
+    apply the label; nothing else surfaces it to him."""
+    out = []
+    for slug in repo_slugs():
+        rows = sh(["gh", "issue", "list", "--repo", slug, "--state", "open",
+                    "--label", WORLD_CLASS_LABEL, "--limit", "40",
+                    "--json", "number,title,url,createdAt"], timeout=60)
+        try:
+            items = json.loads(rows or "[]")
+        except json.JSONDecodeError:
+            continue
+        for it in items:
+            out.append({"repo": slug, "number": it.get("number"), "title": it.get("title"),
+                        "url": it.get("url"), "created_at": it.get("createdAt")})
+    return out
+
+
 def number_header() -> str:
     return sh([sys.executable, str(KIT / "scripts" / "number_read.py"), "--render"], timeout=60).strip()
 
@@ -221,6 +243,7 @@ def collect(since_hours: float) -> dict:
         "merged": merged,
         "open_prs": open_prs,
         "asks": asks_open(),
+        "world_class_open": world_class_open(),
         "runs": runs_since(since.timestamp()),
         "deploys": deploys_since(since.astimezone(CENTRAL)),
         "plan_bets": plan_bets(),
