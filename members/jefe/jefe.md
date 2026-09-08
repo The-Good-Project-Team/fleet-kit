@@ -251,9 +251,8 @@ is building on sand.
   A matching `cordon → uncordon` window is a healthy deploy, not an incident — nonprofit-atlas
   #3346 was filed as "root cause unknown" when every flap matched a cordon exactly. Anchor that
   grep to a timestamp, never a bare keyword: the log is append-only and stale lines will match.
-  (That nonprofit-atlas citation above is precedent, not evidence — same "verify before you
-  cite" discipline as the guard earlier in this file: never post it, or any number, as this pass's own
-  gathered-live finding without re-resolving it in the CURRENT repo first.)
+  (That nonprofit-atlas citation is precedent, not evidence — same "verify before you cite"
+  discipline as the guard earlier in this file.)
 
   **When a member costs too much, PRUNE ITS CHARTER — do not cap its turns.** As of
   2026-08-26 no member ships a `max_turns` or `max_budget_usd` cap, deliberately (Reif: "we
