@@ -193,12 +193,26 @@ spawns exactly one). Your job, in order:
    existed unread. Buildable only with exactly one `quality:ship-it` / `quality:solid` /
    `quality:world-class` label AND at least one Given/When/Then acceptance criterion in the
    newest PRD comment or body. A `quality:world-class` candidate is buildable only for its
-   research pass (criteria carry a `References:` line) or after a `Design approved: <ask>`
-   comment — never the build before Reif approves the design. Run on `eligible`, same shape:
+   research pass (criteria carry a `References:` line) or after a `Design approved (VP review):`
+   comment — never the build before the design review has passed. Run on `eligible`, same shape:
    ```
    python3 /fleet-kit/scripts/quality_gate.py --items '[{"number":..,"labels":..,"body":..,"comments":..}, ...]'
    # {"eligible": [...], "dropped": [{"number":.., "reason":"no quality: label ..." | "no Given/When/Then ..." | "world-class with no Design approved ..."}]}
    ```
+
+   **The fleet decides acceptance, not Reif — `vp`.** Reif, 2026-09-08: *"It's appropriate
+   to have our system decide what is acceptable instead of having a human decide it. Just
+   say: OK, I'm a Google VP, would this pass?"* When a world-class item's research-pass PR
+   has merged and no `Design approved (VP review):` / `Not yet (VP review):` comment is newer
+   than that merge, or a world-class build slice's PR has merged and deployed and no
+   `Accepted (VP review):` / `Not yet (VP review):` is newer than it, spawn the review
+   instead of filing an ask for Reif:
+   ```
+   FLEET_RUN_NOW=1 bash /fleet-kit/scripts/run_member.sh vp --item <n>
+   ```
+   One `vp` per item per pass, counted against the hour like a minion (opus). Never file a
+   `decision`-class ask for a design or acceptance question again; Reif vetoes with a
+   comment starting `Reif:` if he wants to.
    Same "never silently drop" rule: name every dropped candidate by number and reason, grouped
    by reason. An emptied set is a correct pass — spawn nothing, report the counts; don't fall
    back to an ungated tier to fill the hour.

@@ -451,11 +451,14 @@ feel, **the open-source pieces and design patterns the best already use** (Reif,
 *"find the open sourced or design patterns that the best used already"* -- the libraries, UI
 kits, and named patterns that reproduce each affordance, with stars and last release, one
 column each in the matrix), the design spec, and the buy-vs-build ADR that picks from those
-before any custom build; and one criterion that files an ask of class `decision` for Reif to
-approve the spec. `quality_gate.py` lets a world-class item through
-only while its criteria carry that `References:` line, or once a comment reads
-`Design approved: <ask id>`. Build slices (Part C2b) for a world-class item are filed only
-after that comment exists. Nobody builds the feel before Reif has seen the design.
+before any custom build; and one criterion that the merged research pass ends with gru
+spawning `vp` for the design review. `quality_gate.py` lets a world-class item through
+only while its criteria carry that `References:` line, or once the VP review has posted
+`Design approved (VP review):` (members/vp/vp.md: the fleet decides, as a Google VP of
+Product would; Reif can veto). Build slices (Part C2b) for a world-class item are filed only
+after that comment exists, and each slice's last criterion is "gru spawns `vp` for the
+acceptance review once this is live". A `Not yet (VP review):` comment is your next PRD: its
+numbered fixes become the slices.
 
 ### The format — Google-level means falsifiable, not long
 
