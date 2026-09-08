@@ -1367,6 +1367,12 @@ async function renderStatsPage() {
           </details>`;
       }).join('');
 
+      // Same delta convention as passRows, but against siPasses[1] (the previous pass) --
+      // the headline is siPasses[0], so this is the identical i===0 case passRows skips.
+      const headlineDelta = siPasses[1] ? siLatest.score - siPasses[1].score : null;
+      const headlineArrow = headlineDelta === null || headlineDelta === 0 ? ''
+        : `<span style="color:${headlineDelta > 0 ? '#1f8b4c' : '#c13a2e'};font-weight:600;font-size:14px;margin-left:8px;">${headlineDelta > 0 ? '+' : ''}${headlineDelta}</span>`;
+
       const staleBadge = siStale
         ? `<span class="badge quiet" title="expected every 3h -- last score ${esc(ago(siLatest.date))}, this may have stopped running">stale</span>`
         : '';
@@ -1375,13 +1381,13 @@ async function renderStatsPage() {
           ${magikarpArt(siLatest.score)}
           <div class="kpi-cell" style="flex:1;min-width:240px;">
             <div class="kpi-label">${esc(humanDate(siLatest.date))} &middot; ${quip} ${staleBadge}</div>
-            <div class="kpi-value" style="color:${color};">${siLatest.score}<span style="font-size:14px;color:var(--dimmer);">/100</span></div>
+            <div class="kpi-value" style="color:${color};">${siLatest.score}<span style="font-size:14px;color:var(--dimmer);">/100</span>${headlineArrow}</div>
             <div class="kpi-sub">${esc(siLatest.reasoning || '')}</div>
             ${siStale ? `<div class="kpi-sub" style="color:var(--warn);">last score ${esc(ago(siLatest.date))} -- expected every 3h, this pipeline may have stopped</div>` : ''}
           </div>
         </div>
         <div style="margin-top:14px;">
-          <div class="kpi-label" style="margin-bottom:2px;">every pass &middot; ${siPasses.length} scored</div>
+          <div class="kpi-label" style="margin-bottom:2px;">every pass &middot; ${siPasses.length - 1} scored</div>
           ${passRows}
         </div>
         <div style="margin-top:12px;font-size:11px;color:var(--dimmer);">
