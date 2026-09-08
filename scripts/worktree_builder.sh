@@ -132,8 +132,23 @@ cleanup() {
   # disambiguated as the real RUN_ID would have been, instead of collapsing to one label
   # per item regardless of which concurrent attempt was actually running.
   check_repo_clean_postflight "${RUN_ID:-build-$ITEM_ID-$WORKER_NAME}"
+  # gh#4727: `remove`/`prune` mutate the same $REPO/.git/worktrees admin dir that
+  # create_build_worktree's `add` does (and that run_member.sh's own `add` does too --
+  # both scripts share this exact $LOCK file), but only `add` took $LOCK -- remove/prune
+  # ran unguarded, free to race a SIBLING pass's concurrent `add`/`remove`/`prune` on the
+  # same $REPO. Same fix as run_member.sh's cleanup_run_worktree; see its comment for the
+  # full incident writeup (#4727).
+  local cleanup_waited=0 cleanup_held=0
+  while [ "$cleanup_waited" -lt 30 ]; do
+    if mkdir "$LOCK" 2>/dev/null; then cleanup_held=1; break; fi
+    if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
+      rmdir "$LOCK" 2>/dev/null || true; continue
+    fi
+    sleep 1; cleanup_waited=$((cleanup_waited + 1))
+  done
   git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
   git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+  if [ "$cleanup_held" -eq 1 ]; then rmdir "$LOCK" 2>/dev/null || true; fi
   rm -f "${USAGE_FILE:-}"
   if [ "$BUILD_SUCCEEDED" -ne 1 ]; then
     python3 "$KIT_DIR/scripts/board_github.py" release "$ITEM_ID" \
