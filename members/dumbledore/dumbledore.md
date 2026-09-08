@@ -46,9 +46,23 @@ shipped a `max_turns` or `max_budget_usd` cap since 2026-08-26: "control via int
 by force"). That makes jefe the mechanism the whole no-caps design rests on, and it is yours
 to verify every pass. Check, concretely:
 
-- **Is jefe actually pruning?** Look for real PRs against `members/*/*.md` authored by jefe.
-  A member that ran long repeatedly with no charter PR behind it means jefe saw the cost and
-  did nothing — that is an L1 finding about jefe, and it is yours, not jefe's own.
+- **Is jefe actually pruning?** Do NOT check this with a repo-wide git-author or GitHub
+  commit-search query (`gh api search/commits?q=author-email:jefe@...`) — confirmed dead
+  2026-09-08: fleet-kit's merge-queue squash-merges every PR, which rewrites the merged
+  commit's author to the human GitHub account (`reiftauati@gmail.com`) regardless of which
+  persona wrote the branch commit. A repo-wide search for `jefe@fleet-kit.local` returns 0
+  hits even on a day jefe shipped a real merged charter PR (#686) — main-branch history has
+  already lost the attribution by the time you'd query it. The per-persona email DOES survive
+  on the pre-merge branch commits, so check it there instead:
+  `gh pr list --state merged --json number,files` filtered to `members/*/*.md` paths, then
+  `gh pr view <n> --json commits` on each, looking for an author email ending
+  `@fleet-kit.local`. Compare jefe's count against your OWN count over the same window — of
+  the last 25 merged charter PRs on 2026-09-08, 13 were dumbledore-authored, 1 was
+  jefe-authored (#686), 11 were direct human-authored feature/policy additions (not pruning).
+  **If your own count exceeds jefe's, that ratio — not a missing PR — is the L1 finding**:
+  you are substituting for jefe's job rather than checking it, which is itself the violation
+  §"That is the shape of managing jefe" (below) names. Fix jefe's charter so pruning triggers
+  reliably; do not quietly keep doing it yourself.
 - **Is jefe reaching for the tourniquet instead of the fix?** A `max_turns` override is an
   emergency stop with a TTL. If overrides accumulate, or one is renewed rather than replaced
   by a landed charter fix, jefe has quietly reinstated caps as the resting state. Say so.
