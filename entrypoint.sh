@@ -15,6 +15,17 @@ set -euo pipefail
 : "${FLEET_REPO:?set FLEET_REPO (env or fleet.env) -- the repo this fleet builds against}"
 : "${GH_TOKEN:?set GH_TOKEN -- gh CLI reads this directly, no separate auth step}"
 
+# gh#707: FLEET_ACCOUNTS lives in fleet.env, not the container's own env -- the two loops
+# below (credential check, gh#592's guard-install targets) both read $FLEET_ACCOUNTS before
+# this script ever sourced fleet.env, so on a box where FLEET_ACCOUNTS is only set via that
+# file (not also exported as a raw container env var), both loops silently fell back to
+# `${FLEET_ACCOUNTS:-primary}` == "primary" -- a fake account nobody uses (real accounts,
+# e.g. "gmail tgp", never got gh#592's hook registered into their real
+# /root/.claude-<account>/settings.json, so worktree_guard_hook.py never ran for a single
+# real pass despite PR#605 shipping and this file "installing" it every boot). Source early,
+# before either loop, same idiom the crontab lines below already use per-tick.
+[ -f "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}" ] && { set -a; . "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}"; set +a; }
+
 # Clone the target repo on first boot if it isn't already there (bind-mounted or a prior
 # container layer). A fresh container with only FLEET_REPO=/repo and no mount clones for you --
 # matches the "point this at a repo" pitch without a manual clone step per box.
