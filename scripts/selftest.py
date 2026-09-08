@@ -9920,6 +9920,25 @@ def _worktree_guard_install_cli_accepts_claude_config_dir_not_just_settings_json
         assert data["hooks"]["PreToolUse"], "expected the guard to be registered"
 
 
+def _fleet_env_example_documents_the_fixer_prod_visibility_vars_gh728():
+    """AC8 (gh#728): 'the code path exists but the variable is empty' is the exact failure this
+    issue fixes -- FIXER_HEALTH_URL/FIXER_PAGE_URL/FIXER_PROD_DIAG_DRIVER/FLEET_DEPLOY_DRIVER
+    must each be documented in fleet.env.example with an example value and a line on what
+    breaks when left empty, or an operator wiring a fresh instance reproduces the same gap."""
+    text = (ROOT / "fleet.env.example").read_text()
+    for var in ("FIXER_HEALTH_URL", "FIXER_PAGE_URL", "FIXER_PROD_DIAG_DRIVER", "FLEET_DEPLOY_DRIVER"):
+        assert f"\n{var}=" in text, f"{var} has no assignment line in fleet.env.example"
+        # An example value lives in a comment somewhere above the assignment (both are
+        # commented-out `# Example: VAR=...` lines by this kit's own convention).
+        assert f"Example: {var}=" in text or f"Example {var}=" in text, (
+            f"{var} has no example value documented in fleet.env.example"
+        )
+    assert "the-fixer's fire path" in text or "scripts/fixer_fire_path.py" in text, (
+        "FLEET_DEPLOY_DRIVER's comment must say what breaks for the-fixer's rollback path "
+        "specifically, not just the generic deploy-skip behavior"
+    )
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -10174,6 +10193,8 @@ if __name__ == "__main__":
     check("worktree_guard_hook blocks a chained git -C command where only a later verb mutates (gh#592)", _worktree_guard_blocks_chained_git_dash_c_where_only_a_later_verb_mutates_gh592)
     check("worktree_guard_hook_install merges into existing settings.json and is idempotent (gh#592)", _worktree_guard_install_merges_without_clobbering_existing_settings_gh592)
     check("worktree_guard_hook_install accepts a CLAUDE_CONFIG_DIR path, not just a settings.json path (gh#592)", _worktree_guard_install_cli_accepts_claude_config_dir_not_just_settings_json_gh592)
+
+    check("fleet.env.example documents FIXER_HEALTH_URL/PAGE_URL/PROD_DIAG_DRIVER/FLEET_DEPLOY_DRIVER with examples and what breaks empty (gh#728 AC8)", _fleet_env_example_documents_the_fixer_prod_visibility_vars_gh728)
 
     for n in ok:
         print(f"  ok    {n}")

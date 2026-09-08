@@ -70,6 +70,20 @@ state file so the same failing SHA never fires twice. It prints one line:
   restore-oriented fix second. If the line has no `diag=` at all (or ends `diag=<path>
   (driver-nonzero)`, meaning the driver failed to run), `FIXER_PROD_DIAG_DRIVER` is not
   configured or is broken -- log the gap loudly and stop, never invent ad hoc prod access.
+  **If `FLEET_DEPLOY_DRIVER` is ALSO configured** (gh#728), the restore itself is a rollback,
+  not a code fix, and it is not yours to improvise: run
+  `python3 /fleet-kit/scripts/fixer_fire_path.py` (reads `FIXER_PROD_DIAG_DRIVER`,
+  `FIXER_PROD_DIAG_SECTION` and `FLEET_DEPLOY_DRIVER`/`FLEET_REPO` from the environment, same as
+  `check.sh`). It diagnoses again itself (belt-and-braces against a stale `diag=` file from a
+  now-resolved earlier tick), rolls back, and proves the rollback actually moved
+  `current_sha` before ever filing or updating the `incident` issue -- a driver whose
+  `rollback` silently no-ops is reported as `ROLLBACK FAILED`, never as success. Read its JSON
+  output and paste the `issue_number` it filed/updated into your own report; do not file a
+  second incident issue yourself; do not attempt your own rollback if this script reports
+  `ROLLBACK FAILED` -- that means the driver itself is broken, which is a human call, not a
+  retry loop. No `FLEET_DEPLOY_DRIVER` configured: nothing has changed from before -- log the
+  gap the same way as an unconfigured diag driver, and fall through to a normal fix-or-revert
+  PR once the site itself recovers (or stays down for a human to act on).
 - If `<what>` is `stale-prs(N1:sha1:reason1 N2:sha2:reason2 ...)`: these are *existing* PRs,
   not one fresh incident, and they share no state with each other -- **do not fight them in
   sequence.** Reif, 2026-08-22: "if we have N issues we can deploy N independent units," the
