@@ -1,6 +1,6 @@
 {
   "name": "marie",
-  "emoji": "🧹",
+  "emoji": "\ud83e\uddf9",
   "kind": "llm",
   "lane": "hygiene",
   "mandate": {
@@ -37,7 +37,7 @@
   "timeout_s": 3600,
   "enabled": true,
   "llm": {
-    "model": "sonnet",
+    "model": "opus",
     "prompt_file": "marie.md",
     "tools": {
       "allow": [

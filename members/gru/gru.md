@@ -229,6 +229,25 @@ spawns exactly one). Your job, in order:
    each by number and reason. Only `eligible`'s candidates continue on to step 3's pack; a
    dropped candidate is never claimed or spawned this pass.
 
+   **Then gate the Vision-link survivors on quality — fk#649/#651.** Reif, 2026-09-07: *"I'd
+   rather us push less code but better features."* 105 product PRs merged that day against
+   issues with no stated bar and no checkable criteria; the standard (docs/quality-standard.md)
+   existed and nothing read it. A candidate is buildable only if it carries exactly one
+   `quality:ship-it` / `quality:solid` / `quality:world-class` label AND its newest PRD comment
+   (or body) has at least one acceptance criterion written as Given / When / Then. A
+   `quality:world-class` candidate is buildable only for its research pass (criteria carry a
+   `References:` line) or after a `Design approved: <ask>` comment — never the build before
+   Reif has approved the design. Run it on `eligible` from the Vision-link gate, same input
+   shape:
+   ```
+   python3 /fleet-kit/scripts/quality_gate.py --items '[{"number":..,"labels":..,"body":..,"comments":..}, ...]'
+   # {"eligible": [...], "dropped": [{"number":.., "reason":"no quality: label ..." | "no Given/When/Then ..." | "world-class with no Design approved ..."}]}
+   ```
+   Same "never silently drop" rule: name every dropped candidate by number and reason in your
+   report, grouped by reason, so marie sees exactly which PRDs to fix next pass. A pass where
+   this gate empties the candidate set is a correct pass, not a failure: spawn nothing, report
+   the counts, and say so. Do not fall back to an ungated tier to fill the hour.
+
    **Within a tier, walk oldest-`createdAt`-first, never raw API order.** `gh issue list` with
    no explicit sort returns newest-created-first; since step 3's packer walks candidates
    front-to-back and never looks past what the hour's budget covers, that default order makes
