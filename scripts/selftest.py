@@ -14,6 +14,7 @@ ran it.
 from __future__ import annotations
 
 import datetime
+import inspect
 import json
 import re
 import pathlib
@@ -29,12 +30,31 @@ ROOT = HERE.parent
 ok, fail = [], []
 
 
+def _redact_secrets(text):
+    """Redact live credentials before they can reach a selftest failure message -- gh#682: a
+    stubbed command's captured argv can carry a real `Authorization: Bearer <Resend key>` on a
+    box with real alert credentials (dino), and a *failing* assertion would otherwise print it
+    into selftest output and every log that captures it. Redact at the point of display, not
+    of capture -- tests still assert on the raw captured argv, only the message text that could
+    leak into logs is scrubbed. The Bearer character class covers JWT/base64url-shaped tokens
+    (`.`, `+`, `/`, `=`), not just plain alnum ones; `re_` requires a word boundary so it can't
+    fire mid-identifier (e.g. `core_module_name12345678`)."""
+    text = re.sub(r"(?i)(bearer\s+)[a-z0-9._~+/=-]{8,}", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)\bre_[a-z0-9]{8,}", "[REDACTED]", text)
+    return text
+
+
 def check(name, fn):
     try:
         fn()
         ok.append(name)
     except Exception as exc:  # noqa: BLE001 -- a selftest reports, it does not raise
-        fail.append((name, f"{type(exc).__name__}: {exc}"))
+        # gh#682: redact here, not at each call site -- this is the one place every test's
+        # failure message funnels through before it is stored or printed, so it protects every
+        # current test (including ones that also do `text = calls.read_text()` and interpolate
+        # it raw, but happen to be safe today only because their stub never reaches a real
+        # secret) and every future one, not just the two sites this issue named.
+        fail.append((name, _redact_secrets(f"{type(exc).__name__}: {exc}")))
 
 
 def _members():
@@ -8423,8 +8443,9 @@ def _fleet_alert_queues_an_undelivered_alarm_and_retries_it_next_call():
                               text=True, timeout=30, env={**env, "CURL_RC": "0"})
         assert proc.returncode == 0, proc.stderr[:300]
         sent = calls.read_text()
-        assert "[retry] first title" in sent, f"queued alarm must be retried first: {sent!r}"
-        assert "second title" in sent, sent
+        assert "[retry] first title" in sent, \
+            f"queued alarm must be retried first: {_redact_secrets(sent)!r}"
+        assert "second title" in sent, _redact_secrets(sent)
         assert sent.index("[retry] first title") < sent.index("second title"), "retry goes before the new alarm"
         assert queue.read_text().strip() == "", f"delivered retry must leave the queue: {queue.read_text()!r}"
 
@@ -9230,9 +9251,98 @@ def _ask_file_rate_limits_ntfy_to_once_per_member_per_hour_gh568():
 
         sent = calls.read_text() if calls.exists() else ""
         assert sent.count("fleet ask filed by marie") == 1, \
-            f"a second ask from the same member inside the hour must not page again: {sent!r}"
+            f"a second ask from the same member inside the hour must not page again: " \
+            f"{_redact_secrets(sent)!r}"
         assert "fleet ask filed by gru" in sent, \
-            f"a different member's first ask this hour must still page: {sent!r}"
+            f"a different member's first ask this hour must still page: {_redact_secrets(sent)!r}"
+
+
+def _redact_secrets_strips_bearer_tokens_from_assertion_messages_gh682():
+    """gh#682: on dino (the only box with real alert credentials), a failing assertion in
+    either `_ask_file_rate_limits_ntfy_to_once_per_member_per_hour_gh568` or
+    `_fleet_alert_queues_an_undelivered_alarm_and_retries_it_next_call` interpolates the
+    stubbed curl's captured argv straight into its AssertionError message -- and that argv
+    carries a real `Authorization: Bearer <Resend key>` for the email leg. Proves the shared
+    `_redact_secrets` helper actually removes the token and leaves an explicit marker, for a
+    plain Resend-style key, a JWT-shaped one (dots are not in a plain alnum char class -- a
+    narrower regex would truncate the redaction and leave the tail of the token printed), and
+    a bare key with no `Bearer` prefix at all, since AC5's grep
+    (`bearer [a-z0-9_-]{8,}|re_[a-z0-9]{8,}`) checks the two forms independently. Never prints
+    the candidate secret itself in a failure message -- a test that guards against leaking a
+    secret should not leak its own (synthetic) one on the one failure mode it exists to catch."""
+    cases = [
+        ("curl -sS -X POST https://api.resend.com/emails "
+         "-H 'Authorization: Bearer re_LIVEKEY123abcdef0123' "
+         "-H 'Content-Type: application/json' --data '{}'\n", "re_LIVEKEY123abcdef0123"),
+        ("-H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig'",
+         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig"),
+    ]
+    for source, token in cases:
+        redacted = _redact_secrets(source)
+        assert token not in redacted, "the live token must never survive redaction"
+        assert "[REDACTED]" in redacted, \
+            "redaction must leave an explicit marker in the token's place"
+        assert not re.search(r"(?i)bearer [a-z0-9_-]{8,}", redacted), \
+            "AC5's grep must find nothing after redaction"
+
+    # A bare Resend key with no "Bearer" prefix (e.g. logged directly, not via a header) must
+    # also be caught -- AC5's grep checks the two forms independently.
+    bare_key = "re_bareKEY987654"
+    redacted_bare = _redact_secrets(f"warning: using key {bare_key} without a Bearer prefix\n")
+    assert bare_key not in redacted_bare, "a bare key outside a Bearer header must also be redacted"
+    assert not re.search(r"(?i)re_[a-z0-9]{8,}", redacted_bare), \
+        "AC5's grep must find nothing after redaction"
+
+    # A key-shaped substring embedded mid-identifier must NOT be redacted -- over-redaction
+    # would destroy debugging signal in a failure message that had nothing to do with a secret.
+    benign = "core_module_name12345678 and prefix_recordset99999999"
+    assert _redact_secrets(benign) == benign, \
+        "redaction must not fire on a 're_'-shaped substring embedded mid-identifier"
+
+    # A green run must not gain noise: text with no secret in it is untouched.
+    clean = "fleet ask filed by marie\nfleet ask filed by gru\n"
+    assert _redact_secrets(clean) == clean, \
+        "redaction must be a no-op on text that carries no secret"
+
+
+def _check_redacts_secrets_from_every_failure_message_gh682():
+    """gh#682: rather than trust every test (present or future) to redact its own assertion
+    message, `check()` -- the one chokepoint every test failure funnels through before it is
+    stored in `fail` or printed -- redacts secrets from the exception text itself. This covers
+    not just the two sites this issue named, but any test that raises with a live-looking
+    credential in its message, including ones that already do `text = calls.read_text()` and
+    interpolate it raw (e.g. the `_member_liveness_*` tests above), which are safe today only
+    because their stub happens not to shell out to a real curl -- an implementation detail of
+    the scripts they exercise, not a contract this suite enforces anywhere else. Exercises
+    `check()` itself end-to-end: a synthetic test raises with a fake Bearer token, and the
+    message `check()` actually stores in `fail` must come out redacted. `ok`/`fail` are the
+    module's real accounting lists, so this saves and restores them rather than assuming an
+    empty run -- check() has no other entry point to construct without duplicating its body."""
+    saved_ok, saved_fail = ok[:], fail[:]
+    del ok[:], fail[:]
+    try:
+        def _leaks_a_bearer_token():
+            raise AssertionError(
+                "captured argv: -H 'Authorization: Bearer re_LIVEKEY123abcdef0123'")
+        check("gh#682 probe", _leaks_a_bearer_token)
+        assert len(fail) == 1, "check() must record exactly one failure for a raising fn"
+        _, message = fail[0]
+        assert "re_LIVEKEY123abcdef0123" not in message, \
+            "check() must redact a live-looking token before storing the failure message"
+        assert "[REDACTED]" in message, \
+            "check() must leave an explicit redaction marker in the token's place"
+    finally:
+        ok[:] = saved_ok
+        fail[:] = saved_fail
+
+
+def _check_calls_redact_secrets_gh682():
+    """Doc-consistency-style guard, same shape as the ones above (e.g.
+    `_gru_md_calls_ask_file_alongside_needs_human_op_stop_gh568`) but pointed at this file's own
+    `check()` instead of a charter -- proves the wiring the previous test exercises behaviorally
+    is actually there in source, not just true by coincidence of the one case tested."""
+    assert "_redact_secrets(" in inspect.getsource(check), \
+        "check() no longer redacts failure messages -- gh#682's structural fix is unwired"
 
 
 def _gru_md_calls_ask_file_alongside_needs_human_op_stop_gh568():
@@ -9604,6 +9714,9 @@ if __name__ == "__main__":
     check("ask.py file/list round-trips a filed ask (gh#568)", _ask_file_and_list_roundtrip_gh568)
     check("ask.py answer sets the row once; a second call is a no-op (gh#568 AC3)", _ask_answer_is_idempotent_gh568)
     check("ask.py file rate-limits its NTFY page to once per member per hour (gh#568 AC4)", _ask_file_rate_limits_ntfy_to_once_per_member_per_hour_gh568)
+    check("_redact_secrets strips Bearer tokens from assertion messages (gh#682)", _redact_secrets_strips_bearer_tokens_from_assertion_messages_gh682)
+    check("check() redacts secrets from every failure message it records (gh#682)", _check_redacts_secrets_from_every_failure_message_gh682)
+    check("check() calls _redact_secrets (gh#682)", _check_calls_redact_secrets_gh682)
     check("gru.md calls ask.py file alongside its own needs-human-op stop (gh#568 AC6)", _gru_md_calls_ask_file_alongside_needs_human_op_stop_gh568)
 
     check("worktree_guard_hook blocks an Edit under the shared $REPO when isolated (gh#592 AC2)", _worktree_guard_blocks_edit_under_shared_repo_gh592)
