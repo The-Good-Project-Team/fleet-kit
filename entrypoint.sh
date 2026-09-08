@@ -24,7 +24,18 @@ set -euo pipefail
 # /root/.claude-<account>/settings.json, so worktree_guard_hook.py never ran for a single
 # real pass despite PR#605 shipping and this file "installing" it every boot). Source early,
 # before either loop, same idiom the crontab lines below already use per-tick.
+# fleet-env-source-begin
+# fleet.env fills in what the container env left unset -- but the port pair deploy.sh hands
+# THIS container (`-e FLEET_VIEW_PORT` / `-e FLEET_WEBHOOK_PORT`, gh#625 rolling deploys
+# alternate two pairs) must win over fleet.env's instance default, or a green candidate on
+# the other pair binds the live pair's port inside its own namespace and never answers its
+# health check (2026-09-08: every deploy to the B pair FAILED). selftest runs this block.
+_fk_view="${FLEET_VIEW_PORT-}"; _fk_webhook="${FLEET_WEBHOOK_PORT-}"
 [ -f "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}" ] && { set -a; . "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}"; set +a; }
+[ -n "$_fk_view" ] && export FLEET_VIEW_PORT="$_fk_view"
+[ -n "$_fk_webhook" ] && export FLEET_WEBHOOK_PORT="$_fk_webhook"
+unset _fk_view _fk_webhook
+# fleet-env-source-end
 
 # Clone the target repo on first boot if it isn't already there (bind-mounted or a prior
 # container layer). A fresh container with only FLEET_REPO=/repo and no mount clones for you --
@@ -399,7 +410,7 @@ case "${1:-cron-foreground}" in
       # exactly as before -- this changes when the value is read, not what happens when it's
       # genuinely absent.
       echo "27 * * * * root export FLEET_LOG_DIR=$LOG_DIR && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; bash /fleet-kit/scripts/account_health_check.sh >> $LOG_DIR/account_health_check.log 2>&1"
-      echo "37 * * * * root export PUBLIC_URL=${PUBLIC_URL:-} FLEET_VIEW_PORT=${FLEET_VIEW_PORT:-8420} && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; bash /fleet-kit/scripts/tunnel_health_check.sh >> $LOG_DIR/tunnel_health_check.log 2>&1"
+      echo "37 * * * * root [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; export PUBLIC_URL=${PUBLIC_URL:-} FLEET_VIEW_PORT=${FLEET_VIEW_PORT:-8420}; bash /fleet-kit/scripts/tunnel_health_check.sh >> $LOG_DIR/tunnel_health_check.log 2>&1"
       # path_health_check.sh (gh#249): the fleet's THIRD outage pager -- tunnel-health above
       # only checks the tunnel's ROOT hostname, which falls through Caddy's default route and
       # never touches either instance's real path-routed dashboard (/fleet/<name>). Same
