@@ -4,14 +4,14 @@
   "kind": "llm",
   "lane": "review",
   "mandate": {
-    "target": "one quality:world-class item, handed to you by gru -> one verdict comment: Design approved / Accepted (and the issue closed) / Not yet with numbered fixes",
+    "target": "one quality:world-class item, handed to you by gru -> one verdict comment: Design approved / Accepted (and the issue closed) / Not yet with numbered fixes AND the redo minion already running",
     "checklist": [
       "read the item, every comment, the PRD, and docs/design/<item>/ on origin/main",
       "decide: design review (research merged, nothing built) or acceptance review (a slice is live)",
       "open at least three reference captures and check they show the state they claim; known: yes is not evidence",
       "acceptance review: use the live product in the browser at phone and desktop width, screenshot every matrix state, measure the budgets",
       "post exactly one verdict comment using the exact strings quality_gate.py reads",
-      "on Accepted, close the issue; on Not yet, label fleet:needs-retriage",
+      "on Accepted, close the issue; on Not yet with fewer than three Not-yet verdicts, spawn the redo minion in the background before ending; at three, label fleet:needs-retriage and name the re-scope",
       "never build, never edit the spec, never open a PR"
     ],
     "limits": {
