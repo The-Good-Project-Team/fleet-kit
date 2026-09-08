@@ -3531,6 +3531,25 @@ def _every_entrypoint_scheduled_script_is_actually_scheduled():
         + "\n".join(missing))
 
 
+def _entrypoint_cron_never_resources_fleet_env_after_exporting_the_port():
+    """Same bug class as the boot-time fix, one level down: the hourly tunnel_health_check cron
+    line used to `export FLEET_VIEW_PORT=<boot value>` and THEN `set -a; . fleet.env`, so the
+    instance default in fleet.env won again and tunnel_health_check.sh would compare (and
+    rewrite) the tunnel against the wrong pair. Every generated crontab line that exports
+    FLEET_VIEW_PORT or FLEET_WEBHOOK_PORT must do so AFTER any fleet.env sourcing on that line.
+    """
+    entry = (Path(__file__).parent.parent / "entrypoint.sh").read_text()
+    bad = []
+    for line in entry.splitlines():
+        if not line.lstrip().startswith('echo "') or "FLEET_VIEW_PORT=" not in line and "FLEET_WEBHOOK_PORT=" not in line:
+            continue
+        src = line.find("set -a; .")
+        exp = max(line.find("FLEET_VIEW_PORT="), line.find("FLEET_WEBHOOK_PORT="))
+        if src != -1 and exp != -1 and exp < src:
+            bad.append(line.strip()[:90])
+    assert not bad, "crontab line(s) export a port and then re-source fleet.env, which overrides it:\n" + "\n".join(bad)
+
+
 def _entrypoint_container_port_env_wins_over_fleet_env():
     """Rolling deploys (gh#625) hand each container its own port pair with `-e FLEET_VIEW_PORT`
     / `-e FLEET_WEBHOOK_PORT`. PR#708 made entrypoint.sh `set -a; . fleet.env` at boot, and
@@ -9945,6 +9964,7 @@ if __name__ == "__main__":
     check("every entrypoint.sh-scheduled incident script is actually scheduled (gh#378, table-driven)", _every_entrypoint_scheduled_script_is_actually_scheduled)
     check("entrypoint.sh's crontab-wide env block forwards FLEET_SHARE_DIR (gh#569)", _entrypoint_crontab_forwards_fleet_share_dir)
     check("entrypoint.sh: the container's port env wins over fleet.env (rolling deploy pairs, gh#625/#708)", _entrypoint_container_port_env_wins_over_fleet_env)
+    check("entrypoint.sh: no crontab line exports a port and then re-sources fleet.env", _entrypoint_cron_never_resources_fleet_env_after_exporting_the_port)
     check("entrypoint.sh's crontab-wide env block forwards FLEET_LEASE_DIR (gh#579)", _entrypoint_crontab_forwards_fleet_lease_dir)
     check("entrypoint.sh's crontab-wide env block forwards FLEET_INSTANCE_NAME (gh#581)", _entrypoint_crontab_forwards_fleet_instance_name)
     check("run_member.sh logs CRITICAL when postflight_dirty_check.sh fails to source", _run_member_logs_critical_when_postflight_dirty_check_fails_to_source)
