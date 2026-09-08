@@ -20,6 +20,12 @@ A `quality:world-class` item is eligible only if that criterion set is its resea
 
 Same shape and split as vision_link_gate.py: pure core (`classify_candidate`,
 `gate_candidates`), thin CLI (`main`) reading `--items '[{"number","labels","body","comments"}]'`.
+
+fk#696: `gate_candidates`'s `dropped` entries carry a `stale_prd: true` flag when the item
+already has `fleet:prd` but still fails the gate -- distinguishing "spec'd once, now below the
+bar" from "never spec'd" without changing which items are eligible. See fk#696 for the wider
+backfill question (how much of the pre-#683 backlog to re-spec vs. prune), which this alone
+does not decide.
 """
 from __future__ import annotations
 
@@ -84,11 +90,20 @@ def classify_candidate(labels, body: str | None, comments: list[dict] | None) ->
 def gate_candidates(items: list[dict]) -> dict:
     eligible, dropped = [], []
     for item in items:
-        ok, reason = classify_candidate(item.get("labels"), item.get("body"), item.get("comments"))
+        labels = item.get("labels")
+        ok, reason = classify_candidate(labels, item.get("body"), item.get("comments"))
         if ok:
             eligible.append(item["number"])
         else:
-            dropped.append({"number": item["number"], "reason": reason})
+            entry = {"number": item["number"], "reason": reason}
+            # fk#696: a dropped item that already carries `fleet:prd` was spec'd once and no
+            # longer clears the bar -- that's a stale PRD needing a re-spec, not an item that
+            # was simply never looked at. Flag it so a pass over `dropped` (marie's backfill,
+            # gru's report) can tell the two apart without re-reading every issue by hand.
+            # This does not change which items are eligible, only the dropped-list metadata.
+            if "fleet:prd" in _label_names(labels):
+                entry["stale_prd"] = True
+            dropped.append(entry)
     return {"eligible": eligible, "dropped": dropped}
 
 
