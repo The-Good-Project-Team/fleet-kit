@@ -24,7 +24,18 @@ set -euo pipefail
 # /root/.claude-<account>/settings.json, so worktree_guard_hook.py never ran for a single
 # real pass despite PR#605 shipping and this file "installing" it every boot). Source early,
 # before either loop, same idiom the crontab lines below already use per-tick.
+# fleet-env-source-begin
+# fleet.env fills in what the container env left unset -- but the port pair deploy.sh hands
+# THIS container (`-e FLEET_VIEW_PORT` / `-e FLEET_WEBHOOK_PORT`, gh#625 rolling deploys
+# alternate two pairs) must win over fleet.env's instance default, or a green candidate on
+# the other pair binds the live pair's port inside its own namespace and never answers its
+# health check (2026-09-08: every deploy to the B pair FAILED). selftest runs this block.
+_fk_view="${FLEET_VIEW_PORT-}"; _fk_webhook="${FLEET_WEBHOOK_PORT-}"
 [ -f "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}" ] && { set -a; . "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}"; set +a; }
+[ -n "$_fk_view" ] && export FLEET_VIEW_PORT="$_fk_view"
+[ -n "$_fk_webhook" ] && export FLEET_WEBHOOK_PORT="$_fk_webhook"
+unset _fk_view _fk_webhook
+# fleet-env-source-end
 
 # Clone the target repo on first boot if it isn't already there (bind-mounted or a prior
 # container layer). A fresh container with only FLEET_REPO=/repo and no mount clones for you --
