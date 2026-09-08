@@ -123,6 +123,8 @@
   .run-row { padding: 9px 16px; border-bottom: 1px solid var(--border); cursor: pointer; }
   .run-row:hover { background: var(--panel); }
   .run-row.open { background: var(--panel); }
+  .run-row.live { border-left: 2px solid var(--accent); }
+  .run-row .relapsed { color: var(--accent); font-weight: 600; }
   .run-row .rline1 { display: flex; align-items: baseline; gap: 8px; }
   .badge { font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 1px 6px;
     border-radius: 3px; flex: none; }
@@ -402,6 +404,14 @@ function fmtIn(s) {
   if (s < 60) return s + 's';
   if (s < 3600) return Math.round(s / 60) + 'm';
   return (s / 3600).toFixed(1) + 'h';
+}
+// gh#562: elapsed time for a still-running pass -- start_ts is epoch seconds (run_report.py's
+// build_started_record writes `time.time()`), same unit ago()/clockTime() already assume.
+function fmtElapsed(startEpoch) {
+  const s = Math.max(0, Date.now() / 1000 - startEpoch);
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
 }
 function copyText(text, el) {
   const prev = el.textContent;
@@ -739,19 +749,25 @@ function formatOutcome(raw) {
   return html;
 }
 
-function runRowHtml(rec, dupCount) {
+function runRowHtml(rec, dupCount, live) {
   const status = rec.status || 'pending';
   const pr = rec.pr
     ? (REPO_URL ? `<a href="${REPO_URL}/pull/${esc(rec.pr)}" target="_blank" onclick="event.stopPropagation()">PR #${esc(rec.pr)}</a>`
                 : `PR #${esc(rec.pr)}`)
     : '';
   const dup = dupCount > 1 ? `<span class="dedup-badge">×${dupCount}</span>` : '';
+  // gh#562 AC2: a "started" row with no completion yet gets a ticking elapsed timer instead of
+  // the normal clockTime+ago -- tickLiveTimers() below updates this element's text every second
+  // by re-reading data-start-ts, so this initial render just needs to seed it correctly.
+  const timeHtml = live
+    ? `<span class="rtime relapsed" data-start-ts="${esc(rec.ts || '')}">running ${fmtElapsed(rec.ts)}</span>`
+    : `<span class="rtime">${rec.ts ? clockTime(rec.ts) + ' · ' + ago(rec.ts) : ''}</span>`;
   return `
     <div class="rline1">
       <span class="badge ${esc(status)}">${esc(status)}</span>
       <span class="rmeta">${esc(rec.kind || '')} · item ${esc(rec.item_id || '—')}${pr ? ' · ' + pr : ''}</span>
       ${dup}
-      <span class="rtime">${rec.ts ? clockTime(rec.ts) + ' · ' + ago(rec.ts) : ''}</span>
+      ${timeHtml}
     </div>
     <div class="routcome">${rec.outcome ? formatOutcome(rec.outcome) : noOutcomeHint(rec)}</div>
     ${rec.evidence ? `<div class="rmeta">${formatOutcome(rec.evidence)}</div>` : ''}
@@ -797,27 +813,60 @@ function renderUpcomingCard() {
     </div>`;
 }
 
+// gh#562: run_report.py writes two records under one run_id -- the provisional "started" row
+// (gh#145), then the real completion row -- and both used to render as separate, stacked rows
+// forever. Collapse a matched started+completion pair into the completion row alone; a started
+// row with no completion yet is kept as its own row and marked live (runRowHtml gives it a
+// ticking elapsed timer instead). AC4: a record with no run_id is never merged with anything.
+function mergeRunIdPairs(runs) {
+  const seenRunIds = new Set();
+  const merged = [];
+  for (const r of runs) {
+    if (!r.run_id) { merged.push(r); continue; }
+    if (seenRunIds.has(r.run_id)) continue;
+    seenRunIds.add(r.run_id);
+    const terminal = runs.find(o => o.run_id === r.run_id && o.status !== 'started');
+    merged.push(terminal || r);
+  }
+  return merged;
+}
+
 function renderRunList() {
   if (!SELECTED) { runListEl.innerHTML = '<div class="run-empty">select an agent</div>'; return; }
   if (RUN_VIEW === 'upcoming') { renderUpcomingCard(); return; }
   reindexSeq(SELECTED);
   const runs = ALL_RUNS.filter(r => r.member === SELECTED).slice().reverse(); // newest first
   if (!runs.length) { runListEl.innerHTML = '<div class="run-empty">no runs recorded yet</div>'; return; }
+  const merged = mergeRunIdPairs(runs);
 
   // Collapse consecutive identical (status, outcome) runs same as before -- a fanout finding
   // nothing 5x is one fact, not 5 rows.
   const groups = [];
-  for (const r of runs) {
+  for (const r of merged) {
     const key = `${r.status || ''}|${r.outcome || ''}`;
     const last = groups[groups.length - 1];
     if (last && last.key === key) { last.count++; last.rec = r; /* keep newest of the group */ }
     else groups.push({ key, count: 1, rec: r });
   }
-  runListEl.innerHTML = groups.map(g =>
-    `<div class="run-row" data-run-id="${esc(g.rec.run_id || '')}">${runRowHtml(g.rec, g.count)}</div>`
-  ).join('');
+  runListEl.innerHTML = groups.map(g => {
+    const live = g.rec.status === 'started';
+    return `<div class="run-row${live ? ' live' : ''}" data-run-id="${esc(g.rec.run_id || '')}">${runRowHtml(g.rec, g.count, live)}</div>`;
+  }).join('');
   restoreOpenTranscript();
 }
+
+// One ticking interval updates every visible live row's elapsed text in place -- re-querying
+// the DOM each second rather than tracking per-row timers means a row that gets replaced by
+// its completion (renderRunList rebuild on the next 'run' SSE event) just stops being found
+// here; there is no separate timer handle to leak or clear.
+function tickLiveTimers() {
+  runListEl.querySelectorAll('.relapsed').forEach(el => {
+    const startTs = parseFloat(el.dataset.startTs);
+    if (!startTs) return;
+    el.textContent = 'running ' + fmtElapsed(startTs);
+  });
+}
+setInterval(tickLiveTimers, 1000);
 
 runListEl.addEventListener('click', e => {
   const moreEl = e.target.closest('.tmore');
