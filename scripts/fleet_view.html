@@ -234,6 +234,23 @@
   .kpi-cell .kpi-label { color: var(--dim); font-size: 11.5px; }
   .kpi-cell .kpi-value { font-size: 24px; font-weight: 700; margin-top: 2px; }
   .kpi-cell .kpi-sub { color: var(--dimmer); font-size: 11px; margin-top: 2px; }
+  /* gh#563: the Magikarp verdict sentence -- second-most prominent thing in the card after
+     the score itself, so it reads as the answer rather than as footnote metadata like the
+     surrounding kpi-sub date/staleness lines. */
+  .kpi-cell .kpi-verdict { color: var(--text); font-size: 13.5px; font-weight: 500;
+    line-height: 1.4; margin-top: 5px; }
+
+  /* gh#563: skeleton placeholders for the Stats page's 4 in-flight fetches -- .chart-box
+     reserves the exact box a canvas renders into (matching the max-height rules above) so
+     removing the skeleton once data lands never shifts the layout. */
+  @keyframes skeletonPulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }
+  .skeleton { background: var(--panel-2); border-radius: 4px;
+    animation: skeletonPulse 1.4s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; opacity: .75; } }
+  .chart-box { position: relative; min-height: 260px; }
+  .chart-box .skeleton { position: absolute; inset: 0; }
+  .skeleton-score { height: 96px; }
+  .skeleton-kpirow { grid-column: 1 / -1; height: 64px; }
 
   /* ---------- mobile: sidebar becomes a full-width overlay toggled by the ☰ button, detail
      pane takes the full screen, KPI grid stacks to 2-up. Desktop layout above is untouched --
@@ -254,6 +271,7 @@
     .runs-kpi-row { grid-template-columns: repeat(2, 1fr); gap: 10px; }
     .stats-card { padding: 12px; }
     .stats-card canvas { max-height: 200px; }
+    .chart-box { min-height: 200px; }
     .detail-actions, .dial-row { gap: 5px; }
   }
 .role-block{margin:6px 0 4px;font-size:13px;line-height:1.45}
@@ -1236,33 +1254,56 @@ async function renderStatsPage() {
   detailHeadEl.innerHTML = `<div class="title-row"><h2>Stats</h2></div>`;
   runListEl.innerHTML = `
     <div class="stats-page">
-      <div class="stats-card">
+      <div class="stats-card" id="cardSelfImprove">
         <h3>Magikarp Score</h3>
         <div class="stats-sub">an LLM reads the fleet's own week and scores it, every 3h -- 100 = Jarvis, 1 = a Windows update notification. Splash does nothing... yet.</div>
-        <div id="selfImproveCard"></div>
-        <canvas id="chartSelfImprove" style="margin-top:10px;"></canvas>
+        <div class="stats-card-body">
+          <div id="selfImproveCard"><div class="skeleton skeleton-score"></div></div>
+          <div class="chart-box" id="chartSelfImproveBox" style="margin-top:10px;">
+            <div class="skeleton"></div>
+            <canvas id="chartSelfImprove"></canvas>
+          </div>
+        </div>
       </div>
-      <div class="stats-card">
+      <div class="stats-card" id="cardRuns">
         <h3>Recent Runs</h3>
         <div class="stats-sub">every run in the last 24h -- is the fleet's output any good</div>
-        <div id="runsKpiRow" class="runs-kpi-row"></div>
-        <div class="stats-sub" style="margin-top:14px;">Runs per hour by outcome</div>
-        <canvas id="chartRunsHourly"></canvas>
-        <div class="stats-sub" style="margin-top:14px;display:flex;align-items:center;gap:8px;">
-          <img id="minionGif" width="42" height="29" alt="" style="image-rendering:auto;">
-          <span>Minions spawned per hour &mdash; the fleet's build throughput</span>
+        <div class="stats-card-body">
+          <div id="runsKpiRow" class="runs-kpi-row"><div class="skeleton skeleton-kpirow"></div></div>
+          <div class="stats-sub" style="margin-top:14px;">Runs per hour by outcome</div>
+          <div class="chart-box" id="chartRunsHourlyBox">
+            <div class="skeleton"></div>
+            <canvas id="chartRunsHourly"></canvas>
+          </div>
+          <div class="stats-sub" style="margin-top:14px;display:flex;align-items:center;gap:8px;">
+            <img id="minionGif" width="42" height="29" alt="" style="image-rendering:auto;">
+            <span>Minions spawned per hour &mdash; the fleet's build throughput</span>
+          </div>
+          <div class="chart-box" id="chartMinionsBox">
+            <div class="skeleton"></div>
+            <canvas id="chartMinions"></canvas>
+          </div>
         </div>
-        <canvas id="chartMinions"></canvas>
       </div>
-      <div class="stats-card">
+      <div class="stats-card" id="cardTokens">
         <h3>Token Usage</h3>
         <div class="stats-sub">input + output tokens per hour, last 24h</div>
-        <canvas id="chartTokens"></canvas>
+        <div class="stats-card-body">
+          <div class="chart-box" id="chartTokensBox">
+            <div class="skeleton"></div>
+            <canvas id="chartTokens"></canvas>
+          </div>
+        </div>
       </div>
-      <div class="stats-card">
+      <div class="stats-card" id="cardBacklog">
         <h3>Backlog Size</h3>
         <div class="stats-sub">backlog total, new PRs, shipped PRs -- per day, last 14 days</div>
-        <canvas id="chartBacklog"></canvas>
+        <div class="stats-card-body">
+          <div class="chart-box" id="chartBacklogBox">
+            <div class="skeleton"></div>
+            <canvas id="chartBacklog"></canvas>
+          </div>
+        </div>
       </div>
     </div>`;
 
@@ -1272,13 +1313,36 @@ async function renderStatsPage() {
     return;
   }
 
-  const [selfImprove, runsSummary, tokensData, backlogData] = await Promise.all([
-    fetch('/api/stats/self_improve_score?days=14').then(r => r.json()).catch(() => null),
-    fetch('/api/stats/runs_summary?hours=24').then(r => r.json()).catch(() => null),
-    fetch('/api/stats/token_usage?hours=24').then(r => r.json()).catch(() => ({ buckets: [] })),
-    fetch('/api/stats/backlog_history?days=14').then(r => r.json()).catch(() => ({ days: [], new_prs: [], merged_prs: [] })),
+  // gh#563: allSettled (not all) + an explicit r.ok check -- a rejection here now means
+  // "this one card's fetch actually failed," distinct from an endpoint's own valid "no data
+  // yet" shape, so cardUnavailable() below can tell the two apart instead of collapsing a
+  // real failure into a misleadingly-empty success state.
+  const t0 = performance.now();
+  const fetchStatsJSON = url => fetch(url).then(r => {
+    if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
+    return r.json();
+  });
+  const [selfImproveR, runsSummaryR, tokensR, backlogR] = await Promise.allSettled([
+    fetchStatsJSON('/api/stats/self_improve_score?days=14'),
+    fetchStatsJSON('/api/stats/runs_summary?hours=24'),
+    fetchStatsJSON('/api/stats/token_usage?hours=24'),
+    fetchStatsJSON('/api/stats/backlog_history?days=14'),
   ]);
   if (PAGE !== 'stats') return; // navigated away while awaiting -- don't render into a gone canvas
+  console.log(`[stats] time-to-data: ${Math.round(performance.now() - t0)}ms`);
+
+  const selfImprove = selfImproveR.status === 'fulfilled' ? selfImproveR.value : null;
+  const runsSummary = runsSummaryR.status === 'fulfilled' ? runsSummaryR.value : null;
+  const tokensData = tokensR.status === 'fulfilled' ? tokensR.value : { buckets: [] };
+  const backlogData = backlogR.status === 'fulfilled' ? backlogR.value : { days: [], new_prs: [], merged_prs: [] };
+
+  // Per-card failure state (AC3): a rejected fetch replaces just that card's body with a
+  // visible "unavailable" message instead of the skeleton or a misleading all-zero render --
+  // the other three cards are untouched, same per-fetch isolation gh#262 already relies on.
+  function cardUnavailable(cardId, label) {
+    const body = document.querySelector(`#${cardId} .stats-card-body`);
+    if (body) body.innerHTML = `<div class="run-empty">${esc(label)} unavailable -- try reloading</div>`;
+  }
 
   destroyStatsChart('selfImprove');
   destroyStatsChart('runsHourly'); destroyStatsChart('minions');
@@ -1291,6 +1355,10 @@ async function renderStatsPage() {
   // sprite -- same joke, no copyrighted artwork shipped in the repo, and no external asset to
   // 404 later. It reacts to the score, which is the whole point of the name: a low score is a
   // fish that only knows Splash, and the thing about Magikarp is it does eventually evolve.
+  if (selfImproveR.status === 'rejected') {
+    cardUnavailable('cardSelfImprove', 'Magikarp Score');
+  } else {
+  document.querySelector('#chartSelfImproveBox .skeleton')?.remove();
   const siCard = document.getElementById('selfImproveCard');
   const siHistory = selfImprove?.history || [];
   const siLatest = selfImprove?.latest;
@@ -1382,7 +1450,7 @@ async function renderStatsPage() {
           <div class="kpi-cell" style="flex:1;min-width:240px;">
             <div class="kpi-label">${esc(humanDate(siLatest.date))} &middot; ${quip} ${staleBadge}</div>
             <div class="kpi-value" style="color:${color};">${siLatest.score}<span style="font-size:14px;color:var(--dimmer);">/100</span>${headlineArrow}</div>
-            <div class="kpi-sub">${esc(siLatest.reasoning || '')}</div>
+            ${siLatest.reasoning ? `<div class="kpi-verdict">${esc(siLatest.reasoning)}</div>` : ''}
             ${siStale ? `<div class="kpi-sub" style="color:var(--warn);">last score ${esc(ago(siLatest.date))} -- expected every 3h, this pipeline may have stopped</div>` : ''}
           </div>
         </div>
@@ -1436,12 +1504,18 @@ async function renderStatsPage() {
       }],
     });
   }
+  }
 
   // --- Recent Runs: KPI strip + hourly outcome bar + per-agent signal rate. Replaces the old
   // per-run scatter (when did each agent run -- nobody asked) with "is the fleet's output any
   // good" -- signal rate (ok / executed), budget-wall rate (declined before running / total),
   // total runs, and which agents are fully walled off (dormant).
   const STATUS_COLOR = { ok: '#1f8b4c', quiet: '#a6720f', reported_nothing: '#c13a2e', budget_declined: '#9a9ea6' };
+  if (runsSummaryR.status === 'rejected') {
+    cardUnavailable('cardRuns', 'Recent Runs');
+  } else {
+  document.querySelector('#chartRunsHourlyBox .skeleton')?.remove();
+  document.querySelector('#chartMinionsBox .skeleton')?.remove();
   // gh#153: `null` (not `0`) is the "no data" sentinel for these two -- a real 0% (everyone
   // failed, or everyone got budget-walled) is a different diagnosis from "nothing ran in this
   // window," and pctOrDash below is what keeps the two from rendering as the same digit.
@@ -1570,9 +1644,13 @@ async function renderStatsPage() {
       },
     }],
   });
-
+  }
 
   // --- Token Usage: stacked bar, input vs output, per hour
+  if (tokensR.status === 'rejected') {
+    cardUnavailable('cardTokens', 'Token Usage');
+  } else {
+  document.querySelector('#chartTokensBox .skeleton')?.remove();
   const buckets = tokensData.buckets || [];
   STATS_CHARTS.tokens = new Chart(document.getElementById('chartTokens'), {
     type: 'bar',
@@ -1592,11 +1670,16 @@ async function renderStatsPage() {
       plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10.5 } } } },
     },
   });
+  }
 
   // --- Backlog Size: all three as bars, per Reif's "more readable" -- backlog total gets its
   // own right-hand y-axis (0-400ish) since it dwarfs new/shipped PR counts (0-100ish); on one
   // shared axis the backlog bars swamp the PR bars to invisibility. Same day-keyed x-axis, all
   // three arrays day-aligned by the server already (backlog_history / pr_activity_by_day).
+  if (backlogR.status === 'rejected') {
+    cardUnavailable('cardBacklog', 'Backlog Size');
+  } else {
+  document.querySelector('#chartBacklogBox .skeleton')?.remove();
   const days = backlogData.days || [];
   const newPrDays = backlogData.new_prs || [];
   const mergedPrDays = backlogData.merged_prs || [];
@@ -1631,6 +1714,7 @@ async function renderStatsPage() {
       plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10.5 } } } },
     },
   });
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
