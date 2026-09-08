@@ -641,14 +641,28 @@ def _budget_preview() -> dict:
     # re-sources fleet.env into its own os.environ. subprocess_env()'s own docstring above
     # documents exactly this failure for maxx_share_ceiling.py (gh#295-adjacent): an in-process
     # call would read FLEET_MAXX_URL/_HANDLE/_KEY as unset even when fleet.env has them
-    # configured, and silently show every operator "headroom unavailable" always. None (never
-    # a fabricated number) whenever the meter genuinely can't be read -- gh#561.
-    out["week_bank_pct"] = None
+    # configured, and silently show every operator "headroom unavailable" always.
+    #
+    # Gated on the subprocess's own `label`, not a bare pass-through of the raw field:
+    # maxx_reader.get_headroom() builds its allowance dict (which still carries whatever raw
+    # week_bank_pct the API returned) BEFORE branching on verdict, so an "over" verdict --
+    # OVER_VERDICTS's real, definitive stop, forced to headroom_fraction=0.0 -- can still
+    # carry a stale positive week_bank_pct in that same dict. Showing that raw number would
+    # have the topbar contradict maxx's own honest zero during exactly the stall this PR
+    # exists to make visible (gh#561). Any other untrustworthy verdict (get_headroom()
+    # returns fraction=None) is treated the same as an unreadable meter -- None, never a
+    # number the caller cannot vouch for.
     try:
         proc = subprocess.run(
             [sys.executable, str(KIT_DIR / "scripts" / "maxx_reader.py")],
             capture_output=True, text=True, timeout=20, env=subprocess_env())
-        out["week_bank_pct"] = json.loads(proc.stdout or "{}").get("week_bank_pct")
+        reading = json.loads(proc.stdout or "{}")
+        label = reading.get("label")
+        if label == "over":
+            out["week_bank_pct"] = 0.0
+        elif label in ("ok", "degraded"):
+            out["week_bank_pct"] = reading.get("week_bank_pct")
+        # else: not_configured / an untrustworthy verdict / a bad shape -- stays None.
     except Exception:  # noqa: BLE001 -- display route, a meter hiccup must never 500
         pass
 

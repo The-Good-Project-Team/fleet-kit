@@ -6940,9 +6940,17 @@ def _budget_preview_exposes_week_bank_pct():
     (mocked here, same boundary maxx_share_ceiling.py's own call crosses), never by importing
     maxx_reader in-process -- this is a long-lived server that never re-sources fleet.env into
     its own os.environ (subprocess_env()'s docstring), so an in-process call would silently
-    read every credential as unset. Three cases: a real reading passes through untouched; an
-    unreadable/unconfigured meter degrades to None, never a fabricated number; and a raised
-    exception from the subprocess call (any meter hiccup) must not crash this display route.
+    read every credential as unset.
+
+    Five cases, gated on the subprocess's own `label` (never a bare pass-through of the raw
+    field): an ok/degraded reading passes the raw value through untouched; an "over" verdict
+    -- maxx's own real, definitive stop -- forces an honest 0.0 even when the raw payload
+    still carries a stale positive week_bank_pct (get_headroom() builds its allowance dict
+    from the raw budget BEFORE branching on verdict, so that field survives an over-budget
+    reading unchanged); any other untrustworthy verdict (get_headroom() returns
+    fraction=None) degrades to None the same as an unconfigured meter, even if the raw field
+    is present, because the caller cannot vouch for it; and a raised exception from the
+    subprocess call (any meter hiccup) must not crash this display route.
     """
     import fleet_view_server as fvs
 
@@ -6970,6 +6978,20 @@ def _budget_preview_exposes_week_bank_pct():
 
         fvs.subprocess.run = _dispatch(json.dumps(
             {"headroom_fraction": None, "label": "not_configured"}))
+        out = fvs._budget_preview()
+        assert out["week_bank_pct"] is None, out
+
+        # verdict=over, but the raw field is still a stale positive -- must render as a real
+        # 0.0, never the raw number (that would contradict maxx's own honest stop, gh#561).
+        fvs.subprocess.run = _dispatch(json.dumps(
+            {"headroom_fraction": 0.0, "label": "over", "week_bank_pct": 15.0}))
+        out = fvs._budget_preview()
+        assert out["week_bank_pct"] == 0.0, out
+
+        # An untrustworthy-but-not-over verdict (get_headroom() -> fraction=None) can still
+        # carry a raw week_bank_pct in the allowance dict -- must stay None, not leak it.
+        fvs.subprocess.run = _dispatch(json.dumps(
+            {"headroom_fraction": None, "label": "maxx_verdict_unknown", "week_bank_pct": 8.0}))
         out = fvs._budget_preview()
         assert out["week_bank_pct"] is None, out
 
