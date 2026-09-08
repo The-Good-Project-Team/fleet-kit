@@ -2030,18 +2030,37 @@ function renderSiblingSwitch(siblings) {
 }
 
 async function loadMembers() {
-  const [{ members }, { spend }, { kpi }] = await Promise.all([
+  const [{ members }, { spend }, { kpi }, budgetPreview] = await Promise.all([
     fetchJSON('/api/members'),
     fetchJSON('/api/spend?hours=24'),
     fetchJSON('/api/kpi?hours=24'),
+    fetchJSON('/api/budget_preview'),
   ]);
   const spendByMember = Object.fromEntries((spend || []).map(s => [s.member, s]));
   members.forEach(m => { m._spend = spendByMember[m.spec.name]; });
   SPECS = members;
   KPI_BY_MEMBER = Object.fromEntries((kpi || []).map(k => [k.member, k]));
-  const totalCost = (spend || []).reduce((sum, s) => sum + (s.total_cost || 0), 0);
-  document.getElementById('globalSpend').innerHTML = `$${totalCost.toFixed(2)} <b>today</b>`;
+  renderGlobalSpend(budgetPreview);
   if (!SELECTED && SPECS.length) SELECTED = SPECS[0].spec.name;
+}
+
+// The topbar's always-visible figure -- percent-of-week headroom (maxx_reader's
+// week_bank_pct, the same unit gru packs against per fanout.py:11), not raw dollars.
+// A dollar total has no ceiling to be a fraction of, so a real zero-headroom stall
+// (gh#578, FLEET_SHARE_CEILING_PCT=0.0000) looked identical to a quiet day on the old
+// "$4.12 today" topbar -- gh#561. null (meter unreadable/not configured) must render as
+// its own visible state, never as "0% of week" -- an unreadable meter is not the same
+// fact as a real, honest zero (maxx_reader.py's own over-vs-unreadable distinction).
+// The dollar figure is not removed -- it still shows on each member's detail view,
+// via renderDetailHead()'s spendLine.
+function renderGlobalSpend(preview) {
+  const el = document.getElementById('globalSpend');
+  const pct = preview && preview.week_bank_pct;
+  if (pct === null || pct === undefined) {
+    el.innerHTML = `<span title="maxx meter unreadable or not configured for this instance">headroom unavailable</span>`;
+    return;
+  }
+  el.innerHTML = `${Number(pct).toFixed(1)}% <b>of week</b>`;
 }
 
 async function renderQueue() {
