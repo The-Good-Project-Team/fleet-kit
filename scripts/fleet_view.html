@@ -83,7 +83,16 @@
   .astatus.off { background: var(--dimmer); }
   .agent-item .atext { flex: 1; min-width: 0; }
   .agent-item .aname { overflow-wrap: break-word; }
-  .agent-item.disabled-agent .aname { color: var(--dimmer); text-decoration: line-through; }
+  /* gh#565: how a member is DRIVEN (scheduled/spawned/disabled) is a separate axis from the
+     health dot above (ok/warn/bad/off) -- three distinct badges, none of them strikethrough,
+     so a dispatch-only member (minion, nerd) doesn't read as dead. Shared by the sidebar
+     (.agent-item) and the Home page's agent grid (.home-agent), so unscoped. */
+  .amode { display: inline-block; margin-left: 6px; padding: 1px 5px;
+    border-radius: 3px; font-size: 9px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .04em; vertical-align: 1px; }
+  .amode.mode-scheduled { background: var(--panel-2); color: var(--dim); }
+  .amode.mode-spawned { background: var(--panel-2); color: var(--accent); }
+  .amode.mode-disabled { background: var(--panel-2); color: var(--dimmer); border: 1px solid var(--border); }
   .agent-item .aago { color: var(--dimmer); font-size: 10.5px; margin-top: 1px; }
   .agent-item .akpi { color: var(--dim); font-size: 10.5px; margin-top: 1px; font-weight: 600; }
 
@@ -487,6 +496,21 @@ function hasRecentRun(last) {
   return (Date.now() - tsMs) < RECENT_RUN_WINDOW_MS;
 }
 
+// gh#565: three real states, none of them "dead". `enabled` is self-scheduling (cron-driven);
+// a disabled member with a recent run is dispatch-only (spawned by another member on demand,
+// same gh#166 signal `hasRecentRun` already tracks above); a disabled member with no recent
+// run is genuinely off.
+const MODE_LABEL = {scheduled: 'scheduled', spawned: 'spawned', disabled: 'disabled'};
+const MODE_TITLE = {
+  scheduled: 'scheduled — fires on its own cron',
+  spawned: 'spawned — dispatch-only, driven by another member (recent run inside 24h)',
+  disabled: 'disabled — not scheduled, no recent run',
+};
+function memberMode(enabled, last) {
+  if (enabled) return 'scheduled';
+  return hasRecentRun(last) ? 'spawned' : 'disabled';
+}
+
 let SIDEBAR_ORDER = null; // cached agent-name order -- computed once per resort, not per render
 
 function resortSidebar() {
@@ -515,15 +539,16 @@ function renderSidebar() {
     const last = lastRunFor(name);
     const off = !enabled && !hasRecentRun(last);
     const cls = off ? 'off' : statusClass(last?.status);
+    const mode = memberMode(enabled, last);
     const active = PAGE === 'agent' && name === SELECTED;
     const k = KPI_BY_MEMBER[name];
     const kpiLine = (k && k.total !== null && k.total !== undefined && k.unit)
       ? `<div class="akpi">${k.total} ${esc(k.unit)}</div>` : '';
-    return `<div class="agent-item ${active ? 'active' : ''} ${off ? 'disabled-agent' : ''}"
+    return `<div class="agent-item ${active ? 'active' : ''}"
         data-agent="${esc(name)}">
       <span class="astatus ${cls}"></span>
       <div class="atext">
-        <div class="aname">${m.spec.emoji ? esc(m.spec.emoji) + ' ' : ''}${esc(name)}</div>
+        <div class="aname">${m.spec.emoji ? esc(m.spec.emoji) + ' ' : ''}${esc(name)}<span class="amode mode-${mode}" title="${esc(MODE_TITLE[mode])}">${MODE_LABEL[mode]}</span></div>
         <div class="aago">${last ? ago(last.ts) : 'never run'}</div>
         ${kpiLine}
       </div>
@@ -1025,11 +1050,12 @@ function homeAgentsHtml() {
     const enabled = !!m.effective.enabled;
     const off = !enabled && !hasRecentRun(last);
     const cls = off ? 'off' : statusClass(last?.status);
+    const mode = memberMode(enabled, last);
     const k = KPI_BY_MEMBER[name];
     const kpi = (k && k.total !== null && k.total !== undefined && k.unit) ? `${k.total} ${esc(k.unit)}` : '';
-    return `<div class="home-agent ${off ? 'disabled-agent' : ''}" data-agent="${esc(name)}">
+    return `<div class="home-agent" data-agent="${esc(name)}">
         <span class="astatus ${cls}"></span>
-        <span class="ha-name">${m.spec.emoji ? esc(m.spec.emoji) + ' ' : ''}${esc(name)}</span>
+        <span class="ha-name">${m.spec.emoji ? esc(m.spec.emoji) + ' ' : ''}${esc(name)}<span class="amode mode-${mode}" title="${esc(MODE_TITLE[mode])}">${MODE_LABEL[mode]}</span></span>
         <span class="ha-meta">${last ? esc(ago(last.ts)) : 'never run'}${kpi ? ' · ' + kpi : ''}</span>
       </div>`;
   }).join('');
