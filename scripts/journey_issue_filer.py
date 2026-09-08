@@ -59,6 +59,19 @@ DEDUPE: match on a hidden marker in the issue body (`<!-- fleet:sentry-journey k
 not on title text -- a title can be edited or reworded by a human without breaking the match,
 same reasoning closes_gate.py's own comment-parsing takes for machine-vs-human text.
 
+VIEWPORT COLLAPSING (gh#660 follow-up, live proof #690/#691): journey_walker.py's own results.json
+id convention suffixes every non-desktop viewport onto the journey id (`<id>--<viewport>`), so a
+naive `<journey_id>::step<N>` key is viewport-specific by construction -- a step-0 navigation
+failure (wrong URL, HTTP error, DNS) fires once per viewport even though it cannot possibly
+depend on screen width. `step_key()` collapses ONLY step index 0 (the narrow, defensible rule
+marie's PRD asks for -- results.json carries no reliable HTTP-status signal to widen this
+further without guessing) back to the bare journey id, so both viewports land on the same key.
+Every other step index keeps today's per-viewport key, since rendering/layout failures at later
+steps genuinely are per-viewport. `process()` groups same-run entries by their (possibly
+collapsed) key before deciding fail/pass, so one run's two-viewport step-0 failure files or
+closes exactly once, and a partial recovery (one viewport passing, the other still failing)
+never reads as a full one.
+
 PART OF #660, not Closes: acceptance criterion 1 requires a failed step to result in an issue
 "within the same [sentry] pass" -- that pass does not exist yet, since #657 (the walker that
 would actually run journeys.yaml and emit a results.json) is still unbuilt on main as of this
@@ -95,7 +108,27 @@ DEFAULT_STATE_PATH = Path(
 MARKER_RE = re.compile(r"<!--\s*fleet:sentry-journey\s+key=([^\s]+?)\s*-->")
 
 
+def is_viewport_independent(step_index: int) -> bool:
+    """Only step 0 (navigating into a journey) is treated as viewport-independent -- see
+    VIEWPORT COLLAPSING above for why this is deliberately narrow."""
+    return step_index == 0
+
+
+def base_journey_id(journey_id: str) -> str:
+    """Strips journey_walker.py's `--<viewport>` suffix, if present, back to the catalog id."""
+    idx = journey_id.find("--")
+    return journey_id[:idx] if idx != -1 else journey_id
+
+
+def viewport_of(journey_id: str) -> str:
+    """Inverse of journey_walker.py's id convention: no `--<viewport>` suffix means desktop."""
+    idx = journey_id.find("--")
+    return journey_id[idx + 2:] if idx != -1 else "desktop"
+
+
 def step_key(journey_id: str, step_index: int) -> str:
+    if is_viewport_independent(step_index):
+        journey_id = base_journey_id(journey_id)
     return f"{journey_id}::step{step_index}"
 
 
@@ -133,6 +166,7 @@ def build_issue_body(
     deploy_sha: str,
     last_pass_sha: str | None,
     key: str,
+    viewports: list[str] | None = None,
 ) -> str:
     lines = [
         f"Sentry drove the **{journey.get('name', journey.get('id'))}** journey as a real "
@@ -140,6 +174,10 @@ def build_issue_body(
         "",
         f"**Failed step:** {step.get('action', '').strip()}",
         f"**Expected:** {step.get('observable_result', '').strip()}",
+    ]
+    if viewports:
+        lines.append(f"**Affected viewports:** {', '.join(viewports)}")
+    lines += [
         "",
         "**Repro steps (run these in order):**",
         _repro_steps(journey.get("steps", [step]), step.get("index", 0)),
@@ -239,6 +277,19 @@ def iter_steps(results: dict):
             yield journey, step
 
 
+def group_by_key(results: dict) -> "dict[str, list[tuple[dict, dict]]]":
+    """Groups this run's (journey, step) pairs by their dedupe key, so a step-0 failure that
+    ran at two viewports (same key, per VIEWPORT COLLAPSING above) is decided ONCE -- filed
+    once, commented once, and only closed when every viewport mapped to that key passed. A
+    key that never collapses (every other step index) still ends up with one entry per group,
+    which is exactly today's per-viewport behaviour."""
+    groups: "dict[str, list[tuple[dict, dict]]]" = {}
+    for journey, step in iter_steps(results):
+        key = step_key(journey["id"], step.get("index", 0))
+        groups.setdefault(key, []).append((journey, step))
+    return groups
+
+
 def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_run, dry_run: bool = False) -> dict:
     """Walks one results.json, files/comments/closes as needed. Returns a summary dict of
     what happened -- never raises on a `gh` failure, since one bad call must not stop the rest
@@ -253,11 +304,14 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
     if not dry_run:
         ensure_label(runner)
 
-    for journey, step in iter_steps(results):
-        key = step_key(journey["id"], step.get("index", 0))
-        status = step.get("status")
+    for key, entries in group_by_key(results).items():
+        failing = [(j, s) for j, s in entries if s.get("status") == "fail"]
 
-        if status == "fail":
+        if failing:
+            # Only the viewports that actually failed are "affected" -- a viewport that
+            # happened to pass in the same collapsed group must not be reported as broken.
+            failing_viewports = sorted({viewport_of(j["id"]) for j, _ in failing})
+            journey, step = failing[0]
             existing = None if dry_run else find_open_issue(key, runner)
             if existing:
                 note = f"Recurred again on run `{run}` (sha `{deploy_sha or 'unknown'}`)."
@@ -269,7 +323,11 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
                 summary["commented"].append({"issue": existing, "key": key})
             else:
                 title = build_issue_title(journey.get("name", journey["id"]), step.get("action", ""))
-                body = build_issue_body(journey, step, run, deploy_sha, state.get(key, {}).get("last_pass_sha"), key)
+                collapsed_viewports = failing_viewports if len(failing_viewports) > 1 else None
+                body = build_issue_body(
+                    journey, step, run, deploy_sha, state.get(key, {}).get("last_pass_sha"), key,
+                    collapsed_viewports,
+                )
                 if dry_run:
                     summary["filed"].append({"issue": None, "key": key, "title": title})
                     continue
@@ -281,7 +339,11 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
                 m = re.search(r"/issues/(\d+)\s*$", out)
                 summary["filed"].append({"issue": int(m.group(1)) if m else None, "key": key, "title": title})
 
-        elif status == "pass":
+        elif entries and all(s.get("status") == "pass" for _, s in entries):
+            # every entry mapped to this key passed -- a partial recovery (see AC6), or a
+            # step whose status is neither "pass" nor "fail" (a walker crash, an unrecognized
+            # value), never reaches this branch: it is left untouched this run, same as the
+            # original per-step `elif status == "pass":` guard did.
             state[key] = {"last_pass_sha": deploy_sha, "last_pass_run": run}
             existing = None if dry_run else find_open_issue(key, runner)
             if existing:
