@@ -18,7 +18,7 @@
     "escalation": "a file the scrubber can't parse (binary, truncated, permission denied) -- skip it and name it in the report, never let one bad file stop the whole pass. A brand-new credential SHAPE the pattern list doesn't cover -- name it in the report as a gap; do not hand-write a one-off regex mid-pass without re-running members/librarian/test_librarian.py against it first."
   },
   "schedule": {
-    "hourly_at_minute": 55
+    "hourly_at_minute": 6
   },
   "timeout_s": 900,
   "enabled": true,
