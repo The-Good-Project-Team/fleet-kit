@@ -48,7 +48,11 @@ messenger's morning brief lists every open `world-class` item so Reif can move t
    frame, load under 1 s).
 4. Write the design spec against the references: annotated screenshots or a mock, with the
    states above. Reif approves it (an ask of class `decision`) before anything is built.
-5. Spike buy-vs-build: two existing libraries or products against the matrix, and an ADR.
+5. Find what the best already use: the open-source libraries, UI kits, and named design
+   patterns that reproduce each affordance in the matrix (Reif, 2026-09-08: *"find the open
+   sourced or design patterns that the best used already"*). Add one column per candidate
+   with stars and last release. Then the buy-vs-build spike: an ADR that picks from those
+   before any custom build, and names the one reason.
 6. Build in vertical slices. After each: design QA against the reference screenshots, side
    by side, at desktop and phone width, in the PR.
 7. Reif uses it and says done. Then it closes.
