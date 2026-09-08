@@ -18,13 +18,40 @@ dict's string-literal keys gets the same names without ever executing a line of 
 
 Usage: lane_registry_lanes.py <path-to-lane_kpis.py>
 Prints the lane names, space-separated, to stdout. Prints nothing (not an error) if the file
-is missing, unparseable, or has no top-level `REGISTRY = {...}` assignment -- the caller's own
-fallback to the fleet-kit list is the correct behavior for all three, not a crash.
+is missing, unparseable, or has no top-level `REGISTRY = {...}` or `REGISTRY = [...]`
+assignment -- the caller's own fallback to the fleet-kit list is the correct behavior for all
+three, not a crash.
+
+Two `REGISTRY` shapes are recognised (gh#704):
+  - a dict with string-literal keys (fleet-kit's own shape): `REGISTRY = {"growth": ..., ...}`
+  - a list of calls with a `lane=` string-literal keyword (philanthropy's shape):
+    `REGISTRY = [LaneKPI(lane="claim", ...), LaneKPI(lane="audience", ...)]`
+Any list element that is not a call, or a call with no `lane=` keyword, or a `lane=` value
+that is not a string literal, is skipped rather than raising.
 """
 from __future__ import annotations
 
 import ast
 import sys
+
+
+def _lanes_from_dict(node: ast.Dict) -> "set[str]":
+    lanes: set[str] = set()
+    for key in node.keys:
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            lanes.add(key.value)
+    return lanes
+
+
+def _lanes_from_list(node: ast.List) -> "set[str]":
+    lanes: set[str] = set()
+    for elt in node.elts:
+        if not isinstance(elt, ast.Call):
+            continue
+        for kw in elt.keywords:
+            if kw.arg == "lane" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                lanes.add(kw.value.value)
+    return lanes
 
 
 def registry_lanes(path: str) -> list[str]:
@@ -39,11 +66,10 @@ def registry_lanes(path: str) -> list[str]:
             continue
         if not any(isinstance(t, ast.Name) and t.id == "REGISTRY" for t in node.targets):
             continue
-        if not isinstance(node.value, ast.Dict):
-            continue
-        for key in node.value.keys:
-            if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                lanes.add(key.value)
+        if isinstance(node.value, ast.Dict):
+            lanes |= _lanes_from_dict(node.value)
+        elif isinstance(node.value, ast.List):
+            lanes |= _lanes_from_list(node.value)
     return sorted(lanes)
 
 
