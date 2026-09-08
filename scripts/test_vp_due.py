@@ -86,6 +86,19 @@ class DueTests(unittest.TestCase):
         it = item(25, comments=[("Not yet (VP review): a", T1), ("Reif: leave it", T2)])
         self.assertFalse(vp_due.redo_due(it)[0])
 
+    def test_running_items_reads_runs_rows_not_ps(self):
+        now = 1_000_000.0
+        rows = [
+            {"member": "minion", "run_id": "a", "item_id": "4863", "status": "started", "ts": now - 300},
+            {"member": "minion", "run_id": "b", "item_id": "3235", "status": "started", "ts": now - 200},
+            {"member": "minion", "run_id": "b", "item_id": "3235", "status": "ok", "ts": now - 100},   # finished: newest row wins
+            {"member": "minion", "run_id": "c", "item_id": "111", "status": "started", "ts": now - 5000},  # older than timeout: dead
+            {"member": "vp", "run_id": "d", "item_id": "4863", "status": "started", "ts": now - 60},
+        ]
+        self.assertEqual(vp_due.running_items(rows, "minion", now), {4863})
+        self.assertEqual(vp_due.running_items(rows, "vp", now), {4863})
+        self.assertEqual(vp_due.running_items(rows, "marie", now), set())
+
     def test_due_items_shape(self):
         out = vp_due.due_items([item(10, merged=[T1]), item(11)])
         self.assertEqual(out["due"], [10])

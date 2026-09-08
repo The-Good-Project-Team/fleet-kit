@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+import time
 
 VERDICT_RE = re.compile(r"^\W*(design approved|accepted|not yet)\s*\(vp review\)\s*:", re.IGNORECASE | re.MULTILINE)
 REIF_RE = re.compile(r"^\W*reif\s*:", re.IGNORECASE | re.MULTILINE)
@@ -85,8 +87,7 @@ def redo_due(item: dict, running_minions: set[int] | None = None) -> tuple[bool,
 
 
 def running_minion_items() -> set[int]:
-    out = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
-    return {int(m) for m in re.findall(r"run_member\.sh minion --item (\d+)", out)}
+    return running_items(_runs_rows(), "minion")
 
 
 def due_items(items: list[dict], running: set[int] | None = None) -> dict:
@@ -129,9 +130,49 @@ def collect(repo_dir: str) -> list[dict]:
     return items
 
 
+RUN_TIMEOUT_S = 2400  # minion and vp both carry timeout_s 2400 in their fleet.json
+
+
+def running_items(rows: list[dict], member: str, now: float | None = None,
+                  timeout_s: int = RUN_TIMEOUT_S) -> set[int]:
+    """Items with a pass of `member` in flight, read from runs.jsonl rows (shared by every
+    container of this instance). A pass is in flight when its newest row is `started` and
+    younger than the member's timeout. `ps` cannot see a pass in the retired container after a
+    rolling cutover: 2026-09-08 19:54Z vp_due spawned a second minion on #4863 while the first,
+    started 6 minutes earlier in the container that had just been retired, was still working.
+    `rows` in file order (oldest first); the newest row per run_id wins."""
+    now = time.time() if now is None else now
+    newest: dict[str, dict] = {}
+    for r in rows:
+        if r.get("member") == member and r.get("item_id") not in (None, "", "None"):
+            newest[r.get("run_id")] = r
+    out = set()
+    for r in newest.values():
+        if r.get("status") == "started" and now - float(r.get("ts") or 0) < timeout_s:
+            try:
+                out.add(int(r["item_id"]))
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def _runs_rows() -> list[dict]:
+    path = os.path.join(os.environ.get("FLEET_LOG_DIR", "/var/log/fleet-kit"), "runs.jsonl")
+    rows = []
+    try:
+        with open(path) as fh:
+            for line in fh:
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        return []
+    return rows
+
+
 def running_vp_items() -> set[int]:
-    out = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
-    return {int(m) for m in re.findall(r"run_member\.sh vp --item (\d+)", out)}
+    return running_items(_runs_rows(), "vp")
 
 
 def main(argv=None) -> int:
