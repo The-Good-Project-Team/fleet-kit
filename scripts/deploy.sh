@@ -98,7 +98,12 @@ WEBHOOK_PORT="${FLEET_WEBHOOK_PORT:-8562}"
 # process from a prior failed deploy is easy to spot (`podman ps` shows these exact numbers).
 GREEN_VIEW_PORT="${FLEET_GREEN_VIEW_PORT:-8571}"
 GREEN_WEBHOOK_PORT="${FLEET_GREEN_WEBHOOK_PORT:-8572}"
-HEALTH_TIMEOUT_S="${FLEET_HEALTH_TIMEOUT_S:-30}"
+# gh#672: 30s false-negatived a genuinely-healthy green build under real load (2026-09-07,
+# load average 35 on 7 cores -- `serving http://0.0.0.0:8420` was already logged when the
+# check gave up), which then tore down a container that was still serving in-flight passes
+# (fk#671). 120s is the new default; still overridable, but a caller now has to opt INTO a
+# shorter window rather than getting one that has already failed once under real load.
+HEALTH_TIMEOUT_S="${FLEET_HEALTH_TIMEOUT_S:-120}"
 GH_TOKEN="${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}"
 
 # Durable receipt regardless of caller. auto_deploy.sh only captures this script's stdout into
@@ -325,11 +330,20 @@ proxy_deploy() {
     if [ "$ov" = "$VIEW_PORT" ]; then nv="$GREEN_VIEW_PORT"; nw="$GREEN_WEBHOOK_PORT"; else nv="$VIEW_PORT"; nw="$WEBHOOK_PORT"; fi
     log "rolling deploy (gh#625): live $CONTAINER on $ov/$ow, new build goes to $nv/$nw, no cordon"
 
-    # Only one retired generation is kept. If the previous one is still running (its passes
-    # outlived a whole deploy window) it has had its RETIRE_MAX_S; stop it now to free its ports.
-    if exists "$RETIRED_MARKER"; then
-        running "$RETIRED_MARKER" && { log "previous retired build still running -- stopping it to free $nv/$nw"; podman stop -t 30 "$RETIRED_MARKER" >/dev/null 2>&1 || true; }
-        podman rm -f "$RETIRED_MARKER" >/dev/null 2>&1 || true
+    # gh#672 AC6: only one retired generation is kept, and its NAME must be free before this
+    # deploy's own cutover can rename $CONTAINER -> $RETIRED_MARKER later -- but its in-flight
+    # passes must not be killed on the SPECULATION that this deploy even succeeds. If it is
+    # still running, its ports (nv/nw -- ports alternate every deploy, so a still-running
+    # previous-retired build sits on exactly the pair this build needs) are genuinely blocked;
+    # previously this stopped it unconditionally, right here, before green had even been built,
+    # let alone health-checked -- killing its passes for a deploy that might go on to fail its
+    # OWN health check for unrelated reasons, and destroying the one known-good fallback
+    # do_rollback depends on in the same stroke. Abandon this tick instead: leave it running,
+    # log why, and let the next deploy tick (or its own reaper, RETIRE_MAX_S) retry once it has
+    # actually freed the ports on its own.
+    if exists "$RETIRED_MARKER" && running "$RETIRED_MARKER"; then
+        log "ABANDONED: previous retired build ($RETIRED_MARKER) still running on $nv/$nw -- not stopping its in-flight passes to force this deploy through; will retry next tick"
+        return 1
     fi
     exists "${CONTAINER}-green" && podman rm -f "${CONTAINER}-green" >/dev/null 2>&1 || true
 
@@ -356,6 +370,11 @@ proxy_deploy() {
         return 1
     fi
     log "cutover: caddy upstream $ov/$ow -> $nv/$nw reloaded (zero downtime); $CONTAINER -> $RETIRED_MARKER keeps running until its passes finish"
+
+    # Free the $RETIRED_MARKER name for the rename below -- safe now: green is proven healthy,
+    # and this deploy only ever got here because that container was already stopped (not
+    # running), so no in-flight pass is lost by removing it.
+    exists "$RETIRED_MARKER" && podman rm -f "$RETIRED_MARKER" >/dev/null 2>&1 || true
 
     if exists "$CONTAINER"; then
         disable_cron_in "$CONTAINER"
