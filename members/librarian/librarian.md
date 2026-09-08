@@ -71,13 +71,11 @@ hand-edit of a transcript.
      watermark yet) already scans everything without needing the flag.
    - **If this Bash call exceeds the tool's ~600s ceiling and gets moved to the background** (a
      cold first-ever run, or `--full-scan`, both genuinely take 20+ minutes against this
-     corpus): do NOT end your turn believing you'll be notified later, and do NOT call
-     `ScheduleWakeup` -- that tool only exists inside a `/loop` context and errors
-     (`` `prompt` is required when `stop` is not true ``) outside one; this member is a one-shot
-     hourly pass, not a loop. Ending your turn here reaps the backgrounded job with it (SIGKILL).
-     Instead, stay in the SAME turn: re-check the backgrounded task's own output path (named in
-     the tool result) every minute or two with a short `Bash(sleep 90 && ...)` / `Read` call, or
-     `TaskOutput`, until it finishes, then continue to step 2.
+     corpus): do NOT end your turn believing you'll be notified later -- see persona_law.md §12
+     (your pass is one-shot; nothing you background, including an armed `Monitor`, will ever
+     resume you). Stay in the SAME turn: re-check the backgrounded task's own output path (named
+     in the tool result) every minute or two with a short `Bash(sleep 90 && ...)` / `Read` call,
+     or `TaskOutput`, until it finishes, then continue to step 2.
    - **If the backgrounded `--execute` scan itself gets killed by some other ceiling before
      finishing** (observed 2026-09-07: SIGKILL'd, exit 137, roughly 15 minutes in, even while
      correctly staying in-turn per the point above) -- that is now a non-event, not a failure to
