@@ -60,6 +60,32 @@ class DueTests(unittest.TestCase):
         it = item(9, comments=[("claimed-by: gru", T2), ("marie: priority=high", T3)], merged=[T1])
         self.assertTrue(vp_due.is_due(it)[0])
 
+    def test_redo_after_not_yet_with_no_newer_merge(self):
+        it = item(20, comments=[("Not yet (VP review): thin\n1. ...", T2)], merged=[T1])
+        ok, why = vp_due.redo_due(it)
+        self.assertTrue(ok); self.assertIn("round 1", why)
+
+    def test_no_redo_when_merge_is_newer_than_not_yet(self):
+        it = item(21, comments=[("Not yet (VP review): thin", T1)], merged=[T2])
+        self.assertFalse(vp_due.redo_due(it)[0])
+
+    def test_no_redo_after_three_rounds(self):
+        it = item(22, comments=[("Not yet (VP review): a", T1), ("Not yet (VP review): b", T2), ("Not yet (VP review): c", T3)])
+        ok, why = vp_due.redo_due(it)
+        self.assertFalse(ok); self.assertIn("3 Not-yet rounds", why)
+
+    def test_no_redo_when_approved(self):
+        it = item(23, comments=[("Not yet (VP review): a", T1), ("Design approved (VP review): ok", T2)])
+        self.assertFalse(vp_due.redo_due(it)[0])
+
+    def test_no_redo_when_minion_running(self):
+        it = item(24, comments=[("Not yet (VP review): a", T1)])
+        self.assertFalse(vp_due.redo_due(it, running_minions={24})[0])
+
+    def test_no_redo_when_reif_spoke_after_verdict(self):
+        it = item(25, comments=[("Not yet (VP review): a", T1), ("Reif: leave it", T2)])
+        self.assertFalse(vp_due.redo_due(it)[0])
+
     def test_due_items_shape(self):
         out = vp_due.due_items([item(10, merged=[T1]), item(11)])
         self.assertEqual(out["due"], [10])
