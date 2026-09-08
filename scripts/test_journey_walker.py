@@ -95,6 +95,43 @@ class _FixtureServer:
         self.dir.cleanup()
 
 
+class _HeaderRecordingServer:
+    """A minimal HTTP server that just records every request's headers -- used to assert the
+    bypass header attaches (or doesn't) against a REAL recorded request server-side, per gh#729
+    AC1's own wording ("asserted against a recorded/mock request, not by eyeballing prod").
+    Deliberately not `route.continue_`'s own Request object: that call dispatches a fresh
+    request Playwright's `request` event does not reliably reflect back with the override
+    applied, so the only trustworthy witness is what actually arrived on the wire."""
+
+    def __init__(self):
+        self.received: list[dict] = []
+        received = self.received
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                received.append({k.lower(): v for k, v in self.headers.items()})
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):  # quiet -- keep test output readable
+                pass
+
+        self.port = _free_port()
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), _Handler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
 class CatalogCoverageTest(unittest.TestCase):
     """Every journey in the real catalog has a real implementation -- AC1."""
 
@@ -137,6 +174,27 @@ class BlockedJourneyTest(unittest.TestCase):
         self.assertEqual(journeys_out, [])
         self.assertEqual(len(blocked), 1)
         self.assertEqual(blocked[0]["id"], "sign-in")
+
+
+class RedactSecretTest(unittest.TestCase):
+    """gh#729 AC6: the bypass value must never survive into a step's `detail` text, a Blocked
+    reason, or anything printed -- proven against a fixture string containing the value, same
+    shape selftest.py's own `_redact_secrets` tests use for its own secrets."""
+
+    def test_redacts_the_configured_value(self):
+        text = "TimeoutError: waiting for selector (sent X-Atlas-Test-Bypass: sekrit-val-123)"
+        redacted = jw.redact_secret(text, "sekrit-val-123")
+        self.assertNotIn("sekrit-val-123", redacted)
+        self.assertIn("[REDACTED]", redacted)
+
+    def test_noop_when_no_secret_configured(self):
+        text = "some ordinary failure text"
+        self.assertEqual(jw.redact_secret(text, None), text)
+        self.assertEqual(jw.redact_secret(text, ""), text)
+
+    def test_noop_when_value_absent_from_text(self):
+        text = "some ordinary failure text"
+        self.assertEqual(jw.redact_secret(text, "sekrit-val-123"), text)
 
 
 class RunAllContinuesTest(unittest.TestCase):
@@ -261,6 +319,119 @@ class _PatchedCtx:
 
     def __getattr__(self, name):
         return getattr(self._ctx, name)
+
+
+class BypassHeaderScopeTest(unittest.TestCase):
+    """gh#729 AC1/AC2/AC3: the bypass header attaches to the configured philanthropy host,
+    never attaches to a different host in the same browser context (the fleet-console journey
+    shares JourneyCtx.page()'s context-creation code path with every other journey, so this is
+    exactly the credential-leak shape a hardcoded per-context header would have had), and an
+    unconfigured instance sends no header and still completes normally."""
+
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+
+        cls.target = _HeaderRecordingServer()  # stands in for philanthropy.org
+        cls.other = _HeaderRecordingServer()   # stands in for an unrelated host (fleet console)
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+        cls.target.stop()
+        cls.other.stop()
+
+    def _ctx(self, bypass: str | None) -> jw.JourneyCtx:
+        env = {"PHILANTHROPY_BASE_URL": self.target.base_url}
+        if bypass:
+            env["ATLAS_TEST_BYPASS"] = bypass
+        users = jw.TestUsers(env=env)
+        journey = {"id": "probe", "name": "Probe", "steps": []}
+        return jw.JourneyCtx(journey, "desktop", {"width": 1280, "height": 800}, self.browser,
+                              users, Path("/tmp"), "probe-run")
+
+    def test_bypass_header_attaches_to_the_configured_host(self):
+        ctx = self._ctx("sekrit-val-123")
+        ctx.page().goto(self.target.base_url + "/", timeout=10000)
+        ctx.close()
+        self.assertTrue(self.target.received)
+        self.assertEqual(self.target.received[-1].get(jw.BYPASS_HEADER.lower()), "sekrit-val-123")
+
+    def test_bypass_header_does_not_attach_to_a_different_host(self):
+        ctx = self._ctx("sekrit-val-123")
+        ctx.page().goto(self.other.base_url + "/", timeout=10000)
+        ctx.close()
+        self.assertTrue(self.other.received)
+        self.assertNotIn(jw.BYPASS_HEADER.lower(), self.other.received[-1])
+
+    def test_unset_bypass_sends_no_header_and_completes_normally(self):
+        ctx = self._ctx(None)
+        response = ctx.page().goto(self.target.base_url + "/", timeout=10000)
+        ctx.close()
+        self.assertEqual(response.status, 200)
+        self.assertTrue(self.target.received)
+        self.assertNotIn(jw.BYPASS_HEADER.lower(), self.target.received[-1])
+
+
+class ReportPage403BlockedTest(unittest.TestCase):
+    """gh#729 AC4: a report-page request that comes back 403 -- even with the bypass header
+    sent -- is classified BLOCKED (not BROKEN, not a silent pass), and the record carries the
+    response status and headers."""
+
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+
+        class _ChallengeHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(403)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("X-Test-Marker", "cf-challenge")
+                self.end_headers()
+                self.wfile.write(b"<html><body>Checking your browser...</body></html>")
+
+            def log_message(self, *a):  # quiet -- keep test output readable
+                pass
+
+        cls.port = _free_port()
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", cls.port), _ChallengeHandler)
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def test_403_on_report_page_is_blocked_with_status_and_headers_recorded(self):
+        catalog = {
+            "viewports": {"desktop": {"width": 1280, "height": 800}},
+            "journeys": [{
+                "id": "open-990-report", "name": "Open 990 report", "viewports": ["desktop"],
+                "steps": [{"action": "a", "observable_result": "o"}, {"action": "b", "observable_result": "o"}],
+            }],
+        }
+        users = jw.TestUsers(env={
+            "PHILANTHROPY_BASE_URL": f"http://127.0.0.1:{self.port}",
+            "FIXTURE_EIN": "123456789",
+            "ATLAS_TEST_BYPASS": "sekrit-val-123",
+        })
+        journeys_out, blocked = jw.run_all(catalog, users, self.browser, Path("/tmp"), "blocked-run")
+
+        self.assertEqual(journeys_out, [])  # not a silent pass, and never filed as BROKEN
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0]["id"], "open-990-report")
+        self.assertEqual(blocked[0]["response"]["status"], 403)
+        headers = {k.lower(): v for k, v in blocked[0]["response"]["headers"].items()}
+        self.assertEqual(headers.get("x-test-marker"), "cf-challenge")
+        self.assertNotIn("sekrit-val-123", json.dumps(blocked))  # AC6, defense in depth
 
 
 class WalkerOutputFeedsIssueFilerTest(unittest.TestCase):
