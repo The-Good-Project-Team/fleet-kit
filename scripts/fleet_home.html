@@ -68,6 +68,31 @@
   footer { color: var(--muted); font-size: 13px; margin-top: 26px; line-height: 1.8; }
   footer a { color: var(--accent); }
   @media (min-width: 700px) { main { padding: 20px; } .big { font-size: 40px; } }
+  /* fk#748, Reif: "right slider, 1/3 page on click for more infos". One run, everything about
+     it, in a panel that slides in from the right; the list behind it stays put. */
+  .drawer .run[data-run] { cursor: pointer; border-radius: 6px; padding-left: 4px; margin-left: -4px; }
+  .drawer .run[data-run]:hover { background: var(--bg); }
+  .side-back { position: fixed; inset: 0; background: rgba(0,0,0,.18); z-index: 40; }
+  .side { position: fixed; top: 0; right: 0; bottom: 0; width: 33.333vw; min-width: 360px; max-width: 640px;
+    background: var(--panel); border-left: 1px solid var(--line); box-shadow: -12px 0 32px rgba(0,0,0,.12);
+    z-index: 41; overflow-y: auto; padding: 16px 18px 40px; transform: translateX(100%); transition: transform .18s ease-out; }
+  .side.in { transform: none; }
+  @media (max-width: 700px) { .side { width: 100vw; min-width: 0; max-width: none; padding: 14px 14px 40px; } }
+  .side .top { display: flex; align-items: flex-start; gap: 10px; }
+  .side .top .name { font-size: 18px; }
+  .side .top .close { margin-left: auto; min-width: 44px; padding: 0; font-size: 22px; line-height: 1; }
+  .side .when { color: var(--muted); font-size: 13px; margin: 2px 0 12px; }
+  .side .badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--bg); color: var(--muted); }
+  .side .badge.ok { color: var(--ok); } .side .badge.warn { color: var(--warn); } .side .badge.bad { color: var(--bad); }
+  .side h2 { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 16px 0 6px; }
+  .side .txt { font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .side .txt.report { border-left: 3px solid var(--accent); padding-left: 10px; }
+  .side .txt a { color: var(--accent); }
+  .side .none { color: var(--muted); font-style: italic; font-size: 14px; }
+  .side .facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 14px; }
+  .side .facts dt { color: var(--muted); } .side .facts dd { margin: 0; }
+  .side pre.live { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 10px; max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -87,6 +112,8 @@
 
   <footer id="foot"></footer>
 </main>
+<div id="sideBack" class="side-back" hidden></div>
+<aside id="side" class="side" hidden aria-label="run details"></aside>
 
 <script>
 'use strict';
@@ -100,6 +127,8 @@ const signed = (v, fmt) => v === null || v === undefined ? '' : `<span class="de
 const centralDay = d => new Intl.DateTimeFormat('en-CA', {timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit'}).format(d);
 
 let OPEN = null;        // which agent drawer is open, survives re-renders
+let OPEN_RUN = null;    // run_id shown in the side panel (fk#748), survives re-renders
+let LIVE_TIMER = null;
 let STATE = { number: null, plan: null, asks: [], members: [], runs: [], gh: {}, kpi: {}, spend: null, build: null, fleet: null };
 
 async function getJSON(path) {
@@ -213,7 +242,7 @@ function renderAgents() {
       ${last && last.outcome ? `<div class="outcome">${esc(String(last.outcome).slice(0, 140))}</div>` : ''}
       ${open ? `<div class="drawer">
           <div class="role">${esc((m.spec.mandate || {}).target || '')}</div>
-          ${runs.map(r => `<div class="run"><span class="dot ${dotClass(r, true)}" style="display:inline-block;vertical-align:middle;margin-right:6px"></span>${esc(ago(r.ts))} · ${esc(r.status || '')}${r.pr ? ` · <a href="${esc(String(r.pr).startsWith('http') ? r.pr : '#')}" target="_blank">PR</a>` : ''}<br><span class="sub">${esc(String(r.outcome || '').slice(0, 200))}</span></div>`).join('') || '<div class="sub">no runs yet</div>'}
+          ${runs.map(r => `<div class="run" data-run="${esc(r.run_id || '')}"><span class="dot ${dotClass(r, true)}" style="display:inline-block;vertical-align:middle;margin-right:6px"></span>${esc(ago(r.ts))} · ${esc(r.status || '')}${r.pr ? ` · <a href="${esc(String(r.pr).startsWith('http') ? r.pr : '#')}" target="_blank">PR</a>` : ''}<br><span class="sub">${esc(String(r.outcome || '').slice(0, 200))}</span></div>`).join('') || '<div class="sub">no runs yet</div>'}
           <div class="btns">
             <button class="primary" data-act="rerun" data-member="${esc(name)}">Rerun now</button>
             <button class="${enabled ? 'danger' : ''}" data-act="toggle" data-member="${esc(name)}" data-on="${enabled}">${enabled ? 'Pause' : 'Resume'}</button>
@@ -244,9 +273,82 @@ function renderFoot() {
     <a href="/classic">Classic console</a> · <a href="/classic#settings">Settings and sign in</a> · <a href="/status">Status</a> · updated ${esc(new Date().toLocaleTimeString('en-US', {timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit'}))} CT`;
 }
 
+// ---- fk#748: the run panel. Click a run, everything about that one run slides in from the right.
+function repoBase() {
+  const pr = (STATE.gh.merged || []).find(p => p.url);
+  return pr ? String(pr.url).replace(/\/pull\/\d+.*$/, '') : null;
+}
+function linkify(text) {
+  const base = repoBase(), h = esc(text);
+  return base ? h.replace(/(^|[^\w/&])#(\d{2,6})\b/g, (m, pre, n) => `${pre}<a href="${base}/issues/${n}" target="_blank">#${n}</a>`) : h;
+}
+function statusClass(rec) {
+  const st = rec && rec.status;
+  if (!st || st === 'started') return '';
+  if (st === 'ok') return 'ok';
+  if (st === 'quiet' || st === 'budget_declined' || st === 'reported_nothing') return 'warn';
+  return 'bad';
+}
+function findRun(id) {
+  const all = STATE.runs.filter(r => r.run_id === id);
+  return all.find(r => r.status !== 'started') || all[0] || null;
+}
+function section(title, text, cls) {
+  return `<h2>${esc(title)}</h2>${text ? `<div class="txt ${cls || ''}">${linkify(text)}</div>` : `<div class="none">none</div>`}`;
+}
+function renderRun() {
+  const side = $('side'), back = $('sideBack');
+  const rec = OPEN_RUN && findRun(OPEN_RUN);
+  if (!rec) { side.hidden = true; back.hidden = true; side.classList.remove('in'); if (LIVE_TIMER) { clearInterval(LIVE_TIMER); LIVE_TIMER = null; } return; }
+  const m = STATE.members.find(x => x.spec.name === rec.member);
+  const t = rec.tokens || {};
+  const dur = t.duration_ms ? `${Math.round(t.duration_ms / 60000)} min` : (rec.status === 'started' ? 'running' : '--');
+  const live = rec.status === 'started';
+  const base = repoBase();
+  const links = [rec.pr && base ? `<a href="${base}/pull/${esc(rec.pr)}" target="_blank">PR #${esc(rec.pr)}</a>` : '',
+                 rec.item_id && base ? `<a href="${base}/issues/${esc(rec.item_id)}" target="_blank">issue #${esc(rec.item_id)}</a>` : ''].filter(Boolean).join(' · ');
+  side.innerHTML = `
+    <div class="top"><span class="name">${esc((m && m.spec.emoji) || '')} ${esc(rec.member)}</span>
+      <button class="close" data-act="closeRun" aria-label="close">×</button></div>
+    <div class="when">${esc(ago(rec.ts))} · ${esc(new Date(rec.ts * 1000).toLocaleString('en-US', {timeZone: 'America/Chicago', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'}))} CT
+      · <span class="badge ${statusClass(rec)}">${esc(live ? 'running' : rec.status || '')}</span></div>
+    <dl class="facts">
+      <dt>Took</dt><dd>${esc(dur)}</dd>
+      <dt>Cost</dt><dd>${t.cost_usd !== undefined ? esc(money(t.cost_usd)) : '--'}${t.num_turns ? ` · ${esc(t.num_turns)} turns` : ''}</dd>
+      ${links ? `<dt>Links</dt><dd>${links}</dd>` : ''}
+      <dt>Run</dt><dd style="overflow-wrap:anywhere;color:var(--muted);font-size:12px">${esc(rec.run_id || '')}</dd>
+    </dl>
+    ${live ? `<h2>Report</h2><div class="none">still running; the outcome and report land here when the pass ends</div>
+    <h2>Live transcript</h2><pre class="live" id="liveLog">loading…</pre>` : `
+    ${section('Outcome', rec.outcome)}
+    ${section('Evidence', rec.evidence)}
+    ${rec.report ? section('Report', rec.report, 'report') : `<h2>Report</h2><div class="none">no written report for this run</div>`}
+    ${section('Self-critique', rec.self_critique)}`}`;
+  side.hidden = false; back.hidden = false;
+  requestAnimationFrame(() => side.classList.add('in'));
+  if (LIVE_TIMER) { clearInterval(LIVE_TIMER); LIVE_TIMER = null; }
+  if (live) { loadLive(rec); LIVE_TIMER = setInterval(() => loadLive(rec), 10000); }
+}
+async function loadLive(rec) {
+  try {
+    const d = await getJSON(`/api/pass_log?member=${encodeURIComponent(rec.member)}&n=0`);
+    const el = $('liveLog'); if (!el) return;
+    const lines = (d.lines || []).slice(-60).map(l => typeof l === 'string' ? l : (l.text || JSON.stringify(l)));
+    el.textContent = lines.length ? lines.join('\n') : 'no transcript yet';
+    el.scrollTop = el.scrollHeight;
+  } catch (ex) { const el = $('liveLog'); if (el) el.textContent = ex.message; }
+}
+function openRun(id) { OPEN_RUN = id; renderRun(); }
+function closeRun() { OPEN_RUN = null; renderRun(); }
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && OPEN_RUN) closeRun(); });
+$('sideBack').addEventListener('click', closeRun);
+
 document.addEventListener('click', async e => {
   const row = e.target.closest('.row[data-agent]');
   if (row) { OPEN = OPEN === row.dataset.agent ? null : row.dataset.agent; renderAgents(); return; }
+  const runEl = e.target.closest('.run[data-run]');
+  if (runEl && runEl.dataset.run) { openRun(runEl.dataset.run); return; }
+  if (e.target.closest('[data-act="closeRun"]')) { closeRun(); return; }
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
   const box = btn.closest('.drawer, .ask');

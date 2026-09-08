@@ -167,8 +167,9 @@ pick_pr() {
   return 1
 }
 
-report_run() { # <pr> <head_sha> <usage_file> <outcome-line> <evidence-line> <self-critique-line>
-  printf 'Outcome: %s\nEvidence: %s\nSelf-critique: %s\n' "$4" "$5" "${6:-none}" | python3 "$KIT_DIR/scripts/run_report.py" \
+report_run() { # <pr> <head_sha> <usage_file> <outcome-line> <evidence-line> <self-critique-line> [report-text]
+  # fk#748: the review the model wrote IS this run's report -- the console's run panel shows it.
+  printf 'Outcome: %s\nEvidence: %s\nSelf-critique: %s\nReport:\n%s\n' "$4" "$5" "${6:-none}" "${7:-no review text captured}" | python3 "$KIT_DIR/scripts/run_report.py" \
     --member "judge-judy" --run-id "review-${1}-${2:0:12}" --kind llm --exit-code 0 \
     --pass-file - --usage-file "$3" --pr "$1" >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
 }
@@ -480,7 +481,7 @@ This reflects a parse/format issue in the reviewer's own output, not a finding a
       || log "PR #$PR: WARN approved but status POST failed"
     # fleet-kit#523: the queue merges whatever is armed, so the verdict moves the arm.
     if timeout 25s gh pr merge "$PR" --auto >/dev/null 2>&1; then log "PR #$PR: auto-merge armed"; else log "PR #$PR: WARN could not arm auto-merge"; fi
-    report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "approved PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: success" "$SELF_CRITIQUE"
+    report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "approved PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: success" "$SELF_CRITIQUE" "$(sed '/^VERDICT: /d' "$OUT_FILE" 2>/dev/null | tail -c 8000)"
   else
     # Findings comment first, status second: a failure status pointing at nothing is worse
     # than no status at all.
@@ -519,7 +520,7 @@ $PR_VISION_LINK"
       && log "PR #$PR: filed fix item for blocked review" \
       || log "PR #$PR: WARN failed to file fix item for blocked review"
 
-    report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "blocked PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: failure, see PR comment" "$SELF_CRITIQUE"
+    report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "blocked PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: failure, see PR comment" "$SELF_CRITIQUE" "$FINDINGS"
   fi
 
   cleanup_pass

@@ -288,6 +288,12 @@ def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
                  lane: str | None = None, trailing_loss: bool = False) -> dict:
     """One run = one record. `usage` is pass_accounting's parsed JSON, or None (mechanical)."""
     report = parse_report(pass_text)
+    if not report.get("report") and kind != "llm" and (pass_text or "").strip():
+        # fk#748, Reif: "should publish its report each run and let me see it." A shell
+        # member has no prose Report: block; what it printed IS its report. Tail, capped
+        # like the prose path, so the console's run panel is never blank for roomba/librarian.
+        tail = (pass_text or "").strip()[-8000:]
+        report["report"] = "(script output)\n" + tail
     status = classify(report, vision_required=vision_required, exit_code=exit_code,
                       trailing_loss=trailing_loss)
     rec = {
