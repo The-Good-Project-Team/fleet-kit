@@ -64,3 +64,34 @@ The CEO pass (or your CI workflow directly) is the natural caller: after a merge
 driver configured (`FLEET_DEPLOY_DRIVER` unset) means the fleet builds/reviews/merges but
 never deploys — a perfectly valid mode for a library or a repo with its own separate release
 process.
+
+## Optional: `rollback` + `status` (for incident response)
+
+`the-fixer`'s automatic PROD DOWN response (gh#728, `scripts/fixer_fire_path.py`) needs a
+narrower ask than the full `deploy` cycle above: go BACK to whatever was serving before, and
+prove it actually moved. A driver used for this only needs to also implement:
+
+### `rollback`
+Takes the system back one step (however your driver defines "back" — the previous blue/green
+slot, a platform's own rollback API, whatever is cheapest to reach unattended). Same
+idempotent/fails-loud properties as `deploy`.
+
+```
+deploy_driver.sh rollback
+# -> exit 0 on success; nonzero on failure. Callers NEVER trust this exit code alone --
+#    they read current_sha before and after and only call it verified if the two differ
+#    (a driver that no-ops while exiting 0 must still read as failed to the caller).
+```
+
+### `status`
+An even narrower probe than `health`: "is the driver itself reachable at all" (the deploy
+credential still works, the host answers), independent of whether the served code is healthy.
+Useful when `health` needs application-level knowledge a pure infra driver doesn't have.
+
+```
+deploy_driver.sh status
+# -> exit 0 if the driver can reach its target at all; nonzero + a one-line reason otherwise.
+```
+
+See `scripts/drivers/philanthropy_deploy.sh` for a reference implementation of all three
+against an SSH forced-command key that accepts only a fixed set of named verbs (no shell).
