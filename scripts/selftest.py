@@ -5717,6 +5717,91 @@ def _nerd_invalid_lane_rejected_before_lane_work():
         "a valid canonical lane was rejected -- AC4 behavior change"
 
 
+def _nerd_lane_validation_reads_target_own_registry():
+    """gh#638: `run_member.sh`'s nerd lane-validation hardcoded fleet-kit's own seven lane
+    names as THE canonical list for every `FLEET_REPO` target, not just fleet-kit's. When
+    `FLEET_REPO` pointed at philanthropy, its own `src/philanthropy/ops/lane_kpis.py`
+    `REGISTRY` legitimately defines three more real lanes (`claim`, `audience`,
+    `coordination`) -- every dispatch to one of them was rejected before any lane-specific
+    work ran, undispatchable for 32+ hours (5+ rejections in fleet.db, 2026-09-06/07).
+
+    The fix reads the CURRENT target's own registry file at dispatch time (via
+    `lane_registry_lanes.py`'s AST parse -- never an `import`, to avoid running a product
+    repo's code inside this shared script) and falls back to the fixed fleet-kit list when no
+    such file exists. Both directions must hold, plus the "not just allow-listing everything"
+    proof AC3 asks for:
+
+    1. fleet-kit target (no registry file) still rejects a philanthropy-only lane name
+       (gh#374's original invariant, unchanged).
+    2. a fabricated per-target-registry checkout accepts its OWN registry's lanes...
+    3. ...but still rejects a name that is in neither list, proving this reads a real
+       registry rather than allow-listing.
+    """
+    import os
+    import subprocess
+
+    tmp = tempfile.mkdtemp()
+
+    fk_log_dir = Path(tmp) / "fk_logs"
+    fk_log_dir.mkdir(parents=True, exist_ok=True)
+    fk_env = dict(os.environ)
+    fk_env.update({
+        "FLEET_REPO": str(ROOT),
+        "FLEET_LOG_DIR": str(fk_log_dir),
+        "FLEET_ENV_FILE": str(Path(tmp) / "nonexistent.env"),
+    })
+    proc_fk = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "run_member.sh"), "nerd",
+         "--dry-run", "--task", "lane=claim — philanthropy-only lane"],
+        capture_output=True, text=True, timeout=30, env=fk_env,
+    )
+    assert proc_fk.returncode == 0, f"rc={proc_fk.returncode} stderr={proc_fk.stderr}"
+    assert "REJECTED" in proc_fk.stdout, (
+        "gh#638/gh#374: fleet-kit target (no registry file) must still reject a "
+        f"philanthropy-only lane name -- got: {proc_fk.stdout!r}"
+    )
+
+    fake_target = Path(tmp) / "fake_philanthropy"
+    ops_dir = fake_target / "src" / "philanthropy" / "ops"
+    ops_dir.mkdir(parents=True, exist_ok=True)
+    (ops_dir / "lane_kpis.py").write_text(
+        "REGISTRY = {\n"
+        '    "growth": {}, "searchquality": {}, "ui": {}, "devops": {}, "revenue": {},\n'
+        '    "claim": {}, "audience": {}, "coordination": {},\n'
+        "}\n"
+    )
+    ph_log_dir = Path(tmp) / "ph_logs"
+    ph_log_dir.mkdir(parents=True, exist_ok=True)
+    ph_env = dict(os.environ)
+    ph_env.update({
+        "FLEET_REPO": str(fake_target),
+        "FLEET_LOG_DIR": str(ph_log_dir),
+        "FLEET_ENV_FILE": str(Path(tmp) / "nonexistent.env"),
+    })
+    proc_ph_claim = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "run_member.sh"), "nerd",
+         "--dry-run", "--task", "lane=claim — real philanthropy lane"],
+        capture_output=True, text=True, timeout=30, env=ph_env,
+    )
+    assert proc_ph_claim.returncode == 0, f"rc={proc_ph_claim.returncode} stderr={proc_ph_claim.stderr}"
+    assert "REJECTED" not in proc_ph_claim.stdout, (
+        "gh#638 AC1: philanthropy target must accept its own registry's 'claim' lane -- "
+        f"got: {proc_ph_claim.stdout!r}"
+    )
+
+    proc_ph_nonsense = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "run_member.sh"), "nerd",
+         "--dry-run", "--task", "lane=nonsense — not in any registry"],
+        capture_output=True, text=True, timeout=30, env=ph_env,
+    )
+    assert proc_ph_nonsense.returncode == 0, f"rc={proc_ph_nonsense.returncode} stderr={proc_ph_nonsense.stderr}"
+    assert "REJECTED" in proc_ph_nonsense.stdout, (
+        "gh#638 AC3: a fabricated lane must still reject even on a target with its own "
+        f"registry -- proves this reads a real registry, not an allow-everything fix. "
+        f"got: {proc_ph_nonsense.stdout!r}"
+    )
+
+
 def _every_pass_files_a_written_report():
     """A pass costs real money; it owes a memo, not three one-line fields.
 
@@ -9399,6 +9484,7 @@ if __name__ == "__main__":
     check("datta dispatches by coverage, nerds analyse one lane", _datta_dispatches_and_nerds_analyse)
     check("datta's structural-N/A streak has a reset path independent of ranking (gh#447)", _datta_structural_na_streak_has_a_reset_path)
     check("nerd rejects an invalid lane before any lane-specific work (gh#374)", _nerd_invalid_lane_rejected_before_lane_work)
+    check("nerd lane validation reads the current target's own lane registry (gh#638)", _nerd_lane_validation_reads_target_own_registry)
     check("nerd's STRUCTURAL-N/A marker wires to datta's down-rank rule (gh#451)", _nerd_structural_na_marker_wires_to_datta_downrank)
     check("datta's gh#392 hold never suppresses a STALE or BREACHED verdict (gh#497)", _datta_gh392_hold_never_suppresses_stale_or_breached)
     check("a run records the item it worked", _a_run_records_the_item_it_worked)

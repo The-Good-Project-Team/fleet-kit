@@ -96,18 +96,48 @@ LOG="$LOG_DIR/${MEMBER}.log"
 ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
 
-# gh#374: a `lane=<name>` dispatch to nerd whose name is not one of the seven real lanes
-# (nerd.md's own table / scripts/selftest.py's `_datta_dispatches_and_nerds_analyse`) burns a
-# full pass discovering only that it should never have run -- no matching checklist, no
-# expected credentials, no code surface. Reject BEFORE the worktree is built, BEFORE
-# `claude -p` is ever invoked, and record a real, non-`reported_nothing` Outcome naming the
-# rejected lane -- not a full pass's worth of tokens spent to conclude the same thing.
-NERD_CANONICAL_LANES="growth searchquality ui datadog devops lens revenue"
+# gh#374: a `lane=<name>` dispatch to nerd whose name is not one of the current target's real
+# lanes burns a full pass discovering only that it should never have run -- no matching
+# checklist, no expected credentials, no code surface. Reject BEFORE the worktree is built,
+# BEFORE `claude -p` is ever invoked, and record a real, non-`reported_nothing` Outcome naming
+# the rejected lane -- not a full pass's worth of tokens spent to conclude the same thing.
+#
+# fleet-kit's own seven lanes (growth/searchquality/ui/datadog/devops/lens/revenue) are fixed
+# here deliberately (gh#374/PR#473) -- nerd.md and selftest.py's
+# `_datta_dispatches_and_nerds_analyse` both key off this exact list for the fleet-kit target,
+# and neither changes here (gh#638's own non-goals).
+#
+# gh#638: that fixed list is fleet-kit-shaped, not universal. When $REPO is checked out to a
+# DIFFERENT target (e.g. philanthropy), that target can define its own real lanes with its own
+# KPI signals -- philanthropy's `src/philanthropy/ops/lane_kpis.py` REGISTRY names `claim`,
+# `audience`, `coordination` in addition to the five lane names the two targets share. Reading
+# that file with `import` would run a product repo's own code inside this shared script's
+# process (its own dependencies, its own side effects) for a single-purpose name lookup -- the
+# "fragile coupling" gh#638 explicitly warned against -- so this parses the REGISTRY dict's key
+# literals with `ast`, never executes the file. No registry file found (fleet-kit itself, or
+# any other target that hasn't adopted this convention) falls back to the fixed fleet-kit list
+# unchanged, so gh#374's original invariant holds exactly as before everywhere this file does
+# not exist.
+NERD_FLEETKIT_LANES="growth searchquality ui datadog devops lens revenue"
+NERD_CANONICAL_LANES="$NERD_FLEETKIT_LANES"
+NERD_LANE_REGISTRY_FILE=""
+if [ "$MEMBER" = "nerd" ] && [ -n "$LANE" ] && [ -n "${REPO:-}" ]; then
+  NERD_LANE_REGISTRY_FILE=$(find "$REPO/src" -maxdepth 3 -path '*/ops/lane_kpis.py' 2>/dev/null | head -1)
+  if [ -n "$NERD_LANE_REGISTRY_FILE" ]; then
+    REGISTRY_LANES=$(python3 "$KIT_DIR/scripts/lane_registry_lanes.py" "$NERD_LANE_REGISTRY_FILE" 2>>"$LOG")
+    if [ -n "$REGISTRY_LANES" ]; then
+      NERD_CANONICAL_LANES="$REGISTRY_LANES"
+      log "nerd lane validation: read canonical lanes from $NERD_LANE_REGISTRY_FILE ($NERD_CANONICAL_LANES)"
+    else
+      log "nerd lane validation: $NERD_LANE_REGISTRY_FILE found but yielded no REGISTRY lanes -- falling back to fleet-kit list ($NERD_FLEETKIT_LANES)"
+    fi
+  fi
+fi
 if [ "$MEMBER" = "nerd" ] && [ -n "$LANE" ]; then
   case " $NERD_CANONICAL_LANES " in
     *" $LANE "*) ;;  # valid lane -- fall through, no behavior change
     *)
-      log "REJECTED: nerd dispatched with lane='$LANE', not in the canonical seven ($NERD_CANONICAL_LANES) -- exiting before any lane-specific work"
+      log "REJECTED: nerd dispatched with lane='$LANE', not in the canonical list ($NERD_CANONICAL_LANES) -- exiting before any lane-specific work"
       if [ "$DRY_RUN" -eq 1 ]; then
         echo "[dry-run] REJECTED: lane '$LANE' not in canonical list ($NERD_CANONICAL_LANES) -- would exit without running"
         exit 0
