@@ -158,6 +158,47 @@ class TwoTickPagingTest(unittest.TestCase):
             alert_store.DEGRADED_MIN_SEC = orig
 
 
+class ResolveOnRecoveryTest(unittest.TestCase):
+    """Regression test: alert_store.record() has no re-paging cadence of its own for a
+    condition that stays open under the same (check, problem) key -- once paged, it returns
+    'already paged for this condition' forever unless something calls resolve()/
+    resolve_check(). main() now does that every tick via `keep`; this proves the mechanism
+    actually un-sticks the debounce rather than merely compiling."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = str(Path(self.tmp.name) / "alerts.json")
+
+    def test_condition_pages_again_after_resolve_and_recurrence(self):
+        problem = "http_probe:home"
+        first = alert_store.record(phc.CHECK, problem, "degraded", state_file=self.state)
+        self.assertFalse(first["page"])
+
+        orig = alert_store.DEGRADED_MIN_SEC
+        alert_store.DEGRADED_MIN_SEC = 0
+        try:
+            second = alert_store.record(phc.CHECK, problem, "degraded", state_file=self.state)
+            self.assertTrue(second["page"])
+
+            # Site recovers: the check declares nothing open this tick (`keep=set()`), same
+            # as main() does when evaluate() returns no alerts.
+            resolved = alert_store.resolve_check(phc.CHECK, keep=set(), state_file=self.state)
+            self.assertTrue(any(r["was_paged"] for r in resolved))
+
+            # A recurrence after resolve() is a FRESH occurrence (own first_seen), so with
+            # DEGRADED_MIN_SEC still forced to 0 it pages immediately again -- the opposite of
+            # "already paged for this condition", which is what record() would say without
+            # the resolve_check() call above.
+            third = alert_store.record(phc.CHECK, problem, "degraded", state_file=self.state)
+            self.assertTrue(
+                third["page"],
+                f"never paged again after recovery + recurrence: {third['reason']}")
+            self.assertNotIn("already paged", third["reason"])
+        finally:
+            alert_store.DEGRADED_MIN_SEC = orig
+
+
 class SlowProbeBudgetTest(unittest.TestCase):
     """gh#727 AC3: a 200 that exceeds the 8s budget is its own failure, distinguishable
     from a non-200 status in the reason string."""
@@ -250,14 +291,30 @@ class IncidentFilingTest(unittest.TestCase):
         probes = [fail("home", "http 500"), ok("search"), ok("report")]
         alerts = phc.evaluate(probes, FRESH_HEARTBEAT)
         filed = phc.file_or_update_incident(probes, alerts, runner=gh)
-        rec = phc.report_recovery(runner=gh)
-        self.assertEqual(rec["issue"], filed["issue"])
+        recs = phc.report_recovery(runner=gh)
+        self.assertEqual([r["issue"] for r in recs], [filed["issue"]])
         self.assertTrue(gh.issues[filed["issue"]]["open"])
         self.assertIn("Recovered", gh.issues[filed["issue"]]["comments"][-1])
 
+    def test_recovery_comments_on_every_open_incident_not_just_the_first(self):
+        gh = FakeGh()
+        home_probes = [fail("home", "http 500"), ok("search"), ok("report")]
+        home_alerts = phc.evaluate(home_probes, FRESH_HEARTBEAT)
+        first = phc.file_or_update_incident(home_probes, home_alerts, runner=gh)
+
+        all_ok_probes = [ok("home"), ok("search"), ok("report")]
+        heartbeat_alerts = phc.evaluate(all_ok_probes, STALE_HEARTBEAT)
+        second = phc.file_or_update_incident(all_ok_probes, heartbeat_alerts, runner=gh)
+        self.assertNotEqual(first["issue"], second["issue"])
+
+        recs = phc.report_recovery(runner=gh)
+        self.assertEqual({r["issue"] for r in recs}, {first["issue"], second["issue"]})
+        for n in (first["issue"], second["issue"]):
+            self.assertIn("Recovered", gh.issues[n]["comments"][-1])
+
     def test_recovery_with_no_open_incident_is_a_noop(self):
         gh = FakeGh()
-        self.assertIsNone(phc.report_recovery(runner=gh))
+        self.assertEqual(phc.report_recovery(runner=gh), [])
 
 
 class PageGatesIncidentFilingTest(unittest.TestCase):
