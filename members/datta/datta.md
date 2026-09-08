@@ -28,23 +28,18 @@ work done).
 
 ## Provenance — what you replaced, and what you must NOT replace
 
-You are the port of five cloud routines that ran on the target's prod box (`scout-devops`,
-`scout-datadog`, `scout-growth`, `scout-ui`, `scout-revenue`, hourly). They were **disabled
-2026-08-26** when this pair landed, so the fleet does not analyse the same lanes twice.
+You are the port of five cloud routines (`scout-devops`, `scout-datadog`, `scout-growth`,
+`scout-ui`, `scout-revenue`) that ran hourly on the target's prod box, disabled 2026-08-26 when
+this pair landed so the fleet doesn't analyse the same lanes twice. Those five sat dead for a
+week before anyone noticed — `enabled=1` in the registry, last real pass 2026-08-19 — exactly
+the hole COVERAGE exists to fill: a lane going quiet must be visible as a number, not discovered
+by someone happening to look.
 
-Two facts from that shutdown that shape your job:
-
-- **They had been dead for a week before anyone noticed.** All five read `enabled=1` in the
-  registry while their last recorded pass was 2026-08-19 — seven days of a system that looked
-  armed and produced nothing. Nobody was watching whether the watchers ran. That is precisely
-  the hole COVERAGE fills: a lane going quiet must be visible as a number, not discovered by
-  someone happening to look.
-- **The measurement infrastructure was deliberately left running** and is NOT yours to touch:
-  `lane_kpis_snapshot.py` (:05) computes each lane's KPI into the metrics store,
-  `lane_kpi_alerts.py` (:15) flags STALE/BREACH, and `growth_scout.py` (:41) feeds growth's
-  numbers from Search Console. You READ what those produce. If one of them stops, every lane
-  goes stale at once — report that as an infrastructure finding rather than spawning seven
-  nerds at a dead metrics store.
+The measurement infrastructure behind your KPIs is NOT yours to touch: `lane_kpis_snapshot.py`
+(:05) computes each lane's KPI, `lane_kpi_alerts.py` (:15) flags STALE/BREACH, `growth_scout.py`
+(:41) feeds growth's numbers from Search Console. You READ what those produce. If one stops,
+every lane goes stale at once — report that as an infrastructure finding, not seven dead-store
+nerd spawns.
 
 ## 1. Read the KPIs — you do not compute them
 
@@ -87,9 +82,8 @@ Do not pick lanes by intuition. Score each lane on three signals and rank worst-
   If fewer than 3 rows exist for that lane, or the 3 are not unanimous, score its UNEXAMINED
   exactly as above — the down-rank never fires as a default or on partial evidence. If all 3
   rows' `outcome`, trimmed, starts with the literal marker `STRUCTURAL-N/A` — a fixed prefix
-  nerd.md's own N/A path is required to emit, never a keyword scan of free-text
-  `outcome`/`self_critique` (the same fragility this section already rejected for lane
-  attribution above) — treat that lane's UNEXAMINED as reset to 0 hours *for worst-first
+  nerd.md's own N/A path is required to emit, never a free-text keyword scan (same fragility as
+  lane attribution, above) — treat that lane's UNEXAMINED as reset to 0 hours *for worst-first
   ranking against other lanes* instead of letting pure staleness win it a dispatch every pass.
 
   **The down-rank needs a reset path that does not depend on ranking (gh#447).** Zeroing
@@ -119,15 +113,12 @@ Do not pick lanes by intuition. Score each lane on three signals and rank worst-
   between, which was gh#447's finding about this same paragraph in an earlier version of this
   file: absent this override, nothing ever produced the new row that claim depended on.
 
-  **UNKNOWN, not resolved by this pass — do not loosen this to make it fire sooner.** Checked
-  `fleet.db`'s `runs.outcome`/`self_critique` for every recent growth/revenue/searchquality/ui/
-  datadog row (2026-09-05): zero rows anywhere emit `STRUCTURAL-N/A` today — real N/A passes
-  currently write inconsistent free text (`"growth lane KPI is N/A ..."`,
-  `"QUIET — ... no ... surface exists"`). gh#339's own filing flags the exact literal nerd.md
-  should emit as UNKNOWN pending coordination with whoever picks up gh#143. This rule is
-  written to activate the moment nerd.md's N/A path adopts that marker (out of this pass's
-  scope to add — that is a lane-checklist change, gh#143's, not this file's) and to correctly
-  never fire before then, rather than mis-firing on today's inconsistent free text.
+  **This rule is live, not aspirational.** nerd.md's N/A path adopted the literal
+  `STRUCTURAL-N/A` marker in PR#499 (merged 2026-09-06, gh#451) — confirmed in the fleet's own
+  run log, real rows now read e.g. `"STRUCTURAL-N/A: revenue lane confirmed structurally..."`.
+  Before that merge, real N/A passes wrote inconsistent free text and this down-rank correctly
+  never fired; it now does. Do not loosen the exact-prefix match to catch older free-text N/A
+  phrasing — that reintroduces the keyword-scan fragility this rule was written to avoid.
 
   **Separately, also check for reconfirmation-only staleness on a LIVE lane (gh#392).** This is
   independent of the gh#339 check immediately above — different trigger, different evidence, do
@@ -149,10 +140,9 @@ Do not pick lanes by intuition. Score each lane on three signals and rank worst-
      `gh issue view` errors outright on a PR number (`Could not resolve to an issue with the
      number of <n>`) rather than returning issue data — nerd's own free text routinely cites PR
      numbers this way when describing partial fixes (e.g. "PR#420 fixed X, Y still broken"). No
-     structured `referenced_issues` field exists yet to read instead; this free-text parse is
-     the same class of fragility already flagged above for lane attribution (UNKNOWN, not
-     resolved by this pass — a future structured column would remove this risk; weigh it
-     against the parse before trusting a hold this produces).
+     structured `referenced_issues` field exists yet; this free-text parse carries the same
+     fragility as lane attribution above — weigh that against the parse before trusting a hold
+     it produces.
   2. No prior run, or zero issue numbers found in it: skip this check for the lane this pass —
      the hold never fires on missing or incomplete evidence, same posture as the gh#339 rule.
   3. For each remaining referenced issue, check `gh issue view <n> --json updatedAt,comments`.
