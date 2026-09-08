@@ -102,6 +102,16 @@ def roll_back_and_verify(driver: str, run=_run) -> RollbackResult:
 
 
 # --- post-promote breach detection (AC4) -------------------------------------------------------
+#
+# should_fire_post_promote() is the GATE a post-promote sampling loop calls to decide WHETHER to
+# invoke run_fire_path() below -- it is deliberately not called from run_fire_path() itself,
+# which only ever runs the diagnose/rollback/incident sequence once already triggered. No such
+# sampling loop exists in this repo yet: it would have to poll real 5xx/p95 numbers off
+# philanthropy.org's own atlas-serve infrastructure after a live promote, which is exactly the
+# operator/host-access work gh#728's own PRD scopes out of a builder pass (see the issue's "Out
+# of scope" section). Until that loop is wired up (a follow-up, not part of this PR), this
+# function is unreachable in production -- tested here in isolation so its logic is proven
+# correct before anything calls it live.
 
 def _breaches(sample: dict, error_pct_threshold: float, p95_threshold_s: float) -> bool:
     return sample.get("error_pct", 0) > error_pct_threshold or sample.get("p95_s", 0) > p95_threshold_s
@@ -128,8 +138,15 @@ def build_incident_search_cmd() -> list[str]:
     # No --repo flag: same convention board_github.py already uses -- the caller `cd`s into the
     # product repo (FLEET_REPO) first, and `gh` infers the repo from the working directory's
     # git remote, so this works unmodified for whatever repo an instance is pointed at.
+    #
+    # Deliberately NOT `--search INCIDENT_MARKER`: gh's --search hits GitHub's tokenized
+    # full-text index, not an exact substring match -- it can silently drop or mangle punctuation
+    # like the marker's `<!--`/`-->`/hyphens, which would make find_open_incident() below miss an
+    # already-open incident and file a duplicate (the exact failure AC7 exists to prevent).
+    # Filtering by label only and matching the marker CLIENT-SIDE against the real body text
+    # (see find_open_incident) is slower per call but exact.
     return ["gh", "issue", "list", "--state", "open", "--label", INCIDENT_LABEL,
-            "--search", INCIDENT_MARKER, "--json", "number", "--limit", "5"]
+            "--json", "number,body", "--limit", "20"]
 
 
 def build_incident_create_cmd(title: str, body: str) -> list[str]:
@@ -149,12 +166,16 @@ def find_open_incident(run=_run) -> int | None:
         found = json.loads(out)
     except json.JSONDecodeError:
         return None
-    return found[0]["number"] if found else None
+    for issue in found:
+        if INCIDENT_MARKER in (issue.get("body") or ""):
+            return issue["number"]
+    return None
 
 
 def file_or_update_incident(title: str, body: str, run=_run) -> tuple[int | None, bool]:
     """Returns (issue_number, created). A repeat firing updates the SAME open incident rather
-    than filing a second one (AC7) -- searched by INCIDENT_MARKER."""
+    than filing a second one (AC7) -- matched by INCIDENT_MARKER against each open incident's
+    real body text, not GitHub's own (tokenized, inexact) issue search."""
     number = find_open_incident(run=run)
     if number is not None:
         run(build_incident_comment_cmd(number, body))

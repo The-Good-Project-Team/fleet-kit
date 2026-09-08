@@ -43,8 +43,7 @@ class DiagnoseBeforeRollbackOrderingTests(unittest.TestCase):
             ("diag-driver", "pg"): (0, "pg looks fine"),
             ("deploy-driver", "current_sha"): (0, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             ("deploy-driver", "rollback"): (0, ""),
-            ("gh", "issue", "list", "--state", "open", "--label", "incident",
-             "--search", ffp.INCIDENT_MARKER, "--json", "number", "--limit", "5"): (0, "[]"),
+            tuple(ffp.build_incident_search_cmd()): (0, "[]"),
         }
         base_run = _fake_run(script, calls)
 
@@ -78,8 +77,7 @@ class DiagnoseBeforeRollbackOrderingTests(unittest.TestCase):
             script = {
                 ("deploy-driver", "current_sha"): (0, sha),
                 ("deploy-driver", "rollback"): (0, ""),
-                ("gh", "issue", "list", "--state", "open", "--label", "incident",
-                 "--search", ffp.INCIDENT_MARKER, "--json", "number", "--limit", "5"): (0, "[]"),
+                tuple(ffp.build_incident_search_cmd()): (0, "[]"),
             }
             stubbed = _fake_run(script, calls)
             # gh issue create's cmd includes the body text, which is only known at call time --
@@ -236,7 +234,7 @@ class IncidentDedupTests(unittest.TestCase):
         def run(cmd, timeout=60):
             calls.append(tuple(cmd))
             if cmd[:3] == ["gh", "issue", "list"]:
-                return (0, json.dumps([{"number": 17}]))
+                return (0, json.dumps([{"number": 17, "body": f"old incident\n\n{ffp.INCIDENT_MARKER}"}]))
             if cmd[:3] == ["gh", "issue", "comment"]:
                 return (0, "")
             raise AssertionError(cmd)
@@ -247,10 +245,33 @@ class IncidentDedupTests(unittest.TestCase):
         self.assertFalse(any(c[:3] == ("gh", "issue", "create") for c in calls),
                           "a second incident was filed even though one was already open")
 
-    def test_incident_search_is_scoped_to_the_marker_so_unrelated_incidents_are_ignored(self):
+    def test_an_incident_label_without_the_marker_is_not_treated_as_this_fire_paths_own(self):
+        """A different member (or #742's prod_health_check.py) can file its own `incident`-
+        labeled issue with no marker at all -- this must file its OWN incident rather than
+        commenting on an unrelated one just because it shares the label."""
+        calls: list = []
+
+        def run(cmd, timeout=60):
+            calls.append(tuple(cmd))
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return (0, json.dumps([{"number": 5, "body": "prod down, filed by someone else"}]))
+            if cmd[:3] == ["gh", "issue", "create"]:
+                return (0, "https://github.com/acme/prod/issues/6")
+            raise AssertionError(cmd)
+
+        number, created = ffp.file_or_update_incident("title", "body", run=run)
+        self.assertEqual(number, 6)
+        self.assertTrue(created)
+
+    def test_search_command_relies_on_label_and_exact_client_side_body_match_not_gh_search(self):
+        """gh's own --search is a tokenized full-text index, not an exact substring match, and
+        can silently fail to find the marker (punctuation/hyphens get tokenized) -- the command
+        built here must not depend on it; matching happens client-side in find_open_incident()
+        against the real `body` field instead."""
         cmd = ffp.build_incident_search_cmd()
-        self.assertIn(ffp.INCIDENT_MARKER, cmd)
         self.assertIn(ffp.INCIDENT_LABEL, cmd)
+        self.assertNotIn("--search", cmd)
+        self.assertIn("body", cmd[cmd.index("--json") + 1])
 
 
 class IncidentLabelTests(unittest.TestCase):
