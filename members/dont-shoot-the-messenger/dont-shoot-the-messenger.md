@@ -48,20 +48,19 @@ asks).
 
 ## Step 2: write the brief -- the strategy first, then what moved it, then his one job
 
-Reif, 2026-09-07, on the first brief: *"we don't show the objective and the results"*, *"I
-couldn't understand the ask"*, *"show me the url where I can see it, make it concrete on what
-I need to do"*, and *"we could reiterate the entire strategy document and then show how it
-fits."* Every section below exists because of one of those lines.
+Reif, 2026-09-07, on the first brief: *"we don't show the objective and the results,"* *"I
+couldn't understand the ask,"* *"show me the url where I can see it,"* and *"we could
+reiterate the entire strategy document and then show how it fits."* Every section below
+answers one of those lines.
 
 Write markdown to `/tmp/brief.md`. First line is a `# ` title: the one thing that matters
 today in under 10 words (it becomes the email subject). Plain words, short sentences, numbers
 in tables, a link on every PR, issue and page you name. He knows the domain; do not explain
-the fleet to him. Never paste a token, key or email address.
-
-**Words you may not use without saying what they mean in the same sentence:** bet N, band,
-ladder, KR1/KR2/KR3, Vision-link, guardrail, channel, lane, fanout, allowance. Say "orgs that
-can pay $3k to $50k a year", not "band 3k-50k". Say "the key result for interactions", not
-"KR2". If a smart person outside software could not follow the sentence, rewrite it.
+the fleet to him. Never paste a token, key or email address. Words you may not use without
+saying what they mean in the same sentence: bet N, band, ladder, KR1/KR2/KR3, Vision-link,
+guardrail, channel, lane, fanout, allowance -- say "orgs that can pay $3k to $50k a year," not
+"band 3k-50k"; say "the key result for interactions," not "KR2." If a smart person outside
+software could not follow the sentence, rewrite it.
 
 **morning** (the PDF he wakes up to), in this order:
 
@@ -70,10 +69,10 @@ can pay $3k to $50k a year", not "band 3k-50k". Say "the key result for interact
   what it measures (plain), where it is now, the target, the next checkpoint date from
   `vision.checkpoints`, and the 7-day change. Then one sentence: did last night move any row.
 - `## What landed, and what it moved` -- merged PRs, each one line: what a person can now do,
-  **See it: <live URL>** (Reif, 2026-09-07: "I need to have the urls to actually see what you
-  mean"), the PR link, then an arrow to the row it moves (`-> the number`, `-> interactions`,
-  `-> sign-ups`, `-> time to first interaction`, or `-> keeps the fleet shipping`). The live
-  URL comes from the PR body's own `See it:` line (persona law §10d); if the body has none,
+  **See it: <live URL>**, the PR link, then an arrow to the row it moves (`-> the number`,
+  `-> interactions`, `-> sign-ups`, `-> time to first interaction`, or `-> keeps the fleet
+  shipping`). The live URL comes from the PR body's own `See it:` line (persona law §10d); if
+  the body has none,
   derive it from the files the PR touched (a template or route under `/990/...`, `/network/...`,
   `/superadmin/...` -- use `pages` and `app_url`) and say "See it:" with that URL; if the change
   is not something a person sees, write "(internal)" instead of a URL. Group by row, biggest
