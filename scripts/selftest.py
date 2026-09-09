@@ -10042,6 +10042,67 @@ def _control_plane_runs_last_hour_counts_starvation_and_last_brief_gh759():
         assert cp.runs_last_hour(logs / "missing", now)["last_brief"] is None
 
 
+def _control_plane_page_pauses_resumes_and_sets_weight_over_http_gh759():
+    """gh#759 AC4, as Reif does it: open the page, press pause on an instance, the instance's
+    fleet.env carries FLEET_ENABLED=false and its share flows to the others; press resume,
+    it comes back; set a weight, the registry carries it. Real stdlib server on a free port,
+    real form POSTs, no mocks."""
+    import threading
+    import urllib.request
+    import urllib.parse
+    import control_plane as cp
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        reg = {"human_reserve": 0.2, "instances": []}
+        for name, w in (("a", 3), ("b", 1)):
+            d = root / name
+            (d / "logs").mkdir(parents=True)
+            (d / "fleet.env").write_text("FLEET_ENABLED=true\nFLEET_SHARE_FRACTION=0.5\n")
+            reg["instances"].append({"name": name, "dir": str(d), "weight": w})
+        registry = root / "registry.json"
+        registry.write_text(json.dumps(reg))
+        cp.OUT_DIR = root / "out"
+        srv = cp.make_server(0, registry)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{port}"
+            page = urllib.request.urlopen(base + "/").read().decode()
+            assert "action='pause'" in page and "action='weight'" in page, page[:500]
+            assert "budget-declined" in page and "/fleet/a/" in page
+
+            def post(path, **fields):
+                data = urllib.parse.urlencode(fields).encode()
+                req = urllib.request.Request(base + path, data=data, method="POST")
+                opener = urllib.request.build_opener(_NoRedirect)
+                try:
+                    return opener.open(req).status
+                except urllib.error.HTTPError as e:
+                    return e.code
+
+            assert post("/pause", name="b") == 303
+            env_b = (root / "b" / "fleet.env").read_text()
+            assert "FLEET_ENABLED=false" in env_b and "FLEET_SHARE_FRACTION=0\n" in env_b, env_b
+            assert "FLEET_SHARE_FRACTION=0.8" in (root / "a" / "fleet.env").read_text()
+            page = urllib.request.urlopen(base + "/").read().decode()
+            assert "action='resume'" in page and "paused" in page
+            assert post("/resume", name="b") == 303
+            assert "FLEET_ENABLED=true" in (root / "b" / "fleet.env").read_text()
+            assert post("/weight", name="b", w="3") == 303
+            assert json.loads(registry.read_text())["instances"][1]["weight"] == 3.0
+            assert "FLEET_SHARE_FRACTION=0.4" in (root / "a" / "fleet.env").read_text()
+            assert post("/pause", name="nope") == 400
+            assert post("/weight", name="a", w="-1") == 400
+            assert post("/explode", name="a") == 400
+        finally:
+            srv.shutdown()
+
+
+class _NoRedirect(__import__("urllib.request").request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -10305,6 +10366,7 @@ if __name__ == "__main__":
     check("control_plane tick writes FLEET_SHARE_FRACTION in place, only when changed; index names every instance (gh#759 AC2/AC3)", _control_plane_tick_writes_share_in_place_only_when_changed_gh759)
     check("control_plane runs_last_hour counts budget_declined as starvation and finds the last brief (gh#759 AC3)", _control_plane_runs_last_hour_counts_starvation_and_last_brief_gh759)
 
+    check("control_plane page: pause/resume/weight buttons change fleet.env and the registry over HTTP (gh#759 AC4)", _control_plane_page_pauses_resumes_and_sets_weight_over_http_gh759)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:
