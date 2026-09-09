@@ -10210,6 +10210,21 @@ def _self_improve_score_reads_the_ledger_gh782():
     assert 'SELF_IMPROVE_DRY_RUN' in text
 
 
+def _dumbledore_charter_is_short_on_opus_and_ledger_first_gh783():
+    import member_spec
+    spec = member_spec.by_name("dumbledore", ROOT / "members")
+    assert spec["llm"]["model"] == "opus", spec["llm"]["model"]
+    charter = (ROOT / "members" / "dumbledore" / "dumbledore.md").read_text()
+    lines = charter.count("\n")
+    assert lines <= 140, f"dumbledore.md is {lines} lines; the cap is 140 (was 366)"
+    for needle in ("predict.py resolve", "predict.py add", "predict.py last --member dumbledore",
+                   "INTENT.md", "Never touch your own grader", "Last-verdict:", "Prediction:", "Intent:"):
+        assert needle in charter, needle
+    assert charter.find("predict.py resolve") < charter.find("Rot hunt"), "ledger before the rot hunt"
+    assert any("predict.py add" in c for c in spec["mandate"]["checklist"]), "checklist must carry the add"
+    assert "export FLEET_RUN_ID" in (HERE / "run_member.sh").read_text()
+
+
 def _control_plane_shares_sum_to_pool_and_paused_weight_flows_gh759():
     """gh#759 AC2: shares split (1 - human_reserve) by weight; a paused instance gets 0.0 and
     the others absorb its weight. Seeded 3:1 with reserve 0.2 reproduces the hand-set
@@ -10883,6 +10898,7 @@ if __name__ == "__main__":
     check("predict.py add/resolve: hit in the baseline->target direction, miss otherwise, unavailable on no data (gh#782 AC2)", _predict_add_resolve_hit_miss_unavailable_gh782)
     check("predict.py ledger reports hit rate and the authoring pass turns/cost (gh#782 AC3)", _predict_ledger_reports_hit_rate_and_pass_cost_gh782)
     check("self_improve_score.sh resolves the ledger, feeds it to the prompt first, and stamps hits/misses on the row (gh#782 AC4)", _self_improve_score_reads_the_ledger_gh782)
+    check("dumbledore: <=140 lines, opus, ledger-first, one predict.py add per pass, reads INTENT.md, grader off-limits (gh#783)", _dumbledore_charter_is_short_on_opus_and_ledger_first_gh783)
     check("run_member.sh calls pacing_gate after the ceiling and the exempt specs are the three named (gh#781)", _run_member_wires_pacing_gate_and_exempt_specs_gh781)
     for n in ok:
         print(f"  ok    {n}")
