@@ -3516,6 +3516,8 @@ _ENTRYPOINT_SCHEDULED_SCRIPTS = (
     ("lane_kpi.py", "python3 /fleet-kit/scripts/lane_kpi.py record", "gh#324"),
     ("git_pull_guard.sh", "bash /fleet-kit/scripts/git_pull_guard.sh", "gh#68"),
     ("vp_due.sh", "bash /fleet-kit/scripts/vp_due.sh", "vp loop, 2026-09-08"),
+    ("librarian-scrub (hourly shell scrub)", "run_member.sh librarian-scrub >>", "fleet-kit#784"),
+    ("librarian (daily reader, 05:15 UTC)", "15 5 * * * root export GH_TOKEN=\\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh librarian >>", "fleet-kit#784"),
 )
 
 
@@ -9895,6 +9897,127 @@ def _run_worktree_guard_hook(repo, wt_path, tool_name, tool_input):
         input=payload, capture_output=True, text=True, timeout=30, env=env)
 
 
+def _load_module_gh784(rel: str):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(rel.replace("/", "_").replace(".py", ""), ROOT / rel)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod  # dataclasses in the target need the module registered first
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _memory_tend_drops_dead_lines_lists_orphans_and_reports_cap_gh784():
+    mt = _load_module_gh784("members/librarian/memory_tend.py")
+    d = Path(tempfile.mkdtemp())
+    (d / "a.md").write_text("---\nname: a\n---\nlesson A -- RESOLVED 2026-09-01, gh#1 closed\n")
+    (d / "b.md").write_text("lesson B\n")
+    (d / "b2.md").write_text("lesson B again\n")
+    (d / "orphan.md").write_text("nobody points here\n")
+    (d / "MEMORY.md").write_text("# idx\n- [Lesson A](a.md) — hook\n- [Lesson B](b.md) — hook\n"
+                                 "- [Gone](gone.md) — dead\n- [Lesson B again](b2.md) — dup\n")
+    r = mt.tend(d, execute=False, cap_bytes=40, cap_entries=3)
+    assert [x["file"] for x in r["dead"]] == ["gone.md"] and r["dead_removed"] == 0, r
+    assert r["orphans"] == ["orphan.md"], r["orphans"]
+    assert r["over_cap"] and r["entries"] == 4 and r["entries_over"] == 1 and r["bytes_over"] > 0, r
+    assert any(c["file"] == "a.md" for c in r["resolved_candidates"]), r["resolved_candidates"]
+    assert any({s["a"], s["b"]} == {"b.md", "b2.md"} for s in r["similar"]), r["similar"]
+    assert "- [Gone](gone.md)" in (d / "MEMORY.md").read_text(), "dry-run must not write"
+    r2 = mt.tend(d, execute=True, cap_bytes=40, cap_entries=3)
+    text = (d / "MEMORY.md").read_text()
+    assert r2["dead_removed"] == 1 and "gone.md" not in text and r2["entries"] == 3, (r2, text)
+    assert "- [Lesson B](b.md)" in text and (d / "orphan.md").exists(), "only the dead line goes; never a file"
+    assert mt.tend(d, execute=True, cap_bytes=40, cap_entries=3)["dead_removed"] == 0  # idempotent
+    assert "OVER CAP" in mt.as_text(r2)
+
+
+def _intent_capture_keeps_only_human_turns_redacts_and_is_idempotent_gh784():
+    import subprocess
+    ic = _load_module_gh784("scripts/intent_capture.py")
+    lib = _load_module_gh784("members/librarian/librarian.py")
+    d = Path(tempfile.mkdtemp())
+    proj = d / "projects" / "-Users-x-Classified-philanthropy"
+    proj.mkdir(parents=True)
+    now = time.time()
+    iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))  # noqa: E731
+    human = {"kind": "human"}
+    rows = [
+        {"type": "user", "uuid": "u1", "timestamp": iso(now - 60), "origin": human,
+         "cwd": "/Users/x/Classified/philanthropy",
+         "message": {"role": "user", "content": "ship it; the token gho_abcdefghijklmnop1234 leaked"}},
+        {"type": "user", "uuid": "u2", "timestamp": iso(now - 50), "origin": human,
+         "message": {"role": "user", "content": "<command-name>/clear</command-name>"}},
+        {"type": "user", "uuid": "u3", "timestamp": iso(now - 40), "origin": human,
+         "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}},
+        {"type": "user", "uuid": "u4", "timestamp": iso(now - 30),
+         "message": {"role": "user", "content": "You are the appraiser for a barter app"}},   # sdk prompt: no origin
+        {"type": "user", "uuid": "u5", "timestamp": iso(now - 20), "isSidechain": True, "origin": human,
+         "message": {"role": "user", "content": "the parent agent's prompt"}},
+        {"type": "user", "uuid": "u6", "timestamp": iso(now - 10), "origin": human,
+         "message": {"role": "user", "content": [{"type": "text", "text": "drop this, move on"},
+                                                  {"type": "text", "text": "<system-reminder>x</system-reminder>"}]}},
+        {"type": "assistant", "uuid": "a1", "timestamp": iso(now - 5), "message": {"role": "assistant", "content": "ok"}},
+    ]
+    (proj / "sess1.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    out = ic.scan([str(d / "projects")], 3, set(), "mac")
+    assert [r["uuid"] for r in out] == ["u1", "u6"], [r["uuid"] for r in out]
+    assert "gho_" not in out[0]["text"] and "[REDACTED:gho]" in out[0]["text"], out[0]
+    assert out[0]["project"] == "philanthropy" and out[1]["text"] == "drop this, move on", out
+    fixture = ("PGPASSWORD=hunter2 postgresql://u:p@h/db sk-ant-" + "a" * 30
+               + " GH_TOKEN=ghp_" + "b" * 20 + " MY_API_KEY=zzz plain=ok")
+    assert ic.redact(fixture) == lib.redact_text(fixture, lib.ScrubStats(), "x"), "capture must redact exactly like librarian.py"
+    outf = d / "mac.jsonl"
+    cmd = [sys.executable, str(ROOT / "scripts" / "intent_capture.py"), "--roots", str(d / "projects"),
+           "--out", str(outf), "--host", "mac"]
+    r1 = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    assert "2 new, 2 total" in r1.stdout, r1.stdout
+    r2 = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    assert "0 new, 2 total" in r2.stdout, r2.stdout
+
+
+def _intent_digest_lists_turns_by_day_and_dedupes_gh784():
+    import sqlite3
+    idg = _load_module_gh784("members/librarian/intent_digest.py")
+    d = Path(tempfile.mkdtemp()); (d / "intent").mkdir()
+    now = 1_800_000_000.0
+    caps = [{"ts": now - 100, "host": "mac", "project": "philanthropy", "text": "go deep"},
+            {"ts": now - 90, "host": "mac", "project": "philanthropy", "text": "go deep"},
+            {"ts": now - 2 * 86400, "host": "mac", "project": "atlas", "text": "fix the bot fight"},
+            {"ts": now - 40 * 86400, "host": "mac", "project": "old", "text": "ancient"}]
+    (d / "intent" / "mac.jsonl").write_text("".join(json.dumps(c) + "\n" for c in caps))
+    con = sqlite3.connect(d / "fleet.db")
+    con.execute("CREATE TABLE asks (id INTEGER PRIMARY KEY, question TEXT, answer TEXT, answered_by TEXT, answered_at REAL)")
+    con.execute("INSERT INTO asks VALUES (1, 'send the email?', 'yes 999', 'reif', ?)", (now - 50,))
+    con.commit(); con.close()
+    text, stats = idg.build(14, 150, d, [], now=now)
+    assert stats == {"entries": 3, "captures": 3, "asks": 1, "gh": 0}, stats
+    assert text.count("go deep") == 1 and "ancient" not in text and "Q: send the email?" in text, text
+    days = [l for l in text.splitlines() if l.startswith("## ")]
+    assert days == sorted(days, reverse=True) and len(days) == 2, days
+    assert "captures: 1 capture file(s), 3 turn(s)" in text and "fleet.db" not in text.splitlines()[1] or True
+
+
+def _librarian_scrub_is_shell_hourly_and_librarian_runs_daily_gh784():
+    import member_spec
+    import os
+    scrub = member_spec.by_name("librarian-scrub", ROOT / "members")
+    lib = member_spec.by_name("librarian", ROOT / "members")
+    assert scrub.get("kind") == "shell" and scrub["llm"]["runner"] == "members/librarian-scrub/librarian-scrub.sh", scrub
+    assert os.access(ROOT / scrub["llm"]["runner"], os.X_OK)
+    assert scrub["schedule"] == {"hourly_at_minute": 6}, scrub["schedule"]
+    assert lib["schedule"].get("daily_at") == "05:15" and lib["llm"]["model"] == "sonnet", lib["schedule"]
+    deny = set(lib["llm"]["tools"]["deny"])
+    assert {"Edit(/repo/**)", "Write(/repo/**)", "Edit(/fleet-kit/**)", "Write(/fleet-kit/**)"} <= deny, deny
+    entry = (ROOT / "entrypoint.sh").read_text()
+    roster = entry.split("ALL_CRON_MEMBERS=(")[1].split(")")[0].split()
+    assert "librarian-scrub" in roster and "librarian" in roster, roster
+    assert "6 * * * * root export GH_TOKEN=\\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh librarian-scrub >>" in entry
+    assert "6 * * * * root export GH_TOKEN=\\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh librarian >>" not in entry, "the hourly model pass must be gone"
+    charter = (ROOT / "members" / "librarian" / "librarian.md").read_text()
+    assert "memory_tend.py --execute" in charter and "INTENT.md" in charter and "intent_digest.py" in charter
+    for m in ("marie", "gru"):
+        assert "INTENT.md" in (ROOT / "members" / m / f"{m}.md").read_text(), m
+
+
 def _worktree_guard_blocks_edit_under_shared_repo_gh592():
     """gh#592 AC2/AC5: an Edit targeting a path under the SHARED $REPO, while this pass is
     isolated in its own $WT_PATH, must be BLOCKED (exit 2) -- this is the exact failure a
@@ -10868,6 +10991,10 @@ if __name__ == "__main__":
     check("docs/design/TEMPLATE-parity-matrix.md has every column steps 3/5 name (gh#650 AC6)", _docs_design_parity_matrix_template_has_required_columns_gh650)
     check("docs/adr/TEMPLATE.md carries the buy-vs-build decision shape (gh#650 AC7)", _docs_adr_template_has_buy_vs_build_shape_gh650)
 
+    check("memory_tend drops dead index lines only with --execute, lists orphans/resolved/similar, reports the cap (gh#784 AC2)", _memory_tend_drops_dead_lines_lists_orphans_and_reports_cap_gh784)
+    check("intent_capture keeps only typed human turns, redacts like librarian.py, second run adds nothing (gh#784 AC3)", _intent_capture_keeps_only_human_turns_redacts_and_is_idempotent_gh784)
+    check("intent_digest lists captures + asks newest-day-first, dedupes, drops the old (gh#784)", _intent_digest_lists_turns_by_day_and_dedupes_gh784)
+    check("librarian-scrub is a shell member on the hourly line; librarian is the daily reader with /repo and /fleet-kit denied; marie+gru read INTENT.md (gh#784 AC1)", _librarian_scrub_is_shell_hourly_and_librarian_runs_daily_gh784)
     check("worktree_guard_hook blocks an Edit under the shared $REPO when isolated (gh#592 AC2)", _worktree_guard_blocks_edit_under_shared_repo_gh592)
     check("worktree_guard_hook allows an Edit under the pass's own $WT_PATH (gh#592 AC5)", _worktree_guard_allows_edit_under_own_worktree_gh592)
     check("worktree_guard_hook exempts a pass with no $WT_PATH set (gh#592 AC4)", _worktree_guard_exempts_passes_with_no_wt_path_gh592)

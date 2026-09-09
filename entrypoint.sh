@@ -152,7 +152,7 @@ case "${1:-cron-foreground}" in
     # `FLEET_CRON_MEMBERS=judge-judy`) to schedule only those. dont-shoot-the-messenger is
     # excluded from ALL_CRON_MEMBERS because its own cron line is already commented out
     # (archived 2026-09-04, see below) -- re-enabling it is a separate step from this mechanism.
-    ALL_CRON_MEMBERS=(the-fixer judge-judy gru jefe roomba marie datta dumbledore sentry librarian dont-shoot-the-messenger)
+    ALL_CRON_MEMBERS=(the-fixer judge-judy gru jefe roomba marie datta dumbledore sentry librarian librarian-scrub dont-shoot-the-messenger)
     if [ -n "${FLEET_CRON_MEMBERS:-}" ]; then
       IFS=', ' read -ra RESOLVED_CRON_MEMBERS <<< "$FLEET_CRON_MEMBERS"
       for m in "${RESOLVED_CRON_MEMBERS[@]}"; do
@@ -285,8 +285,13 @@ case "${1:-cron-foreground}" in
       # runs. :06 runs right after the hour's headroom resets, matching the schedule
       # librarian.fleet.json's schedule.hourly_at_minute already declared -- fleet.json edits
       # do not update this line by themselves (see the selftest check that now compares them).
+      # fleet-kit#784: the hourly scrub is a shell member now (no model); librarian itself is
+      # the daily reader (memory under cap, INTENT.md) at 05:15 UTC, before the morning brief.
+      if cron_member_enabled librarian-scrub; then
+        echo "6 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh librarian-scrub >> $LOG_DIR/librarian-scrub.log 2>&1"
+      fi
       if cron_member_enabled librarian; then
-        echo "6 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh librarian >> $LOG_DIR/librarian.log 2>&1"
+        echo "15 5 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh librarian >> $LOG_DIR/librarian.log 2>&1"
       fi
       if cron_member_enabled marie; then
         echo "33 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh marie >> $LOG_DIR/marie.log 2>&1"
