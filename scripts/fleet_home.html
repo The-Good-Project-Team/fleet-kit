@@ -46,6 +46,7 @@
   .outcome { color: var(--muted); font-size: 13px; padding: 0 4px 10px 24px; margin-top: -6px; }
   .drawer { padding: 8px 4px 12px 24px; border-top: 1px dashed var(--line); font-size: 14px; }
   .drawer .role { color: var(--muted); margin-bottom: 8px; }
+  .drawer .role-label { display: block; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
   .drawer .run { padding: 4px 0; border-top: 1px solid var(--line); }
   .drawer .run:first-child { border-top: 0; }
   .btns { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
@@ -241,7 +242,7 @@ function renderAgents() {
       </div>
       ${last && last.outcome ? `<div class="outcome">${esc(String(last.outcome).slice(0, 140))}</div>` : ''}
       ${open ? `<div class="drawer">
-          <div class="role">${esc((m.spec.mandate || {}).target || '')}</div>
+          <div class="role"><span class="role-label">Purpose</span>${esc((m.spec.mandate || {}).target || '')}</div>
           ${runs.map(r => `<div class="run" data-run="${esc(r.run_id || '')}"><span class="dot ${dotClass(r, true)}" style="display:inline-block;vertical-align:middle;margin-right:6px"></span>${esc(ago(r.ts))} · ${esc(r.status || '')}${r.pr ? ` · <a href="${esc(String(r.pr).startsWith('http') ? r.pr : '#')}" target="_blank">PR</a>` : ''}<br><span class="sub">${esc(String(r.outcome || '').slice(0, 200))}</span></div>`).join('') || '<div class="sub">no runs yet</div>'}
           <div class="btns">
             <button class="primary" data-act="rerun" data-member="${esc(name)}">Rerun now</button>

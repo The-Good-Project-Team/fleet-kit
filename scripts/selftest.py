@@ -4142,7 +4142,8 @@ def _console_run_panel_shows_everything_about_one_run_fk748():
     page = (ROOT / "scripts" / "fleet_home.html").read_text()
     for needle in ('id="side"', 'id="sideBack"', 'width: 33.333vw', '@media (max-width: 700px) { .side { width: 100vw',
                    'data-run=', 'no written report for this run', '/api/pass_log', "e.key === 'Escape'",
-                   "section('Outcome', rec.outcome)", "section('Evidence', rec.evidence)", "section('Self-critique'"):
+                   "section('Outcome', rec.outcome)", "section('Evidence', rec.evidence)", "section('Self-critique'",
+                   '<span class="role-label">Purpose</span>'):  # Reif 2026-09-09: "not clear that this is marie's purpose line"
         assert needle in page, f"fleet_home.html lacks {needle!r}"
     assert len(page.encode()) < 40_000, "v2 must stay small"
     import run_report
