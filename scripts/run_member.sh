@@ -306,6 +306,23 @@ if [ "$DRY_RUN" -ne 1 ] && [ "${FLEET_SHARE_FRACTION:-1.0}" != "1.0" ]; then
   fi
 fi
 
+# fleet-kit#781 -- the ceiling above used to be advisory: only gru read it, every other member
+# launched `claude -p` straight through a 0.0000 (2026-09-09: "the week is -65.7% over pace"
+# in budget_read_check.log while 200 quiet passes ran that day; both accounts hit their weekly
+# limit by Wednesday). pacing_gate.py is pure: a real zero ceiling holds the pass unless the
+# spec says "pacing": "exempt" (the-fixer, the brief, judge-judy); an unreadable meter still
+# runs (fails open). A held pass costs nothing and is recorded as status `paced` (exit 75).
+if [ "$DRY_RUN" -ne 1 ] && [ -n "${FLEET_SHARE_CEILING_PCT:-}" ]; then
+  PACING=$(echo "$SPEC" | python3 "$KIT_DIR/scripts/pacing_gate.py" "$FLEET_SHARE_CEILING_PCT" 2>>"$LOG")
+  if [ "$PACING" = "paced" ]; then
+    log "PACED: FLEET_SHARE_CEILING_PCT=$FLEET_SHARE_CEILING_PCT -- this hour has no headroom for this instance; holding $MEMBER without spending (fleet-kit#781)"
+    printf '' | python3 "$KIT_DIR/scripts/run_report.py" \
+        --member "$MEMBER" --run-id "$RUN_ID" --kind llm --exit-code 75 \
+        --pass-file - ${ITEM:+--item-id "$ITEM"} $LANE_FLAG >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
+    exit 0
+  fi
+fi
+
 # A member MAY declare its own runner (e.g. judge-judy's judge-judy.sh, which reviews a
 # diff as untrusted TEXT with zero tools -- a shape the generic claude -p path below can't
 # express safely). Default: none, every other member runs through the generic path.

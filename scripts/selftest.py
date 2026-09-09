@@ -102,6 +102,10 @@ def _report_contract():
     timed_out = run_report.build_record(member="t", run_id="r", kind="llm", exit_code=124,
                                         pass_text="", usage=None, vision_required=False)
     assert timed_out["status"] == "timed_out", timed_out["status"]
+    # fleet-kit#781: a pass held by the pacing gate exits 75 with no report -- its own status.
+    paced = run_report.build_record(member="t", run_id="r", kind="llm", exit_code=75,
+                                    pass_text="", usage=None, vision_required=False)
+    assert paced["status"] == "paced", paced["status"]
 
 
 def _incomplete_fanout_is_not_reported_nothing():
@@ -10067,6 +10071,38 @@ def _fleet_env_example_documents_the_fixer_prod_visibility_vars_gh728():
     )
 
 
+def _pacing_gate_holds_zero_ceiling_unless_exempt_gh781():
+    import subprocess
+    import pacing_gate
+    assert pacing_gate.decide("0.0000", {}) == "paced"
+    assert pacing_gate.decide("0.0000", {"pacing": "exempt"}) == "run"
+    assert pacing_gate.decide("", {}) == "run"            # unreadable meter fails open
+    assert pacing_gate.decide(None, {"name": "x"}) == "run"
+    assert pacing_gate.decide("0.0137", {}) == "run"
+    assert pacing_gate.decide("garbage", {}) == "run"
+    # The CLI shape run_member.sh uses: ceiling as argv[1], spec JSON on stdin, one word out.
+    out = subprocess.run([sys.executable, str(HERE / "pacing_gate.py"), "0.0000"],
+                         input='{"name": "gru"}', capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "paced", out.stdout
+    out = subprocess.run([sys.executable, str(HERE / "pacing_gate.py"), "0.0000"],
+                         input='{"name": "the-fixer", "pacing": "exempt"}',
+                         capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "run", out.stdout
+    assert pacing_gate.EXIT_CODE == 75
+
+
+def _run_member_wires_pacing_gate_and_exempt_specs_gh781():
+    import member_spec
+    text = (HERE / "run_member.sh").read_text()
+    gate_at = text.find("pacing_gate.py")
+    ceiling_at = text.find('export FLEET_SHARE_CEILING_PCT="$CEILING_PCT"')
+    launch_at = text.find("claude -p \"$PROMPT\"")
+    assert 0 < ceiling_at < gate_at < launch_at, "gate must sit after the ceiling and before claude -p"
+    assert "--exit-code 75" in text, "a held pass must be recorded as paced (exit 75)"
+    exempt = {s["name"] for s in member_spec.load_all(ROOT / "members") if s.get("pacing") == "exempt"}
+    assert exempt == {"the-fixer", "dont-shoot-the-messenger", "judge-judy"}, exempt
+
+
 def _control_plane_shares_sum_to_pool_and_paused_weight_flows_gh759():
     """gh#759 AC2: shares split (1 - human_reserve) by weight; a paused instance gets 0.0 and
     the others absorb its weight. Seeded 3:1 with reserve 0.2 reproduces the hand-set
@@ -10735,6 +10771,8 @@ if __name__ == "__main__":
     check("control_plane: an agent creates and removes an instance over HTTP with a bearer token (gh#759 AC1)", _control_plane_agent_creates_and_removes_an_instance_over_http_gh759)
     check("control_plane secrets: init/check/adopt/set build one store, include every fleet.env, never print a value (gh#759)", _control_plane_secret_store_init_check_adopt_set_gh759)
     check("deploy.sh mounts the shared secret store read-only at the same path, only when present (gh#759)", _deploy_sh_mounts_the_shared_secret_store_read_only_gh759)
+    check("pacing_gate holds a zero ceiling, runs an exempt member or an unreadable meter (gh#781 AC1-3)", _pacing_gate_holds_zero_ceiling_unless_exempt_gh781)
+    check("run_member.sh calls pacing_gate after the ceiling and the exempt specs are the three named (gh#781)", _run_member_wires_pacing_gate_and_exempt_specs_gh781)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:

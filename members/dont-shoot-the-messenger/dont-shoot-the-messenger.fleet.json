@@ -1,6 +1,6 @@
 {
   "name": "dont-shoot-the-messenger",
-  "emoji": "\ud83d\udcee",
+  "emoji": "📮",
   "lane": "plumbing",
   "mandate": {
     "target": "Reif gets the morning brief (PDF, the number, what landed, needs-you, the one 4-hour project, reading) at 06:30 Central, the afternoon block at 12:30 and the wrap at 17:30 -- one voice, nothing else in the fleet emails him",
@@ -43,5 +43,7 @@
   },
   "report": {
     "vision_link": "optional"
-  }
+  },
+  "pacing": "exempt",
+  "pacing_why": "the brief Reif reads must go out (fleet-kit#781)"
 }

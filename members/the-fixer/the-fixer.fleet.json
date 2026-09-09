@@ -1,6 +1,6 @@
 {
   "name": "the-fixer",
-  "emoji": "\ud83d\udd27",
+  "emoji": "🔧",
   "lane": "incident",
   "mandate": {
     "target": "a red CI/deploy or dark prod gets exactly one fix-or-revert PR within one fire cycle, deduped per SHA",
@@ -45,5 +45,7 @@
   },
   "report": {
     "vision_link": "optional"
-  }
+  },
+  "pacing": "exempt",
+  "pacing_why": "incidents cannot wait for headroom (fleet-kit#781)"
 }

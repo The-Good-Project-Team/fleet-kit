@@ -234,6 +234,7 @@ RUN_STATE = {
     "quiet": OK,               # ran, correctly found nothing to do
     "reported_nothing": OK,    # ran, produced no report -- weak, not down
     "budget_declined": "spare",
+    "paced": "spare",          # held before spending: the hour had no headroom (fk#781)
     "killed": "spare",
     "timed_out": BAD,
     "error": BAD,
