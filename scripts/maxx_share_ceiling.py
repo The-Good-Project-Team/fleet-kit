@@ -32,10 +32,46 @@ real, honest answer -- always printed, never suppressed.
 """
 from __future__ import annotations
 
+import os
 import sys
 
 import maxx_lease
 from maxx_reader import get_headroom
+
+# THE 5H BLOCK IS THE LIMIT THAT ACTUALLY BITES (Reif, 2026-09-09: "it's the session limits
+# we should respect"). Live on 2026-09-09 the hourly formula above stayed at 0.015-0.048 while
+# the account burned 77% of its 5h window in the first 90 minutes of the block (15:20Z start,
+# session_used_pct=77 at 16:51Z, burn 15%/hr), walled at ~16:53Z, then sat budget_declined
+# for the remaining 3.5h -- the same shape as the 09:45Z and 12:45Z walls that day. The
+# `verdict=over` hard-stop only fires AT the wall; nothing slowed the fleet before it. So the
+# fleet ate the whole block in one burst and every interactive session on the account hit the
+# limit too. The clamp below holds the fleet whenever the block is being spent faster than
+# linear pace: used% of the 5h window may lead elapsed% of the window by at most
+# FLEET_BLOCK_PACE_SLACK_PCT. It uses the ACCOUNT-wide `session_used_pct` on purpose: a human
+# session is on the same limit, so a hot laptop should pause the fleet, not race it (this is
+# the deliberate reverse of the 2026-08-26 reading that maxx_reader.py's header describes --
+# that one zeroed the fleet on a laptop's PACING ratio, this one yields on the shared WALL).
+# Missing fields fail open, same law as everything else in this file.
+BLOCK_S = 5 * 3600
+
+
+def block_over_pace(budget: dict, slack_pct: float | None = None) -> bool:
+    used = budget.get("session_used_pct")
+    left = budget.get("five_reset_in_sec")
+    if used is None or left is None:
+        return False
+    try:
+        used = float(used)
+        left = float(left)
+    except (TypeError, ValueError):
+        return False
+    if slack_pct is None:
+        try:
+            slack_pct = float(os.environ.get("FLEET_BLOCK_PACE_SLACK_PCT", "10"))
+        except ValueError:
+            slack_pct = 10.0
+    elapsed_pct = 100.0 * max(0.0, min(1.0, 1.0 - left / BLOCK_S))
+    return used > elapsed_pct + slack_pct
 
 
 def main(argv: list[str]) -> int:
@@ -71,6 +107,10 @@ def main(argv: list[str]) -> int:
         # them alone, without also checking this, would spend straight through maxx's own
         # hard stop. An honest zero, not suppressed: this IS a real reading, distinct from
         # the unreadable-meter branch above.
+        print("0.0000")
+        return 0
+
+    if block_over_pace(budget):
         print("0.0000")
         return 0
 

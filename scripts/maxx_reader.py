@@ -140,7 +140,10 @@ def get_headroom(
 
     allowance = {
         k: budget[k] for k in ("per_diem_hourly_pct", "reserved_pct", "week_bank_pct",
-                               "per_diem_usable_pct", "sustainable_pct_per_hour", "verdict")
+                               "per_diem_usable_pct", "sustainable_pct_per_hour", "verdict",
+                               # the 5h block, for maxx_share_ceiling's block-pace clamp
+                               # (Reif 2026-09-09: "it's the session limits we should respect")
+                               "session_used_pct", "five_reset_in_sec")
         if budget.get(k) is not None
     }
 
