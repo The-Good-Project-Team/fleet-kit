@@ -10103,6 +10103,168 @@ class _NoRedirect(__import__("urllib.request").request.HTTPRedirectHandler):
         return None
 
 
+_CADDY_SAMPLE = """:9000 {
+	@api_philanthropy {
+		path /api/*
+		header_regexp Referer ^https?://[^/]+/fleet/philanthropy
+	}
+	handle @api_philanthropy {
+		reverse_proxy localhost:8591
+	}
+
+	# fallback for /api/* with no matching Referer: philanthropy (first instance, prior default)
+	handle /api/* {
+		reverse_proxy localhost:8591
+	}
+
+	handle /fleet/philanthropy* {
+		uri strip_prefix /fleet/philanthropy
+		reverse_proxy localhost:8591
+	}
+
+	handle /webhook* {
+		reverse_proxy localhost:8592
+	}
+}
+"""
+
+
+def _control_plane_new_env_and_routes_are_pure_and_reversible_gh759():
+    """gh#759 AC1 pieces: a new fleet.env keeps the shared credentials, replaces every
+    per-instance/per-product key exactly once, and starts paused at share 0; caddy and cron
+    edits are marked, idempotent, and remove restores the original text byte for byte."""
+    import control_plane as cp
+    tmpl = ("FLEET_ENABLED=true\nCLAUDE_CODE_OAUTH_TOKEN=keep\nFLEET_MAXX_KEY_GMAIL=keep2\n"
+            "FLEET_CONTAINER_NAME=philanthropy\nFLEET_VIEW_PORT=8420\nFLEET_GREEN_VIEW_PORT=8591\n"
+            "FLEET_REPO_URL=https://x/one.git\nFLEET_REPO_URL=https://x/two.git\n"
+            "FLEET_NUMBER_URL=https://philanthropy.org/990/api/number\nFLEET_SHARE_FRACTION=0.6\n")
+    out = cp.render_new_env(tmpl, "smoke", "https://x/three.git", (8601, 8602, 8603, 8604), "https://h")
+    lines = [l for l in out.splitlines() if l and not l.startswith("#")]
+    keys = [l.split("=", 1)[0] for l in lines]
+    assert keys.count("FLEET_REPO_URL") == 1 and "FLEET_REPO_URL=https://x/three.git" in lines, out
+    assert "CLAUDE_CODE_OAUTH_TOKEN=keep" in lines and "FLEET_MAXX_KEY_GMAIL=keep2" in lines
+    assert "FLEET_ENABLED=false" in lines and "FLEET_SHARE_FRACTION=0" in lines
+    assert "FLEET_VIEW_PORT=8601" in lines and "FLEET_GREEN_WEBHOOK_PORT=8604" in lines
+    assert "FLEET_NUMBER_URL=" in lines and "PUBLIC_PATH_URL=https://h/fleet/smoke" in lines
+    assert "FLEET_CONTAINER_NAME=smoke" in lines and keys.count("FLEET_ENABLED") == 1
+
+    with_ = cp.caddy_with_instance(_CADDY_SAMPLE, "smoke", 8601)
+    assert with_ != _CADDY_SAMPLE and "handle /fleet/smoke* {" in with_ and "localhost:8601" in with_
+    assert with_.index("@api_smoke") < with_.index("# fallback for /api/*"), "api route must precede the fallback"
+    assert with_.index("handle /fleet/smoke*") < with_.index("handle /webhook*")
+    assert cp.caddy_with_instance(with_, "smoke", 8601) == with_, "not idempotent"
+    assert cp.caddy_without_instance(with_, "smoke") == _CADDY_SAMPLE, cp.caddy_without_instance(with_, "smoke")
+
+    cron = "*/5 * * * * something\n"
+    with_c = cp.cron_with_instance(cron, "smoke", Path("/x/smoke"))
+    assert with_c.count("# control_plane:smoke") == 3 and "auto_deploy.sh" in with_c and "FLEET_INSTANCE_DIR=/x/smoke" in with_c
+    assert cp.cron_with_instance(with_c, "smoke", Path("/x/smoke")) == with_c
+    assert cp.cron_without_instance(with_c, "smoke") == cron
+
+    assert cp.allocate_ports({8601, 8603}) == (8604, 8605, 8606, 8607)
+    assert cp.allocate_ports(set()) == (8601, 8602, 8603, 8604)
+
+
+def _control_plane_agent_creates_and_removes_an_instance_over_http_gh759():
+    """gh#759 AC1, as an agent does it: POST /new with a bearer token -> 202; the job clones
+    the repo, writes a paused fleet.env from the template, registers, routes, adds cron, and
+    calls deploy; GET /new/<name> reports done; the page shows three rows; POST /remove undoes
+    routes/cron/registry and keeps the files. No token -> 401, bad name -> 400, dup -> 409."""
+    import subprocess
+    import threading
+    import urllib.request
+    import urllib.parse
+    import control_plane as cp
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "a" / "logs").mkdir(parents=True)
+        (root / "a" / "fleet.env").write_text("FLEET_ENABLED=true\nCLAUDE_CODE_OAUTH_TOKEN=keep\n"
+                                              "FLEET_VIEW_PORT=8420\nFLEET_WEBHOOK_PORT=8562\n"
+                                              "FLEET_GREEN_VIEW_PORT=8591\nFLEET_GREEN_WEBHOOK_PORT=8592\n"
+                                              "FLEET_REPO_URL=https://x/a.git\nFLEET_SHARE_FRACTION=0.8\n")
+        registry = root / "registry.json"
+        registry.write_text(json.dumps({"human_reserve": 0.2, "instances": [
+            {"name": "a", "dir": str(root / "a"), "weight": 3}]}))
+        src_repo = root / "src.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(src_repo)], check=True)
+        work = root / "work"
+        subprocess.run(["git", "clone", "-q", str(src_repo), str(work)], check=True, capture_output=True)
+        (work / "README").write_text("hi\n")
+        subprocess.run(["git", "-C", str(work), "-c", "user.email=t@t", "-c", "user.name=t", "add", "."], check=True)
+        subprocess.run(["git", "-C", str(work), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"], check=True)
+        subprocess.run(["git", "-C", str(work), "push", "-q", "origin", "HEAD"], check=True, capture_output=True)
+
+        caddy = root / "Caddyfile"
+        caddy.write_text(_CADDY_SAMPLE)
+        cron_state = {"text": "*/5 * * * * something\n"}
+        deployed = []
+        saved = (cp.CADDYFILE, cp.TOKEN_FILE, cp.OUT_DIR, cp.read_crontab, cp.write_crontab, cp.reload_caddy, cp.used_ports)
+        cp.CADDYFILE = caddy
+        cp.TOKEN_FILE = root / "token"
+        cp.OUT_DIR = root / "out"
+        cp.read_crontab = lambda: cron_state["text"]
+        cp.write_crontab = lambda t: cron_state.__setitem__("text", t)
+        cp.reload_caddy = lambda: None
+        cp.used_ports = lambda reg: {8420, 8562, 8591, 8592}
+        srv = cp.make_server(0, registry, deploy_fn=lambda d, name, log: deployed.append((d, name)))
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{port}"
+            token = cp.ensure_token()
+            assert oct(cp.TOKEN_FILE.stat().st_mode & 0o777) == "0o600"
+
+            def post(path, headers=None, **fields):
+                data = json.dumps(fields).encode()
+                req = urllib.request.Request(base + path, data=data, method="POST",
+                                             headers={"Content-Type": "application/json", **(headers or {})})
+                try:
+                    r = urllib.request.urlopen(req)
+                    return r.status, json.loads(r.read().decode())
+                except urllib.error.HTTPError as e:
+                    return e.code, json.loads(e.read().decode() or "{}")
+
+            auth = {"Authorization": f"Bearer {token}"}
+            assert post("/new", name="b", repo_url=str(src_repo))[0] == 401
+            assert post("/new", {"Authorization": "Bearer nope"}, name="b", repo_url=str(src_repo))[0] == 401
+            assert post("/new", auth, name="Bad Name", repo_url=str(src_repo))[0] == 400
+            assert post("/new", auth, name="b", repo_url="ftp://x")[0] == 400
+            assert post("/new", auth, name="a", repo_url=str(src_repo))[0] == 409
+            code, body = post("/new", auth, name="b", repo_url=str(src_repo), w="1")
+            assert code == 202 and body["status"] == "new/b", (code, body)
+            for _ in range(200):
+                try:
+                    st = json.loads(urllib.request.urlopen(base + "/new/b").read().decode())
+                except urllib.error.HTTPError:
+                    st = None
+                if st and st["state"] in ("done", "failed"):
+                    break
+                time.sleep(0.05)
+            assert st and st["state"] == "done", st
+            env_b = (root / "b" / "fleet.env").read_text()
+            assert "FLEET_ENABLED=false" in env_b and "FLEET_VIEW_PORT=8601" in env_b and "CLAUDE_CODE_OAUTH_TOKEN=keep" in env_b
+            assert (root / "b" / "repo" / "README").read_text() == "hi\n"
+            assert (root / "b" / "webhook_secret").read_text().strip()
+            assert json.loads(registry.read_text())["instances"][1]["name"] == "b"
+            assert "handle /fleet/b* {" in caddy.read_text() and "localhost:8601" in caddy.read_text()
+            assert cron_state["text"].count("# control_plane:b") == 3
+            assert deployed == [(root / "b", "b")], deployed
+            page = urllib.request.urlopen(base + "/").read().decode()
+            assert "/fleet/b/" in page and "paused" in page and "action='new'" in page
+            assert post("/new", auth, name="b", repo_url=str(src_repo))[0] == 409
+
+            code, body = post("/remove", auth, name="b")
+            assert code == 200 and "files kept" in body["ok"], (code, body)
+            assert [i["name"] for i in json.loads(registry.read_text())["instances"]] == ["a"]
+            assert caddy.read_text() == _CADDY_SAMPLE
+            assert cron_state["text"] == "*/5 * * * * something\n"
+            assert not (root / "b").exists() and list(root.glob("b.removed-*")), list(root.iterdir())
+            assert post("/remove", name="b")[0] == 401
+        finally:
+            srv.shutdown()
+            cp.CADDYFILE, cp.TOKEN_FILE, cp.OUT_DIR, cp.read_crontab, cp.write_crontab, cp.reload_caddy, cp.used_ports = saved
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -10367,6 +10529,8 @@ if __name__ == "__main__":
     check("control_plane runs_last_hour counts budget_declined as starvation and finds the last brief (gh#759 AC3)", _control_plane_runs_last_hour_counts_starvation_and_last_brief_gh759)
 
     check("control_plane page: pause/resume/weight buttons change fleet.env and the registry over HTTP (gh#759 AC4)", _control_plane_page_pauses_resumes_and_sets_weight_over_http_gh759)
+    check("control_plane new: fleet.env/caddy/cron pieces are pure, idempotent and reversible (gh#759 AC1)", _control_plane_new_env_and_routes_are_pure_and_reversible_gh759)
+    check("control_plane: an agent creates and removes an instance over HTTP with a bearer token (gh#759 AC1)", _control_plane_agent_creates_and_removes_an_instance_over_http_gh759)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:
