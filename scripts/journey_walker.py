@@ -315,7 +315,26 @@ def _blocked_for_403(response, users: "TestUsers") -> Blocked | None:
     return Blocked(reason, status=response.status, headers=headers)
 
 
+def _blocked_for_report_click_through_timeout(response, users: "TestUsers") -> Blocked:
+    """search-and-open-org's step 1 clicked a result row and never landed on a report page,
+    and no response observed along the way was a 403 either (else `_blocked_for_403` would
+    already have raised). The only known cause of this click-through path failing to arrive is
+    the same missing-bypass credential #729/#160 track for direct navigation (gh#750) -- so,
+    same as `_blocked_for_403`, this is classified BLOCKED rather than a bare `TimeoutError`
+    read as a product break. `response` may be None (no matching response arrived at all)."""
+    status = response.status if response is not None else None
+    headers = {k: redact_secret(v, users.bypass) for k, v in dict(response.headers).items()} if response is not None else None
+    reason = (
+        "report page click-through timed out even with ATLAS_TEST_BYPASS configured"
+        if users.bypass
+        else "report page click-through timed out -- ATLAS_TEST_BYPASS not configured"
+    )
+    return Blocked(reason, status=status, headers=headers)
+
+
 def run_search_and_open_org(ctx: JourneyCtx):
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
     page = ctx.page()
 
     def s0():
@@ -334,12 +353,31 @@ def run_search_and_open_org(ctx: JourneyCtx):
     def s1():
         first = page.locator('a[href*="/990/report/"]').first
         clicked_text = first.inner_text().strip()
-        with page.expect_response(lambda r: "/990/report/" in r.url) as resp_info:
-            first.click()
-        blocked = _blocked_for_403(resp_info.value, ctx.users)
+
+        def _is_report_navigation(r):
+            # gh#750: the substring alone also matches sub-resources (e.g. a tracking pixel
+            # fired on click) that can resolve before the real navigation response does --
+            # is_navigation_request() pins this to the main-frame document response.
+            return "/990/report/" in r.url and r.request.is_navigation_request()
+
+        try:
+            with page.expect_response(_is_report_navigation, timeout=10000) as resp_info:
+                first.click()
+            nav_response = resp_info.value
+        except PlaywrightTimeoutError:
+            # No response matching the report-page navigation arrived at all -- don't also
+            # wait out wait_for_url's own timeout below, we already know it won't land.
+            raise _blocked_for_report_click_through_timeout(None, ctx.users)
+
+        blocked = _blocked_for_403(nav_response, ctx.users)
         if blocked:
             raise blocked
-        page.wait_for_url(re.compile(r"/990/report/"), timeout=10000)
+
+        try:
+            page.wait_for_url(re.compile(r"/990/report/"), timeout=10000)
+        except PlaywrightTimeoutError:
+            raise _blocked_for_report_click_through_timeout(nav_response, ctx.users)
+
         heading = page.get_by_role("heading").first.inner_text().strip()
         assert heading, "no org-name heading after opening a result"
         assert clicked_text.split()[0].lower() in heading.lower()

@@ -31,6 +31,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -492,6 +493,197 @@ class SearchClickThrough403BlockedTest(unittest.TestCase):
         self.assertEqual(len(blocked), 1)
         self.assertEqual(blocked[0]["id"], "search-and-open-org")
         self.assertEqual(blocked[0]["response"]["status"], 403)
+
+
+class SearchClickThroughSubResourceRaceBlockedTest(unittest.TestCase):
+    """gh#750 AC1/AC2/AC6: the OLD predicate (`"/990/report/" in r.url`, no other check) can
+    latch onto a sub-resource fired alongside the click -- e.g. a tracking pixel whose URL also
+    contains `/990/report/` -- if that sub-resource's 200 arrives before the real navigation's
+    403 does. That race is exactly what made a Cloudflare 403 read as a generic `fail` in the
+    live run this issue reports. The fix scopes the predicate to the main-frame navigation
+    response (`is_navigation_request()`), so it must pick the 403 regardless of which response
+    physically arrives first."""
+
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+
+        class _RaceHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/990/report/123456789":
+                    # Delay the real navigation response so the pixel sub-resource below --
+                    # fired by the same click -- reliably resolves first, recreating the race.
+                    time.sleep(0.3)
+                    self.send_response(403)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("X-Test-Marker", "cf-challenge")
+                    self.send_header("X-Bypass-Echo", self.headers.get("X-Atlas-Test-Bypass", ""))
+                    self.end_headers()
+                    self.wfile.write(b"<html><body>Checking your browser...</body></html>")
+                elif self.path == "/990/report/123456789/pixel.png":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/png")
+                    self.end_headers()
+                    self.wfile.write(b"")
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    self.wfile.write(
+                        b'<html><body>'
+                        b'<a id="link" href="/990/report/123456789">Example Org</a>'
+                        b'<script>document.getElementById("link").addEventListener("click", '
+                        b'function () { new Image().src = "/990/report/123456789/pixel.png"; });'
+                        b'</script>'
+                        b'</body></html>'
+                    )
+
+            def log_message(self, *a):  # quiet -- keep test output readable
+                pass
+
+        cls.port = _free_port()
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", cls.port), _RaceHandler)
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def test_sub_resource_matching_the_url_substring_does_not_win_the_race(self):
+        catalog = jw.load_catalog(CATALOG_PATH)
+        search = next(j for j in catalog["journeys"] if j["id"] == "search-and-open-org")
+        search["viewports"] = ["desktop"]
+        users = jw.TestUsers(env={
+            "PHILANTHROPY_BASE_URL": f"http://127.0.0.1:{self.port}",
+            "ATLAS_TEST_BYPASS": "sekrit-val-750",
+        })
+
+        journeys_out, blocked = jw.run_all(catalog, users, self.browser, Path("/tmp"),
+                                            "search-race-run", journey_filter=["search-and-open-org"])
+
+        self.assertEqual(journeys_out, [])  # AC1: not a `fail` from the sub-resource winning
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0]["id"], "search-and-open-org")
+        self.assertEqual(blocked[0]["response"]["status"], 403)  # AC2: the doc's status, not the pixel's
+        headers = {k.lower(): v for k, v in blocked[0]["response"]["headers"].items()}
+        self.assertEqual(headers.get("x-test-marker"), "cf-challenge")
+        self.assertEqual(headers.get("x-bypass-echo"), "[REDACTED]")  # AC6
+        self.assertNotIn("sekrit-val-750", json.dumps(blocked))  # AC6
+
+
+class SearchClickThroughNeverArrivesBlockedTest(unittest.TestCase):
+    """gh#750 AC3: the click-through can also fail to land with NO 403, or any response, ever
+    observed on the report-page URL at all (a hung connection, not just a fast wrong-response
+    race). Non-goal 2 keeps this narrow: only this call site's click-through timeout is
+    reclassified, not every TimeoutError the walker can raise."""
+
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+
+        class _HangingReportHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith("/990/report/"):
+                    time.sleep(60)  # far past the walker's own 10s wait -- the client gives up first
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(
+                    b'<html><body><a href="/990/report/123456789">Example Org</a></body></html>'
+                )
+
+            def log_message(self, *a):  # quiet -- keep test output readable
+                pass
+
+        cls.port = _free_port()
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", cls.port), _HangingReportHandler)
+        cls.httpd.daemon_threads = True  # a permanently-hung request thread must not block shutdown
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def test_click_through_that_never_lands_is_blocked_not_a_bare_timeout(self):
+        catalog = jw.load_catalog(CATALOG_PATH)
+        search = next(j for j in catalog["journeys"] if j["id"] == "search-and-open-org")
+        search["viewports"] = ["desktop"]
+        users = jw.TestUsers(env={"PHILANTHROPY_BASE_URL": f"http://127.0.0.1:{self.port}"})
+
+        journeys_out, blocked = jw.run_all(catalog, users, self.browser, Path("/tmp"),
+                                            "search-hang-run", journey_filter=["search-and-open-org"])
+
+        self.assertEqual(journeys_out, [])  # never recorded as a plain `fail`
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0]["id"], "search-and-open-org")
+        self.assertIn("not configured", blocked[0]["reason"])  # names the missing bypass
+        self.assertNotIn("response", blocked[0])  # no response was ever observed
+
+
+class SearchClickThroughHealthyStillPassesTest(unittest.TestCase):
+    """gh#750 AC4: the fix must not turn a healthy click-through into a false block."""
+
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+
+        class _HealthyHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/990/report/123456789":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    self.wfile.write(b"<html><body><h1>Example Org</h1></body></html>")
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    self.wfile.write(
+                        b'<html><body><a href="/990/report/123456789">Example Org</a></body></html>'
+                    )
+
+            def log_message(self, *a):  # quiet -- keep test output readable
+                pass
+
+        cls.port = _free_port()
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", cls.port), _HealthyHandler)
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def test_healthy_click_through_still_passes(self):
+        catalog = jw.load_catalog(CATALOG_PATH)
+        search = next(j for j in catalog["journeys"] if j["id"] == "search-and-open-org")
+        search["viewports"] = ["desktop"]
+        users = jw.TestUsers(env={"PHILANTHROPY_BASE_URL": f"http://127.0.0.1:{self.port}"})
+
+        journeys_out, blocked = jw.run_all(catalog, users, self.browser, Path("/tmp"),
+                                            "search-healthy-run", journey_filter=["search-and-open-org"])
+
+        self.assertEqual(blocked, [])
+        self.assertEqual(len(journeys_out), 1)
+        self.assertTrue(all(s["status"] == "pass" for s in journeys_out[0]["steps"]), journeys_out)
 
 
 class WalkerOutputFeedsIssueFilerTest(unittest.TestCase):
