@@ -9967,6 +9967,81 @@ def _fleet_env_example_documents_the_fixer_prod_visibility_vars_gh728():
     )
 
 
+def _control_plane_shares_sum_to_pool_and_paused_weight_flows_gh759():
+    """gh#759 AC2: shares split (1 - human_reserve) by weight; a paused instance gets 0.0 and
+    the others absorb its weight. Seeded 3:1 with reserve 0.2 reproduces the hand-set
+    0.60/0.20 the two dino instances carried before this script -- rollout is a no-op on the
+    numbers, only the mechanism lands."""
+    import control_plane as cp
+    insts = [{"name": "a", "weight": 3}, {"name": "b", "weight": 1}]
+    assert cp.compute_shares(insts, {"a": True, "b": True}, 0.2) == {"a": 0.6, "b": 0.2}
+    assert cp.compute_shares(insts, {"a": True, "b": False}, 0.2) == {"a": 0.8, "b": 0.0}
+    assert cp.compute_shares(insts, {"a": False, "b": False}, 0.2) == {"a": 0.0, "b": 0.0}
+    insts[1]["weight"] = 0
+    assert cp.compute_shares(insts, {"a": True, "b": True}, 0.0) == {"a": 1.0, "b": 0.0}
+    assert sum(cp.compute_shares(insts, {"a": True, "b": True}, 1.5).values()) == 0.0, \
+        "a reserve typo above 1.0 must never produce a negative pool"
+
+
+def _control_plane_tick_writes_share_in_place_only_when_changed_gh759():
+    """gh#759 AC2: tick writes FLEET_SHARE_FRACTION into each instance's fleet.env IN PLACE
+    (same inode -- fleet.env is a file bind-mount, a rename would strand the container on the
+    old file), preserves every other line, and does not touch the file when the share is
+    already right. The index names every instance."""
+    import control_plane as cp
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        reg = {"human_reserve": 0.2, "instances": []}
+        for name, w in (("a", 3), ("b", 1)):
+            d = root / name
+            (d / "logs").mkdir(parents=True)
+            (d / "fleet.env").write_text("FLEET_ENABLED=true\nCLAUDE_CODE_OAUTH_TOKEN=keepme\n"
+                                         "FLEET_SHARE_FRACTION=0.5\n# a comment\nNTFY_TOPIC=t\n")
+            reg["instances"].append({"name": name, "dir": str(d), "container": name,
+                                     "path": f"/fleet/{name}", "weight": w})
+        (root / "b" / "fleet.env").write_text(
+            (root / "b" / "fleet.env").read_text().replace("FLEET_ENABLED=true", "FLEET_ENABLED=false"))
+        env_a = root / "a" / "fleet.env"
+        inode = env_a.stat().st_ino
+        out = root / "out"
+        rows = cp.tick(reg, out_dir=out)
+        assert env_a.stat().st_ino == inode, "fleet.env was replaced, not rewritten in place"
+        text = env_a.read_text()
+        assert "FLEET_SHARE_FRACTION=0.8\n" in text, text
+        assert "CLAUDE_CODE_OAUTH_TOKEN=keepme" in text and "# a comment" in text and "NTFY_TOPIC=t" in text
+        assert "FLEET_SHARE_FRACTION=0\n" in (root / "b" / "fleet.env").read_text()
+        assert [r["share"] for r in rows] == [0.8, 0.0]
+        mtime = env_a.stat().st_mtime_ns
+        cp.tick(reg, out_dir=out)
+        assert env_a.stat().st_mtime_ns == mtime, "second tick rewrote an unchanged share"
+        page = (out / "index.html").read_text()
+        assert "/fleet/a/" in page and "/fleet/b/" in page and "paused" in page, page[:400]
+        assert "human reserve 20%" in page
+
+
+def _control_plane_runs_last_hour_counts_starvation_and_last_brief_gh759():
+    """gh#759 AC3: the index's starvation signal is budget_declined completions in the last
+    hour (started rows and older rows excluded); the last brief is the messenger's newest
+    'sent ...' completion at any age."""
+    import control_plane as cp
+    now = 1_800_000_000.0
+    with tempfile.TemporaryDirectory() as td:
+        logs = Path(td)
+        rows = [
+            {"member": "gru", "run_id": "g1", "ts": now - 100, "status": "started"},
+            {"member": "gru", "run_id": "g1", "ts": now - 60, "exit_code": 3, "status": "budget_declined"},
+            {"member": "gru", "run_id": "g0", "ts": now - 7200, "exit_code": 0, "status": "ok"},
+            {"member": "marie", "run_id": "m1", "ts": now - 30, "exit_code": 0, "status": "ok"},
+            {"member": "dont-shoot-the-messenger", "run_id": "d1", "ts": now - 9000, "exit_code": 0,
+             "status": "ok", "outcome": "sent wrap"},
+        ]
+        (logs / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
+        got = cp.runs_last_hour(logs, now)
+        assert got["budget_declined"] == 1 and got["ok"] == 1 and got["other"] == 0, got
+        assert got["last_brief"] == now - 9000, got
+        assert cp.runs_last_hour(logs / "missing", now)["last_brief"] is None
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -10224,6 +10299,11 @@ if __name__ == "__main__":
     check("worktree_guard_hook_install accepts a CLAUDE_CONFIG_DIR path, not just a settings.json path (gh#592)", _worktree_guard_install_cli_accepts_claude_config_dir_not_just_settings_json_gh592)
 
     check("fleet.env.example documents FIXER_HEALTH_URL/PAGE_URL/PROD_DIAG_DRIVER/FLEET_DEPLOY_DRIVER with examples and what breaks empty (gh#728 AC8)", _fleet_env_example_documents_the_fixer_prod_visibility_vars_gh728)
+
+
+    check("control_plane shares split the pool by weight; paused weight flows to the rest (gh#759 AC2)", _control_plane_shares_sum_to_pool_and_paused_weight_flows_gh759)
+    check("control_plane tick writes FLEET_SHARE_FRACTION in place, only when changed; index names every instance (gh#759 AC2/AC3)", _control_plane_tick_writes_share_in_place_only_when_changed_gh759)
+    check("control_plane runs_last_hour counts budget_declined as starvation and finds the last brief (gh#759 AC3)", _control_plane_runs_last_hour_counts_starvation_and_last_brief_gh759)
 
     for n in ok:
         print(f"  ok    {n}")
