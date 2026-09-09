@@ -830,6 +830,9 @@ function runRowHtml(rec, dupCount, live) {
       if (rec.status === 'budget_declined') {
         return `<div class="rmeta">$0.000 · declined before spending</div>`;
       }
+      if (rec.status === 'paced') {
+        return `<div class="rmeta">$0.000 · held: no headroom this hour</div>`;
+      }
       return '';
     })()}
     ${rec.run_id ? `<div class="rid" title="click to copy run_id">${esc(rec.run_id)}</div>` : ''}
@@ -1544,7 +1547,7 @@ async function renderStatsPage() {
   // per-run scatter (when did each agent run -- nobody asked) with "is the fleet's output any
   // good" -- signal rate (ok / executed), budget-wall rate (declined before running / total),
   // total runs, and which agents are fully walled off (dormant).
-  const STATUS_COLOR = { ok: '#1f8b4c', quiet: '#a6720f', reported_nothing: '#c13a2e', budget_declined: '#9a9ea6' };
+  const STATUS_COLOR = { ok: '#1f8b4c', quiet: '#a6720f', reported_nothing: '#c13a2e', budget_declined: '#9a9ea6', paced: '#9a9ea6' };
   if (runsSummaryR.status === 'rejected') {
     cardUnavailable('cardRuns', 'Recent Runs');
   } else {

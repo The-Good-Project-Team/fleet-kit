@@ -125,6 +125,10 @@ STATUS_QUIET = "quiet"
 STATUS_NOTHING = "reported_nothing"
 STATUS_NO_VISION = "no_vision_link"
 STATUS_BUDGET_DECLINED = "budget_declined"
+# fleet-kit#781: run_member.sh held the pass before `claude -p` because this hour's share
+# ceiling was a real 0.0000 (over pace / maxx verdict=over). Zero spend, deliberate, distinct
+# from budget_declined (the account itself said no) -- see scripts/pacing_gate.py.
+STATUS_PACED = "paced"
 STATUS_TIMED_OUT = "timed_out"
 STATUS_KILLED = "killed"
 STATUS_INCOMPLETE_FANOUT = "incomplete_fanout"
@@ -183,7 +187,7 @@ _DISPATCH_RE = re.compile(
 # the only trace was a log that stopped mid-sentence. A killed pass is NOT timed_out (it had
 # time left) and NOT budget_declined (it was spending fine) -- it is work that was interrupted
 # and is safe to re-run, which is a different operator decision from either.
-_EXIT_CODE_STATUS = {3: STATUS_BUDGET_DECLINED, 124: STATUS_TIMED_OUT,
+_EXIT_CODE_STATUS = {3: STATUS_BUDGET_DECLINED, 75: STATUS_PACED, 124: STATUS_TIMED_OUT,
                      137: STATUS_KILLED, 143: STATUS_KILLED}
 
 

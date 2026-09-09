@@ -1,6 +1,6 @@
 {
   "name": "judge-judy",
-  "emoji": "\ud83d\udd0d",
+  "emoji": "🔍",
   "kind": "llm",
   "lane": "review",
   "mandate": {
@@ -46,5 +46,7 @@
   },
   "report": {
     "vision_link": "optional"
-  }
+  },
+  "pacing": "exempt",
+  "pacing_why": "the merge gate is one cheap text-only call (fleet-kit#781)"
 }
