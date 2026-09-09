@@ -79,6 +79,12 @@ log "claimed item #$ITEM_ID: $ITEM_TEXT"
 WT_PATH="${TMPDIR:-/tmp}/fleet-build-${ITEM_ID}-$$"
 WT_BRANCH="build/${ITEM_ID}-${WORKER_NAME}"
 . "$KIT_DIR/scripts/worktree_lock.sh"
+# gh#684 (Part C4): same fix PR #697 shipped for run_member.sh -- a blanket `git worktree
+# prune` deletes a SIBLING container's still-live worktree entry during a rolling cutover
+# (#626): $REPO/.git/worktrees is a shared mount, but the worktree paths registered in it are
+# per-container ($TMPDIR). worktree_prune_own_container only reclaims entries this container
+# itself stamped, so a foreign container's live entry is left registered.
+. "$KIT_DIR/scripts/worktree_prune.sh"
 
 create_build_worktree() {
   local attempt rc=1
@@ -88,7 +94,7 @@ create_build_worktree() {
       worktree_lock_release
       sleep $((attempt * 3)); continue
     fi
-    git worktree prune >/dev/null 2>&1
+    worktree_prune_own_container "$REPO" 2>>"$LOG"
     # Delete-and-recreate, never reuse: a stale branch from a prior dead attempt would
     # otherwise silently build on top of possibly-broken prior commits.
     if git rev-parse --verify --quiet "refs/heads/$WT_BRANCH" >/dev/null 2>&1; then
@@ -96,6 +102,9 @@ create_build_worktree() {
     fi
     git worktree add "$WT_PATH" -b "$WT_BRANCH" origin/main
     rc=$?
+    # Stamp BEFORE releasing the lock: a concurrent prune (this container or another) must
+    # never observe a registered-but-unstamped entry.
+    [ "$rc" -eq 0 ] && worktree_stamp_container_id "$REPO" "$WT_PATH" 2>>"$LOG"
     worktree_lock_release
     [ "$rc" -eq 0 ] && return 0
     log "create_build_worktree: attempt $attempt failed (rc=$rc), retrying"
@@ -131,7 +140,7 @@ cleanup() {
   # full incident writeup (#4727).
   worktree_lock_acquire 30
   git -C "$REPO" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
-  git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+  worktree_prune_own_container "$REPO" 2>>"$LOG" || true
   worktree_lock_release
   rm -f "${USAGE_FILE:-}"
   if [ "$BUILD_SUCCEEDED" -ne 1 ]; then
