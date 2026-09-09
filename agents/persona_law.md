@@ -83,6 +83,32 @@ broken piece of infrastructure, not N broken pieces of work. File it once, name 
 unit, and stop retrying against it per-unit. Retrying blind against a broken gate burns passes
 and hides an outage as noise across many individually-unremarkable failures.
 
+## 7b. Read your predecessor before you re-derive — a recorded conclusion is evidence
+
+Found live 2026-09-09: 63 of 208 self-critiqued passes in ONE day, across 11 of 11 members, named
+the same waste in their own words — *"I spent real turns re-deriving a verdict a pass one minute
+earlier had already reached in full."* §1-§3 rightly say never to trust local state and never to
+report a number you did not get from a command. Nothing said where the cheap evidence already
+sits, so "re-run the whole investigation" became the natural first move, every pass.
+
+**A prior pass's recorded, evidenced conclusion is evidence, and the cheapest read of your pass.
+Start there**, before re-deriving any state another pass could plausibly have established:
+
+```
+sqlite3 "$FLEET_LOG_DIR/fleet.db" "SELECT datetime(recorded_at,'unixepoch'), member, outcome,
+  self_critique FROM runs WHERE recorded_at > strftime('%s','now','-1 day') AND status='ok'
+  ORDER BY recorded_at DESC LIMIT 40"
+```
+
+plus `gh issue view <N> --comments` for anything issue-shaped.
+
+Then re-verify only what is **cheap to check and expensive to be wrong about** — a live gate, a
+deploy state, a merge status, the current code at a named path — one command each. Do not re-run
+a predecessor's whole investigation to re-reach a conclusion it already pasted the evidence for:
+cite it (`per <member>'s pass at <time>: <claim>`) and spend the budget on what nobody has looked
+at yet. An unevidenced predecessor claim is still unverified, and `unverified: <why>` is still
+always the right answer for it.
+
 ## 8. Checkpoint discipline
 
 You have a hard turn/time budget. Land the smallest complete unit early rather than holding a
@@ -359,14 +385,10 @@ of your own charter starts a brand-new process with no memory of it.
 **The rule:** if you background any sub-pass or long-running command, you MUST synchronously
 wait for it inside this SAME turn, before you write your report. **Use `Bash(run_in_background:
 true)` + the tool's own blocking form (e.g. `TaskOutput(task_id, block: true, timeout:
-600000)`) — never a raw shell `&` + `wait "$PID"`.** gh#152 (2026-08-28, datta) found `wait
-$PID` fails outright the instant the background and the wait land in separate Bash tool calls —
-shell state doesn't persist across invocations, so the wait returns instantly with exit 127
-("not a child of this shell") instead of blocking, and the pass ends before the real work
-finishes. Even kept inside a single call (`cmd1 & cmd2 & wait`), the pattern stayed fragile:
-gh#283 (2026-09-02) recorded the-fixer's own `... & ... & wait` two-way fan-out getting its
-whole process group killed by an external signal ~42s in, orphaning PRs #276/#280 with the
-work lost entirely — a recurrence of gh#252 (2026-08-30), the same shape on a 4-way fan-out.
+600000)`) — never a raw shell `&` + `wait "$PID"`.** Raw `&` + `wait $PID`
+fails two ways, both recorded: across separate Bash calls the wait returns instantly with exit
+127, never blocking (gh#152); inside one call, `cmd1 & cmd2 & wait` had its whole process group
+killed mid-flight, losing the work outright (gh#283, gh#252).
 `Bash(run_in_background)` + `TaskOutput(block: true)` is the confirmed-working replacement
 (datta.md, gru.md) — it survives independently of the calling turn instead of tying a
 background job's fate to one shell process. If your own turn/time budget can't afford to wait
@@ -399,12 +421,9 @@ Bash(command: "some/long/running/command.sh &", run_in_background: true)
 Bash(command: "some/long/running/command.sh", run_in_background: true)
 ```
 
-Every occurrence of this shape self-recovered (the member noticed via `ps`/`/proc`, found the
-orphaned PID, and re-derived the result by hand) — but that recovery is not the mandated
-`TaskOutput(block: true)` path, costs real turns every time, and is exactly one missed `ps`
-check away from becoming a silent `reported_nothing` like gh#152's original failure. If you
-are about to write a `Bash` call with `run_in_background: true`, the command string you pass
-must never itself end in `&` — that flag already does the only backgrounding this call needs.
+Every occurrence self-recovered by hand, at the cost of real turns and one missed `ps` check
+away from a silent `reported_nothing`. A `Bash` call with `run_in_background: true` must never
+pass a command string ending in `&` — the flag is the only backgrounding it needs.
 
 **A fourth shape, found live gh#677 (2026-09-08, librarian): arming a `Monitor` on a
 backgrounded job, then ending the turn to "wait for its notification."** `Monitor`'s own tool
