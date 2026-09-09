@@ -255,6 +255,10 @@ fi
 # is not a normal pass -- averaging it in would skew every future estimate. Filter these out
 # when calibrating (`run_id NOT LIKE '%-adhoc-%'`).
 RUN_ID="${MEMBER}${ITEM:+-item$ITEM}${TASK:+-adhoc}-$$-$(date +%s)"
+# fleet-kit#783: predict.py records the pass that made a prediction by this id, so the ledger
+# can show that pass's turns/cost (leg 3 of the grader). Exported, not just set: `claude -p`
+# is a separate exec and only sees the environment.
+export FLEET_RUN_ID="$RUN_ID"
 
 MAX_BUDGET=$(jget "['mandate']['limits'].get('max_budget_usd') or ''")
 

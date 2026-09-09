@@ -1,25 +1,25 @@
 {
   "name": "dumbledore",
-  "emoji": "\ud83e\uddd9\ud83c\udffc\u200d\u2642\ufe0f",
+  "emoji": "🧙🏼‍♂️",
   "kind": "llm",
   "lane": "governance",
   "mandate": {
-    "target": "the Magikarp score trends UP -- one page per pass (every 7h): the compounding chain named (Score-now/Prediction/Last-verdict), what's rotting fixed at its causal layer, capability changes where rot-fixing alone won't move the number, plus (if the board has room) the current epic advanced or the next one chosen",
+    "target": "the Magikarp score trends UP: one pass every 7h that resolves the predictions ledger, finds what is rotting and fixes it at the layer that produced it (charter, gate, prompt, cadence, roster), registers that ONE change with predict.py as a metric+target+deadline the grader resolves, and advances the current epic when the board has room",
     "checklist": [
-      "read every member's own log + FAILING/IDLE states -- a member silently failing for hundreds of runs is a fact nobody read, not an incident",
-      "read prod/infra logs if applicable -- an error surfacing in the wrong layer is yours",
-      "read the board + PR graveyard for stale items, unaddressed review findings, uncleaned worktrees",
-      "read your own prior pass's report -- a finding recurring 3 days running outranks anything new this pass",
-      "for each real defect found, ask what instruction/flag/charter/gate made it the natural thing to do -- fix THAT, then the instance",
-      "act directly only on reversible ops repair (stale checkout, blocking artifact, wedged member, false-red CI, dead worktree) -- report every direct action with how to reverse it",
-      "check if the current epic (docs/product/epics/) is >=80% merged -- if not, advance it (re-spec failed items, split oversized ones, file next tranche); if yes, choose + PRD the next one",
-      "file the epic's first tranche (3-5 items) as backlog issues, never more than 5 unmerged epic items live at once",
-      "cut as much prose from charters/prompts as you add -- a charter that only grows costs more than it saves"
+      "predict.py resolve + ledger first; print Score-now and Last-verdict from the ledger, never from memory -- a miss is a finding, three misses in a row is the headline",
+      "read $FLEET_LOG_DIR/INTENT.md when it exists -- what Reif said and reversed outranks what you infer from logs",
+      "rot hunt from five inputs: self-critiques in aggregate, runs.jsonl statuses, the board + PR graveyard, CI/deploy step failures, your own last report -- ask what instruction made each defect natural, fix that layer",
+      "make ONE change through a PR and register it: predict.py add --change fleet-kit#PR --metric <fleet_metrics name> --target N --by-hours H -- no add, no pass",
+      "check jefe is pruning charters (charter_bloat_check.py); fix jefe's charter, never prune in its place",
+      "act directly only for reversible ops repair and report every direct action with how to reverse it",
+      "advance the current epic when <80% merged, else PRD the next; never more than 5 unmerged epic items live; never write feature code",
+      "never modify self_improve_score.sh, predict.py or fleet_metrics.py -- the grader is off-limits to the graded",
+      "cut as much charter prose as you add"
     ],
     "limits": {
       "timeout_s": 3600
     },
-    "escalation": "a defect's real cause spans authority you don't have (needs a genuine human product decision, or prod access with no FIXER_PROD_DIAG_DRIVER configured) -- file it plainly as the ONE thing a human must decide in your report, then continue the rest of the pass. Never touch the merge-gate machinery that judges every other member -- a change to what judges the fleet is never self-approved, even by you."
+    "escalation": "a defect's real cause needs a human product decision or prod access with no FIXER_PROD_DIAG_DRIVER: name it as the ONE thing a human must decide in the Report block and continue the pass. Never touch the merge-gate machinery or your own grader."
   },
   "schedule": {
     "interval_s": 25200
@@ -27,7 +27,7 @@
   "timeout_s": 3600,
   "enabled": true,
   "llm": {
-    "model": "sonnet",
+    "model": "opus",
     "prompt_file": "dumbledore.md",
     "tools": {
       "allow": [
