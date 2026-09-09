@@ -22,9 +22,8 @@ do not claim it — gru already did both before spawning you.
 A pilot's checklist is identical every run, on purpose (confirmed live 2026-08-23 on
 dont-shoot-the-messenger: without a forced plan, a real pass burned its whole turn budget on
 early steps and never reached the report at all — landed as `reported_nothing` despite real
-work done). Re-measured 2026-09-02 against fleet.db: minion's real record is 337 `ok` of 473
-runs lifetime, 22 of the last 27 — the strongest of any member. The "0 of 27" this charter
-claimed for generations was simply wrong, and told every minion it had never once succeeded.
+work done). Per fleet.db, minion's real record is 337 `ok` of 473 runs lifetime, 22 of the
+last 27 — the strongest of any member.
 
 1. **Read your item.** Your prompt names the exact issue number. `gh issue view <n> --comments`
    for its title, body AND comments. Do not touch any other issue, claimed or not; picking a
@@ -65,17 +64,14 @@ claimed for generations was simply wrong, and told every minion it had never onc
 
    No `fleet:prd` label? The body is your spec, as before.
 1c. **Confirm you're in YOUR worktree, not `/repo`, before your first `Edit`/`Write` or
-   git-mutating command — `pwd` and `git worktree list`.** Five separate minion self-critiques
-   hit this exact failure in one 24h window (2026-09-05/06): editing `/repo/pyproject.toml`,
-   running `git commit` or `git checkout --` from `/repo`, editing `pgsearch.py` in `/repo` —
-   each one caught only AFTER the mistake, via `git status` or the harness's own dirty-file
-   notice, costing a wasted round-trip (and once, an accidental revert of uncommitted work)
-   every time. `/repo` is the shared checkout other concurrent sessions use; gh#78/#183 added a
-   post-flight dirty-check as the safety net for when this slips through, but that only cleans
-   up after the fact — it does not give you back the turns. Reading from `/repo` is fine (e.g.
-   `git show origin/main:<path>` to see upstream state without touching your own tree); writing
-   to it is not. Re-run the same check any time a command's output looks unexpectedly large or
-   unfamiliar — that is usually the first sign you are not where you think you are.
+   git-mutating command — `pwd` and `git worktree list`.** `/repo` is the shared checkout other
+   concurrent sessions use; editing it directly (or running `git commit`/`git checkout --`
+   there) cost several minion passes a wasted round-trip in one 24h window (2026-09-05/06,
+   caught only after the fact via `git status`). gh#78/#183's post-flight dirty-check is a
+   safety net for when this slips through, not a substitute for checking first — it doesn't
+   give you back the turns. Reading from `/repo` is fine (`git show origin/main:<path>`);
+   writing to it is not. Re-run the check any time a command's output looks unexpectedly large
+   or unfamiliar — that's usually the first sign you're not where you think you are.
 2. **Build.** Tests first when practical. Follow the codebase's existing style. Reuse before
    you build — check for an existing utility or pattern before writing a new one.
 3. **Test locally** before you push — run whatever this repo's test command is. **You are a
@@ -89,15 +85,11 @@ claimed for generations was simply wrong, and told every minion it had never onc
    that resumes you. If you can't afford to wait for a full suite in this pass's budget, run a
    narrower, faster command you CAN wait for (targeted tests for what you touched) rather than
    backgrounding a slow one you won't see finish.**
-3b. **A browser ships in this image — USE IT when the item touches rendered UI.** Between
-   2026-08-25 and 26, fifteen of your own self-critiques named "no browser tooling in this
-   sandbox" / "no live screenshot" as the reason you could not satisfy an issue's OWN
-   acceptance criteria. Two of those landed AFTER the browser shipped (#107). PRs went out
-   with a CSS-token-consistency *argument* where the PRD had asked for a screenshot. The
-   tooling was there; this charter just never told you.
-
-   Playwright + headless chromium are installed and verified live (loaded philanthropy.org
-   and read its real `<h1>`). Same incantation nerd.md uses:
+3b. **A browser ships in this image — USE IT when the item touches rendered UI.** Fifteen of
+   your own self-critiques (2026-08-25/26) named "no browser tooling" as the reason they
+   couldn't satisfy an issue's OWN acceptance criteria — two of those landed AFTER the browser
+   shipped (#107). Playwright + headless chromium are installed and verified live (loaded
+   philanthropy.org and read its real `<h1>`). Same incantation nerd.md uses:
 
    ```
    python3 -c "
@@ -109,10 +101,9 @@ claimed for generations was simply wrong, and told every minion it had never onc
    "
    ```
 
-   `--no-sandbox` is required (this runs as root in a container). If the item's acceptance
-   criteria ask for a rendered page, a screenshot, or "looks right" — render it and SAY what
-   you saw. **"I could not verify visually" is now a false statement**, so if you write
-   something like it in a self-critique, you have skipped a step you could have run.
+   `--no-sandbox` is required (root in a container). If the acceptance criteria ask for a
+   rendered page, a screenshot, or "looks right" — render it and say what you saw.
+   **"I could not verify visually" is now a false statement.**
 
 4. **Check for duplicates.** `gh pr diff <n>` on any suspicious open PR before writing new
    code — if the item is already fully fixed by an open, mergeable PR, say so and stop.
@@ -149,23 +140,27 @@ claimed for generations was simply wrong, and told every minion it had never onc
    green. You do not merge directly (a check might still be running), and you do not wait for
    a human to drive it through — arming auto-merge IS finishing the job.
 
-   **Check whether your target repo's `main` is queue-controlled before picking a strategy
-   flag — a hardcoded guess has broken real PRs both ways, in both directions.** A bare arm
-   with no strategy flag ERRORS outright on a repo with no queue
-   (`--merge, --rebase, or --squash required when not running interactively`) — confirmed live
-   on fleet-kit's own repo (`gh api repos/The-Good-Project-Team/fleet-kit/branches/main/protection`)
-   as of 2026-08-28 through 2026-09-05, which cost a wasted retry on nearly every minion pass in
-   that window (PRs #406/#407/#413/#414/#416/#417 in one day alone). **That has since flipped**:
-   reconfirmed live 2026-09-06, fleet-kit's `main` now carries a ruleset with a `merge_queue`
-   rule, so the bare form is now correct there too — the shape changes over time, not just
-   between repos. On a repo where `main` IS queue-controlled (confirmed live on both
-   nonprofit-atlas, issue #3108, and fleet-kit as of 2026-09-06), an explicit strategy
-   flag is an invalid combination and gh ERRORS instead of enqueueing (`! The merge strategy
-   for main is set by the merge queue`) — there, the bare form is correct, letting `gh` pick
-   the queue path itself. Don't trust either example above as still true by the time you read
-   this — check once
-   (`gh api repos/<owner>/<repo>/rulesets` for a `merge_queue` rule, or
-   `gh api repos/<owner>/<repo>/merge-queue` for a non-404) rather than assuming either one.
+   **Check whether `main` is queue-controlled before picking a strategy flag — this shape
+   changes over time (fleet-kit's own `main` has flipped between the two), don't assume last
+   pass's answer still holds.** A bare arm with no strategy flag ERRORS on a repo with no queue
+   (`--merge, --rebase, or --squash required when not running interactively` — cost a wasted
+   retry on nearly every minion pass across #406/#407/#413/#414/#416/#417 in one day before
+   fleet-kit's `main` moved onto a queue); an explicit strategy flag ERRORS on a repo where
+   `main` IS queue-controlled instead (`! The merge strategy for main is set by the merge
+   queue`, confirmed on both nonprofit-atlas issue #3108 and fleet-kit). The ruleset LIST
+   endpoint alone can't tell you which — it returns only summaries (id/name/target/enforcement),
+   never the `rules` array, so an unrelated ruleset reads as "non-empty" too. Fetch each
+   ruleset's detail instead:
+   ```
+   gh api repos/<owner>/<repo>/rulesets --jq '.[].id' | while read -r id; do
+     gh api repos/<owner>/<repo>/rulesets/$id --jq '.rules[].type'
+   done
+   gh api repos/<owner>/<repo>/merge-queue
+   ```
+   A `merge_queue` rule type in any ruleset's detail (or a non-404 from the second call) means
+   a queue is live — use a bare `gh pr merge` and let `gh` pick the queue path. Neither means
+   no queue — use `gh pr merge --squash` (or your repo's equivalent) explicitly.
+
    CHECK THE EXIT CODE regardless of shape — issue #3108's root cause was this exact command
    failing silently, with the failure never mentioned in the final report, leaving
    fully-green PRs stuck for hours with no human or orchestrator any the wiser. A non-zero
