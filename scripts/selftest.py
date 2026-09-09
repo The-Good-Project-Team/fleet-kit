@@ -10290,6 +10290,50 @@ def _fleet_env_example_documents_the_fixer_prod_visibility_vars_gh728():
     )
 
 
+def _maxx_share_ceiling_holds_a_5h_block_ahead_of_pace_gh781():
+    """Reif 2026-09-09: "it's the session limits we should respect." Live that day the
+    hourly ceiling stayed 0.015-0.048 while the account burned 77% of its 5h window in the
+    first 90 minutes (session_used_pct=77, five_reset_in_sec=12534 at 16:51Z), walled, then
+    sat budget_declined for 3.5h. The ceiling must read 0.0000 while the block is ahead of
+    linear pace, and the usual number once it is not. Missing fields fail open."""
+    import io
+    from contextlib import redirect_stdout
+    import maxx_share_ceiling
+
+    def ceiling(budget):
+        orig = maxx_share_ceiling.get_headroom
+        maxx_share_ceiling.get_headroom = lambda: (1.0, "ok", budget)
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                assert maxx_share_ceiling.main(["prog", "1.0"]) == 0
+            return buf.getvalue().strip()
+        finally:
+            maxx_share_ceiling.get_headroom = orig
+
+    healthy_hour = {"verdict": "ok", "sustainable_pct_per_hour": 0.35,
+                    "per_diem_hourly_pct": 0.10, "reserved_pct": 0}
+    # The live 16:51Z reading: 30% of the block elapsed, 77% of it spent -> hold.
+    live = {**healthy_hour, "session_used_pct": 77, "five_reset_in_sec": 12534}
+    assert ceiling(live) == "0.0000", ceiling(live)
+    # Same block, spent on pace (30% elapsed, 35% used, inside the 10-point slack) -> the
+    # ordinary hourly number, not a hold.
+    paced = {**live, "session_used_pct": 35}
+    assert abs(float(ceiling(paced)) - 0.25) < 1e-6, ceiling(paced)
+    # Fresh block, small burst inside the slack -> run; past the slack -> hold.
+    assert ceiling({**live, "session_used_pct": 9, "five_reset_in_sec": 18000}) != "0.0000"
+    assert ceiling({**live, "session_used_pct": 11, "five_reset_in_sec": 18000}) == "0.0000"
+    # No block fields at all (older maxx, or a stripped reading) -> fail open, unchanged.
+    assert abs(float(ceiling(healthy_hour)) - 0.25) < 1e-6
+    # The reader passes both fields through, otherwise the clamp can never see them.
+    import maxx_reader
+    _, _, allowance = maxx_reader.get_headroom(
+        "https://example.invalid", "h", "k",
+        fetcher=lambda *a, **k: {"verdict": "ok", "week_bank_pct": 1.9,
+                                 "session_used_pct": 77, "five_reset_in_sec": 12534})
+    assert allowance.get("session_used_pct") == 77 and allowance.get("five_reset_in_sec") == 12534, allowance
+
+
 def _pacing_gate_holds_zero_ceiling_unless_exempt_gh781():
     import subprocess
     import pacing_gate
@@ -11119,6 +11163,7 @@ if __name__ == "__main__":
     check("control_plane: an agent creates and removes an instance over HTTP with a bearer token (gh#759 AC1)", _control_plane_agent_creates_and_removes_an_instance_over_http_gh759)
     check("control_plane secrets: init/check/adopt/set build one store, include every fleet.env, never print a value (gh#759)", _control_plane_secret_store_init_check_adopt_set_gh759)
     check("deploy.sh mounts the shared secret store read-only at the same path, only when present (gh#759)", _deploy_sh_mounts_the_shared_secret_store_read_only_gh759)
+    check("share ceiling is 0.0000 while the 5h block runs ahead of linear pace (gh#781 follow-up)", _maxx_share_ceiling_holds_a_5h_block_ahead_of_pace_gh781)
     check("pacing_gate holds a zero ceiling, runs an exempt member or an unreadable meter (gh#781 AC1-3)", _pacing_gate_holds_zero_ceiling_unless_exempt_gh781)
     check("fleet_metrics computes signal_rate/avg_cost over a window, unavailable when empty (gh#782 AC1)", _fleet_metrics_windows_runs_and_says_unavailable_gh782)
     check("predict.py add/resolve: hit in the baseline->target direction, miss otherwise, unavailable on no data (gh#782 AC2)", _predict_add_resolve_hit_miss_unavailable_gh782)
