@@ -98,6 +98,24 @@ LABEL_JOURNEY = f"{PREFIX}sentry-journey"
 LABEL_COLOR = "5319e7"
 LABEL_DESC = "sentry: a journey step (gh#657/gh#660) failed and was filed by journey_issue_filer.py"
 
+# fleet-kit#785: red reuses this whole filer (dedup, self-close, state) under its own label,
+# marker and wording. A profile is the only thing that varies; everything below defaults to
+# SENTRY so existing callers and tests are byte-for-byte unchanged.
+class Profile:
+    def __init__(self, key, label, color, desc, marker_tag, lead, title_suffix):
+        self.key = key; self.label = label; self.color = color; self.desc = desc
+        self.marker_tag = marker_tag; self.lead = lead; self.title_suffix = title_suffix
+
+SENTRY = Profile("sentry", LABEL_JOURNEY, LABEL_COLOR, LABEL_DESC, "sentry-journey",
+                 "Sentry drove the **{name}** journey as a real person would, and this step stopped doing its job.",
+                 "isn't working")
+RED = Profile("red", f"{PREFIX}red-team", "b60205",
+              "red: an adversarial attack (gh#785) LANDED against our own product and was filed by journey_issue_filer.py",
+              "red-team",
+              "Red drove the **{name}** attack against our own product, and it LANDED -- the product did the unsafe thing.",
+              "can be broken")
+PROFILES = {"sentry": SENTRY, "red": RED}
+
 DEFAULT_STATE_PATH = Path(
     os.environ.get(
         "FLEET_JOURNEY_STATE",
@@ -105,7 +123,11 @@ DEFAULT_STATE_PATH = Path(
     )
 )
 
-MARKER_RE = re.compile(r"<!--\s*fleet:sentry-journey\s+key=([^\s]+?)\s*-->")
+def _marker_re(tag):
+    return re.compile(r"<!--\s*fleet:" + re.escape(tag) + r"\s+key=([^\s]+?)\s*-->")
+
+
+MARKER_RE = _marker_re("sentry-journey")  # back-compat: sentry's own marker
 
 
 def is_viewport_independent(step_index: int) -> bool:
@@ -132,22 +154,22 @@ def step_key(journey_id: str, step_index: int) -> str:
     return f"{journey_id}::step{step_index}"
 
 
-def marker_for(key: str) -> str:
-    return f"<!-- fleet:sentry-journey key={key} -->"
+def marker_for(key: str, tag: str = "sentry-journey") -> str:
+    return f"<!-- fleet:{tag} key={key} -->"
 
 
-def key_from_body(body: str) -> str | None:
-    m = MARKER_RE.search(body or "")
+def key_from_body(body: str, tag: str = "sentry-journey") -> str | None:
+    m = _marker_re(tag).search(body or "")
     return m.group(1) if m else None
 
 
 # --- pure content builders (unit-tested; never executed by tests) ------------------------------
 
-def build_issue_title(journey_name: str, step_action: str) -> str:
+def build_issue_title(journey_name: str, step_action: str, suffix: str = "isn't working") -> str:
     action = (step_action or "").strip().rstrip(".")
     if len(action) > 70:
         action = action[:67] + "..."
-    return f'{journey_name}: "{action}" isn\'t working'
+    return f'{journey_name}: "{action}" {suffix}'
 
 
 def _repro_steps(steps: list[dict], up_to_index: int) -> str:
@@ -167,10 +189,10 @@ def build_issue_body(
     last_pass_sha: str | None,
     key: str,
     viewports: list[str] | None = None,
+    profile: "Profile" = SENTRY,
 ) -> str:
     lines = [
-        f"Sentry drove the **{journey.get('name', journey.get('id'))}** journey as a real "
-        "person would, and this step stopped doing its job.",
+        profile.lead.format(name=journey.get("name", journey.get("id"))),
         "",
         f"**Failed step:** {step.get('action', '').strip()}",
         f"**Expected:** {step.get('observable_result', '').strip()}",
@@ -199,18 +221,18 @@ def build_issue_body(
         + (last_pass_sha or "unknown -- this is the first observed failure"),
         f"**This run:** {run} (sha {deploy_sha or 'unknown'})",
         "",
-        marker_for(key),
+        marker_for(key, profile.marker_tag),
     ]
     return "\n".join(lines)
 
 
-def build_file_cmd(title: str, body: str) -> list[str]:
-    return ["gh", "issue", "create", "--title", title, "--body", body, "--label", LABEL_JOURNEY]
+def build_file_cmd(title: str, body: str, label: str = LABEL_JOURNEY) -> list[str]:
+    return ["gh", "issue", "create", "--title", title, "--body", body, "--label", label]
 
 
-def build_list_cmd() -> list[str]:
+def build_list_cmd(label: str = LABEL_JOURNEY) -> list[str]:
     return [
-        "gh", "issue", "list", "--state", "open", "--label", LABEL_JOURNEY,
+        "gh", "issue", "list", "--state", "open", "--label", label,
         "--limit", "200", "--json", "number,body",
     ]
 
@@ -247,13 +269,13 @@ def _run(cmd: list[str]) -> tuple[int, str]:
         return 1, str(e)
 
 
-def ensure_label(runner=_run) -> None:
+def ensure_label(runner=_run, profile: "Profile" = SENTRY) -> None:
     """Idempotent: `gh` errors on a duplicate create; that failure is expected and ignored."""
-    runner(["gh", "label", "create", LABEL_JOURNEY, "--color", LABEL_COLOR, "--description", LABEL_DESC])
+    runner(["gh", "label", "create", profile.label, "--color", profile.color, "--description", profile.desc])
 
 
-def find_open_issue(key: str, runner=_run) -> int | None:
-    rc, out = runner(build_list_cmd())
+def find_open_issue(key: str, runner=_run, profile: "Profile" = SENTRY) -> int | None:
+    rc, out = runner(build_list_cmd(profile.label))
     if rc != 0:
         print(f"journey_issue_filer: list FAILED: {out[:300]}", file=sys.stderr)
         return None
@@ -262,7 +284,7 @@ def find_open_issue(key: str, runner=_run) -> int | None:
     except json.JSONDecodeError:
         return None
     for issue in issues:
-        if key_from_body(issue.get("body") or "") == key:
+        if key_from_body(issue.get("body") or "", profile.marker_tag) == key:
             return issue.get("number")
     return None
 
@@ -290,7 +312,7 @@ def group_by_key(results: dict) -> "dict[str, list[tuple[dict, dict]]]":
     return groups
 
 
-def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_run, dry_run: bool = False) -> dict:
+def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_run, dry_run: bool = False, profile: "Profile" = SENTRY) -> dict:
     """Walks one results.json, files/comments/closes as needed. Returns a summary dict of
     what happened -- never raises on a `gh` failure, since one bad call must not stop the rest
     of the run from being processed (same non-crashing-on-a-single-failure shape #657's own
@@ -302,7 +324,7 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
     summary = {"filed": [], "commented": [], "closed": [], "errors": []}
 
     if not dry_run:
-        ensure_label(runner)
+        ensure_label(runner, profile)
 
     for key, entries in group_by_key(results).items():
         failing = [(j, s) for j, s in entries if s.get("status") == "fail"]
@@ -312,7 +334,7 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
             # happened to pass in the same collapsed group must not be reported as broken.
             failing_viewports = sorted({viewport_of(j["id"]) for j, _ in failing})
             journey, step = failing[0]
-            existing = None if dry_run else find_open_issue(key, runner)
+            existing = None if dry_run else find_open_issue(key, runner, profile)
             if existing:
                 note = f"Recurred again on run `{run}` (sha `{deploy_sha or 'unknown'}`)."
                 if not dry_run:
@@ -322,16 +344,16 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
                         continue
                 summary["commented"].append({"issue": existing, "key": key})
             else:
-                title = build_issue_title(journey.get("name", journey["id"]), step.get("action", ""))
+                title = build_issue_title(journey.get("name", journey["id"]), step.get("action", ""), profile.title_suffix)
                 collapsed_viewports = failing_viewports if len(failing_viewports) > 1 else None
                 body = build_issue_body(
                     journey, step, run, deploy_sha, state.get(key, {}).get("last_pass_sha"), key,
-                    collapsed_viewports,
+                    collapsed_viewports, profile,
                 )
                 if dry_run:
                     summary["filed"].append({"issue": None, "key": key, "title": title})
                     continue
-                rc, out = runner(build_file_cmd(title, body))
+                rc, out = runner(build_file_cmd(title, body, profile.label))
                 if rc != 0:
                     summary["errors"].append(f"file {key} failed: {out[:300]}")
                     continue
@@ -345,7 +367,7 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
             # value), never reaches this branch: it is left untouched this run, same as the
             # original per-step `elif status == "pass":` guard did.
             state[key] = {"last_pass_sha": deploy_sha, "last_pass_run": run}
-            existing = None if dry_run else find_open_issue(key, runner)
+            existing = None if dry_run else find_open_issue(key, runner, profile)
             if existing:
                 note = f"Passing again as of run `{run}` (sha `{deploy_sha or 'unknown'}`)."
                 if not dry_run:
@@ -365,9 +387,10 @@ def main() -> int:
     ap.add_argument("--results", required=True, type=Path, help="path to a walker results.json")
     ap.add_argument("--state", type=Path, default=DEFAULT_STATE_PATH, help="per-journey last-pass state file")
     ap.add_argument("--dry-run", action="store_true", help="print what would happen, touch nothing")
+    ap.add_argument("--profile", choices=sorted(PROFILES), default="sentry", help="sentry (journeys) or red (adversarial), fleet-kit#785")
     args = ap.parse_args()
 
-    summary = process(args.results, args.state, dry_run=args.dry_run)
+    summary = process(args.results, args.state, dry_run=args.dry_run, profile=PROFILES[args.profile])
     print(json.dumps(summary, indent=2))
     return 1 if summary["errors"] else 0
 
