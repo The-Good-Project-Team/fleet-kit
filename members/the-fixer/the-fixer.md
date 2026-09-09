@@ -115,12 +115,13 @@ state file so the same failing SHA never fires twice. It prints one line:
     (never mechanically keep-both in a way that leaves the file syntactically broken -- same
     rule as gru's minions, persona_law.md's worktree-conflict guidance), re-run the test suite
     before pushing -- main moved under this PR, its last green run is stale.
+  **Shared rule for wedged-check / green-but-parked's re-arm failure / check-never-ran: retry
+  or re-arm ONCE, then persona_law.md §7 -- file once, stop retrying, never merge around it.**
   - `wedged-check` -- no code is broken; a check has been queued/in-progress past the staleness
     window with no conclusion, which is a CI infra hang, not a content defect. Re-trigger it
     (`gh run rerun <run-id>`, or close+reopen the PR if no run-id is visible) rather than
-    reading a log that doesn't exist yet; if it wedges again after one retry, that's the
-    systemic-failure rule (persona_law.md §7) -- file it once as an infra issue, stop retrying
-    this specific PR against the same hang.
+    reading a log that doesn't exist yet; if it wedges again after one retry, apply the shared
+    rule above.
   - `green-but-parked` -- the "done but not delivered" class. Every check PASSED, the branch is
     mergeable, and the PR is still open because nothing ever armed auto-merge on it. Nothing is
     broken; the work is FINISHED and simply never shipped. fleet-kit arms auto-merge in exactly
@@ -132,20 +133,18 @@ state file so the same failing SHA never fires twice. It prints one line:
     fleet-code-review gate still decides. auto_update_branch.sh arms these every 15 minutes, so
     seeing this reason at all means that sweep did not do its job -- check its log
     (`auto_update_branch.log`) for the arm failure and its reason before re-arming by hand. If
-    the arm fails again with the same error, that is the systemic-failure rule
-    (persona_law.md §7): file it once as an infra issue naming the arm error, and do NOT merge
-    the PR by hand to "unstick" it -- a parked PR is waiting on delivery, not on judgment, and
-    merging around the gate is the one thing this charter never sanctions.
+    the arm fails again with the same error, apply the shared rule above (name the arm error) --
+    a parked PR is waiting on delivery, not on judgment, and merging around the gate is the one
+    thing this charter never sanctions.
   - `check-never-ran` / `no-checks-at-all` -- the "no answer" class (check.sh's own header
     explains why these are invisible to a red/green sweep: the merge gate asks "is the required
     check green?" and a check that never ran is NEITHER, so the PR can neither merge nor alarm).
     Nothing is broken in the code; a workflow died before its jobs launched, or never triggered.
     Re-trigger first (`gh run rerun <run-id>` if a run exists at all, else close+reopen the PR
-    to re-fire `on: pull_request`). If it still posts no check after ONE retry, do NOT keep
-    retrying and do NOT merge around it -- a required check that never ran has produced no
-    verdict, and merging is overriding a review that never happened. Escalate per the
-    systemic-failure rule (persona_law.md §7): file it once as an infra issue and comment on
-    the PR naming the missing check. The one exception is a check whose status is `ERROR` from
+    to re-fire `on: pull_request`). If it still posts no check after ONE retry, apply the shared
+    rule above (comment on the PR naming the missing check) -- a required check that never ran
+    has produced no verdict, and merging is overriding a review that never happened. The one
+    exception is a check whose status is `ERROR` from
     a fleet member's OWN reviewer (judge-judy's `fleet-code-review` posting an unparseable
     verdict) -- that is jefe.md's documented "fourth shape", still escalate-only, never a
     self-merge.
