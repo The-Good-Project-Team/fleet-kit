@@ -279,10 +279,14 @@ case "${1:-cron-foreground}" in
       fi
       # librarian (philanthropy#4439, nonprofit-atlas#4410 seq:1): scrubs credential-shaped
       # strings out of session transcripts and enforces the compress/drop retention window.
-      # Hourly like roomba/marie/datta -- a live credential leak on disk does not get a slower
-      # cadence than hygiene work does. :55 is unclaimed on the minute map above.
+      # Hourly like roomba/marie/datta. Moved off :55 to :06 (gh#754, 2026-09-08): :55 was
+      # dead last in the hour after every other member had already drawn down that hour's
+      # shared account headroom, so librarian was declined at the budget gate on 83% of its
+      # runs. :06 runs right after the hour's headroom resets, matching the schedule
+      # librarian.fleet.json's schedule.hourly_at_minute already declared -- fleet.json edits
+      # do not update this line by themselves (see the selftest check that now compares them).
       if cron_member_enabled librarian; then
-        echo "55 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh librarian >> $LOG_DIR/librarian.log 2>&1"
+        echo "6 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh librarian >> $LOG_DIR/librarian.log 2>&1"
       fi
       if cron_member_enabled marie; then
         echo "33 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh marie >> $LOG_DIR/marie.log 2>&1"
