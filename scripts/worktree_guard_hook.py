@@ -40,14 +40,45 @@ import sys
 # Verbs that mutate a git checkout or the filesystem. Deliberately excludes read-only verbs
 # (show, diff, log, status, ls, cat, grep, less, head, tail) so a read-only reference to $REPO
 # (gh#592 AC3: `git show origin/main:<path>`) is never blocked.
+#
+# The redirect alternative used to require `>`/`>>` to sit at the very start of the command or
+# right after a `;`/`&`/`|` separator -- which never matches an ordinary `cmd > file` (the `>`
+# there is preceded by the command's own words, not a separator). Fixed as part of gh#715 AC4:
+# require only that `>`/`>>` be preceded by whitespace/start/a separator (so it reads as an
+# operator, not `-mmethod>Object` arrows or `>=` comparisons) and allow the usual optional
+# space before the target.
 _MUTATING_BASH_RE = re.compile(
     r"\bgit\s+(commit|checkout\s+--|reset|add|merge|rebase|push|stash\s+pop|clean)\b"
     r"|\b(rm|mv|cp|sed\s+-i|mkdir|touch|chmod|chown|tee)\b"
-    r"|(^|[;&|]\s*)>>?\S"
+    r"|(?:^|[\s;&|])>>?(?!=)\s*\S"
 )
 _GIT_DASH_C_RE = re.compile(r"git\s+-C\s+(\S+)\s+(\S+)")
 _MUTATING_SUBCOMMANDS = {"commit", "checkout", "reset", "add", "merge", "rebase", "push", "stash", "clean", "rm", "mv"}
 _PATH_TOKEN_RE = re.compile(r"'[^']*'|\"[^\"]*\"|\S+")
+
+# gh#715: a command that merely QUOTES a mutating verb or a shared-checkout path -- prose in a
+# `gh issue comment --body "..."` argument, or a heredoc BODY -- must not be treated as if it
+# typed that text as a real shell argument. Both are stripped before every regex/token check
+# below; only single-token quoted values ('/repo/file', no internal whitespace) are left alone,
+# since a real mutating command can legitimately quote its own path argument and blanket-
+# stripping quotes would turn that into a new bypass -- the exact trap gh#715 itself names
+# ("the workaround...would work just as well for a genuinely unsafe write").
+_SQ_RE = re.compile(r"'([^']*)'")
+_DQ_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
+_HEREDOC_RE = re.compile(r"(<<-?\s*['\"]?)(\w+)(['\"]?)(.*?)(\n[ \t]*\2\b)", re.DOTALL)
+
+
+def _strip_prose(command: str) -> str:
+    def _blank_if_multiword(m: "re.Match[str]") -> str:
+        if re.search(r"\s", m.group(1)):
+            quote = m.group(0)[0]
+            return quote + quote
+        return m.group(0)
+
+    command = _HEREDOC_RE.sub(lambda m: m.group(1) + m.group(2) + m.group(3), command)
+    command = _SQ_RE.sub(_blank_if_multiword, command)
+    command = _DQ_RE.sub(_blank_if_multiword, command)
+    return command
 
 
 def _resolve(path: str) -> str:
@@ -63,6 +94,8 @@ def _under(path: str, root: str) -> bool:
 def _bash_targets_repo(command: str, repo_real: str) -> bool:
     if not command:
         return False
+
+    command = _strip_prose(command)
 
     # ALL `git -C <dir> <verb>` occurrences, not just the first -- a chained command like
     # `git -C $REPO log && git -C $REPO add -A && git -C $REPO commit -m wip` has an earlier,

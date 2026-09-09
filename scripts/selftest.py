@@ -9901,6 +9901,55 @@ def _worktree_guard_blocks_chained_git_dash_c_where_only_a_later_verb_mutates_gh
         assert p.returncode == 2, f"expected block (exit 2) on the chained mutating call, got {p.returncode}: {p.stderr}"
 
 
+def _worktree_guard_allows_readonly_command_quoting_mutating_text_gh715():
+    """gh#715 AC1: a pure read-only command (`gh issue comment`, no filesystem write path at
+    all) whose --body TEXT happens to quote a mutating verb and a path under $REPO must not be
+    blocked -- the guard's job is the command's real target, not words that appear inside a
+    quoted argument."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        cmd = f'gh issue comment 714 --body "run git -C {repo} stash pop to fix this"'
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd})
+        assert p.returncode == 0, f"expected allow (exit 0), got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_allows_heredoc_to_tmp_whose_body_quotes_repo_path_gh715():
+    """gh#715 AC2: a heredoc whose REDIRECT TARGET is under /tmp (outside $REPO entirely) but
+    whose BODY quotes a mutating verb and a path under $REPO -- e.g. a pass writing a record of
+    an earlier block message to a scratch file -- must not be blocked; the write never touches
+    $REPO."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        cmd = (
+            "cat > /tmp/blockmsg <<'EOF'\n"
+            f"the fix is: git -C {repo} stash pop, per postflight_dirty_check.sh\n"
+            "EOF"
+        )
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd})
+        assert p.returncode == 0, f"expected allow (exit 0), got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_blocks_redirect_into_repo_despite_readonly_leading_program_gh715():
+    """gh#715 AC4: the quoting fix must not become a bypass -- a command with a genuine shell
+    redirection into $REPO (`echo x > $REPO/f`) must still block even though `echo` itself
+    never appears on any mutating-verb list. This also covers a plain, unquoted `cmd > file`
+    redirect, which the pre-gh#715 regex never matched at all (it required `>` to sit at the
+    very start of the command or right after a `;`/`&`/`|` separator)."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        cmd = f"echo x > {repo}/f"
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd})
+        assert p.returncode == 2, f"expected block (exit 2), got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_still_blocks_quoted_single_token_mutation_target_gh715():
+    """gh#715: the quote-stripping fix only blanks MULTI-WORD quoted text (prose); a quoted
+    SINGLE-TOKEN path used as a real mutating command's own argument (`sed -i "$REPO/f"`) must
+    still block -- otherwise quoting a path would become a new way to bypass the guard, the
+    exact trap gh#715's own writeup warns against."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        cmd = f'sed -i "{repo}/f"'
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd})
+        assert p.returncode == 2, f"expected block (exit 2), got {p.returncode}: {p.stderr}"
+
+
 def _worktree_guard_install_merges_without_clobbering_existing_settings_gh592():
     """gh#592: the installer must MERGE into an operator's existing settings.json (their own
     hooks/permissions survive) and must be idempotent -- a second run against the same file
@@ -10520,6 +10569,10 @@ if __name__ == "__main__":
     check("worktree_guard_hook blocks a chained git -C command where only a later verb mutates (gh#592)", _worktree_guard_blocks_chained_git_dash_c_where_only_a_later_verb_mutates_gh592)
     check("worktree_guard_hook_install merges into existing settings.json and is idempotent (gh#592)", _worktree_guard_install_merges_without_clobbering_existing_settings_gh592)
     check("worktree_guard_hook_install accepts a CLAUDE_CONFIG_DIR path, not just a settings.json path (gh#592)", _worktree_guard_install_cli_accepts_claude_config_dir_not_just_settings_json_gh592)
+    check("worktree_guard_hook allows a read-only command whose --body text quotes a mutating verb and repo path (gh#715 AC1)", _worktree_guard_allows_readonly_command_quoting_mutating_text_gh715)
+    check("worktree_guard_hook allows a heredoc to /tmp whose body quotes a repo path (gh#715 AC2)", _worktree_guard_allows_heredoc_to_tmp_whose_body_quotes_repo_path_gh715)
+    check("worktree_guard_hook blocks a real shell redirect into $REPO despite a read-only-looking leading program (gh#715 AC4)", _worktree_guard_blocks_redirect_into_repo_despite_readonly_leading_program_gh715)
+    check("worktree_guard_hook still blocks a quoted single-token mutation target (gh#715, no new bypass)", _worktree_guard_still_blocks_quoted_single_token_mutation_target_gh715)
 
     check("fleet.env.example documents FIXER_HEALTH_URL/PAGE_URL/PROD_DIAG_DRIVER/FLEET_DEPLOY_DRIVER with examples and what breaks empty (gh#728 AC8)", _fleet_env_example_documents_the_fixer_prod_visibility_vars_gh728)
 
