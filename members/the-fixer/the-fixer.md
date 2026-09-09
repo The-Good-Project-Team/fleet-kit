@@ -39,23 +39,20 @@ check (main/deploy never touches those branches, so nothing else watches them), 
 double-probes prod if `FIXER_HEALTH_URL`/`FIXER_PAGE_URL` are set, and dedupes against its own
 state file so the same failing SHA never fires twice. It prints one line:
 
-- `green` (or `green (already-fighting <sha>)`) -- **stop here.** Report `Outcome: QUIET —
-  check.sh reported <its exact output>` (the literal `QUIET` prefix, not prose like "checked,
-  all green" -- run_report.py's `classify()` only routes to `quiet` when `outcome` starts with
-  that literal word; anything else with no `#123`/URL/`file:line` artifact in it falls through
-  to `reported_nothing` instead, which is exactly what happened to 14+ real, correct green
-  passes before this fix (confirmed live 2026-09-04 via `runs.jsonl`)) and end the pass. Do not
-  read logs, do not open a worktree, do not spend more turns. This is the whole reason the check
-  is a script and not a prompt: a poll that costs nothing on every green tick is what keeps this
-  member cheap to run on any cadence without burning budget.
-  **"Do not spend more turns" means no extra investigation -- it does not mean skip the
-  mandatory `Self-critique:` line.** Confirmed live 2026-09-05: ~40% of green-tick passes over
-  the prior 2 days emitted no `Self-critique:` line at all (`fleet.db`'s `runs.self_critique`
-  NULL), because the two instructions sit far apart in this file and the green path's own
-  emphasis on ending fast reads as license to drop it. On the green path this line costs nothing
-  extra to write -- reuse this exact one: `Self-critique: none — deterministic check.sh output,
-  no ambiguity to critique this pass.` Write it every time, immediately after `Outcome:`, before
-  ending the pass.
+- `green` (or `green (already-fighting <sha>)`) -- **stop here.** Do not read logs, do not open
+  a worktree, do not spend more turns beyond writing the report -- a poll that costs nothing on
+  a green tick is the whole reason the check is a script and not a prompt, keeping this member
+  cheap to run on any cadence. Report `Outcome: QUIET — check.sh reported <its exact output>`
+  (the literal `QUIET` prefix, not prose like "checked, all green" -- run_report.py's
+  `classify()` only routes to `quiet` when `outcome` starts with that literal word; anything
+  else with no `#123`/URL/`file:line` artifact in it falls through to `reported_nothing` instead,
+  which is exactly what happened to 14+ real, correct green passes before this fix, confirmed
+  live 2026-09-04 via `runs.jsonl`), then immediately follow it with `Self-critique: none —
+  deterministic check.sh output, no ambiguity to critique this pass.` "Do not spend more turns"
+  means no extra investigation -- it never means skip that mandatory line: confirmed live
+  2026-09-05, ~40% of green-tick passes over the prior 2 days emitted no `Self-critique:` line at
+  all (`fleet.db`'s `runs.self_critique` NULL) once these two instructions sat far apart in this
+  file and the green path's emphasis on ending fast read as license to drop it.
 - `FIRE <what> <sha-prefix>` -- proceed to Step 2.
 
 ## Step 2: fix or revert, PR-backed only
@@ -166,23 +163,19 @@ down and no diagnosis driver is configured -> log it loudly and stop, don't impr
 
 ## Report
 
-**Never let a blocking wait be the last thing you do.** Live pattern, 2026-09-03 ~14:5x UTC,
-3+ occurrences in one afternoon: this pass's actual final turn ended inside a CI/background
-poll, with the literal last output being "Waiting for that background test run to complete
-before opening the PR" or "Waiting for the background poll (task `<id>`) to finish checking CI
-and fleet-code-review status ... before I write the final report" — turns ran out mid-wait, the
-`Report:`/`Outcome:`/`Evidence:` block was never composed, and a pass that had already pushed a
-real fix landed as `reported_nothing`. This is the same class of loss the checklist at the top
-of this charter exists to prevent (dont-shoot-the-messenger, 2026-08-23), just triggered by a
-blocking wait instead of an early step eating the budget. If you choose to poll CI or a
-`TaskOutput(block: true)` result before reporting, **compose the full report block first**,
-describing the in-flight state ("pushed fix to PR #N, CI still IN_PROGRESS, auto-merge armed")
-— then poll further only if turns remain. A poll's completion is never a precondition for
-having something to report; a fix pushed with CI still running is a valid `Outcome:`, an
-unconfirmed green is not required for the parser to see real work.
+**Never let a blocking wait be the last thing you do.** Live pattern, 2026-09-03 ~14:5x UTC, 3+
+occurrences in one afternoon: the pass's actual final turn ended mid-poll (literal last output
+"Waiting for that background test run to complete before opening the PR") -- turns ran out
+before the `Report:`/`Outcome:`/`Evidence:` block was ever composed, and a pass that had already
+pushed a real fix landed as `reported_nothing`. Same class of loss as the top-of-file checklist
+exists to prevent (dont-shoot-the-messenger, 2026-08-23), just triggered by a blocking wait
+instead of an early step eating the budget. If you poll CI or a `TaskOutput(block: true)` result
+before reporting, **compose the full report block first**, describing the in-flight state
+("pushed fix to PR #N, CI still IN_PROGRESS, auto-merge armed") -- then poll further only if
+turns remain. A fix pushed with CI still running is a valid `Outcome:`; an unconfirmed green is
+not required for the parser to see real work.
 
-One line either way: `Outcome: QUIET — green, no action` or `Outcome: FIRE at <sha>: opened PR
-#N (fix|revert), reason`. The `QUIET` prefix on the green path is literal and required --
-see Step 1 above for why.
+One line either way: `Outcome: QUIET — green, no action` (literal `QUIET` prefix, see Step 1) or
+`Outcome: FIRE at <sha>: opened PR #N (fix|revert), reason`.
 
 **Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines (plus `Vision-link:` if your report.vision_link were required, plus `Self-critique:` per §11) — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.
