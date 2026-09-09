@@ -6157,6 +6157,56 @@ def _every_scheduled_member_is_actually_on_cron():
         "A spec does not schedule a member; entrypoint.sh's crontab does.")
 
 
+def _hourly_at_minute_matches_entrypoint_cron_line():
+    """gh#754-class drift: the check above only proves a member has SOME line in
+    entrypoint.sh, never that the line's minute agrees with its own
+    schedule.hourly_at_minute -- fleet_view_server.py's next_fires() docstring says the two
+    "are meant to agree by construction, not by a second source of truth", but nothing ever
+    enforced that beyond existence.
+
+    Caught live 2026-09-09: PR#754 changed librarian.fleet.json's hourly_at_minute from 55 to
+    6 (to move it off the hour's most starved minute) and merged clean -- selftest was green
+    because `_every_scheduled_member_is_actually_on_cron` only checks a `run_member.sh
+    librarian` line exists, not what minute it fires on. entrypoint.sh's own hardcoded line
+    still said `55 * * * *`; the fix never took effect and the dashboard's "next due" (which
+    reads hourly_at_minute) silently disagreed with prod. A minute mismatch is invisible at
+    runtime -- nothing errors, the member just runs on the wrong schedule forever.
+
+    Scoped to schedule.hourly_at_minute members only: interval_s (*/N) and daily_at (three
+    separate slots by design, see dont-shoot-the-messenger's own fleet.json note) have more
+    than one valid textual encoding in entrypoint.sh, so a plain int-equality check would be
+    either wrong or need its own parser. hourly_at_minute is a single literal int and is
+    exactly the class that just broke.
+    """
+    import json, glob, re
+    root = Path(__file__).parent.parent
+    entry = (root / "entrypoint.sh").read_text()
+    spawned_by_a_member = {"minion", "nerd"}
+    mismatches = []
+    for f in sorted(glob.glob(str(root / "members" / "*" / "*.fleet.json"))):
+        spec = json.loads(Path(f).read_text())
+        name = spec["name"]
+        if name in spawned_by_a_member or not spec.get("enabled"):
+            continue
+        sched = spec.get("schedule") or {}
+        if "hourly_at_minute" not in sched:
+            continue
+        expected = int(sched["hourly_at_minute"])
+        script = f"run_{name}_fanout.sh" if f"run_{name}_fanout.sh" in entry else f"run_member.sh {name}"
+        m = re.search(rf'echo "(\S+)[^\n"]*{re.escape(script)}', entry)
+        if not m:
+            continue  # existence is _every_scheduled_member_is_actually_on_cron's job, not ours
+        actual = m.group(1)
+        if not actual.isdigit() or int(actual) != expected:
+            mismatches.append(
+                f"{name}: fleet.json says hourly_at_minute={expected}, "
+                f"entrypoint.sh's cron line's minute field is {actual!r}")
+    assert not mismatches, (
+        "entrypoint.sh's crontab disagrees with a member's own schedule.hourly_at_minute -- "
+        "the fleet.json edit merged but the actual cron minute never changed, so the fix is a "
+        "no-op in prod:\n" + "\n".join(mismatches))
+
+
 def _fleet_cron_members_gates_entrypoint_crontab():
     """gh#138: fleet.env's own header can declare an instance "judge-judy only", but
     entrypoint.sh's crontab used to be a single hardcoded list installed unconditionally --
@@ -10433,6 +10483,7 @@ if __name__ == "__main__":
     check("a run records the item it worked", _a_run_records_the_item_it_worked)
     check("every pass files a written report", _every_pass_files_a_written_report)
     check("every scheduled member is actually on cron", _every_scheduled_member_is_actually_on_cron)
+    check("schedule.hourly_at_minute matches entrypoint.sh's actual cron minute (gh#754)", _hourly_at_minute_matches_entrypoint_cron_line)
     check("FLEET_CRON_MEMBERS gates entrypoint.sh's generated crontab", _fleet_cron_members_gates_entrypoint_crontab)
     check("gru's cron line redirects to its own log file (gh#511)", _gru_cron_line_redirects_to_its_own_log_file)
     check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
