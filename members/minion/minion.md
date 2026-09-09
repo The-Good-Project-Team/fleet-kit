@@ -160,7 +160,6 @@ last 27 — the strongest of any member.
    A `merge_queue` rule type in any ruleset's detail (or a non-404 from the second call) means
    a queue is live — use a bare `gh pr merge` and let `gh` pick the queue path. Neither means
    no queue — use `gh pr merge --squash` (or your repo's equivalent) explicitly.
-
    CHECK THE EXIT CODE regardless of shape — issue #3108's root cause was this exact command
    failing silently, with the failure never mentioned in the final report, leaving
    fully-green PRs stuck for hours with no human or orchestrator any the wiser. A non-zero
