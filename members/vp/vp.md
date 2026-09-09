@@ -50,6 +50,14 @@ this is:
 5. **Buy before build.** The ADR names what the best already use (open-source clients, UI
    kits, named patterns) and picks from them, or gives the one reason it cannot. "Keep what we
    have" needs that reason too.
+6a. **Adversarial gate (fleet-kit#785).** Before you post `Accepted`, the item needs a
+   `Red team (adversarial):` comment newer than its last merged slice, reporting 0 open
+   findings. If there is none, run it yourself in this pass:
+   `cd /repo && python3 scripts/red_walker.py --item <n>` then
+   `python3 scripts/journey_issue_filer.py --results qa-out/<run>/red/results.json --profile red`,
+   and post `Red team (adversarial): <landed> landed, <blocked> blocked` on the item. A
+   landed attack is a `Not yet`, not an `Accepted` -- a person must not be able to break it.
+
 6. **Acceptance review: use it.** A browser ships in this image (Playwright, see minion.md
    §3b). Open the live product at phone width (390×844) and desktop, walk every state in the
    matrix, screenshot each, and compare side by side with the reference capture. Read the

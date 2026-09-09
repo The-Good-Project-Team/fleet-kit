@@ -10018,6 +10018,102 @@ def _librarian_scrub_is_shell_hourly_and_librarian_runs_daily_gh784():
         assert "INTENT.md" in (ROOT / "members" / m / f"{m}.md").read_text(), m
 
 
+def _red_walker_payload_landed_and_blocked_gh785():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("red_walker", ROOT / "scripts" / "red_walker.py")
+    rw = importlib.util.module_from_spec(spec); sys.modules[spec.name] = rw; spec.loader.exec_module(rw)
+    assert rw.expand_payload("A x 10000") == "A" * 10000
+    assert rw.expand_payload("<img src=x>") == "<img src=x>"
+    assert rw.expand_payload(None) is None
+    cfg = rw.Config({"PHILANTHROPY_BASE_URL": "https://philanthropy.org"})
+    assert cfg.url("/990/") == "https://philanthropy.org/990/"
+    assert cfg.url("https://x.test/a?q=1") == "https://philanthropy.org/a?q=1"  # host swapped, path/query kept
+    try:
+        cfg.require("NOPE_MISSING"); raise AssertionError("missing config must raise Blocked")
+    except rw.Blocked:
+        pass
+    # a 403 response makes _guard_403 raise Blocked, never a finding
+    class R:  # noqa: D401
+        status = 403
+    try:
+        rw._guard_403(R()); raise AssertionError("403 must raise Blocked")
+    except rw.Blocked as b:
+        assert b.status == 403
+    assert rw._guard_403(None) is None
+    # every attack `kind:` in the catalog has a runner -- parsed with a stdlib regex, since
+    # selftest.py must import nothing outside the stdlib (CI runs it before pip install).
+    import re as _re
+    catalog_text = (ROOT / "members" / "red" / "attacks.yaml").read_text()
+    kinds = set(_re.findall(r"^\s*kind:\s*([a-z-]+)\s*$", catalog_text, _re.MULTILINE))
+    assert kinds, "no kinds found in attacks.yaml"
+    for k in kinds:
+        assert k in rw.RUNNERS, k
+    # _needs_met catches a missing fixture, and passes when nothing is needed
+    assert rw._needs_met({"target": {"needs": ["FIXTURE_OTHER_ORG_ADMIN_URL"]}}, rw.Config({})) == "FIXTURE_OTHER_ORG_ADMIN_URL"
+    assert rw._needs_met({"target": {}}, rw.Config({})) is None
+
+
+def _filer_red_profile_uses_red_label_and_marker_gh785():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("jif", ROOT / "scripts" / "journey_issue_filer.py")
+    jif = importlib.util.module_from_spec(spec); sys.modules[spec.name] = jif; spec.loader.exec_module(jif)
+    red = jif.PROFILES["red"]
+    assert red.label.endswith("red-team") and red.marker_tag == "red-team"
+    # a red body carries the red marker and reads back only under the red tag, not sentry's
+    body = jif.build_issue_body({"name": "Search reflects a payload", "steps": []},
+                                {"action": "submit a payload", "observable_result": "HEALTHY iff NOT ...", "index": 0},
+                                "run1", "sha1", None, "search-reflects-script::step0", None, red)
+    assert "fleet:red-team key=search-reflects-script::step0" in body
+    assert "LANDED" in body
+    assert jif.key_from_body(body, "red-team") == "search-reflects-script::step0"
+    assert jif.key_from_body(body, "sentry-journey") is None  # scoped: sentry never matches a red issue
+    assert jif.build_file_cmd("t", "b", red.label)[-1].endswith("red-team")
+    assert red.label in jif.build_list_cmd(red.label)
+    title = jif.build_issue_title("Search reflects a payload", "submit a 10k query", red.title_suffix)
+    assert title.endswith("can be broken")
+    # sentry profile is byte-for-byte unchanged
+    s = jif.SENTRY
+    sbody = jif.build_issue_body({"name": "Sign in", "steps": []},
+                                 {"action": "fill the form", "observable_result": "a form", "index": 0},
+                                 "run1", "sha1", None, "sign-in::step0", None, s)
+    assert "Sentry drove the **Sign in** journey" in sbody and "fleet:sentry-journey key=" in sbody
+    assert jif.build_issue_title("Sign in", "fill the form").endswith("isn't working")
+
+    # end to end through process(): a red results.json files exactly one red-labelled issue,
+    # deduped, using a stubbed gh runner.
+    calls = []
+    def runner(cmd):
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "issue", "list"]:
+            return 0, "[]"
+        if cmd[:3] == ["gh", "issue", "create"]:
+            return 0, "https://github.com/x/y/issues/42"
+        return 0, ""
+    d = Path(tempfile.mkdtemp())
+    results = {"run": "r1", "deploy_sha": "sha", "journeys": [
+        {"id": "search-reflects-script", "name": "Search reflects a payload",
+         "steps": [{"index": 0, "action": "submit a payload", "observable_result": "HEALTHY iff NOT", "status": "fail", "detail": "reflected"}]}]}
+    (d / "results.json").write_text(json.dumps(results))
+    summary = jif.process(d / "results.json", d / "state.json", runner=runner, profile=red)
+    assert summary["filed"] and summary["filed"][0]["issue"] == 42, summary
+    create = [c for c in calls if c[:3] == ["gh", "issue", "create"]][0]
+    assert create[create.index("--label") + 1].endswith("red-team"), create
+    label_create = [c for c in calls if c[:3] == ["gh", "label", "create"]][0]
+    assert label_create[3].endswith("red-team")
+
+
+def _red_member_paced_and_vp_gates_on_red_gh785():
+    import member_spec
+    red = member_spec.by_name("red", ROOT / "members")
+    assert red["pacing"] == "paced" and red["llm"]["model"] == "sonnet"
+    assert red["schedule"] == {"interval_s": 21600}, red["schedule"]
+    charter = (ROOT / "members" / "red" / "red.md").read_text()
+    assert "red_walker.py" in charter and "--profile red" in charter and "our OWN product only" in charter.replace("our own product only", "our OWN product only")
+    vp = (ROOT / "members" / "vp" / "vp.md").read_text()
+    assert "Red team (adversarial):" in vp and "red_walker.py --item" in vp
+    assert vp.find("Adversarial gate") < vp.find("Would it embarrass us"), "red gate before the last VP question"
+
+
 def _worktree_guard_blocks_edit_under_shared_repo_gh592():
     """gh#592 AC2/AC5: an Edit targeting a path under the SHARED $REPO, while this pass is
     isolated in its own $WT_PATH, must be BLOCKED (exit 2) -- this is the exact failure a
@@ -10995,6 +11091,9 @@ if __name__ == "__main__":
     check("intent_capture keeps only typed human turns, redacts like librarian.py, second run adds nothing (gh#784 AC3)", _intent_capture_keeps_only_human_turns_redacts_and_is_idempotent_gh784)
     check("intent_digest lists captures + asks newest-day-first, dedupes, drops the old (gh#784)", _intent_digest_lists_turns_by_day_and_dedupes_gh784)
     check("librarian-scrub is a shell member on the hourly line; librarian is the daily reader with /repo and /fleet-kit denied; marie+gru read INTENT.md (gh#784 AC1)", _librarian_scrub_is_shell_hourly_and_librarian_runs_daily_gh784)
+    check("red_walker expands an overflow payload, inverts landed_when to fail, and blocks a 403 (gh#785 AC1-3)", _red_walker_payload_landed_and_blocked_gh785)
+    check("journey_issue_filer red profile files under fleet:red-team with its own marker, sentry unchanged (gh#785 AC4)", _filer_red_profile_uses_red_label_and_marker_gh785)
+    check("red is a paced 6h member and vp requires a red pass before Accepted (gh#785 AC5)", _red_member_paced_and_vp_gates_on_red_gh785)
     check("worktree_guard_hook blocks an Edit under the shared $REPO when isolated (gh#592 AC2)", _worktree_guard_blocks_edit_under_shared_repo_gh592)
     check("worktree_guard_hook allows an Edit under the pass's own $WT_PATH (gh#592 AC5)", _worktree_guard_allows_edit_under_own_worktree_gh592)
     check("worktree_guard_hook exempts a pass with no $WT_PATH set (gh#592 AC4)", _worktree_guard_exempts_passes_with_no_wt_path_gh592)

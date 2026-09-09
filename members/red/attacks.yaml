@@ -1,0 +1,101 @@
+# attacks.yaml -- the catalog of ways a person could BREAK philanthropy.org, run by the `red`
+# member (fleet-kit#785). AUTHORIZED testing of our own product only. Sibling to sentry's
+# journeys.yaml: sentry asks "can a person still do the thing", red asks "can a person break
+# it". red_walker.py reads this, drives each attack with Playwright, and writes results.json
+# in the schema scripts/journey_issue_filer.py already consumes.
+#
+# No rate or volume attacks: this is correctness under hostile input, never load. Every attack
+# targets a surface WE own and names the observable that means it landed, so pass/fail needs no
+# human judgment.
+#
+# SCHEMA (append in this shape; red_walker.py parses it literally):
+#   - id: kebab-slug                # stable; referenced by filed issues and screenshots
+#     name: Human-readable name
+#     kind: reflection | overflow | idor | double-submit | param-range | hidden-state | console
+#     target: {path: /...   [user: alice]   [needs: [FIXTURE_EIN]]}
+#     description: one sentence, what an attacker is trying to do
+#     steps:
+#       - action: verb-first, what the bot does
+#         payload: the hostile input (optional; omit for a navigation-only probe)
+#         landed_when: what proves the attack SUCCEEDED (i.e. the product is broken) -- an
+#           element, text, status, or console error that must be ABSENT for the product to be
+#           healthy. red_walker records status=fail when landed_when is observed.
+#     viewports: [desktop] unless a viewport changes the attack surface
+
+version: 1
+viewports:
+  desktop: {width: 1280, height: 800}
+  mobile_390: {width: 390, height: 844}
+
+attacks:
+  - id: search-reflects-script
+    name: Search reflects an unescaped script payload
+    kind: reflection
+    target: {path: "/990/"}
+    description: An attacker puts markup in the search box hoping the results page renders it.
+    viewports: [desktop]
+    steps:
+      - action: Navigate to /990/?q=<PAYLOAD> with a script-shaped query
+        payload: "<img src=x onerror=window.__redpwn=1>"
+        landed_when: >
+          window.__redpwn is set, OR the raw payload string appears verbatim inside an
+          element's innerHTML (not escaped as text), OR a console error mentions it.
+
+  - id: search-overflow
+    name: Search survives a 10k-character query
+    kind: overflow
+    target: {path: "/990/"}
+    description: An attacker pastes a huge string into search to force a 5xx or a hang.
+    viewports: [desktop]
+    steps:
+      - action: Submit a 10,000-character query to /990/
+        payload: "A x 10000"
+        landed_when: >
+          the response status is >= 500, OR the page shows an uncaught-exception/stack trace,
+          OR no result container renders within 15s.
+
+  - id: report-ein-nonsense
+    name: Report page rejects a non-numeric EIN
+    kind: param-range
+    target: {path: "/990/report/"}
+    description: An attacker hand-types garbage where an EIN goes.
+    viewports: [desktop]
+    steps:
+      - action: Navigate to /990/report/NOT-AN-EIN and to /990/report/0
+        landed_when: >
+          the response is a 5xx or shows a raw stack trace / database error, rather than a
+          clean 404 or an empty-state page.
+
+  - id: other-org-admin-idor
+    name: A signed-in user cannot open another org's admin page
+    kind: idor
+    target: {path: "FIXTURE_OTHER_ORG_ADMIN_URL", user: alice, needs: [ALICE_EMAIL, FIXTURE_OTHER_ORG_ADMIN_URL]}
+    description: alice, signed in, navigates straight to an org admin URL she does not own.
+    viewports: [desktop]
+    steps:
+      - action: Sign in as alice, then navigate to an org-admin URL for an org alice does not administer
+        landed_when: >
+          the page renders admin controls or the org's private data (a save/edit control, a
+          settings form) instead of 403 / 404 / a redirect to sign-in.
+
+  - id: double-submit-claim
+    name: Claiming an org twice does not double-create
+    kind: double-submit
+    target: {path: "FIXTURE_CLAIM_URL", user: alice, needs: [ALICE_EMAIL, FIXTURE_CLAIM_URL]}
+    description: An attacker clicks the claim/submit control twice fast to create two records.
+    viewports: [desktop]
+    steps:
+      - action: Open the claim flow as alice, fill it, and click submit twice within 300ms
+        landed_when: >
+          two confirmations / two created records appear, OR a 5xx on the second submit,
+          rather than one idempotent result (second click ignored or "already submitted").
+
+  - id: console-clean-on-core-pages
+    name: Core pages load with no console error
+    kind: console
+    target: {path: "/990/"}
+    description: A page that throws in the console is broken even if it looks fine.
+    viewports: [desktop, mobile_390]
+    steps:
+      - action: Load /990/ and run a search, collecting console messages
+        landed_when: any console message of level "error" is emitted during load or search.

@@ -152,7 +152,7 @@ case "${1:-cron-foreground}" in
     # `FLEET_CRON_MEMBERS=judge-judy`) to schedule only those. dont-shoot-the-messenger is
     # excluded from ALL_CRON_MEMBERS because its own cron line is already commented out
     # (archived 2026-09-04, see below) -- re-enabling it is a separate step from this mechanism.
-    ALL_CRON_MEMBERS=(the-fixer judge-judy gru jefe roomba marie datta dumbledore sentry librarian librarian-scrub dont-shoot-the-messenger)
+    ALL_CRON_MEMBERS=(the-fixer judge-judy gru jefe roomba marie datta dumbledore sentry librarian librarian-scrub red dont-shoot-the-messenger)
     if [ -n "${FLEET_CRON_MEMBERS:-}" ]; then
       IFS=', ' read -ra RESOLVED_CRON_MEMBERS <<< "$FLEET_CRON_MEMBERS"
       for m in "${RESOLVED_CRON_MEMBERS[@]}"; do
@@ -327,6 +327,10 @@ case "${1:-cron-foreground}" in
       # its pattern each day. :17 is unclaimed (:03/:12/:13/:21/:33/:41 are taken).
       if cron_member_enabled sentry; then
         echo "17 0,3,6,9,12,15,18,21 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh sentry >> $LOG_DIR/sentry.log 2>&1"
+      fi
+      # fleet-kit#785: red, the adversary, every 6h (paced -- held when the hour has no headroom).
+      if cron_member_enabled red; then
+        echo "23 0,6,12,18 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh red >> $LOG_DIR/red.log 2>&1"
       fi
       # self_improve_score.sh: NOT a member (no members/*/*.fleet.json), so it was invisible
       # to selftest's "every scheduled member is actually on cron" check (#114) and had no

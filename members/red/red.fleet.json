@@ -1,0 +1,48 @@
+{
+  "name": "red",
+  "emoji": "🔴",
+  "kind": "llm",
+  "lane": "quality",
+  "pacing": "paced",
+  "mandate": {
+    "target": "every 6h: run members/red/attacks.yaml against philanthropy.org with a real browser, file every landed attack as a deduped self-closing fleet:red-team issue with a repro, and explore one uncovered surface by hand -- AUTHORIZED testing of our own product only, never a fix",
+    "checklist": [
+      "read open fleet:red-team issues and the newest qa-out/*/red/results.json first -- find what is NEW, not what still lands",
+      "run scripts/red_walker.py --out qa-out; a step recorded fail is a real finding (the product broke), pass means it held",
+      "a Cloudflare 403 is BLOCKED (checker lost its credential, fk#729), never reported as safe or broken",
+      "file with scripts/journey_issue_filer.py --results <results.json> --profile red (fleet:red-team label, dedup, self-close)",
+      "spend remaining turns attacking one uncovered surface by hand; file anything new with a repro and propose the attack for attacks.yaml",
+      "our product only, no rate/volume attacks, never paste a credential, never fix"
+    ],
+    "limits": {
+      "timeout_s": 1800
+    },
+    "escalation": "a fixture/credential an attack needs is missing (attack BLOCKED) -- say which and continue; if login and report pages 403 (fk#729 human op), say the adversarial surface is unreachable rather than reporting it safe."
+  },
+  "schedule": {
+    "interval_s": 21600
+  },
+  "timeout_s": 1800,
+  "enabled": true,
+  "llm": {
+    "model": "sonnet",
+    "prompt_file": "red.md",
+    "tools": {
+      "allow": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "TodoWrite"
+      ],
+      "deny": [
+        "Bash(git push:*)",
+        "Bash(gh pr merge:*)",
+        "Bash(gh pr create:*)"
+      ]
+    }
+  },
+  "report": {
+    "vision_link": "optional"
+  }
+}
