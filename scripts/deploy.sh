@@ -175,6 +175,16 @@ run_args() {
     if [ -f "$alert_env" ]; then
         alert_mounts+=(-v "$alert_env:/home/ubuntu/.config/maxx/alert.env:ro")
     fi
+    # Shared secret store (control_plane.py secrets): one host file every instance reads
+    # through the include line at the top of its fleet.env. Mounted read-only at the SAME
+    # absolute path it has on the host, so the include line resolves inside and outside the
+    # container alike (the alert.env precedent above). Absent file: no mount, no error -- an
+    # instance still carrying its own keys in fleet.env keeps working.
+    local secret_mounts=()
+    local secrets_env="${FLEET_SECRETS_FILE:-$HOME/.config/fleet-kit/secrets.env}"
+    if [ -f "$secrets_env" ]; then
+        secret_mounts+=(-v "$secrets_env:$secrets_env:ro")
+    fi
     echo -d --name "$name" \
         -e FLEET_REPO_URL="$FLEET_REPO_URL" \
         -e FLEET_VIEW_PORT="$view_port" \
@@ -194,6 +204,7 @@ run_args() {
         "${account_mounts[@]}" \
         "${analytics_mounts[@]}" \
         "${alert_mounts[@]}" \
+        "${secret_mounts[@]}" \
         -p "$view_port:$view_port" -p "$webhook_port:$webhook_port" \
         "$IMAGE" cron-foreground
 }

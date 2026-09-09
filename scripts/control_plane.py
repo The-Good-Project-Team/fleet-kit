@@ -53,6 +53,15 @@ Usage (host):
                                           create instances/NAME (paused, share 0) and deploy it
     control_plane.py remove NAME          containers, routes, cron, registry gone; files kept
     control_plane.py token                print the path of the bearer token /new and /remove need
+    control_plane.py secrets init         build ~/.config/fleet-kit/secrets.env from what the
+                                          instances carry; put the include line in every fleet.env
+    control_plane.py secrets check        per instance: include line, container mount, own copies
+    control_plane.py secrets adopt NAME   drop NAME's own copies that equal the store (after redeploy)
+    control_plane.py secrets set KEY < v  rotate one shared key; every instance reads it next tick
+
+Shared secret store: one file on the host (0600), bind-mounted read-only into every container at
+the same path, pulled in by the first line of each fleet.env. Shared keys: the Claude OAuth
+tokens, the maxx keys and handles, GH_TOKEN, NTFY_TOPIC. A new instance never copies them.
 
 Agent API (same server): POST /fleet/new  (JSON or form: name, repo_url, w) with
 Authorization: Bearer <token>  -> 202 {job, status}; GET /fleet/new/NAME -> the steps so far;
@@ -90,6 +99,11 @@ CADDYFILE = Path(os.environ.get("FLEET_CADDYFILE", Path.home() / "Caddyfile"))
 TOKEN_FILE = Path(os.environ.get("FLEET_CONTROL_PLANE_TOKEN_FILE",
                                  Path.home() / ".config" / "fleet-kit" / "control_plane.token"))
 PUBLIC_BASE = os.environ.get("FLEET_PUBLIC_BASE", "https://dino.luckymachines.co")
+SECRETS_FILE = Path(os.environ.get("FLEET_SECRETS_FILE", Path.home() / ".config" / "fleet-kit" / "secrets.env"))
+# Keys every instance shares because the ACCOUNTS are shared: the Claude OAuth tokens, the maxx
+# meter keys/handles, the GitHub token, the pager topic. Per-instance secrets (the console's own
+# FLEET_API_KEY, a product's number token or inbox secret) are deliberately not here.
+SECRET_KEY_RE = re.compile(r"^(CLAUDE_CODE_OAUTH_TOKEN|FLEET_MAXX_KEY|FLEET_MAXX_HANDLE|GH_TOKEN|NTFY_TOPIC)(_[A-Z0-9_]+)?$")
 # The canonical host checkout, not this file's parent: cron lines and the deploy lock must
 # point at the checkout auto_deploy.sh pulls into, even when this script runs from a worktree.
 KIT_DIR = Path(os.environ.get("FLEET_KIT_DIR", Path.home() / "fleet-kit"))
@@ -238,6 +252,20 @@ def _central(ts: float | None) -> str:
     return _dt.datetime.fromtimestamp(ts, CENTRAL).strftime("%Y-%m-%d %H:%M %Z")
 
 
+def _secrets_cell(st: dict | None) -> str:
+    if st is None:
+        return "no store"
+    if not st["include"]:
+        return "<span class=warn>no include line</span>"
+    if st["mount"] is False:
+        return "<span class=warn>container lacks mount</span>"
+    if st["conflicts"]:
+        return f"<span class=warn>overrides {len(st['conflicts'])}</span>"
+    if st["own"]:
+        return f"own copies {len(st['own'])}"
+    return "store"
+
+
 def render_index(rows: list[dict], human_reserve: float, generated: float) -> str:
     """One page, every instance. Static HTML on purpose: the control plane must not need a
     server up to be read (same law as fleet_enabled.sh's file flag)."""
@@ -270,6 +298,7 @@ def render_index(rows: list[dict], human_reserve: float, generated: float) -> st
             f"<td>{runs['ok']} ok · <span class='{'warn' if runs['budget_declined'] else ''}'>"
             f"{runs['budget_declined']} budget-declined</span></td>"
             f"<td><code>{html.escape(r['head'])}</code></td><td>{_central(runs['last_brief'])}</td>"
+            f"<td>{_secrets_cell(r.get('secrets'))}</td>"
             f"<td class=ctl>{controls}</td></tr>")
     return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>fleet control plane</title>
@@ -284,7 +313,7 @@ button{{font:inherit;padding:.2rem .6rem}}input[type=number]{{width:3.5rem;font:
 <p class=meta>{len(rows)} instances · shares sum {total:.0%} · human reserve {human_reserve:.0%} ·
 written {_central(generated)} · a paused instance starts no new pass on its next cron tick and its
 share flows to the rest; weights split what the human reserve leaves</p>
-<div class=wrap><table><tr><th>instance</th><th>state</th><th>number</th><th>share this hour</th><th>runs last hour</th><th>live build</th><th>last brief</th><th></th></tr>
+<div class=wrap><table><tr><th>instance</th><th>state</th><th>number</th><th>share this hour</th><th>runs last hour</th><th>live build</th><th>last brief</th><th>secrets</th><th></th></tr>
 {''.join(trs)}</table></div>
 <h2>New instance</h2>
 <form method=post action='new' class=new>
@@ -317,12 +346,14 @@ def render_new_env(template_text: str, name: str, repo_url: str, ports: tuple, p
     }
     for k in PRODUCT_KEYS:
         overrides[k] = ""
-    kept = []
+    kept = [include_line()]
     for line in template_text.splitlines():
         s = line.strip()
+        if s.startswith("[ -f") and str(SECRETS_FILE) in s:
+            continue  # the template's own include line; ours is first already
         key = s.split("=", 1)[0].strip() if "=" in s and not s.startswith("#") else None
-        if key in overrides:
-            continue
+        if key in overrides or (key and SECRET_KEY_RE.match(key)):
+            continue  # shared secrets come from the store, never copied
         kept.append(line)
     kept.append("")
     kept.append(f"# --- set by control_plane.py new ({name}); the per-instance and per-product keys")
@@ -550,6 +581,155 @@ def ensure_token() -> str:
     return TOKEN_FILE.read_text().strip()
 
 
+
+# ---------------------------------------------------------------- shared secret store
+def include_line() -> str:
+    """The one line at the top of every fleet.env that pulls the shared store in. fleet.env is
+    bash-sourced everywhere it is read (host scripts, run_member.sh, the container entrypoint),
+    so an include line reaches all of them with no script change; the store is bind-mounted into
+    each container at the same absolute path it has on the host (the alert.env precedent in
+    deploy.sh). Lines after it win, so an instance can still override one key on purpose."""
+    return (f"[ -f {SECRETS_FILE} ] && . {SECRETS_FILE}  "
+            f"# shared secrets: control_plane.py secrets (instance lines below override)")
+
+
+def _env_lines(env_file: Path) -> list:
+    return env_file.read_text(errors="ignore").splitlines() if env_file.exists() else []
+
+
+def _write_lines(env_file: Path, lines: list) -> None:
+    with env_file.open("w") as fh:  # in place: bind-mounted file, never rename
+        fh.write("\n".join(lines) + "\n")
+
+
+def shared_keys_in(env_file: Path) -> dict:
+    """key -> value for every shared-secret key an instance still carries in its own fleet.env
+    (last occurrence wins, as bash would)."""
+    out = {}
+    for line in _env_lines(env_file):
+        st = line.strip()
+        if st.startswith("#") or "=" not in st or st.startswith("["):
+            continue
+        k, v = st.split("=", 1)
+        if SECRET_KEY_RE.match(k.strip()):
+            out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def has_include(env_file: Path) -> bool:
+    return any(str(SECRETS_FILE) in l and l.strip().startswith("[ -f") for l in _env_lines(env_file))
+
+
+def ensure_include(env_file: Path) -> bool:
+    if has_include(env_file):
+        return False
+    _write_lines(env_file, [include_line()] + _env_lines(env_file))
+    return True
+
+
+def secrets_init(reg: dict, store: Path = SECRETS_FILE) -> dict:
+    """Build (or extend) the store from what the instances already carry: the template instance
+    first, then the rest, first value wins per key; a later instance whose value differs is a
+    CONFLICT (reported by name, its own line stays and keeps overriding). Then put the include
+    line at the top of every registered fleet.env. Never prints a value."""
+    existing = read_env(store) if store.exists() else {}
+    merged = dict(existing)
+    conflicts, added = [], []
+    tmpl = reg.get("template") or (reg["instances"][0]["name"] if reg["instances"] else None)
+    ordered = sorted(reg["instances"], key=lambda i: i["name"] != tmpl)
+    for inst in ordered:
+        for k, v in shared_keys_in(Path(inst["dir"]) / "fleet.env").items():
+            if k not in merged:
+                merged[k] = v
+                added.append(k)
+            elif merged[k] != v:
+                conflicts.append(f"{inst['name']}:{k}")
+    store.parent.mkdir(parents=True, exist_ok=True)
+    body = "# shared secrets for every fleet instance -- control_plane.py secrets; mounted read-only\n"
+    body += "".join(f"{k}={v}\n" for k, v in merged.items())
+    fd = os.open(store, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(body)
+    os.chmod(store, 0o600)
+    included = [i["name"] for i in reg["instances"] if ensure_include(Path(i["dir"]) / "fleet.env")]
+    return {"keys": sorted(merged), "added": added, "conflicts": conflicts, "included": included}
+
+
+def container_has_mount(container: str) -> bool | None:
+    try:
+        p = subprocess.run(["podman", "inspect", container, "--format", "{{range .Mounts}}{{.Destination}} {{end}}"],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return str(SECRETS_FILE) in p.stdout if p.returncode == 0 else None
+
+
+def secrets_status(inst: dict, store: dict) -> dict:
+    env_file = Path(inst["dir"]) / "fleet.env"
+    own = shared_keys_in(env_file)
+    return {"include": has_include(env_file),
+            "own": sorted(own),
+            "conflicts": sorted(k for k, v in own.items() if k in store and store[k] != v),
+            "mount": container_has_mount(inst["container"])}
+
+
+def secrets_check(reg: dict, store: Path = SECRETS_FILE) -> dict:
+    st = read_env(store) if store.exists() else {}
+    return {"store": str(store), "keys": sorted(st), "exists": store.exists(),
+            "instances": {i["name"]: secrets_status(i, st) for i in reg["instances"]}}
+
+
+def secrets_adopt(reg: dict, name: str, store: Path = SECRETS_FILE) -> str:
+    """Strip an instance's own copies of shared keys whose value equals the store's, so the
+    store is the only place they live. A differing value is a deliberate override and stays.
+    Refuses while the instance's container lacks the mount (it would lose the key)."""
+    inst = next((i for i in reg["instances"] if i["name"] == name), None)
+    if inst is None:
+        raise ValueError(f"no instance named {name!r}")
+    st = read_env(store) if store.exists() else {}
+    if not st:
+        raise ValueError("store is empty; run secrets init first")
+    if container_has_mount(inst["container"]) is False:
+        raise ValueError(f"{inst['container']} has no {SECRETS_FILE} mount yet; redeploy it first")
+    env_file = Path(inst["dir"]) / "fleet.env"
+    ensure_include(env_file)
+    kept, dropped = [], []
+    for line in _env_lines(env_file):
+        s = line.strip()
+        k = s.split("=", 1)[0].strip() if "=" in s and not s.startswith(("#", "[")) else None
+        if k and SECRET_KEY_RE.match(k) and st.get(k) == s.split("=", 1)[1].strip().strip('"').strip("'"):
+            dropped.append(k)
+            continue
+        kept.append(line)
+    _write_lines(env_file, kept)
+    left = sorted(shared_keys_in(env_file))
+    return f"{name}: dropped {len(dropped)} own copies ({', '.join(sorted(set(dropped))) or 'none'}); " \
+           f"still overriding: {', '.join(left) or 'none'}"
+
+
+def secrets_set(key: str, value: str, store: Path = SECRETS_FILE) -> str:
+    """Rotate one key in the store (value from stdin on the CLI, never argv). Every instance
+    reads it on its next tick; an instance still carrying its own copy keeps the old value
+    until adopted -- check says which."""
+    if not SECRET_KEY_RE.match(key):
+        raise ValueError(f"{key} is not a shared-secret key (pattern {SECRET_KEY_RE.pattern})")
+    if not value.strip():
+        raise ValueError("empty value")
+    lines = _env_lines(store)
+    found = False
+    for i, l in enumerate(lines):
+        if l.strip().startswith(f"{key}="):
+            lines[i] = f"{key}={value.strip()}"
+            found = True
+    if not found:
+        lines.append(f"{key}={value.strip()}")
+    store.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(store, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return f"{key}: {'rotated' if found else 'added'} in {store}"
+
+
 # ---------------------------------------------------------------- manage from the page
 def apply_action(reg: dict, action: str, name: str, weight: str | None = None,
                  registry: Path = REGISTRY) -> str:
@@ -696,6 +876,7 @@ def tick(reg: dict, dry_run: bool = False, out_dir: Path | None = None, now: flo
     enabled = {n: is_enabled(e) for n, e in envs.items()}
     shares = compute_shares(insts, enabled, reg["human_reserve"])
     containers = container_status()
+    store = read_env(SECRETS_FILE) if SECRETS_FILE.exists() else {}
     rows = []
     for i in insts:
         d = Path(i["dir"])
@@ -712,6 +893,7 @@ def tick(reg: dict, dry_run: bool = False, out_dir: Path | None = None, now: flo
         print(f"{name}: share {current} -> {share:g}{' (written)' if changed else ''}"
               f"{' [paused]' if not enabled[name] else ''}")
         rows.append({"name": name, "path": i["path"], "container_name": i["container"],
+                     "secrets": secrets_status(i, store) if store else None,
                      "container": containers.get(i["container"], "no container"),
                      "enabled": enabled[name], "weight": float(i["weight"]), "share": share,
                      "number": read_number(d / "logs"), "runs": runs_last_hour(d / "logs", now),
@@ -742,6 +924,30 @@ def main(argv: list[str]) -> int:
             print(remove_instance(reg, argv[1]))
         except (ValueError, IndexError) as exc:
             sys.exit(f"remove: {exc}")
+    elif cmd == "secrets":
+        sub = argv[1] if len(argv) > 1 else "check"
+        try:
+            if sub == "init":
+                r = secrets_init(reg)
+                print(f"store {SECRETS_FILE}: {len(r['keys'])} keys ({', '.join(r['keys'])})")
+                print(f"added: {', '.join(r['added']) or 'none'}; include line added to: {', '.join(r['included']) or 'none'}")
+                print(f"conflicts (instance keeps its own value): {', '.join(r['conflicts']) or 'none'}")
+            elif sub == "check":
+                r = secrets_check(reg)
+                print(f"store {r['store']}: {'missing' if not r['exists'] else str(len(r['keys'])) + ' keys'}")
+                for n, st in r["instances"].items():
+                    print(f"  {n}: include={'yes' if st['include'] else 'NO'} mount="
+                          f"{'yes' if st['mount'] else ('NO' if st['mount'] is False else '?')} "
+                          f"own copies={len(st['own'])} conflicts={', '.join(st['conflicts']) or 'none'}")
+            elif sub == "adopt":
+                print(secrets_adopt(reg, argv[2]))
+                tick(reg)
+            elif sub == "set":
+                print(secrets_set(argv[2], sys.stdin.read()))
+            else:
+                raise ValueError("secrets init | check | adopt NAME | set KEY < value")
+        except (ValueError, IndexError) as exc:
+            sys.exit(f"secrets: {exc}")
     elif cmd == "token":
         ensure_token()
         print(TOKEN_FILE)

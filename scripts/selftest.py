@@ -10241,7 +10241,9 @@ def _control_plane_new_env_and_routes_are_pure_and_reversible_gh759():
     lines = [l for l in out.splitlines() if l and not l.startswith("#")]
     keys = [l.split("=", 1)[0] for l in lines]
     assert keys.count("FLEET_REPO_URL") == 1 and "FLEET_REPO_URL=https://x/three.git" in lines, out
-    assert "CLAUDE_CODE_OAUTH_TOKEN=keep" in lines and "FLEET_MAXX_KEY_GMAIL=keep2" in lines
+    assert "CLAUDE_CODE_OAUTH_TOKEN=keep" not in lines and "FLEET_MAXX_KEY_GMAIL=keep2" not in lines, \
+        "shared secrets must come from the store, never be copied into a new fleet.env"
+    assert out.splitlines()[0] == cp.include_line(), out.splitlines()[0]
     assert "FLEET_ENABLED=false" in lines and "FLEET_SHARE_FRACTION=0" in lines
     assert "FLEET_VIEW_PORT=8601" in lines and "FLEET_GREEN_WEBHOOK_PORT=8604" in lines
     assert "FLEET_NUMBER_URL=" in lines and "PUBLIC_PATH_URL=https://h/fleet/smoke" in lines
@@ -10341,7 +10343,8 @@ def _control_plane_agent_creates_and_removes_an_instance_over_http_gh759():
                 time.sleep(0.05)
             assert st and st["state"] == "done", st
             env_b = (root / "b" / "fleet.env").read_text()
-            assert "FLEET_ENABLED=false" in env_b and "FLEET_VIEW_PORT=8601" in env_b and "CLAUDE_CODE_OAUTH_TOKEN=keep" in env_b
+            assert "FLEET_ENABLED=false" in env_b and "FLEET_VIEW_PORT=8601" in env_b and "CLAUDE_CODE_OAUTH_TOKEN=keep" not in env_b
+            assert env_b.splitlines()[0] == cp.include_line()
             assert (root / "b" / "repo" / "README").read_text() == "hi\n"
             assert (root / "b" / "webhook_secret").read_text().strip()
             assert json.loads(registry.read_text())["instances"][1]["name"] == "b"
@@ -10362,6 +10365,100 @@ def _control_plane_agent_creates_and_removes_an_instance_over_http_gh759():
         finally:
             srv.shutdown()
             cp.CADDYFILE, cp.TOKEN_FILE, cp.OUT_DIR, cp.read_crontab, cp.write_crontab, cp.reload_caddy, cp.used_ports = saved
+
+
+def _control_plane_secret_store_init_check_adopt_set_gh759():
+    """Shared secret store (Reif 2026-09-09: "a centralized secret store ... a standardization
+    among the fleet of fleets"). init builds the store from what the instances carry (template
+    first, first value wins, a differing value is a named conflict), 0600, and puts the include
+    line at the top of every fleet.env; check reports per instance; adopt strips own copies that
+    equal the store and keeps a deliberate override, and refuses while the container lacks the
+    mount; set rotates one key. No command ever prints a secret value."""
+    import io
+    import contextlib
+    import control_plane as cp
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        a, b = root / "a", root / "b"
+        for x in (a, b):
+            (x / "logs").mkdir(parents=True)
+        a_env = "FLEET_ENABLED=true\nCLAUDE_CODE_OAUTH_TOKEN=tokA\nFLEET_MAXX_KEY_GMAIL=mk1\nFLEET_API_KEY=consoleA\nNTFY_TOPIC=t1\n"
+        b_env = "FLEET_ENABLED=true\nCLAUDE_CODE_OAUTH_TOKEN=tokB\nFLEET_MAXX_KEY_GMAIL=mk1\nFLEET_API_KEY=consoleB\nGH_TOKEN=gh1\n"
+        (a / "fleet.env").write_text(a_env)
+        (b / "fleet.env").write_text(b_env)
+        reg = {"human_reserve": 0.2, "template": "a", "instances": [
+            {"name": "a", "dir": str(a), "container": "a", "weight": 1},
+            {"name": "b", "dir": str(b), "container": "b", "weight": 1}]}
+        store = root / "store" / "secrets.env"
+        saved = (cp.SECRETS_FILE, cp.container_has_mount)
+        cp.SECRETS_FILE = store
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                r = cp.secrets_init(reg, store)
+            assert oct(store.stat().st_mode & 0o777) == "0o600"
+            got = cp.read_env(store)
+            assert got == {"CLAUDE_CODE_OAUTH_TOKEN": "tokA", "FLEET_MAXX_KEY_GMAIL": "mk1",
+                           "NTFY_TOPIC": "t1", "GH_TOKEN": "gh1"}, got
+            assert "FLEET_API_KEY" not in got, "per-instance console key must not be shared"
+            assert r["conflicts"] == ["b:CLAUDE_CODE_OAUTH_TOKEN"] and sorted(r["included"]) == ["a", "b"], r
+            for x in (a, b):
+                lines = (x / "fleet.env").read_text().splitlines()
+                assert lines[0] == cp.include_line() and str(store) in lines[0], lines[0]
+                assert "FLEET_ENABLED=true" in lines, "other lines must survive"
+            r2 = cp.secrets_init(reg, store)
+            assert r2["added"] == [] and r2["included"] == [] and cp.read_env(store) == got, "init must be idempotent"
+            assert sum(str(store) in l for l in (a / "fleet.env").read_text().splitlines()) == 1, "include line duplicated"
+            for text in (buf.getvalue(),):
+                assert "tokA" not in text and "mk1" not in text and "gh1" not in text, text
+
+            cp.container_has_mount = lambda c: c == "a"
+            chk = cp.secrets_check(reg, store)
+            assert chk["instances"]["a"] == {"include": True, "own": ["CLAUDE_CODE_OAUTH_TOKEN", "FLEET_MAXX_KEY_GMAIL", "NTFY_TOPIC"], "conflicts": [], "mount": True}, chk
+            assert chk["instances"]["b"]["conflicts"] == ["CLAUDE_CODE_OAUTH_TOKEN"] and chk["instances"]["b"]["mount"] is False
+
+            try:
+                cp.secrets_adopt(reg, "b", store)
+                raise AssertionError("adopt must refuse an instance whose container lacks the mount")
+            except ValueError as exc:
+                assert "mount" in str(exc)
+            receipt = cp.secrets_adopt(reg, "a", store)
+            assert "tokA" not in receipt and "dropped 3" in receipt, receipt
+            a_after = (a / "fleet.env").read_text()
+            assert "CLAUDE_CODE_OAUTH_TOKEN=" not in a_after and "NTFY_TOPIC=" not in a_after
+            assert "FLEET_API_KEY=consoleA" in a_after and "FLEET_ENABLED=true" in a_after
+            assert cp.secrets_check(reg, store)["instances"]["a"]["own"] == []
+
+            cp.container_has_mount = lambda c: True
+            receipt = cp.secrets_adopt(reg, "b", store)
+            b_after = (b / "fleet.env").read_text()
+            assert "CLAUDE_CODE_OAUTH_TOKEN=tokB" in b_after, "a differing value is an override and stays"
+            assert "FLEET_MAXX_KEY_GMAIL=" not in b_after and "GH_TOKEN=" not in b_after
+            assert "still overriding: CLAUDE_CODE_OAUTH_TOKEN" in receipt
+
+            msg = cp.secrets_set("NTFY_TOPIC", "t2\n", store)
+            assert "rotated" in msg and "t2" not in msg and cp.read_env(store)["NTFY_TOPIC"] == "t2"
+            assert oct(store.stat().st_mode & 0o777) == "0o600"
+            msg = cp.secrets_set("CLAUDE_CODE_OAUTH_TOKEN_NEW", "x", store)
+            assert "added" in msg
+            for bad in (("FLEET_API_KEY", "v"), ("NTFY_TOPIC", "  ")):
+                try:
+                    cp.secrets_set(*bad, store)
+                    raise AssertionError(f"set accepted {bad}")
+                except ValueError:
+                    pass
+        finally:
+            cp.SECRETS_FILE, cp.container_has_mount = saved
+
+
+def _deploy_sh_mounts_the_shared_secret_store_read_only_gh759():
+    """deploy.sh run_args mounts the store at the same absolute path inside the container,
+    read-only, only when the file exists (no store: no mount, nothing breaks)."""
+    dep = (HERE / "deploy.sh").read_text()
+    assert 'secrets_env="${FLEET_SECRETS_FILE:-$HOME/.config/fleet-kit/secrets.env}"' in dep
+    assert 'if [ -f "$secrets_env" ]; then' in dep
+    assert 'secret_mounts+=(-v "$secrets_env:$secrets_env:ro")' in dep, "store must mount at the same path, ro"
+    assert '"${secret_mounts[@]}"' in dep, "run_args does not pass the secret mount to podman run"
 
 
 if __name__ == "__main__":
@@ -10635,6 +10732,8 @@ if __name__ == "__main__":
     check("control_plane page: pause/resume/weight buttons change fleet.env and the registry over HTTP (gh#759 AC4)", _control_plane_page_pauses_resumes_and_sets_weight_over_http_gh759)
     check("control_plane new: fleet.env/caddy/cron pieces are pure, idempotent and reversible (gh#759 AC1)", _control_plane_new_env_and_routes_are_pure_and_reversible_gh759)
     check("control_plane: an agent creates and removes an instance over HTTP with a bearer token (gh#759 AC1)", _control_plane_agent_creates_and_removes_an_instance_over_http_gh759)
+    check("control_plane secrets: init/check/adopt/set build one store, include every fleet.env, never print a value (gh#759)", _control_plane_secret_store_init_check_adopt_set_gh759)
+    check("deploy.sh mounts the shared secret store read-only at the same path, only when present (gh#759)", _deploy_sh_mounts_the_shared_secret_store_read_only_gh759)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:
