@@ -150,20 +150,13 @@ claimed for generations was simply wrong, and told every minion it had never onc
    a human to drive it through — arming auto-merge IS finishing the job.
 
    **Check whether your target repo's `main` is queue-controlled before picking a strategy
-   flag — a hardcoded guess has broken real PRs both ways, in both directions.** A bare arm
-   with no strategy flag ERRORS outright on a repo with no queue
-   (`--merge, --rebase, or --squash required when not running interactively`) — confirmed live
-   on fleet-kit's own repo (`gh api repos/The-Good-Project-Team/fleet-kit/branches/main/protection`)
-   as of 2026-08-28 through 2026-09-05, which cost a wasted retry on nearly every minion pass in
-   that window (PRs #406/#407/#413/#414/#416/#417 in one day alone). **That has since flipped**:
-   reconfirmed live 2026-09-06, fleet-kit's `main` now carries a ruleset with a `merge_queue`
-   rule, so the bare form is now correct there too — the shape changes over time, not just
-   between repos. On a repo where `main` IS queue-controlled (confirmed live on both
-   nonprofit-atlas, issue #3108, and fleet-kit as of 2026-09-06), an explicit strategy
-   flag is an invalid combination and gh ERRORS instead of enqueueing (`! The merge strategy
-   for main is set by the merge queue`) — there, the bare form is correct, letting `gh` pick
-   the queue path itself. Don't trust either example above as still true by the time you read
-   this — check once
+   flag — this shape changes over time, so verify fresh, never assume from a past pass.**
+   A bare arm with no strategy flag ERRORS outright on a repo with no queue (`--merge,
+   --rebase, or --squash required when not running interactively`); on a repo where `main`
+   IS queue-controlled (confirmed live on both nonprofit-atlas#3108 and fleet-kit), an
+   explicit strategy flag is the invalid combination instead and gh ERRORS the other way
+   (`! The merge strategy for main is set by the merge queue`) — there, the bare form is
+   correct and lets `gh` pick the queue path itself. Check once, this pass:
    (`gh api repos/<owner>/<repo>/rulesets` for a `merge_queue` rule, or
    `gh api repos/<owner>/<repo>/merge-queue` for a non-404) rather than assuming either one.
    CHECK THE EXIT CODE regardless of shape — issue #3108's root cause was this exact command
