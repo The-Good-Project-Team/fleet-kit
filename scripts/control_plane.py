@@ -44,13 +44,16 @@ defaults to `name`; `path` defaults to /fleet/<name>.
 
 Usage (host):
     control_plane.py tick [--dry-run]     compute shares, write changed ones, render the index
+    control_plane.py serve [--port 8600]  the page, with pause/resume/weight buttons (caddy
+                                          proxies /fleet/* here; systemd user unit on dino)
     control_plane.py pause NAME           FLEET_ENABLED=false in that fleet.env, then tick
     control_plane.py resume NAME          FLEET_ENABLED=true, then tick
     control_plane.py weight NAME N        set the weight in the registry, then tick
 
-The index (one page, every instance: number, share, weight, live build, runs last hour, last
-brief) is written to $FLEET_CONTROL_PLANE_OUT/index.html (default
-~/.cache/fleet-kit/control_plane) and served by caddy at /fleet/.
+The page (every instance: number, share, weight, live build, runs last hour, last brief, and
+the buttons) is served live by `serve` at /fleet/; `tick` also writes a static copy to
+$FLEET_CONTROL_PLANE_OUT/index.html (default ~/.cache/fleet-kit/control_plane) so the numbers
+can still be read when the server is down.
 """
 from __future__ import annotations
 
@@ -224,32 +227,118 @@ def render_index(rows: list[dict], human_reserve: float, generated: float) -> st
                 num_txt += f" (7d {num['delta_7d']:+g})"
         state = "paused" if not r["enabled"] else ("up" if r["container"].startswith("Up") else "DOWN")
         runs = r["runs"]
+        name = html.escape(r["name"])
+        # Relative form actions on purpose: caddy mounts this page under /fleet/ and strips the
+        # prefix, so "pause" resolves to /fleet/pause in the browser and to /pause here.
+        toggle = "resume" if not r["enabled"] else "pause"
+        controls = (f"<form method=post action='{toggle}'><input type=hidden name=name value='{name}'>"
+                    f"<button>{toggle}</button></form>"
+                    f"<form method=post action='weight'><input type=hidden name=name value='{name}'>"
+                    f"<input name=w type=number min=0 step=1 value='{r['weight']:g}' size=3> "
+                    f"<button>set weight</button></form>")
         trs.append(
-            f"<tr class='{state}'><td><a href='{html.escape(r['path'])}/'>{html.escape(r['name'])}</a>"
+            f"<tr class='{state}'><td><a href='{html.escape(r['path'])}/'>{name}</a>"
             f"<div class=sub>{html.escape(r['container_name'])} · {html.escape(r['container'])}</div></td>"
             f"<td>{state}</td><td>{num_txt}</td>"
             f"<td><b>{r['share']:.0%}</b><div class=sub>weight {r['weight']:g}</div></td>"
             f"<td>{runs['ok']} ok · <span class='{'warn' if runs['budget_declined'] else ''}'>"
             f"{runs['budget_declined']} budget-declined</span></td>"
-            f"<td><code>{html.escape(r['head'])}</code></td><td>{_central(runs['last_brief'])}</td></tr>")
+            f"<td><code>{html.escape(r['head'])}</code></td><td>{_central(runs['last_brief'])}</td>"
+            f"<td class=ctl>{controls}</td></tr>")
     return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>fleet control plane</title>
 <style>body{{font:15px/1.4 system-ui,sans-serif;margin:2rem;max-width:72rem;color:#1a1a1a}}
 table{{border-collapse:collapse;width:100%}}th,td{{text-align:left;padding:.6rem .7rem;border-bottom:1px solid #ddd;vertical-align:top}}
 th{{font-size:.8rem;text-transform:uppercase;color:#666}}.sub{{font-size:.8rem;color:#777}}
 tr.paused td{{color:#999}}tr.DOWN td:nth-child(2){{color:#b00;font-weight:600}}.warn{{color:#b00;font-weight:600}}
-p.meta{{color:#666;font-size:.9rem}}</style>
+p.meta{{color:#666;font-size:.9rem}}td.ctl form{{display:inline-block;margin:0 .4rem .3rem 0}}
+button{{font:inherit;padding:.2rem .6rem}}input[type=number]{{width:3.5rem;font:inherit}}</style>
 <h1>Control plane</h1>
 <p class=meta>{len(rows)} instances · shares sum {total:.0%} · human reserve {human_reserve:.0%} ·
-written {_central(generated)} · pause/resume from each instance's console (on/off button) or
-<code>control_plane.py pause NAME</code>; weights in <code>instances/registry.json</code></p>
-<table><tr><th>instance</th><th>state</th><th>number</th><th>share this hour</th><th>runs last hour</th><th>live build</th><th>last brief</th></tr>
+written {_central(generated)} · a paused instance starts no new pass on its next cron tick and its
+share flows to the rest; weights split what the human reserve leaves</p>
+<table><tr><th>instance</th><th>state</th><th>number</th><th>share this hour</th><th>runs last hour</th><th>live build</th><th>last brief</th><th></th></tr>
 {''.join(trs)}</table>"""
 
 
+# ---------------------------------------------------------------- manage from the page
+def apply_action(reg: dict, action: str, name: str, weight: str | None = None,
+                 registry: Path = REGISTRY) -> str:
+    """The one place a pause/resume/weight change happens, shared by the CLI and the page.
+    Returns a one-line receipt. Unknown instance or action raises ValueError."""
+    inst = next((i for i in reg["instances"] if i["name"] == name), None)
+    if inst is None:
+        raise ValueError(f"no instance named {name!r} (have: "
+                         f"{', '.join(i['name'] for i in reg['instances'])})")
+    if action in ("pause", "resume"):
+        val = "false" if action == "pause" else "true"
+        write_env_field(Path(inst["dir"]) / "fleet.env", ENABLED_KEY, val)
+        return f"{name}: {ENABLED_KEY}={val}"
+    if action == "weight":
+        w = float(weight if weight is not None else "x")
+        if w < 0:
+            raise ValueError("weight must be >= 0")
+        inst["weight"] = w
+        save_registry(reg, registry)
+        return f"{name}: weight {w:g}"
+    raise ValueError(f"unknown action {action!r}")
+
+
+def make_server(port: int, registry: Path = REGISTRY):
+    """GET / renders the page from a fresh tick; POST /pause, /resume, /weight apply the change
+    (form fields: name, w), tick, and send the browser back to the page. stdlib only, same
+    shape as fleet_view_server.py -- no framework for four routes."""
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):  # one line per request, cron-log style
+            print(f"[{_central(time.time())}] {self.address_string()} {fmt % args}", flush=True)
+
+        def _page(self):
+            reg = load_registry(registry)
+            rows = tick(reg, dry_run=True)
+            body = render_index(rows, reg["human_reserve"], time.time()).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path.split("?", 1)[0] in ("/", "/index.html", ""):
+                return self._page()
+            self.send_error(404)
+
+        def do_POST(self):
+            action = self.path.split("?", 1)[0].strip("/")
+            n = int(self.headers.get("Content-Length") or 0)
+            form = urllib.parse.parse_qs(self.rfile.read(n).decode(errors="ignore"))
+            name = (form.get("name") or [""])[0]
+            try:
+                reg = load_registry(registry)
+                receipt = apply_action(reg, action, name, (form.get("w") or [None])[0], registry)
+                tick(reg)
+                print(receipt, flush=True)
+            except ValueError as exc:
+                self.send_error(400, str(exc))
+                return
+            self.send_response(303)
+            self.send_header("Location", "./")
+            self.end_headers()
+
+    return ThreadingHTTPServer(("127.0.0.1", port), H)
+
+
+def serve(port: int) -> None:
+    print(f"control_plane serving on :{port}", flush=True)
+    make_server(port).serve_forever()
+
+
 # ---------------------------------------------------------------- the tick
-def tick(reg: dict, dry_run: bool = False, out_dir: Path = OUT_DIR, now: float | None = None) -> list[dict]:
+def tick(reg: dict, dry_run: bool = False, out_dir: Path | None = None, now: float | None = None) -> list[dict]:
     now = now or time.time()
+    out_dir = out_dir or OUT_DIR
     insts = reg["instances"]
     envs = {i["name"]: read_env(Path(i["dir"]) / "fleet.env") for i in insts}
     enabled = {n: is_enabled(e) for n, e in envs.items()}
@@ -283,29 +372,18 @@ def tick(reg: dict, dry_run: bool = False, out_dir: Path = OUT_DIR, now: float |
     return rows
 
 
-def _find(reg: dict, name: str) -> dict:
-    for i in reg["instances"]:
-        if i["name"] == name:
-            return i
-    sys.exit(f"no instance named {name!r} in {REGISTRY} (have: "
-             f"{', '.join(i['name'] for i in reg['instances'])})")
-
-
 def main(argv: list[str]) -> int:
     cmd = argv[0] if argv else "tick"
     reg = load_registry()
     if cmd == "tick":
         tick(reg, dry_run="--dry-run" in argv)
-    elif cmd in ("pause", "resume"):
-        inst = _find(reg, argv[1])
-        write_env_field(Path(inst["dir"]) / "fleet.env", ENABLED_KEY, "false" if cmd == "pause" else "true")
-        print(f"{inst['name']}: {ENABLED_KEY}={'false' if cmd == 'pause' else 'true'}")
-        tick(reg)
-    elif cmd == "weight":
-        inst = _find(reg, argv[1])
-        inst["weight"] = float(argv[2])
-        save_registry(reg)
-        print(f"{inst['name']}: weight {inst['weight']:g}")
+    elif cmd == "serve":
+        serve(int(argv[argv.index("--port") + 1]) if "--port" in argv else 8600)
+    elif cmd in ("pause", "resume", "weight"):
+        try:
+            print(apply_action(reg, cmd, argv[1], argv[2] if len(argv) > 2 else None))
+        except (ValueError, IndexError) as exc:
+            sys.exit(f"{cmd}: {exc}")
         tick(reg)
     else:
         print(__doc__.split("Usage (host):", 1)[1], file=sys.stderr)
