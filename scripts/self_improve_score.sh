@@ -218,43 +218,67 @@ print(json.dumps(by_day, indent=None, sort_keys=True))
 " 2>/dev/null || echo "unavailable")
 fi
 
+# fleet-kit#782 (part of #586): the predictions ledger. dumbledore/jefe register every
+# self-change as a falsifiable row (metric, baseline, target, deadline) via predict.py; code
+# resolves each row against fleet_metrics.py when it comes due. This is the grader's primary
+# evidence now -- the PR lists and day counts above are context, not the thing being scored.
+# The model cannot decide a prediction was a hit; predict.py already did.
+python3 "$KIT_DIR/scripts/predict.py" resolve >> "$FLEET_LOG_DIR/self_improve_score.log" 2>&1 || true
+LEDGER_JSON=$(python3 "$KIT_DIR/scripts/predict.py" ledger --days 14 2>>"$FLEET_LOG_DIR/self_improve_score.log" || echo '{}')
+LEDGER_TEXT=$(python3 "$KIT_DIR/scripts/predict.py" ledger --days 14 --text 2>/dev/null || echo 'ledger unavailable')
+export LEDGER_JSON
+
 PROMPT="You are scoring whether an autonomous agent fleet (fleet-kit, running on $FLEET_REPO_NAME) is genuinely SELF-IMPROVING, not just running.
 
-THE ACTUAL TEST (Reif's own definition, use this exactly -- not general 'did it self-correct sometimes'):
-Self-improvement is a COMPOUNDING LOOP: jefe or dumbledore makes a charter/rule change -> that
-change leads to a MEASURABLE improvement in tracking/outcomes AFTER its merge date -> that
-better tracking leads to the NEXT charter change being faster and/or better than the last one.
-One isolated fix is not this loop. A fix that never shows up as a real shift in the daily
-outcome numbers after it landed is not this loop, no matter how good the fix reads in isolation.
-A high score REQUIRES showing at least one instance of this actual chain in the evidence below --
-name the specific PR, the specific date, and the specific before/after shift in the daily
-numbers it produced. If you cannot point to that chain concretely, the score must be low
-regardless of how much self-evolution PR *volume* exists.
+THE TEST (Reif's definition): a COMPOUNDING LOOP. jefe or dumbledore changes a charter/rule ->
+that change moves a named number, measurably, after it lands -> the NEXT change is faster,
+cheaper or sharper because of what the last one taught. One isolated fix is not this loop.
+
+HOW YOU SCORE IT NOW. Every self-change is supposed to be registered in the PREDICTIONS LEDGER
+below as a falsifiable row: the change, the metric, the baseline, the target, the deadline.
+Code (predict.py + fleet_metrics.py) resolves each row when it comes due: hit, miss, or
+unavailable. You do not decide whether a prediction hit -- the ledger already did. You decide
+what the ledger says about the loop. A prediction whose baseline already met its target, or
+whose metric the change could not plausibly touch, is not evidence of anything: say so and do
+not count it.
 
 Scale, anchored exactly:
-- 100 = Jarvis from Iron Man: the compounding loop above is clearly running -- fixes visibly
-  cause better numbers, and the fixes themselves are getting faster/sharper over time.
-- 50 = self-correction happens, but it's isolated fixes with no visible compounding -- the
-  fleet fixes things without getting better AT fixing things.
-- 1 = a Windows update notification: nags about the same thing repeatedly, takes no corrective
-  action itself, a human has to intervene every time.
-- Score honestly. Volume of self-evolution PRs alone does NOT justify a high score -- lots of
-  jefe/dumbledore activity with no visible before/after improvement in the daily numbers is
-  still a low score, because the loop Reif is asking about isn't there.
+- 1-20   = no ledger rows in the last 7 days. Changes are being made with no falsifiable claim
+           attached. That is a Windows update notification, however many PRs merged.
+- 21-35  = rows exist but none has resolved as a hit. The fleet is guessing.
+- 36-49  = rows exist, none resolved yet (all open) or only unavailable -- the loop may be
+           starting; nothing is proven.
+- 50-69  = at least one honest hit: a change that moved the number it named, by the deadline.
+           Isolated self-correction, no compounding yet.
+- 70-100 = two or more hits AND the chain is tightening: later predictions resolve with a
+           smaller error_ratio, or a shorter by_hours, or a lower pass cost per hit, than
+           earlier ones. 100 = Jarvis: fixes visibly cause better numbers and the fixes
+           themselves keep getting faster and sharper.
+Volume of PRs never raises the score. A high hit rate on trivial predictions never raises it.
 
-Evidence, last 7 days:
+PREDICTIONS LEDGER, last 14 days (resolved by code, not by you):
+${LEDGER_TEXT}
 
-Self-evolution PRs sourced by jefe (the fleet's own orchestrator correcting itself), with merge dates -- check whether the daily numbers below shifted after each date:
+Context only -- the self-evolution PRs that landed (jefe, then dumbledore), with merge dates:
 ${SELF_EVO_JEFE:-none}
-
-Self-evolution PRs sourced by dumbledore (whose entire charter is 'fix the charter/instruction that caused the symptom'), with merge dates:
 ${SELF_EVO_DUMBLEDORE:-none}
 
-Run outcome counts BY DAY, last 7 days (ok = did real work, quiet/reported_nothing = ran but found nothing, budget_declined = didn't run at all) -- look for the shift a PR's merge date should have caused. Each day's object also carries \"hours_elapsed\": 24 for a full past day, or the actual elapsed hours so far for the current UTC day. NORMALIZE by this before calling anything a regression or an improvement -- a lower raw count on a partial today than a complete yesterday is not a regression if today's per-hour rate (count / hours_elapsed) is actually higher; compare rates, not raw totals, whenever either day being compared has hours_elapsed < 24:
+Context only -- Run outcome counts BY DAY, last 7 days (ok = did real work, quiet/reported_nothing
+= ran but found nothing, budget_declined = the account said no, paced = the fleet held itself).
+Each day carries \"hours_elapsed\"; compare rates, not raw totals, when a day is partial:
 ${DAILY_OUTCOMES}
 
-Score 1-100. Reasoning must either (a) name a specific PR, its merge date, and the specific before/after shift in the daily numbers that followed it, or (b) explicitly say no such shift is visible in the evidence and that's why the score is capped low. Output ONLY this JSON, nothing else, no markdown fences:
+Score 1-100. Reasoning must name the ledger row(s) it rests on (id, change, metric, hit/miss,
+error_ratio) -- or say plainly that the ledger is empty or has no hit and that is why the score
+is capped. Output ONLY this JSON, nothing else, no markdown fences:
 {\"score\": <int 1-100>, \"reasoning\": \"<one or two sentences>\"}"
+
+# SELF_IMPROVE_DRY_RUN=1: print the assembled prompt and stop before spending -- the way to
+# check what the grader would read (fleet-kit#782's live gate) without a scoring call.
+if [ "${SELF_IMPROVE_DRY_RUN:-0}" = "1" ]; then
+  printf '%s\n' "$PROMPT"
+  exit 0
+fi
 
 export IS_SANDBOX=1
 RAW=$(account_pool_run timeout 90 claude -p "$PROMPT" \
@@ -295,10 +319,20 @@ if [ -z "$SCORE_JSON" ]; then
 fi
 
 python3 -c "
-import json
+import json, os
 d = json.loads('''$SCORE_JSON''')
 d['date'] = '$NOW_TS'
 d['slot'] = '$SLOT'   # idempotency key: one score per 3h slot, re-runs inside it are no-ops
+# fleet-kit#782: the ledger counts the score rests on, so the console can show them without
+# parsing prose. Fail-open: a broken ledger read leaves them absent, never blocks the score.
+try:
+    L = json.loads(os.environ.get('LEDGER_JSON') or '{}')
+    d['hits'] = int(L.get('hit', 0)); d['misses'] = int(L.get('miss', 0))
+    d['predictions_open'] = int(L.get('open', 0))
+    if L.get('hit_rate') is not None:
+        d['hit_rate'] = round(float(L['hit_rate']), 3)
+except Exception:
+    pass
 print(json.dumps(d))
 " >> "$OUT_FILE"
 

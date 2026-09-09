@@ -10103,6 +10103,113 @@ def _run_member_wires_pacing_gate_and_exempt_specs_gh781():
     assert exempt == {"the-fixer", "dont-shoot-the-messenger", "judge-judy"}, exempt
 
 
+def _gh782_runs(now):
+    return [
+        {"member": "gru", "run_id": "gru-1", "status": "ok", "ts": now - 3600, "tokens": {"num_turns": 5, "cost_usd": 0.5}},
+        {"member": "gru", "run_id": "gru-2", "status": "quiet", "ts": now - 7200, "tokens": {"num_turns": 2, "cost_usd": 0.1}},
+        {"member": "gru", "run_id": "gru-3", "status": "reported_nothing", "ts": now - 10800},
+        {"member": "gru", "run_id": "gru-4", "status": "budget_declined", "ts": now - 14400},
+        {"member": "gru", "run_id": "gru-old", "status": "ok", "ts": now - 3 * 86400},
+        {"member": "gru", "status": "started", "ts": now - 10},
+        {"member": "dumbledore", "run_id": "dumb-1", "status": "ok", "ts": now - 5000,
+         "tokens": {"num_turns": 40, "cost_usd": 2.25}, "self_critique": "missed a log line"},
+    ]
+
+
+def _fleet_metrics_windows_runs_and_says_unavailable_gh782():
+    import fleet_metrics
+    now = 1_800_000_000.0
+    rows = _gh782_runs(now)
+    assert abs(fleet_metrics.compute("signal_rate:gru", rows, now, 24) - 1 / 3) < 1e-9
+    assert fleet_metrics.compute("signal_rate:gru", rows, now, 24 * 7) == 0.5    # the old ok row joins
+    assert fleet_metrics.compute("signal_rate:marie", rows, now, 24) is None     # no rows: unavailable
+    assert fleet_metrics.compute("avg_cost_usd:gru", rows, now, 24) == 0.3
+    assert fleet_metrics.compute("budget_declined_per_hr:gru", rows, now, 24) == 1 / 24
+    assert fleet_metrics.compute("status_per_day:ok:*", rows, now, 24) == 2.0
+    assert fleet_metrics.compute("self_critique_rate:dumbledore", rows, now, 24) == 1.0
+    try:
+        fleet_metrics.compute("nonsense:gru", rows, now, 24)
+        raise AssertionError("unknown metric must raise")
+    except ValueError:
+        pass
+    # 'started' provisional rows never count (gh#576's lesson, kept here).
+    assert fleet_metrics.compute("runs_per_day:gru", rows, now, 24) == 3.0
+
+
+def _predict_add_resolve_hit_miss_unavailable_gh782():
+    import predict
+    now = 1_800_000_000.0
+    runs = _gh782_runs(now)
+    rows = []
+    up = predict.make(rows, member="dumbledore", change="fleet-kit#1", metric="signal_rate:gru",
+                      target=0.3, baseline=0.2, by_hours=1, note="", now=now - 7200, runs=runs, run_id="dumb-1")
+    rows.append(up)
+    down = predict.make(rows, member="dumbledore", change="fleet-kit#2", metric="avg_cost_usd:gru",
+                        target=0.1, baseline=0.5, by_hours=1, note="", now=now - 7200, runs=runs, run_id=None)
+    rows.append(down)
+    nodata = predict.make(rows, member="jefe", change="fleet-kit#3", metric="signal_rate:marie",
+                          target=0.9, baseline=0.1, by_hours=1, note="", now=now - 7200, runs=runs, run_id=None)
+    rows.append(nodata)
+    future = predict.make(rows, member="jefe", change="fleet-kit#4", metric="signal_rate:gru",
+                          target=0.9, baseline=0.1, by_hours=48, note="", now=now, runs=runs, run_id=None)
+    rows.append(future)
+    assert [r["id"] for r in rows] == [1, 2, 3, 4]
+    changed = predict.resolve(rows, runs, now)
+    assert {r["id"] for r in changed} == {1, 2, 3}, [r["id"] for r in changed]
+    by = {r["id"]: r for r in rows}
+    # signal_rate over the 24h ending at due (now-3600): ok, quiet, reported_nothing = 1/3 >= 0.3 -> hit
+    assert by[1]["status"] == "hit" and abs(by[1]["actual"] - 1 / 3) < 1e-9, by[1]
+    # avg cost 0.3, target was <= 0.1 from 0.5: moved the right way but did not reach -> miss
+    assert by[2]["status"] == "miss" and by[2]["moved"] is True, by[2]
+    assert by[3]["status"] == "unavailable" and by[3]["actual"] is None, by[3]
+    assert by[4]["status"] == "open", by[4]
+    # Idempotent: a second resolve changes nothing.
+    assert predict.resolve(rows, runs, now) == []
+    # Round-trip through the file the same way the CLI does.
+    d = Path(tempfile.mkdtemp()); p = d / "predictions.jsonl"
+    predict.save(p, rows)
+    assert [r["status"] for r in predict.load(p)] == ["hit", "miss", "unavailable", "open"]
+    assert predict.judge(None, 0.5, 0.6) == ("hit", None)   # no baseline: only "reaches target" is checkable
+
+
+def _predict_ledger_reports_hit_rate_and_pass_cost_gh782():
+    import predict
+    now = 1_800_000_000.0
+    runs = _gh782_runs(now)
+    rows = []
+    for i, (metric, target, baseline) in enumerate((("signal_rate:gru", 0.3, 0.2),
+                                                    ("signal_rate:gru", 0.9, 0.2),
+                                                    ("avg_cost_usd:gru", 0.1, 0.5))):
+        rows.append(predict.make(rows, member="dumbledore", change=f"fleet-kit#{i}", metric=metric,
+                                 target=target, baseline=baseline, by_hours=1, note="", now=now - 7200,
+                                 runs=runs, run_id="dumb-1" if i == 0 else None))
+    predict.resolve(rows, runs, now)
+    s = predict.summarize(rows, runs, now, 14)
+    assert (s["hit"], s["miss"], s["open"], s["unavailable"]) == (1, 2, 0, 0), s
+    assert abs(s["hit_rate"] - 1 / 3) < 1e-9
+    # Leg 3: the authoring pass's turns/cost ride along -- by run_id, else the member's newest
+    # row before the prediction (dumb-1 in both cases here).
+    assert all(r["pass_num_turns"] == 40 and r["pass_cost_usd"] == 2.25 for r in s["rows"]), s["rows"]
+    assert s["cost_per_hit_usd"] == 2.25
+    assert s["rows"][0]["error_ratio"] is not None
+    text = predict.as_text(s)
+    assert "1 hit, 2 miss" in text and "#1 hit" in text, text
+
+
+def _self_improve_score_reads_the_ledger_gh782():
+    text = (HERE / "self_improve_score.sh").read_text()
+    resolve_at = text.find('predict.py" resolve')
+    ledger_at = text.find('predict.py" ledger --days 14')
+    prompt_at = text.find('PROMPT="You are scoring')
+    assert 0 < resolve_at < ledger_at < prompt_at, "resolve, then ledger, then the prompt"
+    assert "PREDICTIONS LEDGER" in text and "${LEDGER_TEXT}" in text
+    assert text.find("PREDICTIONS LEDGER") < text.find("Context only -- the self-evolution PRs"), "ledger first"
+    assert "1-20   = no ledger rows" in text
+    for f in ("d['hits']", "d['misses']", "d['predictions_open']"):
+        assert f in text, f
+    assert 'SELF_IMPROVE_DRY_RUN' in text
+
+
 def _control_plane_shares_sum_to_pool_and_paused_weight_flows_gh759():
     """gh#759 AC2: shares split (1 - human_reserve) by weight; a paused instance gets 0.0 and
     the others absorb its weight. Seeded 3:1 with reserve 0.2 reproduces the hand-set
@@ -10772,6 +10879,10 @@ if __name__ == "__main__":
     check("control_plane secrets: init/check/adopt/set build one store, include every fleet.env, never print a value (gh#759)", _control_plane_secret_store_init_check_adopt_set_gh759)
     check("deploy.sh mounts the shared secret store read-only at the same path, only when present (gh#759)", _deploy_sh_mounts_the_shared_secret_store_read_only_gh759)
     check("pacing_gate holds a zero ceiling, runs an exempt member or an unreadable meter (gh#781 AC1-3)", _pacing_gate_holds_zero_ceiling_unless_exempt_gh781)
+    check("fleet_metrics computes signal_rate/avg_cost over a window, unavailable when empty (gh#782 AC1)", _fleet_metrics_windows_runs_and_says_unavailable_gh782)
+    check("predict.py add/resolve: hit in the baseline->target direction, miss otherwise, unavailable on no data (gh#782 AC2)", _predict_add_resolve_hit_miss_unavailable_gh782)
+    check("predict.py ledger reports hit rate and the authoring pass turns/cost (gh#782 AC3)", _predict_ledger_reports_hit_rate_and_pass_cost_gh782)
+    check("self_improve_score.sh resolves the ledger, feeds it to the prompt first, and stamps hits/misses on the row (gh#782 AC4)", _self_improve_score_reads_the_ledger_gh782)
     check("run_member.sh calls pacing_gate after the ceiling and the exempt specs are the three named (gh#781)", _run_member_wires_pacing_gate_and_exempt_specs_gh781)
     for n in ok:
         print(f"  ok    {n}")
