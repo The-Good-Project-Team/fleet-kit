@@ -1,0 +1,35 @@
+{
+  "name": "librarian-scrub",
+  "emoji": "🧹",
+  "kind": "shell",
+  "lane": "hygiene",
+  "mandate": {
+    "target": "every credential-shaped string in the transcript store is redacted to a stable marker within an hour of landing, transcripts past 30 days are compressed and past 90 days dropped, and every credential class found is named for a HUMAN to rotate -- with zero writes ever landing outside the transcript store",
+    "checklist": [
+      "librarian-scrub.sh runs members/librarian/librarian.py --execute (incremental since the watermark; checkpoints every 25 files so a cut run resumes next tick)",
+      "the run record names files scanned / redacted / compressed / dropped and the credential classes found -- redaction is never rotation",
+      "librarian.py refuses any root that looks like a repo checkout; that refusal is it working"
+    ],
+    "limits": {
+      "timeout_s": 900
+    },
+    "escalation": "a new credential shape the pattern list misses is a gap for the daily librarian pass to name; never a one-off regex here"
+  },
+  "schedule": {
+    "hourly_at_minute": 6
+  },
+  "timeout_s": 900,
+  "enabled": true,
+  "llm": {
+    "model": "sonnet",
+    "prompt_file": "librarian-scrub.md",
+    "runner": "members/librarian-scrub/librarian-scrub.sh",
+    "tools": {
+      "allow": ["none"],
+      "deny": ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "WebFetch"]
+    }
+  },
+  "report": {
+    "vision_link": "optional"
+  }
+}

@@ -1,43 +1,53 @@
 {
   "name": "librarian",
   "emoji": "📚",
+  "kind": "llm",
   "lane": "hygiene",
   "mandate": {
-    "target": "every gho_/ghp_/ghs_/ghu_/ghr_/sk-ant-/PGPASSWORD=/postgresql://u:p@ credential-shaped string in the transcript store is redacted to a stable marker with 0 grep hits after each run, every distinct credential class found this run is named for human rotation, and transcripts past the retention window are compressed then dropped -- with zero writes ever landing outside the transcript store",
+    "target": "once a day: every memory dir is under its cap (10,240 B / 50 entries) with duplicates merged and resolved entries dropped, and $FLEET_LOG_DIR/INTENT.md (<=40 lines) says what the human decided, corrected and asked for in the last 14 days -- read by dumbledore, marie and gru at the start of their passes",
     "checklist": [
-      "run members/librarian/librarian.py dry-run first (no --execute) -- it encodes the actual patterns and safety checks in code, read its report before acting",
-      "confirm every root in the dry-run output is a transcript store, never a repo checkout -- the tool refuses a root with a .git dir or named 'repo', but read the refusal if it fires rather than routing around it",
-      "re-run with --execute once the dry-run report looks right",
-      "grep the transcript store for gho_/ghp_/ghs_/ghu_/ghr_/sk-ant-/PGPASSWORD=/postgresql:// after the execute run -- 0 hits is the bar",
-      "name every distinct credential class this run found, with file/occurrence counts, for human rotation -- redaction is never rotation, never claim the leak is 'fixed'",
-      "write the report (Report section below), literal Outcome:/Evidence: lines included"
+      "run members/librarian/memory_tend.py --execute and read its per-dir report: size/entries vs cap, dead lines removed, orphans, resolved candidates, similar pairs",
+      "merge near-duplicates, drop resolved entries whose lesson lives in code or a charter, index or delete orphans, bring MEMORY.md under cap -- Edit/Write inside the memory dir only, never raise the cap",
+      "run members/librarian/intent_digest.py (captures + asks + Reif: comments) and write $FLEET_LOG_DIR/INTENT.md: standing decisions, corrections/reversals, open asks; short quotes with dates, never a secret",
+      "0 captures in the listing is a finding: the capture cron on the human's machine stopped -- name it for a human",
+      "a lesson recurring across several members is a charter bug: name it for dumbledore, never edit a charter",
+      "credential classes librarian-scrub keeps finding name a leaking member; a shape it cannot see is a gap for a human, never a hand-written regex"
     ],
     "limits": {
-      "timeout_s": 900
+      "timeout_s": 1800
     },
-    "escalation": "a file the scrubber can't parse (binary, truncated, permission denied) -- skip it and name it in the report, never let one bad file stop the whole pass. A brand-new credential SHAPE the pattern list doesn't cover -- name it in the report as a gap; do not hand-write a one-off regex mid-pass without re-running members/librarian/test_librarian.py against it first."
+    "escalation": "a memory dir you cannot bring under cap without losing a live lesson, or a pattern gap in the scrubber: say so in the report as the one thing a human must decide. Never touch /repo, /fleet-kit or any charter."
   },
   "schedule": {
-    "hourly_at_minute": 6
+    "daily_at": "05:15",
+    "note": "UTC; entrypoint.sh line `15 5 * * *`. Once a day on purpose (fleet-kit#784): the hourly scrub is librarian-scrub, a shell member."
   },
-  "timeout_s": 900,
+  "timeout_s": 1800,
   "enabled": true,
   "llm": {
     "model": "sonnet",
     "prompt_file": "librarian.md",
+    "worktree": false,
     "tools": {
       "allow": [
         "Read",
+        "Edit",
+        "Write",
         "Bash",
         "Grep",
         "Glob",
         "TodoWrite"
       ],
       "deny": [
+        "Edit(/repo/**)",
+        "Write(/repo/**)",
+        "Edit(/fleet-kit/**)",
+        "Write(/fleet-kit/**)",
         "Bash(git push:*)",
         "Bash(gh pr create:*)",
         "Bash(gh pr merge:*)",
-        "Bash(gh issue edit:*)"
+        "Bash(gh issue edit:*)",
+        "Bash(rm -rf:*)"
       ]
     }
   },

@@ -43,6 +43,11 @@ work done).
 8. Part D — label-consistency sweep (below)
 9. Write the report (Report section below), literal Outcome:/Evidence: lines included
 
+**Intent first (fleet-kit#784).** If `$FLEET_LOG_DIR/INTENT.md` exists, read it before Part A. It is
+what Reif decided, corrected and asked for in the last two weeks, distilled daily by librarian
+from his own sessions. An open ask there with no issue is a Part C4 PRD candidate; a reversal
+there outranks any ranking rule below. Cite the entry you acted on in your report.
+
 ## Part A — claim hygiene
 
 1. `gh issue list --state open --label fleet:claimed --limit 500 --json number,title,url`
