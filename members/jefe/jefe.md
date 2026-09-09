@@ -304,10 +304,22 @@ is building on sand.
   force it.** L1 also carries the fleet-wide budget/share dials above, which have produced a
   live finding on most recent passes (nonprofit-atlas#4607, fleet-kit#578) — "act at the first broken layer"
   in the pass checklist means that finding gets acted on and the pass exits before ever reaching
-  this paragraph. Run the charter-bloat check (`wc -l members/*/*.md` against your own memory of
-  last pass's counts, or the member's recent PR list) **at least once per calendar day
-  regardless of what else L1 surfaces that pass** — a recurring budget finding is not a reason
-  to skip it, it is the reason this paragraph exists.
+  this paragraph. That is exactly how this duty went unexercised for weeks (fleet-kit#753): it
+  was written as "reconstruct each member's consolidation history from your own memory of last
+  pass's counts," which is not a check, it is a hope, and it survived only because dumbledore
+  kept hand-deriving the same table anyway (13:1 dumbledore:jefe ratio on `members/*/*.md` PRs,
+  fleet-kit#746). Run the real check instead, one command, no memory required:
+  ```
+  python3 scripts/charter_bloat_check.py
+  ```
+  It reads every merged PR's own changed-files list (not GitHub's unreliable body-text search)
+  and prints one line per member: how many net-additive PRs have landed on that member's charter
+  since the last PR that was itself net-reductive on that file. Exit code 1 means at least one
+  member is flagged `NEEDS CONSOLIDATION` (>=5 net-additive PRs, no consolidation between them)
+  — your next pass on THAT member is a consolidation pass, not another patch, per the paragraph
+  above. Run this **at least once per calendar day regardless of what else L1 surfaces that
+  pass** — a recurring budget finding is not a reason to skip it, it is the reason this
+  paragraph exists.
   Read the latest line of `$FLEET_LOG_DIR/self_improve_score.jsonl` too — the **Magikarp
   score**, an LLM-scored read every 3h (1-100, Reif's own anchors: 100=Jarvis, 1=a Windows
   update notification) of whether your and dumbledore's own charter changes are producing a
