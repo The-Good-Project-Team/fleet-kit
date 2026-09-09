@@ -344,7 +344,10 @@ is building on sand.
 - **L3 PROD** — (if applicable) the deployed product is serving, deploys are green.
 - **L4 WORK** — only now: the backlog, the highest-priority blocker, the actual product.
 
-**A defect found at layer N is fixed AT layer N; layers below N are not touched this pass.**
+**A defect found at layer N is fixed AT layer N — if you can fix it this pass. If you cannot,
+layer N is ESCALATED, not broken, and the pass CONTINUES down the ladder.** Preemption is about
+trust in a signal, not a stop-work order: a blocker that needs a human's hands does not get more
+fixed by a second, third or twentieth jefe pass staring at it.
 
 **Systemic-failure rule:** the SAME failure line on ≥2 unrelated units of work — every PR
 failing the same gate identically, every build hitting the same missing dependency — is ONE
@@ -352,24 +355,22 @@ broken piece of infrastructure, never N broken pieces of work. File it once, nam
 affected PR/item, then STOP per-item retries on that failure until the fix lands. Retrying
 blind against a broken gate burns passes and hides an outage as noise.
 
-**Escape hatch, load-bearing — do not skip:** if you cannot FIX a broken layer this pass, do
-NOT stall the fleet on it. File the blocker loudly (a backlog issue + your pass report),
-record that layer as degraded, and proceed down the ladder for the rest of the pass anyway.
-A permanently broken sensor must never mean L4 stops forever — escalating beats stalling.
-State which layer you acted at, in both your report and any status line you own.
+**The test, and run it BEFORE you spend a turn on layer N:** is the defect already filed, and
+does this pass hold information the thread does not? If filed and nothing new — it is ESCALATED.
+Say so in ONE line of your own report, spend no further turns on it, drop to the next layer.
+Only an unfiled defect, or one with genuinely new information, earns the pass's depth. A
+permanently broken sensor must never mean L4 stops forever — escalating beats stalling. State
+which layer you acted at, in both your report and any status line you own.
 
-**Once a blocker is filed, don't re-diagnose it every pass — check for NEW information
-first.** A systemic/L3 blocker you already filed does not need a fresh issue comment every
-time you re-verify it's still stuck the same way. Before commenting on it again, ask: does
-this pass have something the thread doesn't already have (duration crossed a further
-threshold, new PRs now queued behind it, a diagnosis nobody's stated yet)? If not, note the
-freshness check in YOUR OWN pass report only — that already satisfies "state which layer you
-acted at" above — and move on; don't add another "still stuck, no new diagnosis" comment to
-the thread. That is the same `reported_nothing`-shaped waste this file exists to prevent,
-just spent on GitHub instead of in your own report. (Confirmed live 2026-09-03: gh#278
-collected 8 separate jefe/nerd/gru passes in 9 hours, several logging "freshness check only,
-no new diagnosis" as their entire contribution, while the blocker itself — a host-only git
-fix — needs a human's hands regardless of how many more times it gets re-confirmed.)
+**Once a blocker is filed, don't re-diagnose it — and don't re-DERIVE it either.** The waste
+is not only the duplicate comment; it is the half-pass spent reconstructing an analysis the
+thread already holds. Read the thread FIRST. If the answer is in it, cite it and move on — do
+not recompute it to satisfy "verify before you cite" above. That rule governs what you PUBLISH
+as this pass's own evidence; it does not oblige you to re-derive a finding you already filed.
+(Live 2026-09-03: gh#278 drew 8 jefe/nerd/gru passes in 9 hours, several logging "freshness
+check only" as their whole contribution, against a blocker needing a human's hands regardless.
+Live 2026-09-08/09: 10 of jefe's 20 consecutive `ok` self-critiques say the pass went to
+re-deriving gh#578/gh#308 instead of reaching L4 — ≈23 dollars, ~0 backlog items advanced.)
 
 ## The pass (Observe → Orient → Decide → Act, then exit)
 
