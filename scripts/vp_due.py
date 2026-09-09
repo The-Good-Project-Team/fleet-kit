@@ -14,7 +14,8 @@ THE RULE. (Also: a `Not yet` verdict with no newer merge and fewer than three ro
 the redo minion -- see redo_due.) An open `quality:world-class` item is due for a VP review when a merged PR that
 references it is newer than the newest VP verdict on it (or there is no verdict yet), unless a
 comment starting `Reif:` is newer than that merge (his veto or instruction wins), and no vp
-pass is already running for it.
+pass is already running for it, and it has had fewer than MAX_ROUNDS `Not yet` rounds -- the
+same cap `redo_due` puts on the builder now binds the reviewer too (see MAX_ROUNDS below).
 
 Pure core (`is_due`, `due_items`), thin `gh` seam (`collect`), CLI (`main`) -- same split as
 vision_link_gate.py and quality_gate.py.
@@ -31,6 +32,19 @@ import time
 
 VERDICT_RE = re.compile(r"^\W*(design approved|accepted|not yet)\s*\(vp review\)\s*:", re.IGNORECASE | re.MULTILINE)
 REIF_RE = re.compile(r"^\W*reif\s*:", re.IGNORECASE | re.MULTILINE)
+NOT_YET_RE = re.compile(r"^\W*not yet\s*\(vp review\)\s*:", re.IGNORECASE | re.MULTILINE)
+
+# THE SAME CAP BINDS BOTH SIDES OF THE LOOP (fleet-kit#798). MAX_ROUNDS used to bound only
+# `redo_due` -- the BUILDER. `is_due` -- the REVIEWER -- had no cap, so an item that had been
+# denied three times could not be built and could still be re-reviewed, forever, every time
+# any PR mentioning it merged. Live on project-sketchyswap#5 (2026-09-09): six `Not yet (VP
+# review):` rounds in 13 hours, `redo_skipped: "6 Not-yet rounds: marie re-scopes, no more
+# redos"`, zero builder passes, ~$14 of vp re-denials on the highest-value item on the board
+# while the P0 that blocks the instance's only number (#62, nobody can sign in) got none. A
+# spec that has failed the bar three times does not need a fourth opinion; it needs a person
+# to re-scope or drop it. The release is deliberately a human one: a `Reif:` comment newer
+# than the newest denial lifts the cap, the same override vp.md already gives him.
+MAX_ROUNDS = 3
 
 
 def _newest(stamps):
@@ -52,13 +66,13 @@ def is_due(item: dict, running: set[int] | None = None) -> tuple[bool, str]:
     reif = _newest(c.get("createdAt") for c in comments if REIF_RE.search(c.get("body") or ""))
     if reif and reif > merge:
         return False, "a Reif: comment is newer than the last merge"
+    not_yets = sorted(c.get("createdAt") or "" for c in comments if NOT_YET_RE.search(c.get("body") or ""))
+    if len(not_yets) >= MAX_ROUNDS and not (reif and reif > not_yets[-1]):
+        return False, f"{len(not_yets)} Not-yet rounds: a decision, not another review"
     if verdict and verdict >= merge:
         return False, "verdict is newer than the last merge"
     return True, ("no verdict yet" if not verdict else "merge newer than last verdict")
 
-
-NOT_YET_RE = re.compile(r"^\W*not yet\s*\(vp review\)\s*:", re.IGNORECASE | re.MULTILINE)
-MAX_ROUNDS = 3
 
 
 def redo_due(item: dict, running_minions: set[int] | None = None) -> tuple[bool, str]:

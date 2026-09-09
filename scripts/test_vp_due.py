@@ -44,6 +44,29 @@ class DueTests(unittest.TestCase):
         it = item(5, comments=[("Design approved (VP review): clears the bar", T2)], merged=[T1])
         self.assertFalse(vp_due.is_due(it)[0])
 
+    def test_three_not_yet_rounds_stop_further_reviews(self):
+        """fleet-kit#798: the builder cap binds the reviewer too. Without this, an item that
+        `redo_due` refuses to build is re-reviewed on every merge that mentions it (live:
+        project-sketchyswap#5, six rounds, zero builds)."""
+        it = item(7, comments=[("Not yet (VP review): a", T1), ("Not yet (VP review): b", T2),
+                               ("Not yet (VP review): c", T3)], merged=["2026-09-08T16:00:00Z"])
+        ok, why = vp_due.is_due(it)
+        self.assertFalse(ok); self.assertIn("3 Not-yet rounds", why)
+
+    def test_reif_after_the_last_not_yet_lifts_the_cap(self):
+        """The release is a human one, the same override vp.md already gives him."""
+        it = item(8, comments=[("Not yet (VP review): a", T1), ("Not yet (VP review): b", T2),
+                               ("Not yet (VP review): c", T3),
+                               ("Reif: re-scoped, look again", "2026-09-08T16:00:00Z")],
+                  merged=["2026-09-08T17:00:00Z"])
+        ok, why = vp_due.is_due(it)
+        self.assertTrue(ok); self.assertEqual(why, "merge newer than last verdict")
+
+    def test_two_not_yet_rounds_still_due(self):
+        it = item(9, comments=[("Not yet (VP review): a", T1), ("Not yet (VP review): b", T2)],
+                  merged=[T3])
+        self.assertTrue(vp_due.is_due(it)[0])
+
     def test_reif_comment_after_merge_blocks(self):
         it = item(6, comments=[("Reif: hold this, I want to look first", T3)], merged=[T2])
         ok, why = vp_due.is_due(it)
