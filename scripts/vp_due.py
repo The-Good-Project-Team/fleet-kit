@@ -127,10 +127,28 @@ def _gh(args: list[str], cwd: str) -> list:
     return json.loads(out.stdout or "[]")
 
 
+# fk#805: vp reviewed 3 of 191 issues because this label was hardcoded to world-class alone.
+# quality:solid is where the user-facing surfaces live (76 items vs 3); ship-it stays ungated so
+# throughput is unaffected. Override with FLEET_VP_LABELS (comma-separated) to widen or narrow
+# without a code change.
+VP_LABELS = tuple(
+    lbl.strip()
+    for lbl in os.environ.get("FLEET_VP_LABELS", "quality:world-class,quality:solid").split(",")
+    if lbl.strip()
+)
+
+
 def collect(repo_dir: str) -> list[dict]:
-    """Open world-class items with their comments and the merged PRs that mention them."""
-    issues = _gh(["issue", "list", "--state", "open", "--label", "quality:world-class", "--limit", "100",
-                  "--json", "number,comments"], repo_dir)
+    """Open items in any VP_LABELS tier, with their comments and the merged PRs that mention them."""
+    issues = []
+    seen: set[int] = set()
+    for label in VP_LABELS:
+        for iss in _gh(["issue", "list", "--state", "open", "--label", label, "--limit", "100",
+                        "--json", "number,comments"], repo_dir):
+            # an item carrying two quality labels must not be collected (or reviewed) twice
+            if iss["number"] not in seen:
+                seen.add(iss["number"])
+                issues.append(iss)
     items = []
     for iss in issues:
         n = iss["number"]
