@@ -61,16 +61,20 @@ nobody wrote a check for?* A checklist can only catch failures someone already s
 a floor, never the job. Most of what matters in a lane on any given week is not on it yet, and
 a pass that runs only the checklist is the pass that files "nothing new" forever.
 
-**A compelling operator-flagged thread is not license to skip this.** dumbledore found the
-identical self-critique across devops, datadog and a second devops run in the same 24h window
-(2026-09-07): the FULL pass budget spent re-verifying or re-confirming the one thread the
-`--task` operator instruction named, with the exploration half never reached — "the last 5/6
-passes' self-critiques all name this same pattern" in the members' own words. The operator
-instruction is one input, not the whole task: if the named thread is confirmed or resolved by
-roughly the half-way point of your pass, that is the checkpoint to switch to real step-3
-discovery, not a reason to keep digging on the same thread for the rest of the budget. Filing
-one strong confirmation and nothing from step 3 is the same failure as running only the
-checklist.
+**A compelling operator-flagged thread is not license to skip this — and confirming one is a
+30-second job, not a half-pass job.** The "half-way checkpoint" this section used to name got
+read as an allowance: on 2026-09-10 all six nerd passes obeyed it and still opened their
+self-critique with *"I spent the first ~15% / ~25% / ~35% / close to half of the budget
+re-verifying the operator-flagged thread"* — and three proposed the cheaper move themselves
+(*"I could have checked just the label state first (30 seconds)"*). So **check the thread's
+STATE before reading a word of it**: its labels, whether an open PR references it, the date of
+its last comment — the same cheap-check-first move "Before filing anything, check `--state
+open` too" already asks of you at the other end of the pass. One or two commands answer
+"already handled / still blocked / genuinely stale" for almost every thread. Once you know, say
+so in one sentence and go to step 3 — no later than ~10% of your budget. Read the full thread
+only when that cheap check is genuinely inconclusive, and name in your self-critique which
+check was. One strong confirmation and nothing from step 3 is the same failure as running only
+the checklist.
 
 ### Run a real discovery pass — in this order
 
@@ -84,17 +88,12 @@ sqlite3 "$FLEET_LOG_DIR/fleet.db" \
     ORDER BY recorded_at DESC LIMIT 5"
 ```
 
-(`lane` is a structured column now, not a keyword match against free-text `outcome` -- datta was
-independently re-deriving lane attribution by regex against outcome/evidence prose on several
-consecutive passes, self-reported as fragile and the cause of at least one real mis-attribution.
-Your own `--task "lane=<name> — ..."` prefix is captured verbatim into this column by
-`run_member.sh`/`run_report.py`, so query it directly instead.)
+(`lane` is a structured column, filled verbatim from your own `--task "lane=<name> — ..."`
+prefix by `run_member.sh`/`run_report.py` — query it directly, never regex the free-text
+`outcome` for lane attribution.)
 
 `outcome IS NOT NULL` matters: a killed or budget-declined pass has no outcome to learn from,
-and reading those as "I did nothing last time" is wrong. (The `sqlite3` CLI was missing from
-the container until 2026-08-26 — both this charter and gru's shipped commands that died on
-`sh: sqlite3: not found`, silently returning nothing while the pass carried on. It is installed
-now; python3's `sqlite3` module is always available as a fallback.)
+and reading those as "I did nothing last time" is wrong.
 
 Read what you filed, and read your own `self_critique` — past-you already named what this pass
 should pick up. Then check what happened to those findings: were they built, closed as cruft,
