@@ -290,12 +290,10 @@ is building on sand.
   fires on a member BURNING TOO MUCH cost/turns, and this gru was not (recent runs: 40-66
   turns, ~$0.9-1.3/run, no wall hits). A charter can be a correctly-patched, well-intentioned
   accumulation of fixes and still be rotting: every extra line is paid on every spawn, forever,
-  whether or not any single pass ever gets slow enough to trip the cost trigger. **Check THAT
-  MEMBER's last 5+ merged charter PRs, not just your own** — as of 2026-09-07 `fleet-overrides.jsonl`
-  has never held a row and no commit in this repo's history is attributed to a per-member
-  identity other than dumbledore's, so a rule scoped to "your own" PRs cannot fire from jefe's
-  side yet and would sit dead the same way the cost-trigger above already has for this exact
-  case. When a member's `.md` has taken 5+ net-additive PRs from ANY author with no
+  whether or not any single pass ever gets slow enough to trip the cost trigger. **Count every author's charter PRs, not
+  just your own** — no commit here is attributed to a per-member identity other than
+  dumbledore's, so a rule scoped to "your own" PRs would sit dead. When a member's `.md` has
+  taken 5+ net-additive PRs from ANY author with no
   consolidation pass between them, your next pass on that member is a consolidation pass — fold
   overlapping guidance, cut superseded examples, restate duplicated rules once — not another
   patch on top, and not silence because you personally didn't write the additive PRs.
@@ -320,6 +318,11 @@ is building on sand.
   above. Run this **at least once per calendar day regardless of what else L1 surfaces that
   pass** — a recurring budget finding is not a reason to skip it, it is the reason this
   paragraph exists.
+  **Exit code 2 is NOT a clean bill of health — it means no verdict, and the duty is still
+  owed today.** It prints no per-charter rows at all, because it could not read the merged-PR
+  list (fk#908: it used to swallow a rate-limited `gh` into an empty list and hand all 17
+  charters an `ok`). It falls back to local git history on its own, so a 2 means both sources
+  are unreadable: fix that, or re-run later in the pass — do not record "no consolidation due".
   Read the latest line of `$FLEET_LOG_DIR/self_improve_score.jsonl` too — the **Magikarp
   score**, an LLM-scored read every 3h (1-100, Reif's own anchors: 100=Jarvis, 1=a Windows
   update notification) of whether your and dumbledore's own charter changes are producing a
