@@ -59,6 +59,11 @@ DEDUPE: match on a hidden marker in the issue body (`<!-- fleet:sentry-journey k
 not on title text -- a title can be edited or reworded by a human without breaking the match,
 same reasoning closes_gate.py's own comment-parsing takes for machine-vs-human text.
 
+gh#849: the marker match only ever finds an issue THIS filer wrote. A hand-filed duplicate
+(no marker, sometimes not even this label -- #724) falls back to a second, widened search
+across every open issue for the journey id and exact step index in its own title/body text --
+see `find_open_issue()` and `key_matches_text()`.
+
 VIEWPORT COLLAPSING (gh#660 follow-up, live proof #690/#691): journey_walker.py's own results.json
 id convention suffixes every non-desktop viewport onto the journey id (`<id>--<viewport>`), so a
 naive `<journey_id>::step<N>` key is viewport-specific by construction -- a step-0 navigation
@@ -167,6 +172,36 @@ def key_from_body(body: str, tag: str = "sentry-journey") -> str | None:
     return m.group(1) if m else None
 
 
+# gh#849: the marker match above only ever finds an issue THIS filer wrote itself. A human or
+# another agent who hand-files the same defect (a real, recurring case -- #814/#724 were both
+# hand-filed dupes of what the filer would otherwise re-file) carries no marker, so `process()`
+# needs a second, textual way to recognise "this is already tracked" before it files again.
+_KEY_RE = re.compile(r"^(.*)::step(\d+)$")
+
+
+def parse_key(key: str) -> "tuple[str, int] | None":
+    """Inverse of step_key(): the bare (viewport-stripped) journey id and step index a human
+    would actually write about, e.g. "search-and-open-org--mobile_390::step1" -> ("search-and-
+    open-org", 1). Returns None for a key that doesn't match the filer's own `::step<N>` shape."""
+    m = _KEY_RE.match(key)
+    if not m:
+        return None
+    return base_journey_id(m.group(1)), int(m.group(2))
+
+
+def key_matches_text(key: str, text: str) -> bool:
+    """True when `text` (an issue's title + body) names both the journey and the exact failing
+    step -- the narrow signal #849's PRD asks for: journey id alone is not enough (AC5, a
+    different step in the same journey must not match), and neither is "step N" alone."""
+    parsed = parse_key(key)
+    if parsed is None:
+        return False
+    journey_id, step_index = parsed
+    if journey_id not in text:
+        return False
+    return re.search(r"\bstep\s*" + re.escape(str(step_index)) + r"\b", text, re.IGNORECASE) is not None
+
+
 # --- pure content builders (unit-tested; never executed by tests) ------------------------------
 
 def build_issue_title(journey_name: str, step_action: str, suffix: str = "isn't working") -> str:
@@ -237,11 +272,14 @@ def build_file_cmd(title: str, body: str, label: str = LABEL_JOURNEY, repo: str 
     return cmd
 
 
-def build_list_cmd(label: str = LABEL_JOURNEY, repo: str | None = None) -> list[str]:
-    cmd = [
-        "gh", "issue", "list", "--state", "open", "--label", label,
-        "--limit", "200", "--json", "number,body",
-    ]
+def build_list_cmd(label: "str | None" = LABEL_JOURNEY, repo: str | None = None) -> list[str]:
+    """gh#849: `label=None` drops the `--label` filter entirely -- the widened fallback search
+    `find_open_issue()` uses once the marker match misses, since a hand-filed duplicate (#724)
+    may carry neither the marker nor even this label. `--json` always includes `title` too,
+    for that same fallback's title-or-body text match; the marker fast path ignores it."""
+    cmd = ["gh", "issue", "list", "--state", "open", "--limit", "200", "--json", "number,title,body"]
+    if label:
+        cmd += ["--label", label]
     if repo:
         cmd += ["--repo", repo]
     return cmd
@@ -315,20 +353,42 @@ def ensure_label(runner=_run, profile: "Profile" = SENTRY, repo: str | None = No
 LOOKUP_FAILED = object()
 
 
-def find_open_issue(key: str, runner=_run, profile: "Profile" = SENTRY, repo: str | None = None):
-    """Returns an issue number on a match, None if the lookup ran cleanly and found none, or
-    LOOKUP_FAILED if the lookup itself could not be trusted -- see gh#914 note above."""
-    rc, out = runner(build_list_cmd(profile.label, repo))
+def _list_issues(cmd: list[str], runner):
+    """Shared `gh issue list` execution/parsing for both find_open_issue() passes -- returns
+    a list of issue dicts, or LOOKUP_FAILED (never None-as-empty, per gh#914) on any failure."""
+    rc, out = runner(cmd)
     if rc != 0:
         print(f"journey_issue_filer: list FAILED: {out[:300]}", file=sys.stderr)
         return LOOKUP_FAILED
     try:
-        issues = json.loads(out)
+        return json.loads(out)
     except json.JSONDecodeError:
         print(f"journey_issue_filer: list returned unparsable output: {out[:300]}", file=sys.stderr)
         return LOOKUP_FAILED
+
+
+def find_open_issue(key: str, runner=_run, profile: "Profile" = SENTRY, repo: str | None = None):
+    """Returns an issue number on a match, None if the lookup ran cleanly and found none, or
+    LOOKUP_FAILED if the lookup itself could not be trusted -- see gh#914 note above.
+
+    Two passes: the marker match (AC3's fast path, unchanged) against this profile's own
+    labelled issues; then, only on a clean miss, gh#849's widened fallback across EVERY open
+    issue (no label filter -- #724 proved a hand-filed dup can lack even the label) matching
+    journey id + step index in the issue's own title/body text. A hand-filed issue this filer
+    never wrote gets a comment through this path instead of a second issue."""
+    issues = _list_issues(build_list_cmd(profile.label, repo), runner)
+    if issues is LOOKUP_FAILED:
+        return LOOKUP_FAILED
     for issue in issues:
         if key_from_body(issue.get("body") or "", profile.marker_tag) == key:
+            return issue.get("number")
+
+    all_issues = _list_issues(build_list_cmd(None, repo), runner)
+    if all_issues is LOOKUP_FAILED:
+        return LOOKUP_FAILED
+    for issue in all_issues:
+        text = f"{issue.get('title') or ''}\n{issue.get('body') or ''}"
+        if key_matches_text(key, text):
             return issue.get("number")
     return None
 

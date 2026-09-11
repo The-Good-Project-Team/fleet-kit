@@ -613,5 +613,158 @@ class RepoArgTest(unittest.TestCase):
         self.assertEqual(len(summary["filed"]), 1)
 
 
+class MarkerlessDedupeTest(unittest.TestCase):
+    """gh#849: a hand-filed issue with no marker (sometimes not even the label -- #724's real
+    shape) must dedupe against journey id + exact step index in its own title/body text, so a
+    still-broken surface grows a comment thread instead of a pile of duplicate tickets."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state_path = Path(self.tmp.name) / "state.json"
+
+    def _write(self, name: str, results: dict) -> Path:
+        p = Path(self.tmp.name) / name
+        p.write_text(json.dumps(results))
+        return p
+
+    def _results(self, journey_id: str, name: str, step_index: int, action: str) -> dict:
+        return {
+            "run": "run-1",
+            "deploy_sha": "sha1",
+            "journeys": [{
+                "id": journey_id, "name": name,
+                "steps": [{"index": step_index, "action": action,
+                           "observable_result": "ok", "status": "fail"}],
+            }],
+        }
+
+    def test_ac1_matches_a_markerless_issue_on_journey_id_and_step(self):
+        # #724's real shape: no fleet:sentry-journey label, no marker, journey id and step
+        # number named only in prose.
+        def gh(cmd):
+            if cmd[1] == "label":
+                return 0, "ok"
+            if cmd[2] == "list":
+                return 0, json.dumps([{
+                    "number": 724,
+                    "title": "journey_walker: fleet-console journey has wrong default URL + selector",
+                    "body": "Re-ran the `fleet-console-loads-with-runs` journey ... "
+                            "that explains step 0 failing in the run that filed #690/#691.",
+                }])
+            if cmd[2] == "comment":
+                return 0, "commented"
+            raise AssertionError(cmd)
+
+        r = self._write("r.json", self._results(
+            "fleet-console-loads-with-runs", "The fleet console loads with runs", 0,
+            "Navigate to the fleet console URL.",
+        ))
+        summary = jif.process(r, self.state_path, runner=gh)
+        self.assertEqual(summary["filed"], [], summary)
+        self.assertEqual(len(summary["commented"]), 1, summary)
+        self.assertEqual(summary["commented"][0]["issue"], 724)
+
+    def test_ac2_live_814_and_724_shapes_both_dedupe_not_refile(self):
+        # #814: carries the label but no marker -- body names the journey id and "step 1".
+        def gh_814(cmd):
+            if cmd[1] == "label":
+                return 0, "ok"
+            if cmd[2] == "list":
+                return 0, json.dumps([{
+                    "number": 814,
+                    "title": "sentry: mobile search results — Follow button blocks tapping through",
+                    "body": "journey `search-and-open-org` (mobile_390 viewport), step 1 "
+                            '("Click the first result row") ...',
+                }])
+            if cmd[2] == "comment":
+                return 0, "commented"
+            raise AssertionError(cmd)
+
+        r = self._write("r1.json", self._results(
+            "search-and-open-org--mobile_390", "Search and open an org (mobile_390)", 1,
+            "Click the first result row.",
+        ))
+        summary = jif.process(r, self.state_path, runner=gh_814)
+        self.assertEqual(summary["filed"], [], summary)
+        self.assertEqual(summary["commented"][0]["issue"], 814)
+
+    def test_ac3_marker_match_is_unchanged_and_skips_the_fallback(self):
+        # when the marker matches, no second (unlabelled) list call is made at all.
+        calls = []
+
+        def gh(cmd):
+            calls.append(cmd)
+            if cmd[1] == "label":
+                return 0, "ok"
+            if cmd[2] == "list":
+                key = jif.step_key("send-message", 0)
+                return 0, json.dumps([{"number": 5, "title": "x", "body": jif.marker_for(key)}])
+            if cmd[2] == "comment":
+                return 0, "commented"
+            raise AssertionError(cmd)
+
+        r = self._write("r.json", self._results("send-message", "Send a message", 0, "send it"))
+        summary = jif.process(r, self.state_path, runner=gh)
+        self.assertEqual(summary["commented"][0]["issue"], 5)
+        list_calls = [c for c in calls if c[2] == "list"]
+        self.assertEqual(len(list_calls), 1, "marker match must not trigger the widened fallback")
+        self.assertIn("--label", list_calls[0])
+
+    def test_ac4_no_match_anywhere_still_files_a_new_issue(self):
+        def gh(cmd):
+            if cmd[1] == "label":
+                return 0, "ok"
+            if cmd[2] == "list":
+                return 0, "[]"
+            if cmd[2] == "create":
+                return 0, "https://github.com/x/y/issues/1"
+            raise AssertionError(cmd)
+
+        r = self._write("r.json", self._results("brand-new-journey", "Brand new", 0, "do a thing"))
+        summary = jif.process(r, self.state_path, runner=gh)
+        self.assertEqual(len(summary["filed"]), 1, summary)
+        self.assertEqual(summary["commented"], [])
+
+    def test_ac5_same_journey_different_step_index_does_not_match(self):
+        def gh(cmd):
+            if cmd[1] == "label":
+                return 0, "ok"
+            if cmd[2] == "list":
+                return 0, json.dumps([{
+                    "number": 42, "title": "some-journey step 5 is broken",
+                    "body": "the some-journey journey fails at step 5",
+                }])
+            if cmd[2] == "create":
+                return 0, "https://github.com/x/y/issues/43"
+            raise AssertionError(cmd)
+
+        r = self._write("r.json", self._results("some-journey", "Some journey", 2, "do the thing"))
+        summary = jif.process(r, self.state_path, runner=gh)
+        self.assertEqual(summary["commented"], [], "step 5's issue must not absorb a step 2 failure")
+        self.assertEqual(len(summary["filed"]), 1, summary)
+
+
+class KeyMatchesTextTest(unittest.TestCase):
+    def test_journey_id_alone_is_not_enough(self):
+        self.assertFalse(jif.key_matches_text(
+            "checkout-flow::step1", "the checkout-flow journey is broken, unrelated text"))
+
+    def test_step_number_alone_is_not_enough(self):
+        self.assertFalse(jif.key_matches_text(
+            "checkout-flow::step1", "step 1 of some other journey failed"))
+
+    def test_both_present_matches(self):
+        self.assertTrue(jif.key_matches_text(
+            "checkout-flow::step1", "the checkout-flow journey fails at step 1"))
+
+    def test_viewport_suffix_is_stripped_before_matching(self):
+        self.assertTrue(jif.key_matches_text(
+            "checkout-flow--mobile_390::step1", "the checkout-flow journey fails at step 1"))
+
+    def test_parse_key_rejects_a_non_conforming_key(self):
+        self.assertIsNone(jif.parse_key("not-a-key"))
+
+
 if __name__ == "__main__":
     unittest.main()
