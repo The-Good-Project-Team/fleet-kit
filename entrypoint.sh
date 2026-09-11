@@ -152,7 +152,7 @@ case "${1:-cron-foreground}" in
     # `FLEET_CRON_MEMBERS=judge-judy`) to schedule only those. dont-shoot-the-messenger is
     # excluded from ALL_CRON_MEMBERS because its own cron line is already commented out
     # (archived 2026-09-04, see below) -- re-enabling it is a separate step from this mechanism.
-    ALL_CRON_MEMBERS=(the-fixer judge-judy gru jefe roomba marie datta dumbledore sentry librarian librarian-scrub red dont-shoot-the-messenger custodian)
+    ALL_CRON_MEMBERS=(the-fixer judge-judy gru jefe roomba marie datta dumbledore sentry librarian librarian-scrub red custodian dont-shoot-the-messenger)
     if [ -n "${FLEET_CRON_MEMBERS:-}" ]; then
       IFS=', ' read -ra RESOLVED_CRON_MEMBERS <<< "$FLEET_CRON_MEMBERS"
       for m in "${RESOLVED_CRON_MEMBERS[@]}"; do
