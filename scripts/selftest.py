@@ -7334,6 +7334,121 @@ def _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget():
         "Dockerfile does not accept/write DEPLOY_SHA -- deploy.sh's build-arg has nowhere to land"
 
 
+def _kit_staleness_check_warns_only_when_actually_behind():
+    """gh#731: /fleet-kit is a baked, non-git snapshot (Dockerfile:97's `COPY . /fleet-kit`) --
+    .deploy_sha has been written at build time since gh#201, but nothing read it back for
+    staleness. gh#638 burned four passes on exactly that gap: three "still broken, fresh direct
+    repro" comments each ran the frozen snapshot's copy of a script, not main, and each read as
+    strong evidence precisely because a repro that "reproduces" is the confidence-building kind
+    of wrong -- one landed 31 seconds after the real fix had already merged.
+
+    Unlike deploy_staleness_check.sh (gh#201, its own hourly ops watchdog with a multi-hour
+    paging budget), this check has no budget: N > 0 is worth a line, because the reader is a
+    member mid-repro, not an on-call human deciding whether to page.
+
+    Runs the REAL kit_staleness_check.sh under a stub `gh` executable on PATH (same technique
+    judge-judy's pick_pr test above uses) so every branch is deterministic and offline -- never
+    the real network. Covers AC1 (genuinely behind -> exactly one line naming the short SHA, N,
+    and a build time), AC2 (already current -> silent), AC3 (missing/empty/placeholder/
+    remote-unknown SHA -> silent, never a crash), and AC4 (gh entirely unreachable -> silent).
+    AC6 (exit 0 in every case) is asserted on every call below.
+    """
+    import os
+    import subprocess
+
+    script = ROOT / "scripts" / "kit_staleness_check.sh"
+
+    def run(deploy_sha, gh_body, repo_slug="acme/widgets"):
+        with tempfile.TemporaryDirectory() as td:
+            gh_path = Path(td) / "gh"
+            gh_path.write_text("#!/bin/bash\n" + gh_body)
+            gh_path.chmod(0o755)
+            sha_file = Path(td) / "deploy_sha"
+            if deploy_sha is not None:
+                sha_file.write_text(deploy_sha)
+            else:
+                sha_file = Path(td) / "does-not-exist"
+            env = dict(os.environ)
+            env["PATH"] = f"{td}:{env['PATH']}"
+            env["FLEET_ENV_FILE"] = "/dev/null"
+            env["KIT_REPO_SLUG"] = repo_slug
+            env["KIT_STALENESS_DEPLOY_SHA_FILE"] = str(sha_file)
+            proc = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                                   timeout=15, env=env)
+            return proc.returncode, proc.stdout.strip()
+
+    MAIN_SHA = "a" * 40
+    OLD_SHA = "b" * 40
+
+    stub_stale = (
+        'case "$2" in\n'
+        f'  repos/*/commits/main) echo "{MAIN_SHA}"; exit 0 ;;\n'
+        '  repos/*/compare/*) echo "18"; exit 0 ;;\n'
+        f'  repos/*/commits/{OLD_SHA}) echo "2026-09-08T06:35:00Z"; exit 0 ;;\n'
+        'esac\n'
+        'exit 1\n'
+    )
+    # AC1: genuinely behind -- exactly one line naming the short SHA, N, and a build time.
+    rc, out = run(OLD_SHA, stub_stale)
+    assert rc == 0, f"must exit 0 even when stale: {out!r}"
+    assert out and "\n" not in out, f"expected exactly one line, got: {out!r}"
+    assert OLD_SHA[:7] in out, out
+    assert "18 commit" in out, out
+    assert "2026-09-08" in out, out
+
+    stub_current = f'case "$2" in repos/*/commits/main) echo "{MAIN_SHA}"; exit 0 ;; esac; exit 1\n'
+
+    # AC2: deployed SHA already equals main -- silent, so the line only ever means something.
+    rc, out = run(MAIN_SHA, stub_current)
+    assert rc == 0 and out == "", f"must stay silent when already current: {out!r}"
+
+    # AC3: no .deploy_sha file at all.
+    rc, out = run(None, stub_current)
+    assert rc == 0 and out == "", f"must stay silent with no .deploy_sha: {out!r}"
+
+    # AC3: empty .deploy_sha.
+    rc, out = run("", stub_current)
+    assert rc == 0 and out == "", f"must stay silent with an empty .deploy_sha: {out!r}"
+
+    # AC3: a placeholder, not a real SHA.
+    rc, out = run("unknown", stub_current)
+    assert rc == 0 and out == "", f"must stay silent for the literal 'unknown' placeholder: {out!r}"
+
+    # AC3: a SHA this remote has never heard of (shallow clone / unfetched commit / stray
+    # rebuild) -- main resolves fine but the compare call 404s.
+    stub_unknown_sha = (
+        f'case "$2" in repos/*/commits/main) echo "{MAIN_SHA}"; exit 0 ;; '
+        'repos/*/compare/*) exit 1 ;; esac; exit 1\n'
+    )
+    rc, out = run("c" * 40, stub_unknown_sha)
+    assert rc == 0 and out == "", f"must stay silent for a SHA the remote can't resolve: {out!r}"
+
+    # AC4: gh itself fails outright (network/auth down, or pointed at a nonexistent remote) --
+    # silent, exit 0, never a crash.
+    rc, out = run(OLD_SHA, "exit 1\n")
+    assert rc == 0 and out == "", f"must stay silent (not crash) when gh is entirely unreachable: {out!r}"
+
+
+def _kit_staleness_line_reaches_run_member_log_before_member_specific_work():
+    """gh#731 AC5: the staleness line must land in a member pass's own log before any
+    member-specific work runs (nerd lane validation, worktree build, `claude -p`) -- otherwise
+    gh#638's exact failure (a repro trusted because it "reproduced") can happen before this
+    warning was ever written anywhere the pass could see it.
+    """
+    src = (ROOT / "scripts" / "run_member.sh").read_text()
+    call_idx = src.index("kit_staleness_check.sh")
+    log_def_idx = src.index('log() { echo "[$(ts)] $*" >> "$LOG"; }')
+    lane_reject_idx = src.index("REJECTED: nerd dispatched")
+    worktree_idx = src.index("WORKTREE_ENABLED=")
+    claude_p_idx = src.index('account_pool_run timeout "$TIMEOUT_S" claude -p')
+    assert log_def_idx < call_idx < lane_reject_idx < worktree_idx < claude_p_idx, (
+        "kit_staleness_check.sh must run right after log() is defined and before any "
+        "member-specific dispatch (lane validation, worktree build, claude -p)"
+    )
+    assert 'log "$STALENESS_LINE"' in src, \
+        "staleness output is computed but never actually written to the member's own log"
+
+
 # _lane_kpi_is_actually_scheduled (gh#324) was folded into
 # _every_entrypoint_scheduled_script_is_actually_scheduled above (gh#378).
 
@@ -12359,6 +12474,8 @@ if __name__ == "__main__":
     check("NTFY_TOPIC is deferred to tick-time, not baked in at boot", _ntfy_topic_is_deferred_to_tick_time_not_baked_in_at_boot)
     check("every gh api call in a shell script is timeout-guarded", _every_gh_api_call_is_timeout_guarded)
     check("deploy staleness check reads a baked SHA and only alerts past budget", _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget)
+    check("kit staleness check warns only when actually behind (gh#731)", _kit_staleness_check_warns_only_when_actually_behind)
+    check("kit staleness line reaches run_member's log before member-specific work (gh#731)", _kit_staleness_line_reaches_run_member_log_before_member_specific_work)
     check("deploy.sh's host log dir survives sourcing the instance's container-scoped fleet.env", _deploy_sh_host_log_dir_survives_sourcing_the_instances_container_scoped_fleet_env)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("deploy.sh's log is durable regardless of caller", _deploy_log_is_durable_regardless_of_caller)
