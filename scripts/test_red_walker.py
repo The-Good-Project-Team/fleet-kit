@@ -80,6 +80,25 @@ class FetchItemTextTest(unittest.TestCase):
             rw.fetch_item_text("999999", run=fake_run)
         self.assertIn("999999", str(ctx.exception))
 
+    def test_criterion5_gh_timeout_exits_nonzero_naming_issue(self):
+        import subprocess as sp
+
+        def fake_run(args, capture_output, text, timeout):
+            raise sp.TimeoutExpired(cmd=args, timeout=timeout)
+
+        with self.assertRaises(SystemExit) as ctx:
+            rw.fetch_item_text("881", run=fake_run)
+        self.assertIn("881", str(ctx.exception))
+
+
+class SelectAttacksEmptyAttacksFilterTest(unittest.TestCase):
+    def test_empty_attacks_list_means_no_filter_not_zero_selection(self):
+        # argparse's `nargs="*"` gives [] for a bare `--attacks` with no values; that must
+        # keep meaning "no --attacks filter", same as the old truthiness check did, not
+        # "filter to nothing."
+        selected = rw.select_attacks(FIXTURE_ATTACKS, item_text=None, attacks_filter=[])
+        self.assertEqual([a["id"] for a in selected], [a["id"] for a in FIXTURE_ATTACKS])
+
 
 class MainZeroSelectionTest(unittest.TestCase):
     """Criteria 2 and 3: a scoped run that selects zero attacks writes a distinguishing

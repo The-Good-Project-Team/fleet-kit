@@ -273,7 +273,7 @@ def fetch_item_text(item: str, run=subprocess.run) -> str:
     try:
         proc = run(["gh", "issue", "view", str(item), "--json", "body,comments"],
                     capture_output=True, text=True, timeout=60)
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise SystemExit(f"red_walker: could not read issue #{item} ({exc})")
     if proc.returncode != 0:
         raise SystemExit(f"red_walker: could not read issue #{item} ({proc.stderr.strip() or 'gh error'})")
@@ -293,7 +293,7 @@ def select_attacks(attacks: list[dict], item_text: str | None, attacks_filter: l
     issue number against the target blob, which never matches, so it silently ran nothing)."""
     selected = []
     for attack in attacks:
-        if attacks_filter is not None and attack["id"] not in attacks_filter:
+        if attacks_filter and attack["id"] not in attacks_filter:
             continue
         if item_text is not None:
             path = attack.get("target", {}).get("path")
