@@ -125,7 +125,7 @@ for pr in $STALE_CANDIDATES; do
   [ -f "$LOG" ] && armed_count=$(grep -c "PR #$pr: auto-merge armed" "$LOG" 2>/dev/null)
   armed_count="${armed_count:-0}"
 
-  if [ "${rollup_failed:-0}" -gt 0 ] 2>/dev/null || [ "$verdict" = "failure" ]; then
+  if [ "${rollup_failed:-0}" -gt 0 ] 2>/dev/null || [ "$verdict" = "failure" ] || [ "$verdict" = "error" ]; then
     reason="red"
   elif [ "${armed_count:-0}" -ge 2 ] 2>/dev/null; then
     reason="${armed_count} queue rejections"
@@ -205,10 +205,14 @@ for pr in $(gh pr list --state open --json number,isDraft,autoMergeRequest \
               -q '.[] | select(.isDraft|not) | select(.autoMergeRequest==null) | .number' 2>/dev/null); do
   # fleet-kit#523: never re-arm a head judge-judy blocked. fleet-code-review is not a required
   # check under the merge queue, so an armed BLOCKed PR simply merges. Newest status first.
+  # gh#806: "error" (judge-judy gave up after MAX_PARSE_STRIKES schema-invalid runs) holds the
+  # same as "failure" -- judge-judy.sh itself already disarms via unqueue_pr the moment it
+  # posts state=error, but this guard existed to stop a LATER re-arm from undoing that, and it
+  # used to only recognize "failure", so an errored head could still slip back through here.
   head=$(gh pr view "$pr" --json headRefOid -q '.headRefOid' 2>/dev/null)
   verdict=$(timeout 25s gh api "repos/${REPO_SLUG}/statuses/${head}" --jq '[.[] | select(.context=="fleet-code-review")][0].state' 2>/dev/null || true)
-  if [ "$verdict" = "failure" ]; then
-    log "PR #$pr: not armed -- judge-judy blocked this head (${head:0:12})"
+  if [ "$verdict" = "failure" ] || [ "$verdict" = "error" ]; then
+    log "PR #$pr: not armed -- judge-judy blocked or errored this head (${head:0:12}, state=$verdict)"
     continue
   fi
   if arm_err="$(arm_pr_auto_merge "$pr")"; then
