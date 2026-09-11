@@ -186,6 +186,26 @@ VP_LABELS = tuple(
 )
 
 
+def _claims_item(body: str, n: int) -> bool:
+    """True only if `body` has a line CLAIMING item #n as a build slice -- `Fixes #n`,
+    `Closes #n`, or `Part of #n` (gru's own charter draws this same line, minion.md step 1) --
+    never a bare `#n` mention in ordinary prose.
+
+    gh#636 (VP round-2 fix 7): PR #842 merged with `#636` only inside a sentence describing
+    which epics a NEW guard now drops ("Tracking epics stop looking buildable to gru... #636
+    ..."), and the old bare-`#n` regex here read that as a merged build slice for #636 -- the
+    same PR that also, unrelated to #636, taught quality_gate.py to skip `fleet:epic` items.
+    A claim is matched case-insensitively, anywhere a line starts (allowing markdown bullets,
+    bold markers, and a numbered-list prefix like `1. Fixes #n` -- `\W*` alone stops at a
+    leading digit, since digits are word characters, so a numbered PR checklist needs its own
+    allowance), same tolerance VERDICT_RE above already uses for verdict lines."""
+    claim_re = re.compile(
+        rf"^\W*(?:\d+[.)]\s*)?(fixes|closes|resolves|part of)\s*:?\s*#{n}(?!\d)",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    return bool(claim_re.search(body or ""))
+
+
 def collect(repo_dir: str) -> list[dict]:
     """Open items in any VP_LABELS tier, with their comments and the merged PRs that mention them."""
     issues = []
@@ -202,8 +222,8 @@ def collect(repo_dir: str) -> list[dict]:
         n = iss["number"]
         prs = _gh(["pr", "list", "--state", "merged", "--search", f"#{n} in:body", "--limit", "50",
                    "--json", "number,mergedAt,body"], repo_dir)
-        ref = re.compile(rf"(?<![\w/])#{n}(?!\d)")
-        merged = [{"number": p["number"], "mergedAt": p.get("mergedAt")} for p in prs if ref.search(p.get("body") or "")]
+        merged = [{"number": p["number"], "mergedAt": p.get("mergedAt")} for p in prs
+                  if _claims_item(p.get("body") or "", n)]
         items.append({"number": n,
                       "labels": _label_names(iss.get("labels")),
                       "comments": [{"body": c.get("body"), "createdAt": c.get("createdAt")} for c in iss.get("comments") or []],

@@ -80,6 +80,32 @@ class _FixtureServer:
         action = "location.href = '/account.html';" if redirects else "/* deliberately broken: no redirect */"
         (root / "login.html").write_text(LOGIN_HTML.format(action=action))
         (root / "account.html").write_text(ACCOUNT_HTML)
+        (root / "favicon.ico").write_bytes(b"")  # else Chromium's own 404 for it reads as a console error
+        self.port = _free_port()
+        handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(*a, directory=str(root), **kw)  # noqa: E731
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), handler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.dir.cleanup()
+
+
+class _StaticPageServer:
+    """A one-page static fixture on its own port, used by the console/page-error tests below --
+    deliberately simpler than _FixtureServer (no login/account routing needed)."""
+
+    def __init__(self, html: str):
+        self.dir = tempfile.TemporaryDirectory()
+        root = Path(self.dir.name)
+        (root / "index.html").write_text(html)
+        (root / "favicon.ico").write_bytes(b"")
         self.port = _free_port()
         handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(*a, directory=str(root), **kw)  # noqa: E731
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), handler)
@@ -631,6 +657,182 @@ class SearchClickThroughNeverArrivesBlockedTest(unittest.TestCase):
         self.assertEqual(blocked[0]["id"], "search-and-open-org")
         self.assertIn("not configured", blocked[0]["reason"])  # names the missing bypass
         self.assertNotIn("response", blocked[0])  # no response was ever observed
+
+
+class SearchClickThroughNeverArrivesWithBypassFailsTest(unittest.TestCase):
+    """gh#636 VP round-2 fix 3: with ATLAS_TEST_BYPASS configured, a click-through that never
+    gets any navigation response is a dead link -- a real product break -- and must be recorded
+    `fail` (and filed) rather than swallowed as BLOCKED. Only the no-bypass case (see
+    SearchClickThroughNeverArrivesBlockedTest above) may still read BLOCKED, because there the
+    checker itself lacks the credential a WAF would otherwise demand."""
+
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+
+        class _HangingReportHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith("/990/report/"):
+                    time.sleep(60)  # far past the walker's own 10s wait
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(
+                    b'<html><body><a href="/990/report/123456789">Example Org</a></body></html>'
+                )
+
+            def log_message(self, *a):  # quiet -- keep test output readable
+                pass
+
+        cls.port = _free_port()
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", cls.port), _HangingReportHandler)
+        cls.httpd.daemon_threads = True
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def test_click_through_that_never_lands_fails_when_bypass_is_configured(self):
+        catalog = jw.load_catalog(CATALOG_PATH)
+        search = next(j for j in catalog["journeys"] if j["id"] == "search-and-open-org")
+        search["viewports"] = ["desktop"]
+        users = jw.TestUsers(env={
+            "PHILANTHROPY_BASE_URL": f"http://127.0.0.1:{self.port}",
+            "ATLAS_TEST_BYPASS": "sekrit-val-636",
+        })
+
+        journeys_out, blocked = jw.run_all(catalog, users, self.browser, Path("/tmp"),
+                                            "search-hang-bypass-run", journey_filter=["search-and-open-org"])
+
+        self.assertEqual(blocked, [])  # not silently dropped as BLOCKED
+        self.assertEqual(len(journeys_out), 1)
+        self.assertEqual(journeys_out[0]["steps"][1]["status"], "fail")
+
+
+class DurationAndBudgetTest(unittest.TestCase):
+    """gh#636 VP round-2 fix 1: every step records duration_ms unconditionally, and a step whose
+    caller passed budget_ms fails when it's exceeded -- even when the assertion itself passed --
+    with the measured number in the failure text."""
+
+    def _ctx(self, steps=1):
+        journey = {"id": "probe", "name": "Probe",
+                   "steps": [{"action": "a", "observable_result": "o"} for _ in range(steps)]}
+        users = jw.TestUsers(env={})
+        return jw.JourneyCtx(journey, "desktop", {"width": 1280, "height": 800}, browser=None,
+                              users=users, base_out=Path("/tmp"), run_id="r1")
+
+    def test_duration_ms_is_always_recorded(self):
+        ctx = self._ctx()
+        ctx.step(0, lambda: None)
+        self.assertIn("duration_ms", ctx.results[0])
+        self.assertGreaterEqual(ctx.results[0]["duration_ms"], 0)
+
+    def test_slow_step_fails_its_budget_even_though_the_assertion_passed(self):
+        ctx = self._ctx()
+        ctx.step(0, lambda: time.sleep(0.05), budget_ms=10)
+        self.assertEqual(ctx.results[0]["status"], "fail")
+        self.assertIn("budget", ctx.results[0]["detail"])
+        self.assertIn(str(ctx.results[0]["duration_ms"]), ctx.results[0]["detail"])
+
+    def test_fast_step_within_budget_still_passes(self):
+        ctx = self._ctx()
+        ctx.step(0, lambda: None, budget_ms=10000)
+        self.assertEqual(ctx.results[0]["status"], "pass")
+
+    def test_unbudgeted_step_never_fails_for_being_slow(self):
+        ctx = self._ctx()
+        ctx.step(0, lambda: time.sleep(0.05))
+        self.assertEqual(ctx.results[0]["status"], "pass")
+
+    def test_budget_does_not_override_a_real_assertion_failure(self):
+        ctx = self._ctx()
+
+        def boom():
+            time.sleep(0.05)
+            raise AssertionError("real bug")
+
+        ctx.step(0, boom, budget_ms=10)
+        self.assertEqual(ctx.results[0]["status"], "fail")
+        self.assertIn("real bug", ctx.results[0]["detail"])
+        self.assertNotIn("budget", ctx.results[0]["detail"])
+
+
+CONSOLE_ERROR_HTML = "<!doctype html><html><body><h1>ok</h1>" \
+    "<script>console.error('boom from the page');</script></body></html>"
+PAGE_ERROR_HTML = "<!doctype html><html><body><h1>ok</h1>" \
+    "<script>throw new Error('uncaught boom');</script></body></html>"
+CLEAN_HTML = "<!doctype html><html><body><h1>ok</h1></body></html>"
+
+
+class ConsoleAndPageErrorFailStepTest(unittest.TestCase):
+    """gh#636 VP round-2 fix 2: a console.error or an uncaught page error fails an otherwise
+    passing step, with the message recorded -- real Playwright, real chromium, real HTTP
+    fixtures, no mocking of the browser."""
+
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+
+        cls.console_err = _StaticPageServer(CONSOLE_ERROR_HTML)
+        cls.page_err = _StaticPageServer(PAGE_ERROR_HTML)
+        cls.clean = _StaticPageServer(CLEAN_HTML)
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+        cls.console_err.stop()
+        cls.page_err.stop()
+        cls.clean.stop()
+
+    def _ctx(self, steps=1):
+        journey = {"id": "probe", "name": "Probe",
+                   "steps": [{"action": "a", "observable_result": "o"} for _ in range(steps)]}
+        users = jw.TestUsers(env={})
+        return jw.JourneyCtx(journey, "desktop", {"width": 1280, "height": 800}, self.browser,
+                              users, Path("/tmp"), "console-run")
+
+    def test_console_error_fails_an_otherwise_passing_step(self):
+        ctx = self._ctx()
+        page = ctx.page()
+        ctx.step(0, lambda: page.goto(self.console_err.base_url + "/", timeout=10000))
+        self.assertEqual(ctx.results[0]["status"], "fail")
+        self.assertIn("boom from the page", ctx.results[0]["detail"])
+        ctx.close()
+
+    def test_uncaught_page_error_fails_an_otherwise_passing_step(self):
+        ctx = self._ctx()
+        page = ctx.page()
+        ctx.step(0, lambda: page.goto(self.page_err.base_url + "/", timeout=10000))
+        self.assertEqual(ctx.results[0]["status"], "fail")
+        self.assertIn("uncaught boom", ctx.results[0]["detail"])
+        ctx.close()
+
+    def test_clean_page_still_passes(self):
+        ctx = self._ctx()
+        page = ctx.page()
+        ctx.step(0, lambda: page.goto(self.clean.base_url + "/", timeout=10000))
+        self.assertEqual(ctx.results[0]["status"], "pass")
+        ctx.close()
+
+    def test_console_error_only_flagged_once_across_steps(self):
+        ctx = self._ctx(steps=2)
+        page = ctx.page()
+        ctx.step(0, lambda: page.goto(self.console_err.base_url + "/", timeout=10000))
+        ctx.step(1, lambda: None)
+        self.assertEqual(ctx.results[0]["status"], "fail")
+        self.assertEqual(ctx.results[1]["status"], "pass")
+        ctx.close()
 
 
 class SearchClickThroughHealthyStillPassesTest(unittest.TestCase):

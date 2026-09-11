@@ -53,6 +53,31 @@ part of the result. If a future pass needs to shorten wall-clock time, paralleli
 journeys (they don't share state, apart from the two message journeys which already run
 alice/bob concurrently within one journey) is the safe axis -- not the two viewports of one
 journey, which intentionally never run in relative timing against each other.
+
+DURATION AND BUDGET (gh#636, VP round-2 fix 1 -- PARTIAL): every step's `duration_ms` is now
+measured and written to results.json unconditionally -- cheap, and a reviewer can always ask
+"how slow" once the number exists. `JourneyCtx.step()` also takes an optional `budget_ms`: pass
+it for a step whose entire job is "navigate and render" and it fails a step that otherwise
+passed once `duration_ms` exceeds it, with the measured number in the failure text. What this
+pass deliberately did NOT do: wire a live budget_ms into any of the three real navigate-and-
+render steps (sign-in's, search-and-open-org's, open-990-report's). Proven live against this
+walker's own local fixtures: the FIRST real page.goto() after `p.chromium.launch()` in a pass
+regularly clears 1000ms on process-spawn/JIT warm-up alone (measured 1631ms navigating a
+same-host static file with nothing to load) -- nothing to do with the product, everything to do
+with which journey happens to run first. VP's proposed 1000ms is the RAIL "Load" budget
+(docs/quality-standard.md) and the right number for a WARM page in front of a person; wiring it
+in blind would make the walker fail its own first step almost every run and bury the real 22s
+search-and-open-org signal VP found under self-inflicted noise -- the opposite of this epic's
+goal. Left for whoever wires it in: either warm the browser with a throwaway navigation before
+the timed run starts, or give the first journey's first step a separate, looser budget. Neither
+is a call this sandbox (no real prod traffic to calibrate against) should make un-evidenced.
+
+BROWSER CONSOLE (gh#636, VP round-2 fix 2): `JourneyCtx.page()` now listens for console.error
+and uncaught page errors on every page it opens, and `step()` fails a step that was otherwise
+passing (or annotates one that already failed) with what the browser itself reported -- a
+console error is real product signal a Playwright assertion can silently miss (VP's own proof:
+1 unnoticed 404 on the flagship journey). Recorded once per error, per page, via a drain cursor
+so a later step never re-reports an earlier step's console noise.
 """
 from __future__ import annotations
 
@@ -201,6 +226,8 @@ class JourneyCtx:
         self.run_id = run_id
         self._contexts: dict[str, tuple] = {}
         self.results: list[dict] = []
+        self._console_errors: dict[int, list[str]] = {}
+        self._console_cursor: dict[int, int] = {}
 
     def page(self, user: str | None = None):
         key = user or "_anon"
@@ -224,7 +251,14 @@ class JourneyCtx:
                         route.continue_()
 
                 context.route("**/*", _inject_bypass)
-            self._contexts[key] = (context, context.new_page())
+            page_obj = context.new_page()
+            errors: list[str] = self._console_errors.setdefault(id(page_obj), [])
+            page_obj.on(
+                "console",
+                lambda msg, _errors=errors: _errors.append(msg.text) if msg.type == "error" else None,
+            )
+            page_obj.on("pageerror", lambda exc, _errors=errors: _errors.append(str(exc)))
+            self._contexts[key] = (context, page_obj)
         return self._contexts[key][1]
 
     def close(self):
@@ -232,12 +266,26 @@ class JourneyCtx:
             context.close()
         self._contexts.clear()
 
-    def step(self, index: int, fn, page=None) -> bool:
+    def _drain_console_errors(self, page) -> list[str]:
+        """New console.error/pageerror entries on `page` since the last drain -- a cursor per
+        page so a later step never re-reports an earlier step's console noise."""
+        if page is None:
+            return []
+        errors = self._console_errors.get(id(page))
+        if not errors:
+            return []
+        cursor = self._console_cursor.get(id(page), 0)
+        drained = errors[cursor:]
+        self._console_cursor[id(page)] = len(errors)
+        return drained
+
+    def step(self, index: int, fn, page=None, budget_ms: int | None = None) -> bool:
         step_def = self.journey["steps"][index]
         action, observable = step_text(step_def, self.viewport)
         shot_page = page or next(iter(p for _, p in self._contexts.values()), None)
 
         status, detail = "pass", None
+        start = time.monotonic()
         try:
             fn()
         except Blocked:
@@ -245,8 +293,24 @@ class JourneyCtx:
         except Exception as exc:  # noqa: BLE001 -- a step failing is DATA, not a crash (AC3)
             status = "fail"
             detail = redact_secret(f"{type(exc).__name__}: {exc}", self.users.bypass)
+        duration_ms = round((time.monotonic() - start) * 1000)
 
-        result = {"index": index, "action": action, "observable_result": observable, "status": status}
+        console_errors = self._drain_console_errors(shot_page)
+        if console_errors:
+            console_detail = redact_secret(
+                "browser console error: " + "; ".join(console_errors), self.users.bypass
+            )
+            if status == "pass":
+                status, detail = "fail", console_detail
+            else:
+                detail = f"{detail} | {console_detail}"
+
+        if budget_ms is not None and status == "pass" and duration_ms > budget_ms:
+            status = "fail"
+            detail = f"took {duration_ms}ms, exceeding {budget_ms}ms budget"
+
+        result = {"index": index, "action": action, "observable_result": observable,
+                  "status": status, "duration_ms": duration_ms}
         if detail:
             result["detail"] = detail
         if shot_page is not None:
@@ -323,16 +387,16 @@ def _blocked_for_403(response, users: "TestUsers") -> Blocked | None:
 def _blocked_for_report_click_through_timeout(users: "TestUsers") -> Blocked:
     """search-and-open-org's step 1 clicked a result row and NO navigation response -- 403 or
     otherwise -- was ever observed on the report-page URL before the click-through gave up
-    waiting. `_blocked_for_403` already handles the case where a navigation response DID
-    arrive; this is the residual "we never even got a response" case gh#750's PRD (AC3) calls
-    out separately -- callers only reach this helper once `_blocked_for_403` has already
-    ruled out a 403 (see run_search_and_open_org's s1)."""
-    reason = (
-        "report page click-through timed out even with ATLAS_TEST_BYPASS configured"
-        if users.bypass
-        else "report page click-through timed out -- ATLAS_TEST_BYPASS not configured"
-    )
-    return Blocked(reason)
+    waiting, and ATLAS_TEST_BYPASS is not configured. `_blocked_for_403` already handles the
+    case where a navigation response DID arrive; this is the residual "we never even got a
+    response" case gh#750's PRD (AC3) calls out separately -- callers only reach this helper
+    once `_blocked_for_403` has already ruled out a 403 (see run_search_and_open_org's s1).
+
+    Only called when the bypass is NOT configured (gh#636 VP round-2 fix 3): with no bypass, a
+    WAF is the expected reason nothing ever arrives, so the CHECKER is the one that couldn't
+    look -- BLOCKED. With the bypass configured, the same silence means a dead link, a real
+    product break the caller must record as `fail` and let get filed, not swallow as BLOCKED."""
+    return Blocked("report page click-through timed out -- ATLAS_TEST_BYPASS not configured")
 
 
 def run_search_and_open_org(ctx: JourneyCtx):
@@ -391,7 +455,9 @@ def run_search_and_open_org(ctx: JourneyCtx):
                 if blocked:
                     raise blocked
                 if nav_response is None:
-                    raise _blocked_for_report_click_through_timeout(ctx.users)
+                    if not ctx.users.bypass:
+                        raise _blocked_for_report_click_through_timeout(ctx.users)
+                    raise  # bypass IS configured and nothing ever arrived -- a dead link, `fail`
                 raise  # a non-403 response WAS observed -- a real product signal, stays `fail`
         finally:
             page.remove_listener("response", _capture)
