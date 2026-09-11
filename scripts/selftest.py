@@ -11573,6 +11573,179 @@ def _vp_md_authorizes_every_label_vp_due_spawns_on_gh855():
         f"vp_due.VP_LABELS has label(s) vp.md never mentions -- {missing} (gh#855/fk#805 desync)"
 
 
+def _authority_absent_file_is_byte_identical_to_pre_authority_ask_gh771():
+    """gh#771 AC1: no authority.json at all (or a --class the file has no row for) must file
+    an open ask exactly as every ask.py release before this one did -- an absent or unreadable
+    authority file always means 'ask', never a grant."""
+    import ask, authority, fleet_db
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        authority_path = Path(d) / "does-not-exist" / "authority.json"
+        assert authority.level_for("credential", store=authority_path) == "ask"
+
+        rc = ask.main(["--db-path", str(db_path), "--authority-path", str(authority_path),
+                      "file", "--member", "gru", "--why", "may I rotate this credential",
+                      "--class", "credential", "--no-notify"])
+        assert rc == 0, f"file must still exit 0 with no authority.json, got {rc}"
+        conn = fleet_db.connect(db_path)
+        rows = ask.list_asks(conn, status="open")
+        assert len(rows) == 1 and rows[0]["status"] == "open" and rows[0]["answered_at"] is None, \
+            f"an ask with no standing grant must file open exactly as before, got {rows}"
+
+
+def _authority_act_grant_authorizes_and_leaves_no_open_row_gh771():
+    """gh#771 AC2/AC3: a class granted `act` makes `ask.py file` exit 0, print an
+    authorization rather than a question, and write NO open row -- but a countable record
+    still lands, carrying the class, the member, and the granting authority, so 'how often did
+    standing authority get used' is answerable without re-reading logs.
+
+    This is also the mutation check persona_law.md §5 / the PRD's AC8 ask for: if the
+    authority-lookup call is ever deleted from ask.py's `file` path, every ask files open again
+    and the `open_after == 0` assertion below goes red.
+    """
+    import ask, authority, fleet_db
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        authority_path = Path(d) / "authority.json"
+        authority.grant("credential", "act", by="reif", ask_ids=[1, 2], store=authority_path)
+
+        rc = ask.main(["--db-path", str(db_path), "--authority-path", str(authority_path),
+                      "file", "--member", "gru", "--why", "may I rotate this credential",
+                      "--class", "credential", "--no-notify"])
+        assert rc == 0, f"an act-authorized file must exit 0, got {rc}"
+
+        conn = fleet_db.connect(db_path)
+        open_after = ask.list_asks(conn, status="open")
+        assert open_after == [], f"an act grant must leave no open row, got {open_after}"
+
+        acted = ask.list_asks(conn, status="act")
+        assert len(acted) == 1, f"expected exactly one countable 'act' record, got {acted}"
+        row = acted[0]
+        assert row["class"] == "credential" and row["member"] == "gru", \
+            f"the act record must carry class and member, got {row}"
+        assert "reif" in (row["answered_by"] or ""), \
+            f"the act record must carry the granting authority, got {row}"
+        assert row["answered_at"] is not None, "an act record must already read as answered"
+
+
+def _authority_act_and_tell_grant_files_a_distinct_notice_status_gh771():
+    """gh#771 AC4: a class granted `act-and-tell` makes the member proceed exactly as an `act`
+    grant does, but the row it files carries a status that distinguishes it from an open ask --
+    a notice to be read, never a question blocking the member."""
+    import ask, authority, fleet_db
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        authority_path = Path(d) / "authority.json"
+        authority.grant("infra", "act-and-tell", by="reif", store=authority_path)
+
+        rc = ask.main(["--db-path", str(db_path), "--authority-path", str(authority_path),
+                      "file", "--member", "nerd", "--why", "restarting a stuck worker",
+                      "--class", "infra", "--no-notify"])
+        assert rc == 0, f"an act-and-tell file must exit 0, got {rc}"
+
+        conn = fleet_db.connect(db_path)
+        assert ask.list_asks(conn, status="open") == [], \
+            "act-and-tell must never leave an open, blocking row"
+        notices = ask.list_asks(conn, status="notice")
+        assert len(notices) == 1 and notices[0]["status"] == "notice", \
+            f"expected exactly one 'notice' row distinct from 'open'/'act', got {notices}"
+
+
+def _authority_grant_audits_ask_ids_and_round_trips_gh771():
+    """gh#771 AC5/AC7: a grant records who granted it, when, and the ask ids that justified
+    it; re-reading the file returns that exact same grant, so a human can audit what a
+    standing permission was granted on the basis of."""
+    import authority
+    with tempfile.TemporaryDirectory() as d:
+        authority_path = Path(d) / "authority.json"
+        row = authority.grant("money", "act", by="reif", ask_ids=[7, 3, 3],
+                              granted_at=1234.5, store=authority_path)
+        assert row["ask_ids"] == [3, 7], f"ask_ids must be recorded (deduped/sorted), got {row}"
+
+        reread = authority.show(store=authority_path)["money"]
+        assert reread == row, f"re-reading authority.json must return the same grant, got {reread}"
+        assert reread["granted_by"] == "reif" and reread["granted_at"] == 1234.5
+
+
+def _authority_malformed_file_fails_loudly_and_files_nothing_gh771():
+    """gh#771 AC6: an authority.json naming a class outside ASK_CLASSES, or a level outside
+    the three defined levels, must make ask.py fail loudly (naming the offending key) and file
+    nothing -- never silently degrade to 'ask' (which would be safe but wrong-by-accident) or,
+    worse, to 'act' (which would be a live authority bug)."""
+    import ask, authority, fleet_db
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+
+        bad_level = Path(d) / "bad_level.json"
+        bad_level.write_text(json.dumps({"decision": {"level": "sure-why-not",
+                                                       "granted_by": "x", "granted_at": 1,
+                                                       "ask_ids": []}}))
+        rc = ask.main(["--db-path", str(db_path), "--authority-path", str(bad_level),
+                      "file", "--member", "gru", "--why", "x", "--class", "decision",
+                      "--no-notify"])
+        assert rc != 0, "a malformed level must exit nonzero"
+        conn = fleet_db.connect(db_path)
+        assert ask.list_asks(conn, status="all") == [], \
+            "a malformed authority file must file nothing, not fall back to an open ask"
+
+        bad_class = Path(d) / "bad_class.json"
+        bad_class.write_text(json.dumps({"not_a_real_class": {"level": "act", "granted_by": "x",
+                                                               "granted_at": 1, "ask_ids": []}}))
+        try:
+            authority.level_for("decision", store=bad_class)
+            raised = False
+        except authority.AuthorityError as exc:
+            raised = True
+            assert "not_a_real_class" in str(exc), f"error must name the offending key, got {exc}"
+        assert raised, "an unknown class in authority.json must raise, not be swallowed"
+
+
+def _authority_grant_itself_rejects_unknown_class_or_level_gh771():
+    """gh#771: `authority.grant()` is the write path -- it must refuse an unknown class or
+    level at grant time too, not just when a hand-edited file is later read back."""
+    import authority
+    with tempfile.TemporaryDirectory() as d:
+        authority_path = Path(d) / "authority.json"
+        try:
+            authority.grant("banana", "act", by="reif", store=authority_path)
+            assert False, "granting an unknown class must raise"
+        except authority.AuthorityError:
+            pass
+        try:
+            authority.grant("decision", "always", by="reif", store=authority_path)
+            assert False, "granting an unknown level must raise"
+        except authority.AuthorityError:
+            pass
+        assert not authority_path.exists(), \
+            "a refused grant must never create the file (nothing to read back)"
+
+
+def _ask_authority_cli_reports_grants_gh771():
+    """gh#771 AC5, exercised through ask.py's own CLI (not just the pure `authority.show()`):
+    `ask.py authority` is the reporting surface the PRD names -- 'when ask.py lists or reports
+    authority, those ask ids are shown with the grant'."""
+    import subprocess
+    with tempfile.TemporaryDirectory() as d:
+        authority_path = Path(d) / "authority.json"
+        p1 = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "authority.py"), "--path", str(authority_path),
+             "grant", "--class", "pricing", "--level", "act-and-tell", "--by", "reif",
+             "--ask-ids", "4,5"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert p1.returncode == 0, f"authority.py grant must exit 0: {p1.stderr}"
+
+        p2 = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "ask.py"), "--authority-path", str(authority_path),
+             "authority"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert p2.returncode == 0, f"ask.py authority must exit 0: {p2.stderr}"
+        out = json.loads(p2.stdout)
+        assert out["pricing"]["level"] == "act-and-tell" and out["pricing"]["ask_ids"] == [4, 5], \
+            f"ask.py authority must show the grant's level and ask_ids, got {out}"
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -11888,6 +12061,14 @@ if __name__ == "__main__":
     check("closes_gate.py blocks an epic with unaccepted children, never blocks an unlinked one (fk#652)", _closes_gate_blocks_an_epic_with_unaccepted_children)
     check("jefe.md runs closes_gate.py --epic before closing a fleet:epic issue (fk#652)", _jefe_runs_the_epic_close_check_before_closing_an_epic)
     check("vp.md authorizes every label vp_due.VP_LABELS spawns on (gh#855 AC5)", _vp_md_authorizes_every_label_vp_due_spawns_on_gh855)
+
+    check("authority: no authority.json files an open ask exactly as before (gh#771 AC1)", _authority_absent_file_is_byte_identical_to_pre_authority_ask_gh771)
+    check("authority: an act grant authorizes and leaves no open row, but a countable record lands (gh#771 AC2/AC3)", _authority_act_grant_authorizes_and_leaves_no_open_row_gh771)
+    check("authority: an act-and-tell grant proceeds and files a distinct 'notice' status (gh#771 AC4)", _authority_act_and_tell_grant_files_a_distinct_notice_status_gh771)
+    check("authority: a grant records who/when/ask_ids and re-reads identically (gh#771 AC5/AC7)", _authority_grant_audits_ask_ids_and_round_trips_gh771)
+    check("authority: a malformed authority.json fails loudly and files nothing (gh#771 AC6)", _authority_malformed_file_fails_loudly_and_files_nothing_gh771)
+    check("authority.grant() itself refuses an unknown class or level at write time (gh#771)", _authority_grant_itself_rejects_unknown_class_or_level_gh771)
+    check("ask.py authority reports a grant's level and ask_ids over the CLI (gh#771 AC5)", _ask_authority_cli_reports_grants_gh771)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:

@@ -8,9 +8,13 @@ answered, so it cannot learn from its own past asks. This is the first buildable
 fleet-kit#558's authority ladder: a `fleet.db` table (`asks`, see fleet_db.py's SCHEMA) plus this
 CLI, so any member can call `ask.py file` instead of dead-ending on a label.
 
-NON-GOALS (this issue's own body): no authority.json / permission-escalation logic, no console
-or superadmin UI, no migration of existing `fleet:needs-human-op` issues into asks. This is
-purely the record + CLI.
+NON-GOALS (this issue's own body): no console or superadmin UI, no migration of existing
+`fleet:needs-human-op` issues into asks. This is purely the record + CLI.
+
+gh#771 (the authority ladder's first seam, `scripts/authority.py`) since added the one thing
+this file's own NON-GOALS originally excluded: `ask.py file` now consults `authority.py` before
+filing an open ask, so a class standing at `act`/`act-and-tell` proceeds instead of asking a
+human the same question a third time. See `authority.py`'s own docstring for the ladder.
 
 Pure core (`file_ask`/`answer_ask`/`list_asks`), thin DB seam (`fleet_db.connect`), CLI (`main`)
 -- same split as cost_bridge.py / claim_history.py.
@@ -27,6 +31,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import fleet_db  # noqa: E402
+import authority  # noqa: E402  -- gh#771: class -> level, so filing twice doesn't ask a third time
 
 ASK_COLUMNS = (
     "id", "member", "why", "unblocks", "proposed", "status",
@@ -49,12 +54,21 @@ ASK_CLASSES = (
 
 def file_ask(conn, member: str, why: str, unblocks: str | None = None,
             proposed: str | None = None, filed_at: float | None = None,
-            ask_class: str | None = None) -> int:
-    """Insert a new open ask. Returns its id."""
+            ask_class: str | None = None, status: str = "open",
+            answer: str | None = None, answered_by: str | None = None,
+            answered_at: float | None = None) -> int:
+    """Insert a new ask. Returns its id.
+
+    Defaults record a fresh open ask exactly as before this function grew the last five
+    params -- gh#771's authority ladder reuses this same INSERT for a standing-grant record
+    (status='act'/'notice', answer/answered_by/answered_at already filled in at filing time,
+    see `main()`'s `file` command below) rather than duplicating the SQL, so `list_asks` and
+    `answer_ask` never need to special-case how a row got its answered fields.
+    """
     cur = conn.execute(
-        "INSERT INTO asks (member, why, unblocks, proposed, status, filed_at, class) "
-        "VALUES (?, ?, ?, ?, 'open', ?, ?)",
-        (member, why, unblocks, proposed,
+        "INSERT INTO asks (member, why, unblocks, proposed, status, answer, answered_by, "
+        "answered_at, filed_at, class) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (member, why, unblocks, proposed, status, answer, answered_by, answered_at,
          filed_at if filed_at is not None else time.time(), ask_class),
     )
     conn.commit()
@@ -130,6 +144,8 @@ def main(argv=None) -> int:
         description="File, answer, or list fleet asks -- the structured channel for a member "
                      "that hit a wall the fleet cannot act on (gh#568).")
     ap.add_argument("--db-path", help="override fleet.db path (default: fleet_db.DB_FILE)")
+    ap.add_argument("--authority-path",
+                    help="override authority.json path (default: authority.STORE)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p_file = sub.add_parser("file", help="file a new ask")
@@ -153,14 +169,52 @@ def main(argv=None) -> int:
     p_list.add_argument("--member")
     p_list.add_argument("--limit", type=int, default=100)
 
+    p_authority = sub.add_parser(
+        "authority", help="report the standing grants a class -> level authority.json holds (gh#771)")
+    p_authority.add_argument("--class", dest="ask_class",
+                             help="show only this class's grant (default: every grant)")
+
     a = ap.parse_args(argv)
     conn = fleet_db.connect(Path(a.db_path) if a.db_path else None)
+    authority_store = Path(a.authority_path) if a.authority_path else None
 
     if a.cmd == "file":
-        ask_id = file_ask(conn, a.member, a.why, a.unblocks, a.proposed, ask_class=a.ask_class)
-        print(f"ask {ask_id} filed")
-        if not a.no_notify:
-            _notify(a.member, ask_id, a.why)
+        try:
+            level = authority.level_for(a.ask_class, store=authority_store)
+        except authority.AuthorityError as exc:
+            print(f"ask.py: {exc}", file=sys.stderr)
+            return 1
+
+        if level == "ask":
+            # AC1: no grant (or no --class at all) -- byte-identical to every prior release.
+            ask_id = file_ask(conn, a.member, a.why, a.unblocks, a.proposed, ask_class=a.ask_class)
+            print(f"ask {ask_id} filed")
+            if not a.no_notify:
+                _notify(a.member, ask_id, a.why)
+            return 0
+
+        row = authority.show(store=authority_store).get(a.ask_class, {})
+        granted_by = row.get("granted_by", "unknown")
+        now = time.time()
+        if level == "act":
+            # AC2/AC3: proceed, exit 0, no open row -- but a countable record still lands,
+            # carrying class (column), member (column) and the granting authority (answered_by).
+            answer = f"authorized under standing grant by {granted_by} (class={a.ask_class})"
+            ask_id = file_ask(conn, a.member, a.why, a.unblocks, a.proposed, ask_class=a.ask_class,
+                              status="act", answer=answer, answered_by=f"authority:{granted_by}",
+                              answered_at=now, filed_at=now)
+            print(f"ask {ask_id} authorized -- standing grant by {granted_by} "
+                  f"(class={a.ask_class}); proceed")
+            return 0
+
+        # level == "act-and-tell" (the only other value authority.level_for can return):
+        # AC4: proceed, file a NOTICE -- a status distinct from 'open', never blocking.
+        answer = f"notice filed under standing act-and-tell grant by {granted_by} (class={a.ask_class})"
+        ask_id = file_ask(conn, a.member, a.why, a.unblocks, a.proposed, ask_class=a.ask_class,
+                          status="notice", answer=answer, answered_by=f"authority:{granted_by}",
+                          answered_at=now, filed_at=now)
+        print(f"ask {ask_id} filed as notice -- act-and-tell grant by {granted_by} "
+              f"(class={a.ask_class}); proceed")
         return 0
 
     if a.cmd == "answer":
@@ -176,6 +230,17 @@ def main(argv=None) -> int:
     if a.cmd == "list":
         print(json.dumps(list_asks(conn, status=a.status, member=a.member, limit=a.limit),
                          indent=2))
+        return 0
+
+    if a.cmd == "authority":
+        try:
+            grants = authority.show(store=authority_store)
+        except authority.AuthorityError as exc:
+            print(f"ask.py: {exc}", file=sys.stderr)
+            return 1
+        if a.ask_class:
+            grants = {a.ask_class: grants[a.ask_class]} if a.ask_class in grants else {}
+        print(json.dumps(grants, indent=2, sort_keys=True))
         return 0
 
     ap.print_help()
