@@ -19,9 +19,17 @@
 # WHAT IT WATCHES: curls PUBLIC_URL, checks for HTTP 200. On failure, reads the tunnel's
 # ingress config via the Cloudflare API, finds the rule for PUBLIC_URL's hostname that has
 # no `path` (the catch-all/root rule -- the one fleet_view_server owns), and if its port
-# doesn't match FLEET_VIEW_PORT, rewrites just that rule and PUTs the full config back
-# (Cloudflare's config PUT replaces the whole ingress array, so every other rule --
-# /ssh, /webhook, other hostnames -- is round-tripped unchanged). Then re-checks PUBLIC_URL.
+# doesn't match FLEET_TUNNEL_UPSTREAM_PORT (default 9000, the caddy front door -- see
+# scripts/deploy.sh's own PROXY_CADDYFILE comments; NOT FLEET_VIEW_PORT, the container's own
+# port, which is only reachable from inside the box), rewrites just that rule and PUTs the
+# full config back (Cloudflare's config PUT replaces the whole ingress array, so every other
+# rule -- /ssh, /webhook, other hostnames -- is round-tripped unchanged). Then re-checks
+# PUBLIC_URL.
+#
+# gh#734 / gh#732: an earlier version of this check compared against FLEET_VIEW_PORT, so the
+# moment PUBLIC_URL was actually configured, the first drift tick rewrote Cloudflare's live
+# ingress to the container port and bypassed caddy entirely -- an active outage cause, not a
+# watchdog. FLEET_TUNNEL_UPSTREAM_PORT is the fix: it names the port caddy actually fronts.
 #
 # WHY PLAIN BASH, HOST CRON, ZERO LLM: same reasoning account_health_check.sh and
 # auto_deploy.sh already document -- the watcher can't depend on the thing being watched,
@@ -39,14 +47,14 @@
 # 5-minute cron doesn't re-page every tick -- one page per outage, one recovery page after.
 #
 # Usage (cron, mirrors account_health_check.sh's own invocation shape):
-#   */5 * * * * PUBLIC_URL=https://dino.luckymachines.co/ FLEET_VIEW_PORT=8420 \
+#   */5 * * * * PUBLIC_URL=https://dino.luckymachines.co/ FLEET_TUNNEL_UPSTREAM_PORT=9000 \
 #     NTFY_TOPIC=<topic> bash scripts/tunnel_health_check.sh >> .../tunnel_health_check.cron.log 2>&1
 set -uo pipefail
 
 KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PUBLIC_URL="${PUBLIC_URL:?set PUBLIC_URL -- the public URL to check, e.g. https://dino.luckymachines.co/}"
 NTFY_TOPIC="${NTFY_TOPIC:-}"   # optional: fleet_alert.sh emails regardless
-FLEET_VIEW_PORT="${FLEET_VIEW_PORT:-8420}"
+FLEET_TUNNEL_UPSTREAM_PORT="${FLEET_TUNNEL_UPSTREAM_PORT:-9000}"
 STATE_FILE="${TUNNEL_HEALTH_STATE_FILE:-/home/ubuntu/fleet-kit-logs/.tunnel_health_paged.state}"
 CONNECTOR_TOKEN_FILE="${CONNECTOR_TOKEN_FILE:-/etc/cloudflared/token}"
 CF_API_TOKEN_FILE="${CF_API_TOKEN_FILE:-/etc/cloudflared/api_token}"
@@ -105,7 +113,7 @@ if not data.get('success'):
     sys.exit(1)
 cfg = data['result']['config']
 hostname = '$HOSTNAME'
-port = '$FLEET_VIEW_PORT'
+port = '$FLEET_TUNNEL_UPSTREAM_PORT'
 fixed = False
 old_service = None
 for rule in cfg['ingress']:
@@ -129,7 +137,7 @@ else:
         -H "Content-Type: application/json" \
         --data "$new_config")
       if echo "$put_result" | grep -q '"success":true'; then
-        heal_result="ingress rule corrected to point at :$FLEET_VIEW_PORT, waiting for it to take effect"
+        heal_result="ingress rule corrected to point at :$FLEET_TUNNEL_UPSTREAM_PORT, waiting for it to take effect"
         sleep 8
         http_code=$(_check)
       else
