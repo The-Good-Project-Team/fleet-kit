@@ -4947,6 +4947,24 @@ def _backlog_row_renders_blast_radius_as_chilli_not_a_grey_pill_gh844():
         "glyph must be conditional on a real blast level, never rendered for an unlabelled issue (AC3)"
 
 
+def _backlog_filter_matches_issue_number_as_well_as_title_gh610():
+    """gh#610, marie PRD: the operator recalls work by issue number, not title wording, so the
+    Backlog filter box must also match a bare or '#'-prefixed number exactly -- alongside,
+    never replacing, the existing title substring match (AC1-AC3), and an unmatched filter
+    still renders the unchanged empty state (AC4).
+    """
+    html_src = (ROOT / "scripts" / "fleet_view.html").read_text()
+    queue_fn = html_src[html_src.index("function renderQueuePage()"):html_src.index("function destroyStatsChart(id)")]
+    assert "const filterNumber = filterText.replace(/^#/, '');" in queue_fn, \
+        "renderQueuePage must strip a leading '#' before comparing to the issue number (AC2)"
+    assert "String(i.number) === filterNumber" in queue_fn, \
+        "renderQueuePage's filter predicate must match the issue number exactly (AC1)"
+    assert "i.title.toLowerCase().includes(filterText) || String(i.number) === filterNumber" in queue_fn, \
+        "number match must be additive to the existing title substring match, not a replacement (AC3)"
+    # AC4: the empty-state message itself is untouched by this change.
+    assert "'no backlog items match this filter'" in html_src
+
+
 def _deploy_sh_rolls_over_via_caddy_without_a_cordon():
     """gh#625: on a caddy-fronted box deploy.sh cuts over by swapping the proxy upstream, never
     by cordoning the fleet and draining passes. Pins (a) the proxy path runs INSTEAD of
@@ -14601,6 +14619,7 @@ if __name__ == "__main__":
     check("run_args() strips a trailing -green suffix from FLEET_INSTANCE_NAME, anchored not substring (gh#780 AC1/AC2/AC3)", _run_args_strips_green_suffix_from_instance_name_gh780)
 
     check("backlog row renders blast radius as a chilli glyph, never a grey fleet:blast-N pill (gh#844 AC2/AC3/AC4)", _backlog_row_renders_blast_radius_as_chilli_not_a_grey_pill_gh844)
+    check("Backlog filter matches an issue number, bare or '#'-prefixed, alongside title substring (gh#610 AC1/AC2/AC3/AC4)", _backlog_filter_matches_issue_number_as_well_as_title_gh610)
     check("pacing_hold_check pages once on a sustained fleet-wide hold, suppresses the repeat, resolves on recovery (gh#812 AC1/AC2/AC3/AC4)", _pacing_hold_check_pages_on_sustained_hold_gh812)
     check("pacing_hold_check never pages a single held tick that clears on its own (gh#812 AC6)", _pacing_hold_check_single_tick_does_not_page_gh812)
     check("pacing_hold_check never pages on two sparse single-row hours (one early ticker each, not a real fleet-wide hold)", _pacing_hold_check_sparse_single_row_hours_never_page_gh812)
