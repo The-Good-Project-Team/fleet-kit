@@ -19,6 +19,14 @@ A `quality:world-class` item is eligible only if that criterion set is its resea
 the fleet deciding as a Google VP of Product would; Reif can veto) has approved the design
 (quality-standard.md section 0, steps 1-7).
 
+A `fleet:epic` candidate is never eligible on its own: it is a tracking-only parent (marie
+decomposes it into child issues, Part C2b), so passing this gate would dispatch a builder onto
+an issue with no vertical slice to write code against. Confirmed live fk#634, 2026-09-11 (VP
+round-1 review, fix 1): 5 of 6 open epics read eligible=True the moment marie stamps a
+`quality:` label on the tracking issue to unblock its own gate. `fleet:reif-priority` epics
+(gru.md:123's "outranks marie's ranking entirely" path) are unaffected -- that path never
+calls this gate on the epic itself, only on the child issues/PRs it names.
+
 Same shape and split as vision_link_gate.py: pure core (`classify_candidate`,
 `gate_candidates`), thin CLI (`main`) reading `--items '[{"number","labels","body","comments"}]'`.
 
@@ -37,6 +45,7 @@ import sys
 
 QUALITY_LABELS = ("quality:ship-it", "quality:solid", "quality:world-class")
 WORLD_CLASS = "quality:world-class"
+EPIC = "fleet:epic"
 
 # One criterion: Given ... When ... Then ..., on one line or across up to three lines, any
 # markdown wrapping (bold, list bullets, numbering).  Case-insensitive.
@@ -70,6 +79,8 @@ def _criteria_text(body: str | None, comments: list[dict] | None) -> str | None:
 
 def classify_candidate(labels, body: str | None, comments: list[dict] | None) -> tuple[bool, str]:
     """(eligible, reason)."""
+    if EPIC in _label_names(labels):
+        return False, "tracking-only parent (fleet:epic); gru builds its children, not the epic itself"
     quality = [l for l in _label_names(labels) if l in QUALITY_LABELS]
     if not quality:
         return False, "no quality: label (ship-it / solid / world-class); marie sets it in the PRD"
