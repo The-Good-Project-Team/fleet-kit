@@ -255,6 +255,19 @@ spawns exactly one). Your job, in order:
    Collect each candidate's `fleet:complexity-<1-10>` label with its number — marie's size
    estimate, what makes packing possible. No label means treat it as a 5 (median), never free.
 
+   **Then give complexity-1/2 candidates a bounded head start — gh#5211.** Age-order plus the
+   plan-bet preference above still leaves a cheap, high-value fix stuck behind every older item
+   in its tier that the plan doesn't happen to name: philanthropy#4903 (a 2-file fix unblocking
+   the entire Atlas $100/mo checkout, gate-eligible, complexity-2) sat at roughly position 27 of
+   its tier with zero minion runs ever, because nothing before this weighted complexity at all.
+   After `ranked`'s plan-bet reorder, apply one more stable partition: move up to the first 2
+   complexity-1/2 candidates (in their existing relative order) to the front of the list, ahead
+   of everything else in the tier. This is a bounded head start, not a re-rank by complexity —
+   it never touches complexity-3+ candidates' order, and it never promotes more than 2 items per
+   pass, so a tier with many cheap items still can't crowd out the rest of the hour's budget the
+   way an unbounded complexity sort would. A tier with no complexity-1/2 candidates degrades
+   silently to `ranked`'s order unchanged.
+
 3. **Pack the hour with `fanout.py`. N is an OUTPUT, not a decision.**
 
    Your job is choosing the set of work that fills this hour's allowance, not picking how many
