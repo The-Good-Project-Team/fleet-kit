@@ -499,6 +499,16 @@ case "${1:-cron-foreground}" in
       # first reading. NTFY_TOPIC re-sourced at tick-time, same reasoning as the cron lines
       # above (gh#279).
       echo "*/5 * * * * root export FLEET_LOG_DIR=$LOG_DIR && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; bash /fleet-kit/scripts/sync_health_check.sh >> $LOG_DIR/sync_health_check.log 2>&1"
+      # pacing_hold_check.py (gh#812): the fleet's SIXTH outage pager -- a real zero
+      # `FLEET_SHARE_CEILING_PCT` (maxx_share_ceiling.py's block_over_pace branch, PR#797, or
+      # maxx's own verdict=over) is a deliberate, correct hard stop, but nothing told a human
+      # when it held the whole fleet `status=paced` for ~19 straight hours on 2026-09-10. Same
+      # class of gap as account/tunnel/path/sync-health above (a script existing is not the
+      # same as it being scheduled) -- reads runs.jsonl only, no podman, so it belongs in this
+      # in-container crontab exactly like sync_health_check.sh above. Hourly (minute 52,
+      # unclaimed on this file's own minute map) matches the hourly ticks it is watching for;
+      # NTFY_TOPIC re-sourced at tick-time, same reasoning as every other line here (gh#279).
+      echo "52 * * * * root export FLEET_LOG_DIR=$LOG_DIR && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; python3 /fleet-kit/scripts/pacing_hold_check.py >> $LOG_DIR/pacing_hold_check.log 2>&1"
     } > "$CRONTAB"
     chmod 0644 "$CRONTAB"
     # Validate BEFORE cron ever reads this file (2026-09-05, gh#4340). Vixie cron rejects the

@@ -350,7 +350,7 @@ function renderAgents() {
     const open = OPEN === name;
     const runs = open ? lastRuns(name).slice(0, 5) : [];
     return `
-      <div class="row" data-agent="${esc(name)}">
+      <div class="row" data-agent="${esc(name)}" data-last-ts="${last && last.ts ? esc(String(last.ts)) : ''}">
         <span class="dot ${dotClass(last, enabled)}"></span>
         <span class="name">${esc(m.spec.emoji || '')} ${esc(name)}${enabled ? '' : ' <span class="sub">(paused)</span>'}</span>
         <span class="meta">${last ? esc(ago(last.ts)) : 'never run'}${count ? `<br>${esc(count)}` : ''}</span>

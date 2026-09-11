@@ -27,6 +27,19 @@ Everything else is left to the reviewer, who now sees the issue's acceptance cri
 told to block unless the diff meets every one. The fix for the author is always the same one
 word: write `Part of #N` and list what remains.
 
+`--epic <n>` is the second, PR-independent check (fk#652): whether an epic itself may be
+closed right now. Its `closable: true` carries three DIFFERENT meanings (fk#879 -- a bare
+`true` used to conflate all three, which is what let #785 and #553 close wrongly on
+2026-09-11 despite each carrying a human-written "stays open" verdict in its own thread):
+  1. every child is closed AND the epic's own thread carries no unanswered stays-open marker
+     -- the goal was actually met;
+  2. no children were discoverable at all (no real GitHub sub-issues, no `decomposed into`
+     comment) -- an unlinked epic is never blocked on epic grounds, whatever its thread says;
+  3. a stays-open marker exists but is OLDER than the newest child close -- later work already
+     answered it.
+`reason` always says which of the three (or, for `false`, which open child or which marker)
+produced the verdict -- never trust a bare `true` on its own.
+
 Usage: closes_gate.py <pr-number> [--repo owner/name]   -> JSON on stdout, exit 1 on block
 """
 from __future__ import annotations
@@ -55,6 +68,19 @@ TEST_PATH_RE = re.compile(
 AC_HEADING_RE = re.compile(r"^#{1,4}\s*acceptance criteria\b.*$", re.I | re.M)
 EPIC = "fleet:epic"
 DECOMPOSED_RE = re.compile(r"decomposed into\s+((?:#\d+(?:\s*,\s*|\s+and\s+)?)+)", re.I)
+
+# fk#879: literal, documented phrases only -- no sentiment/NLP guess about a comment's mood
+# (marie.md Part C0 sets the same rule for fleet:needs-retriage). "stays open" also matches
+# "epic stays open"; both are quoted verbatim in #785 (2026-09-09T21:40:04Z, "this epic stays
+# open") and #553 (2026-09-11T09:06:58Z, "Epic stays open and tracking-only"). "not yet (vp
+# review):" is VP's own reopen verdict (used on #553 at 2026-09-11T05:53:04Z). Deliberately
+# NOT included: "tracking-only from here" -- that exact phrase is routine boilerplate marie
+# posts on EVERY Part C2b decomposition (marie.md:322, "...tracking-only from here, closes
+# once every child is closed"), written before any child has closed. Treating it as its own
+# marker would, combined with AC5's marker-wins-with-no-closedAt-data fallback (the common
+# case for a real GitHub sub-issues link, which carries no closedAt -- confirmed live on both
+# #785 and #553), permanently block almost every decomposed epic, not just a genuine reopen.
+STAYS_OPEN_RE = re.compile(r"stays open|not yet \(vp review\):", re.I)
 
 
 def closing_numbers(pr_body: str) -> list[int]:
@@ -111,20 +137,63 @@ def epic_open_children(iss: dict, issues: dict[int, dict]) -> tuple[bool, list[i
     return True, [n for n in children if (issues.get(n) or {}).get("state") == "OPEN"]
 
 
+def newest_child_closed_at(iss: dict, issues: dict[int, dict]) -> str | None:
+    """ISO timestamp of this epic's most recently closed child, or None when no child carries
+    one -- real GitHub `subIssues` nodes carry no `closedAt` (confirmed live on #785/#553;
+    fetching it per child would be a second round-trip Non-goal 5 rules out), and a
+    `decomposed into` child that failed to fetch carries none either. Callers must treat None
+    as "cannot compare", not as "no child ever closed"."""
+    sub = iss.get("subIssues")
+    nodes = sub.get("nodes") if isinstance(sub, dict) else None
+    if nodes:
+        dates = [n.get("closedAt") for n in nodes if n.get("state") == "CLOSED"]
+    else:
+        dates = [(issues.get(n) or {}).get("closedAt") for n in decomposed_children(iss)]
+    dates = [d for d in dates if d]
+    return max(dates) if dates else None
+
+
+def stays_open_marker(iss: dict) -> tuple[str, str] | None:
+    """The newest comment on the epic's OWN thread matching a documented stays-open marker
+    (STAYS_OPEN_RE) -- (marker text, comment createdAt), or None. Newest wins, same
+    newest-comment convention acceptance_criteria() and decomposed_children() already use."""
+    best: tuple[str, str] | None = None
+    for c in sorted(iss.get("comments") or [], key=lambda c: c.get("createdAt") or ""):
+        m = STAYS_OPEN_RE.search(c.get("body") or "")
+        if m:
+            best = (m.group(0), c.get("createdAt") or "")
+    return best
+
+
 def epic_closable(iss: dict, issues: dict[int, dict]) -> dict:
     """Whether an epic issue can be closed right now -- jefe's own pre-close check
-    (members/jefe/jefe.md), independent of any PR. {"closable": bool, "reason": str}."""
+    (members/jefe/jefe.md), independent of any PR. {"closable": bool, "reason": str}.
+    See the module docstring for the three distinct meanings `closable: true` can carry."""
     found, open_children = epic_open_children(iss, issues)
+    if open_children:
+        return {
+            "closable": False,
+            "reason": "unaccepted children: " + ", ".join(f"#{c}" for c in open_children),
+        }
+    marker = stays_open_marker(iss)
+    if marker:
+        marker_text, marker_at = marker
+        newest_closed = newest_child_closed_at(iss, issues) if found else None
+        if newest_closed is None or marker_at > newest_closed:
+            return {
+                "closable": False,
+                "reason": f'stays-open marker "{marker_text}" posted {marker_at} '
+                + (
+                    f"is newer than the last child close ({newest_closed})"
+                    if newest_closed
+                    else "and no child-close timestamp is available to outrank it"
+                ),
+            }
     if not found:
         return {
             "closable": True,
             "reason": "no children found (no real GitHub sub-issues, no `decomposed into` "
             "comment) -- an unlinked epic is never blocked on epic grounds",
-        }
-    if open_children:
-        return {
-            "closable": False,
-            "reason": "unaccepted children: " + ", ".join(f"#{c}" for c in open_children),
         }
     return {"closable": True, "reason": "every child is closed"}
 
@@ -208,10 +277,13 @@ def fetch_issue_and_epic_children(n: int, repo: list[str]) -> dict[int, dict]:
     sub = iss.get("subIssues")
     nodes = sub.get("nodes") if isinstance(sub, dict) else None
     if EPIC in labels and not nodes:
-        # no real sub-issue links -- fetch state for marie's "decomposed into" children
+        # no real sub-issue links -- fetch state+closedAt for marie's "decomposed into"
+        # children (closedAt feeds epic_closable()'s stays-open-marker timestamp compare)
         for child_n in decomposed_children(iss):
             if child_n not in issues:
-                child_iss = gh_json(["issue", "view", str(child_n), *repo, "--json", "state"])
+                child_iss = gh_json(
+                    ["issue", "view", str(child_n), *repo, "--json", "state,closedAt"]
+                )
                 if isinstance(child_iss, dict):
                     issues[child_n] = child_iss
     return issues
@@ -224,7 +296,9 @@ def main(argv=None) -> int:
         "--epic",
         type=int,
         help="check whether THIS issue (an epic) can be closed right now, no PR involved "
-        "-- the check members/jefe/jefe.md runs before it closes an epic (fk#652)",
+        "-- the check members/jefe/jefe.md runs before it closes an epic (fk#652). "
+        "closable:true means one of three things: goal met, no children discoverable, or "
+        "a stays-open marker was outranked by a later child close -- read `reason` (fk#879)",
     )
     ap.add_argument("--repo", help="owner/name (default: the current repo)")
     a = ap.parse_args(argv)
