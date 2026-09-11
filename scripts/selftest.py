@@ -13596,10 +13596,13 @@ def _pacing_hold_check_env(tmp: Path, ntfy_calls: Path):
 
 
 def _write_pacing_hold_runs(runs_path: Path, paced_hours_ago: list[int], other_hours_ago: list[int]):
+    """Two distinct members per paced hour (jefe + gru), matching pacing_hold_check.py's own
+    MIN_ROWS_PER_HOUR=2 floor -- a real fleet-wide hold, not one early ticker's single row."""
     now = time.time()
     lines = []
     for h in paced_hours_ago:
         lines.append(json.dumps({"ts": now - h * 3600, "status": "paced", "member": "jefe"}))
+        lines.append(json.dumps({"ts": now - h * 3600 - 60, "status": "paced", "member": "gru"}))
     for h in other_hours_ago:
         lines.append(json.dumps({"ts": now - h * 3600, "status": "ok", "member": "roomba"}))
     runs_path.write_text("\n".join(lines) + "\n")
@@ -13671,6 +13674,37 @@ def _pacing_hold_check_single_tick_does_not_page_gh812():
             f"a single held tick must never page -- stdout: {proc.stdout[:400]!r}"
         )
         assert not ntfy_calls.exists(), "a single held tick reached the alert helper at all"
+
+
+def _pacing_hold_check_sparse_single_row_hours_never_page_gh812():
+    """Found by a post-merge /code-review pass on PR#934: current_streak() deliberately
+    looks at the CURRENT, still-forming hour too, so a lone early ticker landing `paced`
+    before anyone else has run that hour must NOT read as a fleet-wide hold. Two
+    consecutive hours with only ONE paced row each (no second member to corroborate) must
+    never page, even though the naive "at least one row, all paced" rule from before this
+    fix would have -- this is what pacing_hold_check.py's MIN_ROWS_PER_HOUR floor guards."""
+    import json as _json
+    import subprocess
+    script_path = ROOT / "scripts" / "pacing_hold_check.py"
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        ntfy_calls = tmp / "ntfy_calls.log"
+        env = _pacing_hold_check_env(tmp, ntfy_calls)
+        now = time.time()
+        lines = [
+            _json.dumps({"ts": now, "status": "paced", "member": "jefe"}),
+            _json.dumps({"ts": now - 3600, "status": "paced", "member": "jefe"}),
+        ]
+        (tmp / "runs.jsonl").write_text("\n".join(lines) + "\n")
+
+        proc = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True,
+                              timeout=30, env=env)
+        assert proc.returncode == 0, f"pacing_hold_check.py must exit 0: {proc.stderr.strip()[:300]}"
+        assert "PAGED" not in proc.stdout, (
+            f"two consecutive single-row paced hours (one early ticker each) must never "
+            f"page on their own -- stdout: {proc.stdout[:400]!r}"
+        )
+        assert not ntfy_calls.exists(), "a sparse single-row hold reached the alert helper at all"
 
 
 if __name__ == "__main__":
@@ -14052,6 +14086,7 @@ if __name__ == "__main__":
 
     check("pacing_hold_check pages once on a sustained fleet-wide hold, suppresses the repeat, resolves on recovery (gh#812 AC1/AC2/AC3/AC4)", _pacing_hold_check_pages_on_sustained_hold_gh812)
     check("pacing_hold_check never pages a single held tick that clears on its own (gh#812 AC6)", _pacing_hold_check_single_tick_does_not_page_gh812)
+    check("pacing_hold_check never pages on two sparse single-row hours (one early ticker each, not a real fleet-wide hold)", _pacing_hold_check_sparse_single_row_hours_never_page_gh812)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:

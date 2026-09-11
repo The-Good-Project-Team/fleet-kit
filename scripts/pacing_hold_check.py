@@ -21,11 +21,16 @@ same distinction; conflating them is exactly what it warns against).
 
 WHAT IT WATCHES: runs.jsonl (via fleet_metrics.load_runs/default_runs_path -- the same
 parsing every other reader of this file already uses), bucketed by UTC hour. An hour
-counts as a fleet-wide pacing hold if it has at least one row and EVERY row in it has
-status "paced" -- one member running fine that hour is proof headroom existed, so the
-hour is not held. Pages once a streak of PACING_HOLD_MIN_HOURS (default 2) consecutive
-held hours, ending at the current hour, is reached. A single held tick that clears on its
-own must never page (marie's AC6).
+counts as a fleet-wide pacing hold if it has at least PACING_HOLD_MIN_ROWS_PER_HOUR rows
+(default 2) and EVERY row in it has status "paced" -- one member running fine that hour
+is proof headroom existed, so the hour is not held. The minimum row count matters because
+current_streak() deliberately looks at the CURRENT, still-forming hour too (see its own
+docstring) -- without it, the very first member to tick in a fresh hour landing "paced"
+would mark that whole hour "held" on a single row, before anyone else has had a chance to
+run and disprove it. The real 2026-09-10 incident held 6-10 rows/hour throughout, so this
+costs nothing against the actual failure this check exists to catch. Pages once a streak
+of PACING_HOLD_MIN_HOURS (default 2) consecutive held hours, ending at the current hour,
+is reached. A single held tick that clears on its own must never page (marie's AC6).
 
 DEDUPE/RESOLUTION goes through alert_store.py directly, severity=critical: this check's
 own streak requirement IS the debounce (waiting out alert_store's own extra
@@ -62,6 +67,7 @@ CHECK = "pacing_hold"
 PROBLEM = "fleet_wide_paced"
 
 MIN_HOLD_HOURS = int(os.environ.get("PACING_HOLD_MIN_HOURS", "2"))
+MIN_ROWS_PER_HOUR = int(os.environ.get("PACING_HOLD_MIN_ROWS_PER_HOUR", "2"))
 
 
 def _hour_bucket(ts: float) -> str:
@@ -69,8 +75,11 @@ def _hour_bucket(ts: float) -> str:
 
 
 def held_hours(rows: list[dict]) -> set[str]:
-    """Every UTC hour bucket in which at least one row landed and EVERY row in it has
-    status "paced" -- a fleet-wide hold for that tick."""
+    """Every UTC hour bucket in which at least MIN_ROWS_PER_HOUR rows landed and EVERY row
+    in it has status "paced" -- a fleet-wide hold for that tick. The row-count floor (not
+    just "at least one") guards the CURRENT, still-forming hour specifically: a single
+    early ticker landing paced before anyone else has run that hour is not evidence the
+    fleet is held, only that one member happened to go first."""
     by_hour: dict[str, list[dict]] = {}
     for r in rows:
         ts = r.get("ts")
@@ -82,7 +91,8 @@ def held_hours(rows: list[dict]) -> set[str]:
             continue
         by_hour.setdefault(_hour_bucket(ts), []).append(r)
     return {h for h, hour_rows in by_hour.items()
-            if hour_rows and all(r.get("status") == "paced" for r in hour_rows)}
+            if len(hour_rows) >= MIN_ROWS_PER_HOUR
+            and all(r.get("status") == "paced" for r in hour_rows)}
 
 
 def current_streak(rows: list[dict], at: float) -> int:
