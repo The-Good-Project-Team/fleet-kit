@@ -12179,6 +12179,92 @@ def _filer_ensure_label_forwards_repo_gh922():
     assert label_create, "ensure_label never called label create"
 
 
+def _filer_dedupes_a_markerless_hand_filed_issue_gh849():
+    # gh#849: journey_issue_filer's dedupe only ever matched its own marker, so a hand-filed
+    # issue for the same journey/step (no marker, and #724 proved sometimes not even the
+    # fleet:sentry-journey label) got re-filed every run -- live: #847/#848 re-filed #814/#724
+    # inside an hour of each other on 2026-09-11. This module does not have this fallback on
+    # `main` before this change -- find_open_issue() only ever issues one `gh issue list` call
+    # there, so the widened, unlabelled second call this test drives never happens and the
+    # markerless issue below is invisible to it, filing a duplicate instead of commenting.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("jif", ROOT / "scripts" / "journey_issue_filer.py")
+    jif = importlib.util.module_from_spec(spec); sys.modules[spec.name] = jif; spec.loader.exec_module(jif)
+
+    # #724's real shape: no fleet:sentry-journey label, no marker -- journey id and step number
+    # named only in prose.
+    def gh(cmd):
+        if cmd[1] == "label":
+            return 0, "ok"
+        if cmd[2] == "list":
+            return 0, json.dumps([{
+                "number": 724,
+                "title": "journey_walker: fleet-console journey has wrong default URL + selector",
+                "body": "Re-ran the `fleet-console-loads-with-runs` journey ... that explains "
+                        "step 0 failing in the run that filed #690/#691.",
+            }])
+        if cmd[2] == "comment":
+            return 0, "commented"
+        raise AssertionError(cmd)
+
+    d = Path(tempfile.mkdtemp())
+    results = {"run": "r1", "deploy_sha": "sha", "journeys": [
+        {"id": "fleet-console-loads-with-runs", "name": "The fleet console loads with runs",
+         "steps": [{"index": 0, "action": "Navigate to the fleet console URL.",
+                    "observable_result": "loads", "status": "fail"}]}]}
+    (d / "results.json").write_text(json.dumps(results))
+    summary = jif.process(d / "results.json", d / "state.json", runner=gh)
+    assert summary["filed"] == [], f"must not re-file #724 as a new issue: {summary}"
+    assert len(summary["commented"]) == 1 and summary["commented"][0]["issue"] == 724, summary
+
+    # AC5: a different step index in the same journey is real new information, must still file.
+    def gh_other_step(cmd):
+        if cmd[1] == "label":
+            return 0, "ok"
+        if cmd[2] == "list":
+            return 0, json.dumps([{
+                "number": 724, "title": "x",
+                "body": "the fleet-console-loads-with-runs journey fails at step 0",
+            }])
+        if cmd[2] == "create":
+            return 0, "https://github.com/x/y/issues/900"
+        raise AssertionError(cmd)
+
+    d2 = Path(tempfile.mkdtemp())
+    results2 = {"run": "r1", "deploy_sha": "sha", "journeys": [
+        {"id": "fleet-console-loads-with-runs", "name": "The fleet console loads with runs",
+         "steps": [{"index": 3, "action": "Click a run row.",
+                    "observable_result": "opens", "status": "fail"}]}]}
+    (d2 / "results.json").write_text(json.dumps(results2))
+    summary2 = jif.process(d2 / "results.json", d2 / "state.json", runner=gh_other_step)
+    assert len(summary2["filed"]) == 1, f"a different step must still file: {summary2}"
+    assert summary2["commented"] == [], summary2
+
+    # AC3: the marker fast path is unchanged -- a marker match short-circuits before the
+    # widened (unlabelled) fallback list call is ever made.
+    calls = []
+    def gh_marker(cmd):
+        calls.append(cmd)
+        if cmd[1] == "label":
+            return 0, "ok"
+        if cmd[2] == "list":
+            key = jif.step_key("send-message", 0)
+            return 0, json.dumps([{"number": 5, "title": "x", "body": jif.marker_for(key)}])
+        if cmd[2] == "comment":
+            return 0, "commented"
+        raise AssertionError(cmd)
+
+    d3 = Path(tempfile.mkdtemp())
+    results3 = {"run": "r1", "deploy_sha": "sha", "journeys": [
+        {"id": "send-message", "name": "Send a message",
+         "steps": [{"index": 0, "action": "send it", "observable_result": "sent", "status": "fail"}]}]}
+    (d3 / "results.json").write_text(json.dumps(results3))
+    summary3 = jif.process(d3 / "results.json", d3 / "state.json", runner=gh_marker)
+    assert summary3["commented"] and summary3["commented"][0]["issue"] == 5, summary3
+    list_calls = [c for c in calls if c[2] == "list"]
+    assert len(list_calls) == 1, f"marker match must not trigger the widened fallback: {list_calls}"
+
+
 def _red_member_paced_and_vp_gates_on_red_gh785():
     import member_spec
     red = member_spec.by_name("red", ROOT / "members")
@@ -14570,6 +14656,7 @@ if __name__ == "__main__":
     check("journey_issue_filer red profile files under fleet:red-team with its own marker, sentry unchanged (gh#785 AC4)", _filer_red_profile_uses_red_label_and_marker_gh785)
     check("journey_issue_filer never files a duplicate when the dedup lookup itself fails (gh#914)", _filer_lookup_failure_never_files_a_duplicate_gh914)
     check("journey_issue_filer ensure_label forwards --repo to every gh call, label create included (gh#922)", _filer_ensure_label_forwards_repo_gh922)
+    check("journey_issue_filer dedupes a markerless hand-filed issue by journey id + step, not just its own marker (gh#849)", _filer_dedupes_a_markerless_hand_filed_issue_gh849)
     check("red is a paced 6h member and vp requires a red pass before Accepted (gh#785 AC5)", _red_member_paced_and_vp_gates_on_red_gh785)
     check("worktree_guard_hook blocks an Edit under the shared $REPO when isolated (gh#592 AC2)", _worktree_guard_blocks_edit_under_shared_repo_gh592)
     check("worktree_guard_hook allows an Edit under the pass's own $WT_PATH (gh#592 AC5)", _worktree_guard_allows_edit_under_own_worktree_gh592)
