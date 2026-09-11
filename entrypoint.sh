@@ -407,6 +407,17 @@ case "${1:-cron-foreground}" in
       # this export lane_kpi.py would silently fall back to fleet_db.py's own $HOME-based
       # default and read/write a completely different, wrong fleet.db with no error at all.
       echo "14 * * * * root export FLEET_LOG_DIR=$LOG_DIR && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; python3 /fleet-kit/scripts/lane_kpi.py record >> $LOG_DIR/lane_kpi.log 2>&1"
+      # stash_pile_expiry.py (gh#714 Part C4): postflight_dirty_check.sh's auto-stash rescue has
+      # no bound of its own -- its own POLICY log line says a human must run `git -C $REPO stash
+      # list` and decide what to land or drop, and nothing before this ever did that. Hourly at
+      # :44 (unclaimed on the minute map above) drops only entries this same mechanism created
+      # whose diff is now empty against $REPO's current HEAD (i.e. already landed by another
+      # route) and warns loudly, distinctly, if the pile is still over its ceiling afterward --
+      # it never decides a surviving entry should be landed, that stays a human call (this
+      # issue's own PRD non-goals). Same fleet.env re-source shape as lane_kpi.py's line above,
+      # for the same reason: FLEET_REPO/FLEET_LOG_DIR must resolve to this container's real
+      # values at tick time, not the script's own fallback.
+      echo "44 * * * * root export FLEET_LOG_DIR=$LOG_DIR && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; python3 /fleet-kit/scripts/stash_pile_expiry.py run >> $LOG_DIR/stash_pile_expiry.log 2>&1"
       # account_health_check.sh + tunnel_health_check.sh (gh#171): the fleet's only outage
       # pagers per README step 6. PR#169 wired both into schedulers/systemd + schedulers/launchd
       # -- the bare-host path -- but never into THIS heredoc, the container-native path, so
