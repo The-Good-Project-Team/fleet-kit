@@ -48,9 +48,13 @@ class BacklogHistoryPayload(unittest.TestCase):
         self.assertFalse(cacheable)
 
 
-class BacklogHistoryServesPrecomputedCache(unittest.TestCase):
-    """Proves the handler reads the timer-refreshed cache rather than calling _gh itself --
-    the actual behavior fix 3 asks for, not just the extracted function existing."""
+class CachedServesAWarmEntryWithoutCallingGh(unittest.TestCase):
+    """Proves `_cached()`'s TTL-hit branch: given an entry already sitting in `_TTL_CACHE`
+    with a fresh timestamp, a request through `_cached()` reads it back verbatim and never
+    calls produce() (and so never calls `_gh`). This does NOT exercise
+    `refresh_backlog_history_forever` itself -- that entry is hand-written below, not produced
+    by the timer thread. See RefreshBacklogHistoryForever for coverage of the timer loop's own
+    body (gh#860)."""
 
     def setUp(self):
         sys.modules.pop("fleet_view_server", None)
@@ -66,8 +70,6 @@ class BacklogHistoryServesPrecomputedCache(unittest.TestCase):
             return FAKE_ISSUES if args[0] == "issue" else FAKE_PRS
 
         with unittest.mock.patch.object(self.fvs, "_gh", side_effect=fake_gh):
-            # Simulate one iteration of refresh_backlog_history_forever's own body -- what
-            # the background thread does on its own timer, before any request arrives.
             value, cacheable = self.fvs._backlog_history_payload(self.fvs._BACKLOG_HISTORY_DAYS)
             self.assertTrue(cacheable)
             key = f"backlog_history:{self.fvs._BACKLOG_HISTORY_DAYS}"
@@ -83,6 +85,51 @@ class BacklogHistoryServesPrecomputedCache(unittest.TestCase):
                 lambda: self.fvs._backlog_history_payload(self.fvs._BACKLOG_HISTORY_DAYS))
         self.assertEqual(served, value)
         self.assertEqual(calls, [], "a warm precomputed entry must not trigger a live gh call")
+
+
+class RefreshBacklogHistoryForever(unittest.TestCase):
+    """Calls `refresh_backlog_history_forever` itself -- not a hand-rolled copy of its body --
+    so a wrong cache key, a dropped lock, or a silently-eaten exception would fail here (gh#860,
+    marie PRD Part C4)."""
+
+    def setUp(self):
+        sys.modules.pop("fleet_view_server", None)
+        import fleet_view_server as fvs
+        self.fvs = fvs
+        self.fvs._TTL_CACHE.clear()
+
+    def _run_one_iteration(self):
+        # time.sleep(interval_s) is the last call in each pass of the function's `while True`
+        # loop; raising from it stops the loop after exactly one iteration without touching
+        # the function under test.
+        with unittest.mock.patch.object(self.fvs.time, "sleep", side_effect=StopIteration):
+            with self.assertRaises(StopIteration):
+                self.fvs.refresh_backlog_history_forever(interval_s=0)
+
+    def test_writes_the_cache_on_a_cacheable_result(self):
+        payload = {"days": [], "new_prs": [], "merged_prs": []}
+        with unittest.mock.patch.object(self.fvs, "_backlog_history_payload",
+                                         return_value=(payload, True)):
+            self._run_one_iteration()
+        key = f"backlog_history:{self.fvs._BACKLOG_HISTORY_DAYS}"
+        self.assertIn(key, self.fvs._TTL_CACHE)
+        _, value = self.fvs._TTL_CACHE[key]
+        self.assertEqual(value, payload)
+
+    def test_leaves_the_cache_untouched_when_not_cacheable(self):
+        with unittest.mock.patch.object(self.fvs, "_backlog_history_payload",
+                                         return_value=({"days": []}, False)):
+            self._run_one_iteration()
+        key = f"backlog_history:{self.fvs._BACKLOG_HISTORY_DAYS}"
+        self.assertNotIn(key, self.fvs._TTL_CACHE)
+
+    def test_logs_via_log_sync_error_and_keeps_looping_on_a_raised_exception(self):
+        boom = RuntimeError("boom")
+        with unittest.mock.patch.object(self.fvs, "_backlog_history_payload",
+                                         side_effect=boom), \
+             unittest.mock.patch.object(self.fvs, "log_sync_error") as mock_log:
+            self._run_one_iteration()
+        mock_log.assert_called_once_with(boom)
 
 
 class MainWiresUpTheBackgroundRefresher(unittest.TestCase):
