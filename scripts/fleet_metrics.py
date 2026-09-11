@@ -56,6 +56,11 @@ CATALOG = {
     "avg_duration_s": "mean duration in seconds over executed rows for <member>",
     "self_critique_rate": "share of executed rows with a real Self-critique for <member>",
     "runs_per_day": "executed rows per day [:<member>]",
+    # fk#808: these two do NOT come from runs.jsonl -- rework lives in GitHub. A
+    # separate collector (scripts/rework_collect.py) caches them; compute() stays a pure
+    # function and simply reads that cache. Same network/arithmetic split as cost_bridge.
+    "rework_pct": "share of recently merged PRs whose title reads as rework (cache)",
+    "churn_ratio": "additions/deletions across recently merged PRs (cache)",
 }
 
 
@@ -114,6 +119,26 @@ def _tok(r: dict, key: str):
     return v
 
 
+REWORK_CACHE = Path(__file__).resolve().parent.parent / "state" / "rework.json"
+# A cache older than this is not evidence about now. rework_collect.py is cheap to re-run.
+REWORK_MAX_AGE_S = 36 * 3600.0
+
+
+def _rework_cache(path: Path | None = None, now: float | None = None) -> dict | None:
+    """The collector's cache, or None when absent/unreadable/stale."""
+    p = path or REWORK_CACHE
+    try:
+        row = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    ts = row.get("ts")
+    if not isinstance(ts, (int, float)):
+        return None
+    if (now if now is not None else time.time()) - float(ts) > REWORK_MAX_AGE_S:
+        return None
+    return row
+
+
 def compute(name: str, rows: list[dict], at: float | None = None, hours: float = 24.0) -> float | None:
     base, args = parse(name)
     at = time.time() if at is None else float(at)
@@ -158,6 +183,17 @@ def compute(name: str, rows: list[dict], at: float | None = None, hours: float =
     if base == "runs_per_day":
         rs = [r for r in _for_member(win, args[0] if args else None) if r.get("status") in EXECUTED]
         return len(rs) / days if rs else None
+    if base in ("rework_pct", "churn_ratio"):
+        # Read-only over the collector's cache. A missing or stale cache returns None rather
+        # than 0: predict.py treats None as "unavailable" and leaves the row unresolved, which
+        # is the honest outcome -- a fabricated 0 would resolve a prediction as a hit on a
+        # number nobody measured.
+        cache = _rework_cache()
+        if not cache:
+            return None
+        key = "title_rework_pct" if base == "rework_pct" else "churn_ratio"
+        v = cache.get(key)
+        return float(v) if v is not None else None
     raise ValueError(base)  # unreachable: parse() already rejected unknown names
 
 
