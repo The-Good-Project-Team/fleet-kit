@@ -8631,7 +8631,11 @@ def _fixer_sees_a_green_but_parked_pr():
     src = (ROOT / "members" / "the-fixer" / "check.sh").read_text()
     m = re.search(r"gh pr list --state open --limit 30.*?-q '(.*?)^\s*' 2>>", src, re.S | re.M)
     assert m, "cannot find check.sh's pr-list jq expression -- did its shape change?"
-    expr = m.group(1).replace('\'"$cutoff"\'', "2026-09-02T14:00:00Z")
+    # gh#740: $failed grew a second interpolation point for the required-contexts filter.
+    # This test is about $parked, not $failed, so the fixtures below don't care which checks
+    # are "required" -- drop the filter entirely (same as the real fail-open fallback shape).
+    expr = (m.group(1).replace('\'"$cutoff"\'', "2026-09-02T14:00:00Z")
+                       .replace('\'"$required_filter"\'', ""))
 
     old = "2026-09-02T10:00:00Z"   # before the cutoff
     new = "2026-09-02T23:00:00Z"   # after it
@@ -8676,6 +8680,158 @@ def _fixer_sees_a_green_but_parked_pr():
     assert "293" not in picked, "a DRAFT was called parked -- a draft is explicitly not ready"
     assert "294" not in picked, \
         "a PR that went green seconds ago was called parked -- the arming sweep has not run yet"
+
+
+def _fixer_check_failed_ignores_a_non_required_advisory_check():
+    """gh#740: `$failed` used to fire on ANY red statusCheckRollup entry, with no reference to
+    which checks the branch actually requires. judge-judy's own `fleet-code-review` gate is
+    deliberately advisory on this repo's main (gh#3084) -- only the required contexts actually
+    gate a merge -- so a PR with every required check green was still classified check-failed
+    forever, because the advisory status never flips. Live proof: PR#4910 was re-investigated
+    three separate times while healthy and already queued at position 1.
+
+    Runs check.sh's REAL jq selector (extracted from the script, not retyped) against fixture
+    PRs, same shape as `_fixer_sees_a_green_but_parked_pr`. `required_contexts()` itself (the
+    bash function that fetches the required list) is exercised separately in
+    `_fixer_check_failed_falls_back_when_required_contexts_call_fails` below.
+    """
+    import json
+    import re
+    import shutil
+    import subprocess
+
+    if not shutil.which("jq"):
+        return  # jq absent here; shape is also covered by the live dry-run recorded in the PR
+
+    src = (ROOT / "members" / "the-fixer" / "check.sh").read_text()
+    m = re.search(r"gh pr list --state open --limit 30.*?-q '(.*?)^\s*' 2>>", src, re.S | re.M)
+    assert m, "cannot find check.sh's pr-list jq expression -- did its shape change?"
+    template = m.group(1).replace('\'"$cutoff"\'', "2026-09-02T14:00:00Z")
+    assert '\'"$required_filter"\'' in template, \
+        "cannot find the required_filter interpolation point -- did $failed's shape change?"
+
+    required_filter = (
+        ' | select((.name // .context // "") as $n | (["test","test-postgres"]) | index($n) != null)'
+    )
+    expr_required = template.replace('\'"$required_filter"\'', required_filter)
+    expr_fallback = template.replace('\'"$required_filter"\'', "")
+
+    def classify(expr, prs):
+        proc = subprocess.run(["jq", "-r", expr], input=json.dumps(prs),
+                              capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, f"jq failed: {proc.stderr.strip()[:300]}"
+        picked = {}
+        for line in proc.stdout.strip().splitlines():
+            if line.strip():
+                parts = line.split(":")
+                picked[parts[0]] = parts[2]
+        return picked
+
+    old = "2026-09-01T00:00:00Z"  # any timestamp older than the test's own cutoff above
+
+    # AC1: every required check (test, test-postgres) is green; the sole red entry is a
+    # NON-required advisory check (fleet-code-review), reporting through the legacy
+    # commit-status API (red in .state, not .conclusion). Must NOT be check-failed.
+    pr_advisory_red = {
+        "number": 1, "headRefOid": "a" * 40, "mergeStateStatus": "CLEAN", "isDraft": False,
+        "autoMergeRequest": None, "updatedAt": old, "createdAt": old,
+        "statusCheckRollup": [
+            {"__typename": "CheckRun", "name": "test", "conclusion": "SUCCESS",
+             "status": "COMPLETED", "startedAt": old},
+            {"__typename": "CheckRun", "name": "test-postgres", "conclusion": "SUCCESS",
+             "status": "COMPLETED", "startedAt": old},
+            {"__typename": "StatusContext", "context": "fleet-code-review", "state": "FAILURE"},
+        ],
+    }
+    # AC2: a REQUIRED check itself fails -- the existing true-positive behaviour is unchanged.
+    pr_required_red = {
+        "number": 2, "headRefOid": "b" * 40, "mergeStateStatus": "CLEAN", "isDraft": False,
+        "autoMergeRequest": None, "updatedAt": old, "createdAt": old,
+        "statusCheckRollup": [
+            {"__typename": "CheckRun", "name": "test", "conclusion": "FAILURE",
+             "status": "COMPLETED", "startedAt": old},
+        ],
+    }
+    # AC3: the required check reports through the legacy commit-status schema (red in .state,
+    # not .conclusion, same schema split PR#3127 proved) -- must still classify check-failed.
+    pr_required_red_legacy = {
+        "number": 3, "headRefOid": "c" * 40, "mergeStateStatus": "CLEAN", "isDraft": False,
+        "autoMergeRequest": None, "updatedAt": old, "createdAt": old,
+        "statusCheckRollup": [
+            {"__typename": "StatusContext", "context": "test", "state": "FAILURE"},
+        ],
+    }
+    prs = [pr_advisory_red, pr_required_red, pr_required_red_legacy]
+
+    picked = classify(expr_required, prs)
+    assert picked.get("1") != "check-failed", (
+        "a PR whose only red entry is a non-required advisory check was classified "
+        f"check-failed -- got {picked.get('1')!r} (gh#740 AC1)"
+    )
+    assert picked.get("2") == "check-failed", (
+        f"a genuinely failing REQUIRED check stopped firing check-failed -- got {picked.get('2')!r} (AC2)"
+    )
+    assert picked.get("3") == "check-failed", (
+        "a required check reporting through the legacy commit-status schema (red in .state) "
+        f"was not classified check-failed -- got {picked.get('3')!r} (AC3, PR#3127's schema split)"
+    )
+
+    # AC4: required-contexts lookup failed/empty -- must fall back to today's exact behaviour,
+    # i.e. ANY red entry (including a purely-advisory one) sets check-failed. Fail-open: a
+    # the-fixer that goes blind to real failures is strictly worse than one that is noisy.
+    fallback_picked = classify(expr_fallback, [pr_advisory_red])
+    assert fallback_picked.get("1") == "check-failed", (
+        "when the required-contexts lookup fails/returns empty, the fallback must classify "
+        f"ANY red entry as check-failed -- got {fallback_picked.get('1')!r} (AC4)"
+    )
+
+
+def _fixer_check_failed_falls_back_when_required_contexts_call_fails():
+    """gh#740 AC4, the bash side: `required_contexts()` itself must fail OPEN (return empty, so
+    read_stale_prs() falls back to any-red-check classification) whenever the branch-protection
+    read comes back empty -- no protection configured, a non-200, a timeout kill, or a token
+    without the scope. Stubs `gh api .../protection` to return an empty list and confirms the
+    function prints nothing (its documented "fall back" contract) and logs the fallback.
+    """
+    import subprocess
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        bin_dir = Path(tmp) / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        log = log_dir / "the-fixer.log"
+
+        (bin_dir / "gh").write_text(
+            "#!/bin/bash\n"
+            "if [ \"$1\" = \"repo\" ]; then echo 'The-Good-Project-Team fleet-kit'; exit 0; fi\n"
+            "if [ \"$1\" = \"api\" ]; then echo '[]'; exit 0; fi\n"
+            "exit 0\n"
+        )
+        (bin_dir / "gh").chmod(0o755)
+
+        body = (ROOT / "members" / "the-fixer" / "check.sh").read_text().split(
+            "required_contexts() {", 1
+        )[1].split("\nread_stale_prs()", 1)[0]
+        script = (
+            f"LOG={log}\n"
+            "log() { echo \"[ts] $*\" >> \"$LOG\"; }\n"
+            "required_contexts() {" + body
+            + "\nrequired_contexts\n"
+        )
+
+        proc = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True, text=True, timeout=30,
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+        )
+        assert proc.returncode == 0, f"required_contexts() failed: {proc.stderr.strip()[:300]}"
+        assert proc.stdout.strip() == "", (
+            f"required_contexts() must print nothing when the lookup is empty -- got {proc.stdout!r} (AC4)"
+        )
+        logtext = log.read_text() if log.exists() else ""
+        assert "falling back" in logtext, \
+            f"an empty required-contexts lookup must log the fallback -- log was {logtext!r}"
 
 
 def _fixer_does_not_fire_on_a_parked_pr_already_in_the_merge_queue():
@@ -13089,6 +13245,10 @@ if __name__ == "__main__":
           _check_share_sum_never_reports_ok_on_stale_or_missing_shares)
     check("jefe owns the fleet-wide token budget", _jefe_owns_the_fleet_wide_token_budget)
     check("the-fixer sees a green-but-parked PR", _fixer_sees_a_green_but_parked_pr)
+    check("the-fixer check-failed ignores a non-required advisory check (gh#740)",
+          _fixer_check_failed_ignores_a_non_required_advisory_check)
+    check("the-fixer check-failed falls back when required-contexts lookup fails (gh#740)",
+          _fixer_check_failed_falls_back_when_required_contexts_call_fails)
     check("the-fixer does not fire on a parked PR already in the merge queue",
           _fixer_does_not_fire_on_a_parked_pr_already_in_the_merge_queue)
     check("a green PR with no auto-merge gets armed", _green_pr_with_no_auto_merge_gets_armed)

@@ -171,18 +171,53 @@ queued_prs() { # <space-separated pr numbers> -> the subset that already has a m
     -q '.data | to_entries[] | select(.value.pullRequest.mergeQueueEntry != null) | .key | ltrimstr("pr")' \
     2>>"$LOG"
 }
+# gh#740: `$failed` used to fire on ANY red statusCheckRollup entry, with no reference to which
+# checks the branch actually requires. judge-judy's own `fleet-code-review` gate is deliberately
+# advisory on this repo's main (gh#3084) -- only the branch's required contexts actually gate a
+# merge -- so a PR with every required check green, auto-merge armed, and a live queue position
+# was still classified check-failed forever: the advisory status never flips, so nothing ever
+# clears it. Live proof: PR#4910 was re-investigated three separate times while healthy and
+# already queued at position 1. required_contexts() reads the gating list ONCE per sweep (same
+# one-round-trip discipline queued_prs() uses for mergeQueueEntry) so read_stale_prs() can ask
+# "is a REQUIRED check red" instead of "is anything red".
+required_contexts() { # -> JSON array literal of required status-check names, or "" to fail open
+  local owner name ctx
+  read -r owner name < <(gh repo view --json owner,name -q '.owner.login + " " + .name' 2>>"$LOG")
+  if [ -z "$owner" ]; then
+    log "required_contexts: gh repo view failed -- falling back to any-red-check classification"
+    return
+  fi
+  ctx=$(timeout 15s gh api "repos/$owner/$name/branches/${FIXER_DEFAULT_BRANCH:-main}/protection" \
+    --jq '(.required_status_checks.contexts // []) | tojson' 2>>"$LOG")
+  # Fail-open, deliberately, on every one of: no branch protection configured, a non-200, a
+  # timeout kill, or a token without the scope -- a the-fixer that goes blind to real failures
+  # is strictly worse than one that is noisy (gh#740 AC4).
+  if [ -z "$ctx" ] || [ "$ctx" = "[]" ] || [ "$ctx" = "null" ]; then
+    log "required_contexts: no required contexts readable for $owner/$name -- falling back to any-red-check classification"
+    return
+  fi
+  printf '%s' "$ctx"
+}
 read_stale_prs() { # -> space-separated "num:sha:reason" triples, oldest first, or nothing
   # `gh ... -q/--jq` is a plain expression string, NOT the real jq CLI -- it has no --arg flag
   # to bind the cutoff safely, so it's computed here and interpolated as a quoted ISO-8601
   # literal into the expression itself (a timestamp string, not attacker-controlled input).
-  local cutoff raw candidates queued entry num reason filtered=()
+  # required_json is interpolated the same way (gh#740 AC7): a JSON array literal built from
+  # GitHub's own branch-protection response, not attacker-controlled input.
+  local cutoff raw candidates queued entry num reason filtered=() required_json required_filter
   cutoff=$(date -u -d "-${STALE_PENDING_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
            || date -u -v-"${STALE_PENDING_HOURS}"H +%Y-%m-%dT%H:%M:%SZ)
+  required_json=$(required_contexts)
+  if [ -n "$required_json" ]; then
+    required_filter=" | select((.name // .context // \"\") as \$n | ($required_json) | index(\$n) != null)"
+  else
+    required_filter=""
+  fi
   raw=$(gh pr list --state open --limit 30 \
     --json number,headRefOid,mergeStateStatus,statusCheckRollup,isDraft,autoMergeRequest,updatedAt \
     -q '
       sort_by(.number) | .[] |
-      ( [.statusCheckRollup[]? | select(.conclusion == "FAILURE" or .state == "FAILURE")] | length > 0 ) as $failed |
+      ( [.statusCheckRollup[]? | select(.conclusion == "FAILURE" or .state == "FAILURE")'"$required_filter"'] | length > 0 ) as $failed |
       ( .mergeStateStatus == "DIRTY" ) as $conflict |
       ( [.statusCheckRollup[]?
           | select(.status != null and .status != "COMPLETED" and .startedAt != null and .startedAt < "'"$cutoff"'")
