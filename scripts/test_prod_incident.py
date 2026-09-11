@@ -125,5 +125,73 @@ class CrossMemberDedupTests(unittest.TestCase):
         self.assertEqual(len(gh.issues), 1)
 
 
+class TargetDiscriminatorTests(unittest.TestCase):
+    """gh#836: `find_open_incident()` matched on the marker alone, so two distinct,
+    concurrently-open outages (two different failing URLs) collapsed onto one issue -- the
+    second one silently invisible. AC1-6."""
+
+    A = "https://a.example/health"
+    B = "https://b.example/health"
+
+    def _file(self, gh, target, title="t", body="b"):
+        return pi.file_or_update_incident("acme/prod", title, body, ["incident"], run=gh,
+                                            target=target)
+
+    def test_two_targets_each_find_their_own_issue_regardless_of_gh_order(self):
+        """AC1 + AC5: order-independence."""
+        gh = FakeGh()
+        a, _ = self._file(gh, self.A)
+        b, _ = self._file(gh, self.B)
+        self.assertEqual(pi.find_open_incident("acme/prod", target=self.B, run=gh), b)
+        self.assertEqual(pi.find_open_incident("acme/prod", target=self.A, run=gh), a)
+
+        gh.issues = dict(reversed(list(gh.issues.items())))
+        self.assertEqual(pi.find_open_incident("acme/prod", target=self.B, run=gh), b)
+        self.assertEqual(pi.find_open_incident("acme/prod", target=self.A, run=gh), a)
+
+    def test_filing_a_second_target_creates_a_new_issue_and_comments_on_neither(self):
+        """AC2."""
+        gh = FakeGh()
+        a, _ = self._file(gh, self.A)
+        b, created = self._file(gh, self.B)
+        self.assertTrue(created)
+        self.assertNotEqual(a, b)
+        self.assertEqual(gh.issues[a]["comments"], [])
+
+    def test_refiling_the_same_target_comments_on_its_own_issue_only(self):
+        """AC3: gh#728 fix 3's race behaviour, unchanged for a repeat same-target filing."""
+        gh = FakeGh()
+        a, _ = self._file(gh, self.A)
+        number, created = self._file(gh, self.A, body="b2")
+        self.assertFalse(created)
+        self.assertEqual(number, a)
+        self.assertEqual(len(gh.issues), 1)
+        self.assertIn("b2", gh.issues[a]["comments"])
+
+    def test_no_open_incident_still_creates_one_as_before(self):
+        """AC4."""
+        gh = FakeGh()
+        number, created = self._file(gh, self.A)
+        self.assertTrue(created)
+        self.assertEqual(len(gh.issues), 1)
+
+    def test_legacy_issue_with_no_recorded_target_never_crashes_and_matches_any_target(self):
+        """AC6. Chosen behaviour (stated here and in the PR body): an issue with no recorded
+        target -- filed before gh#836, or by a caller with no discriminator to supply (today,
+        fixer_fire_path.py) -- matches ANY target search. The alternative (never matching) would
+        silently break gh#728 fix 3's cross-member race dedup for that exact caller, which
+        gh#836's PRD lists as a non-goal to preserve; see CrossMemberDedupTests above, which
+        exercises that dedup with no target on one side."""
+        gh = FakeGh()
+        gh.issues[1] = {"title": "legacy", "open": True,
+                         "body": f"pre-gh836 incident\n\n{pi.INCIDENT_MARKER}", "comments": []}
+        gh._next = 2
+        self.assertEqual(pi.find_open_incident("acme/prod", target=self.A, run=gh), 1)
+        number, created = self._file(gh, self.B)
+        self.assertFalse(created)
+        self.assertEqual(number, 1)
+        self.assertEqual(len(gh.issues), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
