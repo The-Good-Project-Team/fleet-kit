@@ -338,8 +338,16 @@ def find_open_incident(title: str, runner=_run_gh) -> int | None:
 
 
 def find_all_open_incidents(runner=_run_gh) -> list[int]:
-    return [issue["number"] for issue in _list_open_incidents(runner)
-            if (issue.get("title") or "").startswith(INCIDENT_TITLE_PREFIX)]
+    """Union of two matches, not just one -- an incident this script itself titled ("prod
+    down: ...", including its own heartbeat ticket) AND any shared, marker-carrying incident
+    fixer_fire_path.py may have filed FIRST under its own different title ("PROD DOWN --
+    automatic rollback ..."). Title-prefix alone would never find the second kind (code review
+    on gh#728 VP fix 3), silently skipping the recovery comment on a ticket both members share.
+    """
+    by_title = {issue["number"] for issue in _list_open_incidents(runner)
+                if (issue.get("title") or "").startswith(INCIDENT_TITLE_PREFIX)}
+    by_marker = set(prod_incident.find_all_open_incidents(INCIDENT_REPO, run=runner))
+    return sorted(by_title | by_marker)
 
 
 def build_file_cmd(title: str, body: str) -> list[str]:
