@@ -11336,6 +11336,104 @@ def _journey_walker_console_url_env_override_wins_unchanged_gh724():
     assert users.fleet_console_url == "https://example.com/custom-console", users.fleet_console_url
 
 
+def _stash_pile_test_repo(tmp_path):
+    """A throwaway git repo with three stash entries: a managed one whose diff will already be
+    on HEAD (redundant), a managed one that is still unique (must survive), and a foreign one
+    with no `run=` marker (must never be inspected or dropped). Mirrors gh#714's own live
+    verification, just on a scratch repo instead of $REPO."""
+    import subprocess as sp
+
+    def git(*args):
+        r = sp.run(["git", "-C", str(tmp_path), *args], capture_output=True, text=True)
+        assert r.returncode == 0, f"git {args} failed: {r.stderr}"
+        return r.stdout
+
+    git("init", "-q")
+    git("config", "user.email", "t@t.com")
+    git("config", "user.name", "t")
+    (tmp_path / "a.txt").write_text("base\n")
+    git("add", "a.txt")
+    git("commit", "-q", "-m", "base")
+
+    (tmp_path / "a.txt").write_text("base\nleaked-change-A\n")
+    git("stash", "push", "-u", "-m",
+        "postflight-dirty-check auto-stash run=alice-1-1 2026-09-08T09:00:00Z", "-q")
+
+    (tmp_path / "b.txt").write_text("leaked-change-B-unique\n")
+    git("stash", "push", "-u", "-m",
+        "postflight-dirty-check auto-stash run=bob-2-1 2026-09-08T10:00:00Z", "-q")
+
+    (tmp_path / "c.txt").write_text("someones manual wip\n")
+    git("stash", "push", "-u", "-m", "manual-wip-not-ours", "-q")
+
+    # Land alice's leaked change on HEAD another way -- her stash entry is now redundant.
+    (tmp_path / "a.txt").write_text("base\nleaked-change-A\n")
+    git("add", "a.txt")
+    git("commit", "-q", "-m", "alice's change landed via a real PR")
+    return git
+
+
+def _stash_pile_expiry_drops_only_redundant_managed_entries_gh714():
+    """gh#714 AC1/AC2: a managed entry whose diff is already reflected in $REPO's current HEAD
+    is dropped; a managed entry that still carries unique content is retained regardless of
+    age."""
+    import stash_pile_expiry as spe
+    with tempfile.TemporaryDirectory() as d:
+        tmp_path = Path(d)
+        git = _stash_pile_test_repo(tmp_path)
+        spe.run_expiry(str(tmp_path), d, ceiling=99)
+        remaining = git("stash", "list")
+        assert "run=alice-1-1" not in remaining, \
+            f"alice's redundant entry should have been dropped: {remaining}"
+        assert "run=bob-2-1" in remaining, \
+            f"bob's still-unique entry must survive: {remaining}"
+
+
+def _stash_pile_expiry_never_touches_foreign_entries_gh714():
+    """gh#714 AC3: a stash entry with no `postflight-dirty-check auto-stash run=` marker is
+    never inspected or dropped, even though its diff (an untracked new file) would otherwise
+    read as non-empty either way -- this proves it survives because it was skipped, not merely
+    because it happened to look non-redundant."""
+    import stash_pile_expiry as spe
+    with tempfile.TemporaryDirectory() as d:
+        tmp_path = Path(d)
+        git = _stash_pile_test_repo(tmp_path)
+        state = spe.run_expiry(str(tmp_path), d, ceiling=99)
+        remaining = git("stash", "list")
+        assert "manual-wip-not-ours" in remaining, \
+            f"a foreign stash entry must never be dropped: {remaining}"
+        # Only the two run= entries were ever counted; the foreign one was not even checked.
+        assert state["checked"] == 2, state
+
+
+def _stash_pile_expiry_report_is_parseable_and_tracks_last_run_gh714():
+    """gh#714 AC4: `report` is a single parseable line naming depth, oldest age, and what the
+    last `run` did -- not prose a human has to read a log to reconstruct."""
+    import stash_pile_expiry as spe
+    with tempfile.TemporaryDirectory() as d:
+        tmp_path = Path(d)
+        _stash_pile_test_repo(tmp_path)
+        before = spe.report(str(tmp_path), d)
+        assert before["depth"] == 3 and before["last_run_at"] == "never", before
+        spe.run_expiry(str(tmp_path), d, ceiling=99)
+        after = spe.report(str(tmp_path), d)
+        assert after["depth"] == 2 and after["last_run_dropped"] == 1, after
+        assert after["last_run_at"] != "never", after
+
+
+def _stash_pile_expiry_warns_distinctly_when_still_over_ceiling_gh714():
+    """gh#714 AC5: once expiry has run, a pile still deeper than its ceiling gets a distinct,
+    greppable warning naming the depth -- not silence, and not the same line a successful
+    within-ceiling run would produce."""
+    import stash_pile_expiry as spe
+    with tempfile.TemporaryDirectory() as d:
+        tmp_path = Path(d)
+        _stash_pile_test_repo(tmp_path)
+        spe.run_expiry(str(tmp_path), d, ceiling=0)
+        alerts = (Path(d) / spe.ALERT_LOG_NAME).read_text()
+        assert "STASH_PILE_CEILING_EXCEEDED depth=2 ceiling=0" in alerts, alerts
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -11643,6 +11741,11 @@ if __name__ == "__main__":
 
     check("journey_walker fleet-console default resolves to the instance's real console path, not the bare host (gh#724 AC1)", _journey_walker_console_url_defaults_to_fleet_instance_path_gh724)
     check("journey_walker fleet-console URL: an explicit FLEET_CONSOLE_URL wins unchanged (gh#724 AC2)", _journey_walker_console_url_env_override_wins_unchanged_gh724)
+
+    check("stash_pile_expiry drops a managed entry whose diff is already on HEAD, keeps a still-unique one (gh#714 AC1/AC2)", _stash_pile_expiry_drops_only_redundant_managed_entries_gh714)
+    check("stash_pile_expiry never inspects or drops a foreign (non-run=) stash entry (gh#714 AC3)", _stash_pile_expiry_never_touches_foreign_entries_gh714)
+    check("stash_pile_expiry report is parseable and tracks the last run's drop count (gh#714 AC4)", _stash_pile_expiry_report_is_parseable_and_tracks_last_run_gh714)
+    check("stash_pile_expiry warns distinctly when the pile is still over ceiling after a run (gh#714 AC5)", _stash_pile_expiry_warns_distinctly_when_still_over_ceiling_gh714)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:
