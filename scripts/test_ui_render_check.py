@@ -9,6 +9,7 @@ before this PR, so importing it raised ImportError.
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -55,6 +56,58 @@ def test_no_files_changed_selects_nothing():
 def test_main_skips_cleanly_when_nothing_relevant_changed(tmp_path=None):
     rc = urc.main(["--changed-files", "scripts/ask.py", "docs/quality-standard.md"])
     assert rc == 0
+
+
+def test_write_report_run_url_appears_before_any_screenshot_path():
+    tmp_path = Path(tempfile.mkdtemp())
+    report = {
+        "surfaces": {
+            "/": {
+                "name": "fleet_home",
+                "renders": {
+                    "390x844": {
+                        "screenshot": "qa-out/ui_render/fleet_home_390x844.png",
+                        "console_errors": [], "text_len": 500, "blank": False,
+                        "settle_seconds": 1.5,
+                    },
+                    "1280x800": {
+                        "screenshot": "qa-out/ui_render/fleet_home_1280x800.png",
+                        "console_errors": [], "text_len": 600, "blank": False,
+                        "settle_seconds": 2.0,
+                    },
+                },
+            }
+        }
+    }
+    urc._write_report(tmp_path, report, run_url="https://example.invalid/actions/runs/123")
+    text = (tmp_path / "report.md").read_text()
+    url_pos = text.index("https://example.invalid/actions/runs/123")
+    path_pos = text.index("fleet_home_390x844.png")
+    assert url_pos < path_pos
+    assert "1280x800" in text
+    assert "waited 1.5s" in text
+
+
+def test_write_report_no_run_url_still_writes_paths():
+    tmp_path = Path(tempfile.mkdtemp())
+    report = {
+        "surfaces": {
+            "/": {
+                "name": "fleet_home",
+                "renders": {
+                    "390x844": {
+                        "screenshot": "qa-out/ui_render/fleet_home_390x844.png",
+                        "console_errors": [], "text_len": 500, "blank": False,
+                        "settle_seconds": 0.5,
+                    },
+                },
+            }
+        }
+    }
+    urc._write_report(tmp_path, report, run_url=None)
+    text = (tmp_path / "report.md").read_text()
+    assert "fleet_home_390x844.png" in text
+    assert "Screenshots & full report" not in text
 
 
 if __name__ == "__main__":
