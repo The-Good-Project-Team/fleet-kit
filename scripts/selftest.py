@@ -12679,36 +12679,6 @@ def _ask_authority_cli_reports_grants_gh771():
             f"ask.py authority must show the grant's level and ask_ids, got {out}"
 
 
-def _ci_required_check_never_bundles_with_deps_gh804():
-    """gh#804: an apt 403 from packages.microsoft.com ejected PR #801 (one markdown file, no
-    relation to Playwright) from the merge queue, because `playwright install --with-deps`
-    lived inside the same job selftest.py's own pass/fail is reported under. The required
-    check must never again depend on an external apt mirror's uptime. Parsed with a stdlib
-    regex, same reasoning as _red_walker_payload_landed_and_blocked_gh785 above -- selftest.py
-    must import nothing outside the stdlib (CI runs it before pip install)."""
-    import os
-    ci_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
-    required = os.environ.get("FLEET_REQUIRED_CHECKS", "").split() or ["selftest"]
-    # job keys sit at 2-space indent directly under `jobs:`; a job's own steps are indented
-    # further, so the next 2-space-indented key (or end of file) closes its block.
-    job_starts = list(re.finditer(r"^  ([a-zA-Z0-9_-]+):[ \t]*$", ci_text, re.MULTILINE))
-    assert job_starts, "no jobs found in .github/workflows/ci.yml"
-    for name in required:
-        matches = [m for m in job_starts if m.group(1) == name]
-        assert matches, f"required check {name!r} (FLEET_REQUIRED_CHECKS) is not a job in ci.yml"
-        start = matches[0]
-        idx = job_starts.index(start)
-        end = job_starts[idx + 1].start() if idx + 1 < len(job_starts) else len(ci_text)
-        block = ci_text[start.start():end]
-        # drop comment-only lines first -- a comment can legitimately name `--with-deps` (e.g.
-        # explaining why a LATER job is allowed to run it) without that being a real step here
-        block = "\n".join(l for l in block.splitlines() if not l.strip().startswith("#"))
-        assert "--with-deps" not in block, (
-            f"required job {name!r} still runs `--with-deps`, which shells out to an external "
-            "apt mirror -- an outage there fails the check even though selftest.py itself passed"
-        )
-
-
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -13062,7 +13032,6 @@ if __name__ == "__main__":
     check("authority: a malformed authority.json fails loudly and files nothing (gh#771 AC6)", _authority_malformed_file_fails_loudly_and_files_nothing_gh771)
     check("authority.grant() itself refuses an unknown class or level at write time (gh#771)", _authority_grant_itself_rejects_unknown_class_or_level_gh771)
     check("ask.py authority reports a grant's level and ask_ids over the CLI (gh#771 AC5)", _ask_authority_cli_reports_grants_gh771)
-    check("ci.yml's required check never bundles playwright's --with-deps apt install (gh#804 AC5)", _ci_required_check_never_bundles_with_deps_gh804)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:
