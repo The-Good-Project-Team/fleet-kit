@@ -32,7 +32,13 @@ landed, so this is deliberately the simplest form that satisfies AC1, not the fi
 own instruction), or this module's parsing updates to match whatever #570 actually ships.
 
 `<instance>` resolves from `$FLEET_INSTANCE_NAME`, falling back to `"default"` -- the same
-fallback entrypoint.sh's own crontab-forwarding comment already uses for this variable.
+fallback entrypoint.sh's own crontab-forwarding comment already uses for this variable. A
+trailing `-green`/`-blue` deploy-slot suffix is stripped first (fk#559 VP review fix 2):
+`deploy.sh:197` bakes the container's `-green` name into `FLEET_INSTANCE_NAME` at `podman run`
+time and the later cutover rename to the live name never restarts the container to pick up a
+new env, so the live value on a deployed box is permanently `<instance>-green` (confirmed
+2026-09-11: `fleet-kit-server-fleet-green`). Nobody hand-writes a plan file at
+`docs/plan/<instance>-green.md`.
 
 Pure core (`parse_bets`, `issue_bet_map`, `rank_candidates`), thin CLI (`main`) -- same split
 as vision_link_gate.py and quality_gate.py.
@@ -54,10 +60,13 @@ _ANY_HEADING_RE = re.compile(r"^(#{1,6})\s+\S", re.MULTILINE)
 _ISSUE_TOKEN_RE = re.compile(r"#(\d+)\b")
 _LIST_MARKER_RE = re.compile(r"^[-*]\s*")
 _NUMBER_MARKER_RE = re.compile(r"^\d+[.)]\s*")
+_SLOT_SUFFIX_RE = re.compile(r"-(?:green|blue)$")
 
 
 def resolve_instance() -> str:
-    return os.environ.get("FLEET_INSTANCE_NAME") or "default"
+    """`$FLEET_INSTANCE_NAME` with any deploy-slot suffix stripped -- see module docstring."""
+    name = os.environ.get("FLEET_INSTANCE_NAME") or "default"
+    return _SLOT_SUFFIX_RE.sub("", name)
 
 
 def plan_path_for_instance(instance: str | None = None, root: Path | None = None) -> Path:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -73,6 +74,30 @@ class CollectIncludesWorldClassOpenTests(unittest.TestCase):
              unittest.mock.patch.object(mb, "pages", return_value=[]):
             out = mb.collect(14)
         self.assertEqual(out["world_class_open"], sentinel)
+
+
+class PlanBetsTests(unittest.TestCase):
+    """fk#559 VP review fix 1 + fix 4: plan_bets() shares plan_rank's path resolver and names
+    an absent plan explicitly instead of returning "" (which the charter would otherwise read
+    as "brief broken", not "no plan yet")."""
+
+    def test_no_plan_file_returns_explicit_marker_naming_the_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"FLEET_REPO": tmp, "FLEET_INSTANCE_NAME": "no-such-instance"}
+            with unittest.mock.patch.dict("os.environ", env, clear=False):
+                out = mb.plan_bets()
+        self.assertTrue(out.startswith("no plan file at "))
+        self.assertTrue(out.endswith("no-such-instance.md yet"))
+
+    def test_plan_file_uses_the_same_path_plan_rank_resolves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "docs" / "plan"
+            plan_dir.mkdir(parents=True)
+            (plan_dir / "an-instance.md").write_text("## Bets\n1. Do the thing -- #1\n")
+            env = {"FLEET_REPO": tmp, "FLEET_INSTANCE_NAME": "an-instance-green"}
+            with unittest.mock.patch.dict("os.environ", env, clear=False):
+                out = mb.plan_bets()
+        self.assertIn("Do the thing -- #1", out)
 
 
 if __name__ == "__main__":
