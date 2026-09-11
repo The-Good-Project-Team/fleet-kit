@@ -11659,6 +11659,39 @@ def _filer_red_profile_uses_red_label_and_marker_gh785():
     assert label_create[3].endswith("red-team")
 
 
+def _filer_lookup_failure_never_files_a_duplicate_gh914():
+    # gh#914: a `gh issue list` call that fails (rate limit, network blip) must never be read
+    # as "no open issue found" -- that misreading filed #911/#912 as duplicates of #814/#884.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("jif", ROOT / "scripts" / "journey_issue_filer.py")
+    jif = importlib.util.module_from_spec(spec); sys.modules[spec.name] = jif; spec.loader.exec_module(jif)
+
+    create_calls = []
+
+    def flaky(cmd):
+        if cmd[1] == "label":
+            return 0, "ok"
+        if cmd[2] == "list":
+            return 1, "rate limited"
+        if cmd[2] == "create":
+            create_calls.append(cmd)
+            return 0, "https://github.com/x/y/issues/999"
+        raise AssertionError(f"unexpected call: {cmd}")
+
+    d = Path(tempfile.mkdtemp())
+    results = {
+        "run": "r1", "deploy_sha": "sha1",
+        "journeys": [{"id": "send-message", "name": "Send a message",
+                      "steps": [{"index": 0, "action": "fill and send", "observable_result": "sent",
+                                 "status": "fail"}]}],
+    }
+    (d / "results.json").write_text(json.dumps(results))
+    summary = jif.process(d / "results.json", d / "state.json", runner=flaky)
+    assert create_calls == [], f"a lookup failure must file zero new issues, got {create_calls}"
+    assert summary["filed"] == [], summary
+    assert len(summary["skipped"]) == 1, summary
+
+
 def _red_member_paced_and_vp_gates_on_red_gh785():
     import member_spec
     red = member_spec.by_name("red", ROOT / "members")
@@ -12131,6 +12164,109 @@ def _charter_bloat_check_never_prints_ok_over_unread_prs_fk908():
         finally:
             cbc.fetch_merged_prs, _sys.argv = real_fetch, real_argv
     assert rc2 == 2 and out2.getvalue().strip() == "", (rc2, out2.getvalue())
+
+
+def _charter_bloat_check_mergedat_tie_mixed_number_types_gh920():
+    """gh#920 (code review on #913): `analyze()`'s `touching` tuples are
+    `(mergedAt, number, additions, deletions)` where `number` is an int for a squash-merged PR
+    and a str (short SHA) for a direct push. Two rows tying on mergedAt's second precision used
+    to fall through tuple comparison to `number`, and Python can't compare int < str -- crash,
+    exit 1, and jefe.md:317 reads exit 1 as a real NEEDS CONSOLIDATION flag on an unnamed
+    charter. (1) proves the raw tuple shape really does raise TypeError on that tie -- so this
+    test would have failed loudly against the pre-fix sort key, not silently passed either way.
+    (2) proves `analyze()` itself no longer raises on the identical input. (3) proves the verdict
+    for a mixed-type tie matches what the equivalent all-int input produces -- the fix must only
+    stop the crash, not change which charter gets flagged."""
+    import charter_bloat_check as cbc
+
+    tie = "2026-09-11T12:00:00+00:00"
+    older = "2026-09-10T00:00:00+00:00"
+    rel = "members/x/x.md"
+
+    # (1) The exact tuple shape `analyze()` used to sort on DOES raise TypeError on this tie --
+    # confirming the regression this test guards is real, not hypothetical.
+    try:
+        sorted([(tie, 200, 5, 0), (tie, "deadbeef1", 3, 0)], reverse=True)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError(
+            "mixed int/str tuple comparison no longer raises TypeError on its own -- "
+            "the premise behind gh#920's regression test has changed, re-check it"
+        )
+
+    # (2) `analyze()` on the same tie, through the real code path, must not raise.
+    rows_mixed = [
+        {"number": 200, "mergedAt": tie, "files": [{"path": rel, "additions": 5, "deletions": 0}]},
+        {"number": "deadbeef1", "mergedAt": tie,
+         "files": [{"path": rel, "additions": 3, "deletions": 0}]},
+        {"number": 150, "mergedAt": older,
+         "files": [{"path": rel, "additions": 1, "deletions": 10}]},
+    ]
+    res_mixed = cbc.analyze([rel], rows_mixed)[rel]
+    assert res_mixed["count_since_consolidation"] == 2, res_mixed
+    assert res_mixed["last_consolidation_pr"] == 150, res_mixed
+
+    # (3) An equivalent all-int input (the str short-SHA replaced by an int PR number) must
+    # produce the identical verdict -- the fix only widens what the sort key can compare.
+    rows_all_int = [dict(r) for r in rows_mixed]
+    rows_all_int[1] = dict(rows_all_int[1], number=201)
+    res_all_int = cbc.analyze([rel], rows_all_int)[rel]
+    assert res_mixed == res_all_int, (res_mixed, res_all_int)
+
+    # (4) Distinct mergedAt values still sort newest-first (regression, not just the tie case).
+    newer = "2026-09-12T00:00:00+00:00"
+    rows_ordered = [
+        {"number": 1, "mergedAt": older, "files": [{"path": rel, "additions": 1, "deletions": 0}]},
+        {"number": 2, "mergedAt": newer,
+         "files": [{"path": rel, "additions": 0, "deletions": 5}]},
+    ]
+    res_ordered = cbc.analyze([rel], rows_ordered)[rel]
+    assert res_ordered["last_consolidation_pr"] == 2, \
+        "newest-first ordering broke: the newer, net-reductive row must be found first"
+    assert res_ordered["count_since_consolidation"] == 0, res_ordered
+
+
+def _charter_bloat_check_unexpected_exception_exits_2_not_1_gh920():
+    """gh#920 AC5: ANY unhandled exception in `main()` -- not just `SourceUnavailable` -- must
+    exit 2 and print to stderr, never let a bare traceback fall through to Python's default
+    exit 1. jefe.md:317 reads exit 1 as a real NEEDS CONSOLIDATION flag, so a crash anywhere
+    else in the pipeline (not only the fetch step) must not be misread as a verdict."""
+    import sys as _sys
+    import contextlib
+    import io
+    import tempfile
+    import pathlib as _pathlib
+
+    import charter_bloat_check as cbc
+
+    with tempfile.TemporaryDirectory() as td:
+        d = _pathlib.Path(td) / "members" / "gru"
+        d.mkdir(parents=True)
+        (d / "gru.md").write_text("# charter\n")
+
+        def _boom(*a, **k):
+            raise ValueError("boom: something analyze()-adjacent broke")
+
+        real_analyze, real_argv = cbc.analyze, _sys.argv
+        real_fetch = cbc.fetch_merged_prs
+        cbc.analyze = _boom
+        cbc.fetch_merged_prs = lambda *a, **k: [
+            {"number": 1, "mergedAt": "2026-09-11T00:00:00+00:00",
+             "files": [{"path": "members/gru/gru.md", "additions": 1, "deletions": 0}]}
+        ]
+        _sys.argv = ["charter_bloat_check.py", "--root", td]
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = cbc.main()
+        finally:
+            cbc.analyze, cbc.fetch_merged_prs, _sys.argv = real_analyze, real_fetch, real_argv
+
+    assert rc == 2, f"an unrelated crash must exit 2 (could-not-run), not {rc}"
+    assert out.getvalue().strip() == "", \
+        f"a crash must never print a per-charter verdict: {out.getvalue()!r}"
+    assert "boom" in err.getvalue() and "ValueError" in err.getvalue(), err.getvalue()
 
 
 def _fleet_metrics_windows_runs_and_says_unavailable_gh782():
@@ -13546,6 +13682,7 @@ if __name__ == "__main__":
     check("librarian-scrub is a shell member on the hourly line; librarian is the daily reader with /repo and /fleet-kit denied; marie+gru read INTENT.md (gh#784 AC1)", _librarian_scrub_is_shell_hourly_and_librarian_runs_daily_gh784)
     check("red_walker expands an overflow payload, inverts landed_when to fail, and blocks a 403 (gh#785 AC1-3)", _red_walker_payload_landed_and_blocked_gh785)
     check("journey_issue_filer red profile files under fleet:red-team with its own marker, sentry unchanged (gh#785 AC4)", _filer_red_profile_uses_red_label_and_marker_gh785)
+    check("journey_issue_filer never files a duplicate when the dedup lookup itself fails (gh#914)", _filer_lookup_failure_never_files_a_duplicate_gh914)
     check("red is a paced 6h member and vp requires a red pass before Accepted (gh#785 AC5)", _red_member_paced_and_vp_gates_on_red_gh785)
     check("worktree_guard_hook blocks an Edit under the shared $REPO when isolated (gh#592 AC2)", _worktree_guard_blocks_edit_under_shared_repo_gh592)
     check("worktree_guard_hook allows an Edit under the pass's own $WT_PATH (gh#592 AC5)", _worktree_guard_allows_edit_under_own_worktree_gh592)
@@ -13586,6 +13723,8 @@ if __name__ == "__main__":
     check("pacing_gate holds a zero ceiling, runs an exempt member or an unreadable meter (gh#781 AC1-3)", _pacing_gate_holds_zero_ceiling_unless_exempt_gh781)
     check("fleet_metrics computes signal_rate/avg_cost over a window, unavailable when empty (gh#782 AC1)", _fleet_metrics_windows_runs_and_says_unavailable_gh782)
     check("charter_bloat_check exits 2 with no rows when the PR list is unreadable, and reads git when gh is down (fk#908)", _charter_bloat_check_never_prints_ok_over_unread_prs_fk908)
+    check("charter_bloat_check analyze() doesn't crash on a mergedAt tie between int and str PR numbers (gh#920)", _charter_bloat_check_mergedat_tie_mixed_number_types_gh920)
+    check("charter_bloat_check exits 2, not 1, on any unexpected exception (gh#920)", _charter_bloat_check_unexpected_exception_exits_2_not_1_gh920)
     check("predict.py add/resolve: hit in the baseline->target direction, miss otherwise, unavailable on no data (gh#782 AC2)", _predict_add_resolve_hit_miss_unavailable_gh782)
     check("predict.py ledger reports hit rate and the authoring pass turns/cost (gh#782 AC3)", _predict_ledger_reports_hit_rate_and_pass_cost_gh782)
     check("predict.py judge() reads direction from the metric when baseline is unknown, never guesses (gh#789 AC4-6)", _predict_judge_uses_metric_direction_when_baseline_missing_gh789)
