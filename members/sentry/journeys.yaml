@@ -51,8 +51,6 @@
 #           OWN assertion genuinely needs the full page settled -- e.g. a screenshot that
 #           depends on webfonts having loaded -- not as a general timeout workaround. May
 #           also be set per-viewport inside viewport_overrides.
-
-
 #
 # Viewport definitions:
 #   desktop     -- 1280x800
