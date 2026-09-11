@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import traceback
@@ -265,6 +266,43 @@ def _needs_met(attack: dict, cfg: Config) -> str | None:
     return None
 
 
+def fetch_item_text(item: str, run=subprocess.run) -> str:
+    """Issue body + all comment bodies for --item -- same source closes_gate.acceptance_criteria()
+    reads (gh#881 PRD: marie's PRDs live in comments, so the body alone would miss them). Raises
+    SystemExit naming the issue on any gh failure (criterion 5) rather than falling back."""
+    try:
+        proc = run(["gh", "issue", "view", str(item), "--json", "body,comments"],
+                    capture_output=True, text=True, timeout=60)
+    except OSError as exc:
+        raise SystemExit(f"red_walker: could not read issue #{item} ({exc})")
+    if proc.returncode != 0:
+        raise SystemExit(f"red_walker: could not read issue #{item} ({proc.stderr.strip() or 'gh error'})")
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"red_walker: could not parse issue #{item} ({exc})")
+    comments = data.get("comments") or []
+    return "\n".join([data.get("body") or ""] + [c.get("body") or "" for c in comments])
+
+
+def select_attacks(attacks: list[dict], item_text: str | None, attacks_filter: list[str] | None) -> list[dict]:
+    """Pure, no network/Playwright -- unit-testable selection (criterion 7). item_text is the
+    item's PRD text (body + comments) when --item is given, else None for the unscoped path
+    (criterion 4, unchanged). An attack is selected when its target path appears in item_text --
+    the direction red_walker.py's own usage text documents (gh#881; the old code matched the
+    issue number against the target blob, which never matches, so it silently ran nothing)."""
+    selected = []
+    for attack in attacks:
+        if attacks_filter is not None and attack["id"] not in attacks_filter:
+            continue
+        if item_text is not None:
+            path = attack.get("target", {}).get("path")
+            if not path or path not in item_text:
+                continue
+        selected.append(attack)
+    return selected
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--catalog", type=Path, default=ROOT / "members" / "red" / "attacks.yaml")
@@ -280,15 +318,26 @@ def main() -> int:
     run_id = args.run_id or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     attacks_out, blocked = [], []
 
+    item_text = fetch_item_text(args.item) if args.item else None
+    selected = select_attacks(catalog["attacks"], item_text, args.attacks)
+
+    if args.item and not selected:
+        reason = f"no attack target path appears in #{args.item}'s PRD"
+        results = {"run": run_id, "deploy_sha": os.environ.get("DEPLOY_SHA", ""), "item": args.item,
+                   "journeys": [], "blocked": [], "selected": 0, "reason": reason,
+                   "summary": {"attacks": 0, "landed": 0, "blocked": 0}}
+        out_dir = args.out / run_id / "red"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "results.json").write_text(json.dumps(results, indent=2))
+        print(f"red_walker: 0 attacks selected for #{args.item} -- {reason} -> {out_dir}/results.json",
+              file=sys.stderr)
+        return 2
+
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"], headless=not args.headed)
         try:
-            for attack in catalog["attacks"]:
-                if args.attacks and attack["id"] not in args.attacks:
-                    continue
-                if args.item and args.item not in json.dumps(attack.get("target", {})):
-                    continue
+            for attack in selected:
                 missing = _needs_met(attack, cfg)
                 if missing:
                     blocked.append({"id": attack["id"], "reason": f"missing {missing}"})
