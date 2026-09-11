@@ -39,8 +39,10 @@ spawns exactly one). Your job, in order:
    `0.0` with `label: ok` even when the real hourly slice is healthy — 2026-08-26 incident. If
    it reads exactly 0.0, check `week_bank_pct` before believing the week is spent.)
 
-   **Do not compute your allowance yourself — run the script** (provably bad at this
-   arithmetic, same reason as the packing-math rule below):
+   **Do not compute your allowance yourself — run the script.** You are provably bad at this
+   arithmetic: across 69 real fanouts, N (item count, step 3) wandered 1-4 with no relationship
+   to headroom when passes re-derived it from prose instead. Same rule for `allowance_pct` here
+   and N later — run the script, never reason it out in your head:
    ```
    python3 /fleet-kit/scripts/gru_allowance.py     # reads FLEET_SHARE_CEILING_PCT + your dial
    # 0.0106      <- percent-of-week units, this is your allowance_pct
@@ -74,10 +76,8 @@ spawns exactly one). Your job, in order:
    your last known-good allowance or a small N, and SAY you were flying blind — never silently
    pretend you had a number.
 
-   **Do not do this arithmetic in your head — you are provably bad at it.** Across 69 real
-   fanouts, N wandered 1–4 with no relationship to headroom, because every pass re-derives it
-   from prose with no visibility into the others. `scripts/fanout.py` packs the hour and shows
-   its work; you own WHICH items are worth doing.
+   **`scripts/fanout.py` packs the hour and shows its work — you own WHICH items are worth
+   doing, never how many.**
 
    **Also check account readiness, separately from budget** — a pass can have plenty of budget
    left and every pool account rate-limited. Run `bash scripts/account_readiness.sh` (reads
@@ -133,11 +133,10 @@ spawns exactly one). Your job, in order:
    referenced children first. Only if at least one survives, build ONLY against the survivors
    (`gh#<epic-number>` convention) — skip 2b's query entirely. If the raw pull is empty, OR
    every item and child is claimed/needs-human-op/dead-end, fall through to 2b instead of
-   ending the pass — gh#5278: four separate passes (`gru-106698`, `gru-72302`, `gru-4219`,
-   `gru-122699`) spent a full turn budget re-confirming a 100%-blocked reif-priority tier, then
-   reported `quiet` without ever touching the regular backlog underneath it, starving
-   `fleet:priority-high` work (including a revenue-critical fix built specifically to reach it
-   faster, gh#831) of every turn in the pass.
+   ending the pass — gh#5278: four separate passes in one stretch each spent a full turn budget
+   re-confirming a 100%-blocked reif-priority tier, then reported `quiet` without ever touching
+   the regular backlog underneath it, starving `fleet:priority-high` work (including a
+   revenue-critical fix built specifically to reach it faster, gh#831) of every turn in the pass.
    Never close a `fleet:reif-priority` issue yourself — that's marie's call (marie.md Part C),
    once no child work remains.
 
@@ -257,40 +256,30 @@ spawns exactly one). Your job, in order:
    #  "bet_by_issue": {"<n>": "<the bet's text>", ...}}
    ```
    Use `ranked`'s order (not the order you queried in) when you build step 3's `--items` for
-   `fanout.py`. No plan file, or one with no bets named yet, degrades to the input order — a
-   fully supported state, not a problem for RANKING. But say so every pass in your OWN report,
-   not just when something is wrong: `plan_rank.py` itself now prints exactly one
-   `plan_rank: plan tier inactive this pass (...)` line to stderr, naming the path it resolved
-   and why, whenever the tier does nothing this pass — no plan file, a malformed one, or one
-   naming no issues (fk#559 VP review round 2 fix 2, replacing round 1 fix 3's charter-only
-   instruction: the code announces it now, not a separate `python -c` incantation you could
-   forget to run, and one that used to re-derive the path against the kit copy of this script
-   rather than the product repo — see fix 1 below). Capture that stderr line from the CLI call
-   above verbatim into your report; when the tier IS active instead, report `bet_by_issue`.
-   Don't reconstruct the path yourself — the two used to disagree (fk#559 VP review round 2 fix
-   1: `plan_path_for_instance()` now defaults to `$FLEET_REPO`, the product repo the plan file
-   actually lives in, not `/fleet-kit`, the frozen deploy copy this script ships from).
+   `fanout.py`. `plan_path_for_instance()` resolves the plan file against `$FLEET_REPO` (the
+   product repo it actually lives in, not `/fleet-kit`'s frozen deploy copy) — don't reconstruct
+   that path yourself. No plan file, or one with no bets named yet, degrades to the input order
+   — a fully supported state, not a problem for RANKING. Say so every pass either way:
+   `plan_rank.py` prints exactly one `plan_rank: plan tier inactive this pass (...)` line to
+   stderr, naming the path it resolved and why, whenever the tier does nothing this pass — no
+   plan file, a malformed one, or one naming no issues. Capture that stderr line verbatim into
+   your report; when the tier IS active instead, report `bet_by_issue`.
 
    Collect each candidate's `fleet:complexity-<1-10>` label with its number — marie's size
    estimate, what makes packing possible. No label means treat it as a 5 (median), never free.
 
    **Then give complexity-1/2 candidates a bounded head start — gh#5211.** Age-order plus the
    plan-bet preference above still leaves a cheap, high-value fix stuck behind every older item
-   in its tier that the plan doesn't happen to name: philanthropy#4903 (a 2-file fix unblocking
-   the entire Atlas $100/mo checkout, gate-eligible, complexity-2) sat at roughly position 27 of
-   its tier with zero minion runs ever, because nothing before this weighted complexity at all.
-   This partition applies only within the non-bet-named remainder of `ranked` — it never moves
-   a complexity-1/2 candidate ahead of a bet-named one. After `ranked`'s plan-bet reorder, take
-   the candidates it did NOT move to the front (i.e. everything but the bet-named block) and
-   apply one more stable partition to that remainder only: move up to the first 2 complexity-1/2
-   candidates from it (in their existing relative order) to the front of the remainder,
-   immediately following the bet-named block. This is a bounded head start, not a re-rank by
-   complexity — a bet-named candidate keeps the position `ranked` gave it regardless of its
-   complexity; the change never touches complexity-3+ candidates' relative order; and it never
-   promotes more than 2 items per pass, so a tier with many cheap items still can't crowd out the
-   rest of the hour's budget the way an unbounded complexity sort would. A tier with no
-   complexity-1/2 candidates in the non-bet-named remainder degrades silently to `ranked`'s order
-   unchanged.
+   in its tier the plan doesn't name (confirmed live: a 2-file, complexity-2 checkout fix sat at
+   position 27 of its tier with zero minion runs ever, because nothing before this weighted
+   complexity at all). Apply one more stable partition, but only within the non-bet-named
+   remainder of `ranked` (after the plan-bet reorder above): move up to the first 2
+   complexity-1/2 candidates from that remainder, in their existing relative order, to the front
+   of the remainder — immediately following the bet-named block. This never moves a
+   complexity-1/2 candidate ahead of a bet-named one, never touches complexity-3+ candidates'
+   relative order, and never promotes more than 2 items per pass, so a tier with many cheap items
+   still can't crowd out the rest of the hour's budget the way an unbounded sort would. No
+   complexity-1/2 candidates in the remainder degrades silently to `ranked`'s order unchanged.
 
 3. **Pack the hour with `fanout.py`. N is an OUTPUT, not a decision.**
 
