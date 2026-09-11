@@ -378,6 +378,13 @@ let SELECTED = null;      // currently open agent name, or null (only meaningful
 let PAGE = 'home';       // 'agent' | 'home' | 'queue' | 'settings' -- which sidebar item is active
 let GH = { prs: [], issues: [], merged: [], self_evolution: [],
            needs_human_op: { count: 0, oldest_age_hours: 0 } };
+// gh#564 fix 6: boot() now switches PAGE (and renders the page frame) from the URL hash BEFORE
+// the snapshot fetch that fills GH resolves, so a page rendered in that gap sees GH still at
+// its empty default above. renderEvolutionPage() needs to tell that apart from a real "checked
+// and there is nothing here" result -- an empty self-evolution feed before GH has loaded is not
+// evidence of anything, and VP fix #2 (never make a bare/false claim in the empty state) applies
+// just as much to a not-yet-loaded state as to a genuinely empty one.
+let GH_LOADED = false;
 let FLEET_STATE = {};
 let NUMBER_DATA = null; // last /api/number payload -- shared by the topbar tile and renderHomePage()
 let NEXT_FIRES = [];
@@ -1105,14 +1112,65 @@ function renderMergedPage() {
 // an agent-definition path as incidental work (see fleet_view_server.py's poll_gh_state for the
 // branch-name filter and why PR author can't be used). Distinct from the plain Recently Merged
 // page, which is unfiltered.
+//
+// gh#564: a single undifferentiated list under "Self-Evolution" let 23 of 31 real rows on
+// philanthropy (.claude/dumbledore-memory.md, CLAUDE.md, hooks, scripts/**, tests/**) hide
+// behind a heading that promised charter/dial/member rewrites and showed docs churn instead
+// (VP review, 2026-09-11: "the console lying more confidently than before"). Split into three
+// named sections -- charter/dial/member, docs-only, and everything else -- so an empty charter
+// section is a real, visible finding instead of indistinguishable from "nothing rendered".
 // ---------------------------------------------------------------------------------------------
+function prFiles(pr) { return pr.files || []; }
+// members/*/*.md and *.fleet.json both live under members/** (verified: every .fleet.json in
+// this repo is), so one prefix check covers marie's AC2 (fleet PRD, 2026-09-09).
+function touchesCharter(pr) { return prFiles(pr).some(f => f.path.startsWith('members/')); }
+// "docs-only" means EVERY changed file is under docs/** -- a PR that also touches CLAUDE.md or
+// .claude/* is not "docs", it's the third bucket (matches VP's live count: those files landed
+// in the 23-row "neither" bucket, not the 8-row "docs-only" one).
+function isDocsOnly(pr) {
+  const files = prFiles(pr);
+  return files.length > 0 && files.every(f => f.path.startsWith('docs/'));
+}
+
 function renderEvolutionPage() {
   if (PAGE !== 'evolution') return;
+  const t0 = performance.now();
+  // Not loaded yet (see GH_LOADED's comment): show a plain loading state, not a definitive
+  // "no charter changes" claim gh#564 fix #2 exists specifically to rule out.
+  if (!GH_LOADED) {
+    detailHeadEl.innerHTML = `<div class="title-row"><h2>Fleet self-changes — charters vs docs vs code</h2></div>`;
+    runListEl.innerHTML = '<div class="rail-section"><div class="run-empty">loading…</div></div>';
+    return;
+  }
   const prs = GH.self_evolution || [];
-  detailHeadEl.innerHTML = `<div class="title-row"><h2>Self-Evolution</h2></div>
-    <div class="spend-line">merged PRs sourced by jefe or dumbledore -- the fleet deciding its own rules should change</div>`;
-  const rowsHtml = prs.map(pr => {
-    const fileList = (pr.files || []).map(f =>
+  // Single pass: each pr is classified exactly once instead of re-testing touchesCharter/
+  // isDocsOnly per bucket.
+  const charterPRs = [], docsPRs = [], codePRs = [];
+  for (const p of prs) {
+    if (touchesCharter(p)) charterPRs.push(p);
+    else if (isDocsOnly(p)) docsPRs.push(p);
+    else codePRs.push(p);
+  }
+
+  // VP fix #4: the feed is "last 20 merged PRs per branch prefix", not a time range -- state
+  // the real span of the rows on screen rather than claiming a "window" that doesn't exist.
+  const dates = prs.map(p => p.mergedAt).filter(Boolean).sort();
+  const spanHtml = dates.length
+    ? `${prs.length} PRs, ${humanDate(dates[0], { dayOnly: true })} – ${humanDate(dates[dates.length - 1], { dayOnly: true })}`
+    : `${prs.length} PRs`;
+
+  // VP fix #3: the feed only searches jefe/dumbledore branch prefixes, so it silently misses
+  // charter/dial changes shipped on minion/feature branches. Computed from gh.merged, which
+  // already carries files + headRefName -- no new fetch, no server change (non-goals 1-2 intact).
+  const evoNumbers = new Set(prs.map(p => p.number));
+  const merged = GH.merged || [];
+  const missedCharter = merged.filter(p => !evoNumbers.has(p.number) && touchesCharter(p));
+
+  detailHeadEl.innerHTML = `<div class="title-row"><h2>Fleet self-changes — charters vs docs vs code</h2></div>
+    <div class="spend-line">${esc(spanHtml)} sourced by jefe/dumbledore branches</div>`;
+
+  const renderRow = pr => {
+    const fileList = prFiles(pr).map(f =>
       `<code>${esc(f.path)}</code> <span class="rmeta">+${f.additions}/-${f.deletions}</span>`
     ).join('<br>');
     return `<div class="rail-row">
@@ -1121,8 +1179,34 @@ function renderEvolutionPage() {
       <div class="rmeta">${esc(pr.headRefName || '')} · merged ${ago(pr.mergedAt)}</div>
       <div class="rmeta" style="margin-top:4px">${fileList}</div>
     </div>`;
-  }).join('') || '<div class="run-empty">no jefe/dumbledore self-evolution PRs found yet</div>';
-  runListEl.innerHTML = `<div class="rail-section">${rowsHtml}</div>`;
+  };
+
+  // VP fix #2: an empty charter section must name the scope it checked, never make a bare
+  // claim about "the fleet" -- charters for this fleet live in the fleet-kit repo, which this
+  // console does not query.
+  const charterHtml = charterPRs.map(renderRow).join('') ||
+    `<div class="run-empty">no charter, dial, or member changes in this repo's last ${prs.length} self-evolution PRs — charters for this fleet live in the fleet-kit repo</div>`;
+  const docsHtml = docsPRs.map(renderRow).join('') ||
+    '<div class="run-empty">no docs-only changes in this feed</div>';
+  const codeHtml = codePRs.map(renderRow).join('') ||
+    '<div class="run-empty">no other code/tooling changes in this feed</div>';
+
+  runListEl.innerHTML = `
+    <div class="rail-section">
+      <div class="rail-head">Charters, dials &amp; members <span class="count-badge">${charterPRs.length}</span></div>
+      <div class="rmeta">this section only searches jefe/dumbledore branch names -- ${missedCharter.length} of the last ${merged.length} merged PRs changed a charter or dial outside that filter and are not shown here</div>
+      ${charterHtml}
+    </div>
+    <div class="rail-section">
+      <div class="rail-head">Docs only <span class="count-badge">${docsPRs.length}</span></div>
+      ${docsHtml}
+    </div>
+    <div class="rail-section">
+      <div class="rail-head">Code &amp; tooling <span class="count-badge">${codePRs.length}</span></div>
+      ${codeHtml}
+    </div>`;
+  const elapsed = performance.now() - t0;
+  if (elapsed > 100) console.warn(`renderEvolutionPage: ${elapsed.toFixed(1)}ms, over the 100ms budget`);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1276,6 +1360,13 @@ function renderQueuePage() {
 // clean" outweighs the small cost of a full chart teardown/rebuild.
 // ---------------------------------------------------------------------------------------------
 let STATS_CHARTS = {}; // chart-id -> Chart instance, so re-renders can destroy before recreate
+// gh#564 fix 6: boot() can now invoke renderStatsPage() twice for one #stats deep link (an
+// immediate hash-driven call, then again once the slow snapshot fetch resolves) -- the existing
+// "PAGE !== 'stats'" guard below only catches navigating AWAY, not a second concurrent call
+// while still on the page, so an earlier call's chart-destroy/recreate could otherwise land
+// after a later call's and stomp fresher data onto the canvases. Each call claims a sequence
+// number and checks it's still the latest before touching any chart.
+let STATS_RENDER_SEQ = 0;
 
 function destroyStatsChart(id) {
   STATS_CHARTS[id]?.destroy();
@@ -1284,6 +1375,7 @@ function destroyStatsChart(id) {
 
 async function renderStatsPage() {
   if (PAGE !== 'stats') return;
+  const mySeq = ++STATS_RENDER_SEQ;
   detailHeadEl.innerHTML = `<div class="title-row"><h2>Stats</h2></div>`;
   runListEl.innerHTML = `
     <div class="stats-page">
@@ -1361,7 +1453,9 @@ async function renderStatsPage() {
     fetchStatsJSON('/api/stats/token_usage?hours=24'),
     fetchStatsJSON('/api/stats/backlog_history?days=14'),
   ]);
-  if (PAGE !== 'stats') return; // navigated away while awaiting -- don't render into a gone canvas
+  // navigated away, or a newer renderStatsPage() call already started, while awaiting -- don't
+  // render into a gone canvas or stomp fresher data with a stale response (gh#564 fix 6).
+  if (PAGE !== 'stats' || mySeq !== STATS_RENDER_SEQ) return;
   console.log(`[stats] time-to-data: ${Math.round(performance.now() - t0)}ms`);
 
   const selfImprove = selfImproveR.status === 'fulfilled' ? selfImproveR.value : null;
@@ -2309,6 +2403,14 @@ async function boot() {
   if (BOOTING) return;
   BOOTING = true;
   try {
+    // gh#564 fix 6: read the hash and switch pages BEFORE the slow gh-backed awaits below --
+    // those (fetchJSON('/api/snapshot') and friends) measured 90-207s on a cold load (VP
+    // review, 2026-09-11), and this used to be read only after they all resolved, so
+    // '#evolution'/'#stats'/'#queue' sat on Home with zero rows the whole time. Rendering the
+    // page frame immediately -- with whatever's cached, even nothing yet -- and letting the
+    // slow fetches fill it in below gets a deep link onto the right tab well under 5s.
+    const hashPage = (location.hash || '').slice(1);
+    if (HASH_PAGES.includes(hashPage)) { PAGE = hashPage; selectPage(PAGE); }
     let snap;
     try {
       // renderQueue() is folded into this same try -- it's still part of boot()'s own
@@ -2325,6 +2427,7 @@ async function boot() {
       ]);
       ALL_RUNS = snap.runs || [];
       GH = snap.gh || { prs: [], issues: [], merged: [], self_evolution: [] };
+      GH_LOADED = true;
       resortSidebar();
       renderSidebar();
       await renderQueue();
@@ -2333,8 +2436,6 @@ async function boot() {
       return;
     }
     clearBootError();
-    const hashPage = (location.hash || '').slice(1);
-    if (HASH_PAGES.includes(hashPage)) PAGE = hashPage;
     // gh#228: boot() used to call selectAgent(SELECTED) unconditionally here, which forces
     // PAGE = 'agent' regardless of the fire-first default set above -- respect PAGE instead,
     // so a fresh load actually lands on 'home' (gh#560) rather than being immediately overridden
@@ -2361,7 +2462,7 @@ async function boot() {
     es.onopen = () => dot.classList.add('live');
     es.onerror = () => dot.classList.remove('live');
     es.addEventListener('run', e => { onRunEvent(JSON.parse(e.data)); renderQueue(); });
-    es.addEventListener('gh', e => { GH = JSON.parse(e.data); renderSidebar(); renderQueuePage(); renderMergedPage(); renderEvolutionPage(); renderHomePage(); });
+    es.addEventListener('gh', e => { GH = JSON.parse(e.data); GH_LOADED = true; renderSidebar(); renderQueuePage(); renderMergedPage(); renderEvolutionPage(); renderHomePage(); });
     es.addEventListener('logline', e => appendLiveLine(JSON.parse(e.data)));
   } finally {
     BOOTING = false;
