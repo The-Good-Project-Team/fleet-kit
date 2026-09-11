@@ -51,7 +51,11 @@ from maxx_reader import get_headroom
 # session is on the same limit, so a hot laptop should pause the fleet, not race it (this is
 # the deliberate reverse of the 2026-08-26 reading that maxx_reader.py's header describes --
 # that one zeroed the fleet on a laptop's PACING ratio, this one yields on the shared WALL).
-# Missing fields fail open, same law as everything else in this file.
+# Missing fields fail CLOSED here, and ONLY here (2026-09-11: Reif locked out 40min
+# mid-block). A null `session_used_pct` means the handle has no live anchor, not that
+# the block is healthy -- failing open made this clamp dead code on every unanchored
+# handle. The hourly ceiling above still governs throughput, so clamping costs pace,
+# not progress; everything else in this file still fails open.
 BLOCK_S = 5 * 3600
 
 
@@ -59,7 +63,17 @@ def block_over_pace(budget: dict, slack_pct: float | None = None) -> bool:
     used = budget.get("session_used_pct")
     left = budget.get("five_reset_in_sec")
     if used is None or left is None:
-        return False
+        # FAIL CLOSED (2026-09-11 incident: Reif locked out 40min mid-block). A null
+        # session_used_pct means the handle has no live anchor -- LOGS.md: "null
+        # unanchored" -- NOT that the block is healthy. Returning False here made this
+        # clamp dead code on every unanchored handle, so the 5h guard never fired once
+        # while the hourly tier alone (which cannot see a burst) let the block burn out.
+        # An unreadable BLOCK is the one case where fail-open is wrong: the hourly
+        # ceiling still governs throughput, so clamping here costs pace, not progress.
+        # Opt out only with eyes open: FLEET_BLOCK_PACE_REQUIRE_ANCHOR=0.
+        if os.environ.get("FLEET_BLOCK_PACE_REQUIRE_ANCHOR", "1") == "0":
+            return False
+        return True
     try:
         used = float(used)
         left = float(left)
