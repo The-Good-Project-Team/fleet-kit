@@ -127,6 +127,29 @@ class DueTests(unittest.TestCase):
         self.assertEqual(out["due"], [10])
         self.assertEqual(out["skipped"][0]["number"], 11)
 
+    def test_573_minion_running_blocks_redispatch_even_with_newer_merge(self):
+        """fk#840, real #573 timeline (2026-09-11): vp posted `Not yet` at 03:55:30Z,
+        `vp_due.sh` correctly spawned the redo minion at 04:00:46Z, and at 04:30:56Z --
+        with that minion still 33 minutes into rewriting #573's files -- vp_due spawned a
+        second `vp --item 573` pass anyway. `merged` here stands in for whatever legitimately
+        claims #573 once the merge is real (the negated mention in the actual PR #838 never
+        counted as a claim at all, per ClaimsItemTests below) -- the point of this guard is
+        that a minion in flight blocks re-review regardless of what merged."""
+        NOT_YET, MERGE = "2026-09-11T03:55:30Z", "2026-09-11T04:23:07Z"
+        it = item(573, comments=[("Not yet (VP review): 7 numbered fixes", NOT_YET)], merged=[MERGE])
+        ok, why = vp_due.is_due(it, running_minions={573})
+        self.assertFalse(ok)
+        self.assertEqual(why, "minion already running")
+
+    def test_573_becomes_due_once_the_minion_clears(self):
+        """The guard delays the review, it never cancels it -- once no minion is running for
+        #573 any more, the same item is due again on the ordinary merge/verdict rule."""
+        NOT_YET, MERGE = "2026-09-11T03:55:30Z", "2026-09-11T04:23:07Z"
+        it = item(573, comments=[("Not yet (VP review): 7 numbered fixes", NOT_YET)], merged=[MERGE])
+        ok, why = vp_due.is_due(it, running_minions=set())
+        self.assertTrue(ok)
+        self.assertEqual(why, "merge newer than last verdict")
+
 
 class ClaimsItemTests(unittest.TestCase):
     """gh#636 VP round-2 fix 7: `collect()` must only count a PR as a merged build slice for
@@ -147,6 +170,15 @@ class ClaimsItemTests(unittest.TestCase):
         body = ("Tracking epics stop looking buildable to gru (gh#634 fix 1)\n\n"
                 "VP's round-1 review of fk#634 found 5 of 6 open fleet:epic issues... #636 ...")
         self.assertFalse(vp_due._claims_item(body, 636))
+
+    def test_838_negated_mention_does_not_claim_573(self):
+        """fk#840 AC3's own named fixture: PR #838's real body said #573 was explicitly NOT
+        built yet -- the bare-token regex this replaced read it as a merged build slice for
+        #573 anyway, which is what let vp_due see a fresh 'merge' and re-review #573 while
+        the redo minion from the earlier Not-yet verdict was still working it."""
+        body = ("Finding 4 (the plan page fitting one phone screen) stays open -- it depends "
+                "on #573, which has nothing merged yet.")
+        self.assertFalse(vp_due._claims_item(body, 573))
 
     def test_does_not_match_a_different_number(self):
         self.assertFalse(vp_due._claims_item("Fixes #6360", 636))
@@ -172,9 +204,42 @@ class ClaimsItemTests(unittest.TestCase):
         self.assertEqual([p["number"] for p in claiming], [1])
 
 
-def epic(n, comments=()):
-    return {"number": n, "labels": ["fleet:epic"],
-            "comments": [{"body": b, "createdAt": t} for b, t in comments]}
+def epic(n, comments=(), sub_issues=None, merged=()):
+    it = {"number": n, "labels": ["fleet:epic"],
+          "comments": [{"body": b, "createdAt": t} for b, t in comments],
+          "merged_prs": [{"number": 1, "mergedAt": t} for t in merged]}
+    if sub_issues is not None:
+        it["subIssues"] = {"nodes": [{"number": num, "state": state} for num, state in sub_issues]}
+    return it
+
+
+class EpicDueTests(unittest.TestCase):
+    """fk#840 (marie, Part C0 re-scope of #636 round-3 fix 7): the VP reviewer stops being
+    called to a tracking epic while any of its children is still open -- the same
+    tracking-only-parent reasoning PR #842 put in quality_gate.py, applied to `is_due` via
+    `closes_gate.epic_open_children` (real GitHub sub-issues, same source `redo_targets`'s
+    epic path already trusts)."""
+
+    def test_epic_with_open_child_is_not_due_even_with_a_fresh_merge(self):
+        it = epic(634, merged=[T2], sub_issues=[(651, "OPEN"), (652, "CLOSED")])
+        ok, why = vp_due.is_due(it)
+        self.assertFalse(ok)
+        self.assertIn("fleet:epic", why)
+        self.assertIn("#651", why)
+
+    def test_epic_with_every_child_closed_falls_through_to_the_normal_rule(self):
+        it = epic(634, merged=[T2], sub_issues=[(651, "CLOSED"), (652, "CLOSED")])
+        ok, why = vp_due.is_due(it)
+        self.assertTrue(ok)
+        self.assertEqual(why, "no verdict yet")
+
+    def test_epic_with_no_discoverable_children_uses_the_normal_rule(self):
+        """No subIssues link at all (an unlinked epic) never gets stuck on epic grounds --
+        same fallback closes_gate.epic_open_children already documents."""
+        it = epic(634, merged=[T2])
+        ok, why = vp_due.is_due(it)
+        self.assertTrue(ok)
+        self.assertEqual(why, "no verdict yet")
 
 
 class RedoTargetsTests(unittest.TestCase):
