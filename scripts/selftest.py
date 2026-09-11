@@ -11305,6 +11305,34 @@ def _gru_md_wires_plan_rank_before_packing_gh572():
         "gru.md's report step must require naming the bet each picked item serves (gh#572 AC5)"
 
 
+def _journey_walker_console_url_defaults_to_fleet_instance_path_gh724():
+    """gh#724 AC1: with no FLEET_CONSOLE_URL set, TestUsers must resolve the instance's real
+    console path (dino.luckymachines.co/fleet/<instance>), not the bare host -- the bare host
+    is dino's own multi-instance container list, which is what made step 0 fail in the run
+    that filed the two false product-break issues (#690/#691) this item exists to stop."""
+    import os as _os
+    import journey_walker as jw
+    old = _os.environ.get("FLEET_INSTANCE_NAME")
+    _os.environ["FLEET_INSTANCE_NAME"] = "fleet-kit"
+    try:
+        users = jw.TestUsers(env={})
+    finally:
+        if old is None:
+            _os.environ.pop("FLEET_INSTANCE_NAME", None)
+        else:
+            _os.environ["FLEET_INSTANCE_NAME"] = old
+    assert users.fleet_console_url == "https://dino.luckymachines.co/fleet/fleet-kit", \
+        users.fleet_console_url
+
+
+def _journey_walker_console_url_env_override_wins_unchanged_gh724():
+    """gh#724 AC2: an explicit FLEET_CONSOLE_URL wins unchanged -- the fix is to the default
+    only."""
+    import journey_walker as jw
+    users = jw.TestUsers(env={"FLEET_CONSOLE_URL": "https://example.com/custom-console"})
+    assert users.fleet_console_url == "https://example.com/custom-console", users.fleet_console_url
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -11609,6 +11637,9 @@ if __name__ == "__main__":
     check("plan_rank with a prose-only Bets section degrades to unchanged order, exit 0 (gh#572 AC3)", _plan_rank_ac3_prose_only_bets_degrade_to_unchanged_order_gh572)
     check("plan_rank on a malformed plan file exits 0, unchanged order, one stderr diagnostic, no traceback (gh#572 AC4)", _plan_rank_ac4_malformed_plan_exits_0_with_one_diagnostic_never_a_traceback_gh572)
     check("gru.md wires plan_rank.py after the quality gate and before packing, and its report names the bet served (gh#572 AC5)", _gru_md_wires_plan_rank_before_packing_gh572)
+
+    check("journey_walker fleet-console default resolves to the instance's real console path, not the bare host (gh#724 AC1)", _journey_walker_console_url_defaults_to_fleet_instance_path_gh724)
+    check("journey_walker fleet-console URL: an explicit FLEET_CONSOLE_URL wins unchanged (gh#724 AC2)", _journey_walker_console_url_env_override_wins_unchanged_gh724)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:
