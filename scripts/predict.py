@@ -87,12 +87,17 @@ def make(rows: list[dict], *, member: str, change: str, metric: str, target: flo
     }
 
 
-def judge(baseline: float | None, target: float, actual: float | None) -> tuple[str, bool | None]:
+def judge(baseline: float | None, target: float, actual: float | None,
+          metric: str | None = None) -> tuple[str, bool | None]:
     if actual is None:
         return "unavailable", None
     if baseline is None:
-        # No starting point: the only checkable claim is "reaches target".
-        return ("hit" if actual >= target else "miss"), None
+        # No starting point: direction can only come from the metric's own catalog entry.
+        # Unknown direction is not a guessable default (gh#789) -- unavailable, not a coin flip.
+        d = fleet_metrics.direction(metric) if metric else None
+        if d is None:
+            return "unavailable", None
+        return ("hit" if (actual >= target if d == "higher" else actual <= target) else "miss"), None
     if target > baseline:
         return ("hit" if actual >= target else "miss"), actual > baseline
     if target < baseline:
@@ -106,7 +111,7 @@ def resolve(rows: list[dict], runs: list[dict], now: float) -> list[dict]:
         if r.get("status") != "open" or float(r.get("due_ts") or 0) > now:
             continue
         actual = fleet_metrics.compute(r["metric"], runs, float(r["due_ts"]), RESOLVE_WINDOW_H)
-        status, moved = judge(r.get("baseline"), float(r["target"]), actual)
+        status, moved = judge(r.get("baseline"), float(r["target"]), actual, metric=r["metric"])
         r.update({"status": status, "actual": actual, "resolved_ts": now, "moved": moved})
         changed.append(r)
     return changed
@@ -139,18 +144,25 @@ def summarize(rows: list[dict], runs: list[dict], now: float, days: float) -> di
     counts = {s: sum(1 for r in recent if r.get("status") == s) for s in ("open", "hit", "miss", "unavailable")}
     resolved = counts["hit"] + counts["miss"]
     hits = [r for r in out_rows if r["status"] == "hit"]
+    # gh#789: a hit whose authoring pass can't be attributed is excluded from the average,
+    # never booked as $0 (docs/kpi-doctrine.md rule 5) -- and counted separately so a
+    # degraded average is visible rather than silently indistinguishable from a real one.
+    attributed_costs = [h["pass_cost_usd"] for h in hits if h["pass_cost_usd"] is not None]
     return {
         "days": days, "now": now, "rows": out_rows, **counts,
         "hit_rate": (counts["hit"] / resolved) if resolved else None,
-        "cost_per_hit_usd": (round(sum((h["pass_cost_usd"] or 0) for h in hits) / len(hits), 4) if hits else None),
+        "cost_per_hit_usd": (round(sum(attributed_costs) / len(attributed_costs), 4) if attributed_costs else None),
+        "hits_cost_unattributed": len(hits) - len(attributed_costs),
         "by_hours_trend": [r["by_hours"] for r in out_rows],
         "error_trend": [r["error_ratio"] for r in out_rows if r["error_ratio"] is not None],
     }
 
 
 def as_text(s: dict) -> str:
+    unattributed = f" ({s['hits_cost_unattributed']} hit cost unattributed)" if s.get("hits_cost_unattributed") else ""
     lines = [f"predictions last {s['days']:.0f}d: {s['hit']} hit, {s['miss']} miss, {s['open']} open, "
-             f"{s['unavailable']} unavailable; hit_rate={s['hit_rate']}; cost_per_hit_usd={s['cost_per_hit_usd']}"]
+             f"{s['unavailable']} unavailable; hit_rate={s['hit_rate']}; "
+             f"cost_per_hit_usd={s['cost_per_hit_usd']}{unattributed}"]
     for r in s["rows"]:
         due = time.strftime("%m-%d %H:%MZ", time.gmtime(float(r["due_ts"])))
         lines.append(f"  #{r['id']} {r['status']:<11} {r['member']} {r['change']} {r['metric']} "
