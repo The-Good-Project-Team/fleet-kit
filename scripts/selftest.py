@@ -11080,15 +11080,17 @@ def _ask_class_column_round_trips_and_is_migrated_gh650():
     with tempfile.TemporaryDirectory() as d:
         db_path = Path(d) / "fleet.db"
         # A "legacy" db: the asks table as it existed before gh#650, i.e. today's SCHEMA minus
-        # the `class` column and its own comment lines -- built by stripping the two lines this
-        # issue added, so the fixture can never silently drift from the real schema shape.
+        # the `class` and `summary` (gh#877) columns and their own comment lines -- built by
+        # stripping the lines those two issues added, so the fixture can never silently drift
+        # from the real schema shape.
         start = fleet_db.SCHEMA.index("  filed_at     REAL NOT NULL,")
-        end = fleet_db.SCHEMA.index("  class        TEXT\n") + len("  class        TEXT\n")
+        end = fleet_db.SCHEMA.index("  summary      TEXT\n") + len("  summary      TEXT\n")
         legacy_schema = (fleet_db.SCHEMA[:start]
                           + "  filed_at     REAL NOT NULL\n"
                           + fleet_db.SCHEMA[end:])
-        assert "class" not in legacy_schema.split("CREATE TABLE IF NOT EXISTS asks")[1].split(");")[0], \
-            "fixture still declares a class column -- bad slice"
+        asks_body = legacy_schema.split("CREATE TABLE IF NOT EXISTS asks")[1].split(");")[0]
+        assert "class" not in asks_body, "fixture still declares a class column -- bad slice"
+        assert "summary" not in asks_body, "fixture still declares a summary column -- bad slice"
 
         conn = sqlite3.connect(str(db_path))
         conn.executescript(legacy_schema)
@@ -11102,9 +11104,11 @@ def _ask_class_column_round_trips_and_is_migrated_gh650():
         conn = fleet_db.connect(db_path)  # triggers _migrate -> _ASK_ADD_COLUMNS
         cols = {r[1] for r in conn.execute("PRAGMA table_info(asks)")}
         assert "class" in cols, "connect() against a pre-existing asks table never added class"
+        assert "summary" in cols, "connect() against a pre-existing asks table never added summary (gh#877)"
         row = ask.list_asks(conn, status="all")[0]
         assert row["id"] == pre_id and row["why"] == "a pre-migration ask with no class column at all", \
             "the pre-existing row must survive the migration unchanged"
+        assert row["summary"] is None, f"a pre-migration row's summary must read NULL, got {row['summary']!r}"
         assert row["class"] is None, f"a pre-migration row's class must read NULL, got {row['class']!r}"
 
 

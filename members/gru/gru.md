@@ -111,6 +111,7 @@ spawns exactly one). Your job, in order:
    python3 /fleet-kit/scripts/ask.py file --member gru --class infra \
      --why "budget/account drought unresolved: allowance_pct=<n> week_bank_pct=<n>, still the \
    same order of magnitude as gh#361's original block" \
+     --summary "The fleet's budget is too low to build anything right now." \
      --unblocks "step 2-3's issue pull and packer call resume" \
      --proposed "none -- see gh#361 for the underlying account/budget fix this needs"
    ```
