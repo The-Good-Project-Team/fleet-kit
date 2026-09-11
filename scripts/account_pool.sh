@@ -387,6 +387,97 @@ _account_pool_classify_failure() {
 # would see nothing until the command exits. A copy still lands in a temp file for
 # `_account_pool_classify_failure` to read after the command exits, same classification logic
 # as before, just sourced from a file `tee` also wrote instead of a buffered variable.
+# gh#818: every member's CLAUDE_CONFIG_DIR must be WRITABLE, or the fleet is amnesiac.
+#
+# Found live 2026-09-11 (dumbledore): `mount` inside the running container shows
+# `/dev/sda1 on /root/.claude-philanthropy type ext4 (ro,...)` -- up.sh:154 mounts each
+# account's dir `:ro`, while deploy.sh's run_args() mounts the SAME path read-write. That one
+# flag's drift between two call sites (the exact defect deploy.sh:140's own header warns about)
+# is the single root cause of three separate failures every member reports independently:
+#
+#   1. MEMORY IS UNWRITABLE. Every member's system prompt tells it to write memory files to
+#      $CLAUDE_CONFIG_DIR/projects/<repo>/memory/. That path is EROFS, so nothing is ever
+#      written. librarian's memory_tend.py walks /root/.claude-*/projects/*/memory and finds
+#      nothing to tend, forever. Members re-derive the same context every pass and say so:
+#      "the third consecutive datadog self-critique to say so", "the same self-critique the
+#      last five lens passes have logged" (fleet.db, 2026-09-10/11).
+#   2. TaskCreate/TaskUpdate ENOENT on every call -- $CLAUDE_CONFIG_DIR/tasks/ cannot be
+#      created. Charters that open "call TodoWrite with exactly these 5 items, then work them
+#      in order" (nerd.md:45, marie, dumbledore) are instructing a dead tool; marie, 2026-09-10:
+#      "I worked the 9-item checklist inline without a written todo list, which is the failure
+#      mode that charter step exists to prevent."
+#   3. entrypoint.sh's worktree_guard_hook_install.py (gh#592) cannot write settings.json into
+#      a `:ro` dir. It survives today only because the host dir was seeded before the mount;
+#      any new account, or any future change to the hook, would fail silently at boot.
+#
+# up.sh is fixed to match deploy.sh in the same PR, but up.sh runs on the HOST and only takes
+# effect when a human re-runs it. This fallback ships INSIDE the image, so it reaches the fleet
+# on the normal deploy path and, more importantly, does not depend on how any future operator
+# mounts things. It is a no-op whenever the real dir is already writable.
+#
+# The mirror lives under $FLEET_LOG_DIR (a host bind mount in both up.sh and deploy.sh), so
+# memory written through it PERSISTS ACROSS DEPLOYS -- which the container's writable layer
+# would not. Credentials are symlinked, never copied: the host stays the single source of
+# truth for auth, exactly as `:ro` intended.
+# Split out so the mirror path above is testable: root ignores permission bits, so no unit test
+# can create a genuinely unwritable directory -- but it CAN redefine this one function.
+# Checking `[ -w ]` is not enough either; a `:ro` bind mount is traversable and reports the
+# dir's own mode happily. Only an actual write attempt tells the truth.
+_account_pool_dir_writable() {
+  local dir="$1"
+  [ -d "$dir" ] || return 1
+  ( : > "$dir/.fk-writable-probe" ) 2>/dev/null || return 1
+  rm -f "$dir/.fk-writable-probe"
+  return 0
+}
+
+_account_pool_config_dir() {
+  local account="$1"
+  local real="$HOME/.claude-$account"
+  # Already writable (deploy.sh's rw mount, or a plain host run): nothing to do.
+  if _account_pool_dir_writable "$real"; then
+    printf '%s\n' "$real"
+    return 0
+  fi
+  local mirror="${FLEET_CLAUDE_STATE_DIR:-${FLEET_LOG_DIR:-/var/log/fleet-kit}/claude-state}/$account"
+  if ! mkdir -p "$mirror/projects" "$mirror/todos" "$mirror/tasks" 2>/dev/null; then
+    # Nowhere writable at all. Fall back to the real dir so auth still works exactly as it does
+    # today -- a member with no memory is far better than a member that cannot log in.
+    _account_pool_log "account=$account config dir $real is READ-ONLY and mirror $mirror is not creatable -- memory/TodoWrite stay broken for this account"
+    printf '%s\n' "$real"
+    return 0
+  fi
+  # projects/todos/tasks can't join the symlink farm below -- they must stay WRITABLE, and
+  # $real is read-only, so a symlink into it would be exactly as unwritable as $real itself.
+  # But $real/projects (etc.) can already hold real history that predates this mirror (a
+  # project's memory/, prior session transcripts) -- the same "seeded before the mount"
+  # scenario the PR description already calls out for settings.json. Copy that content in
+  # once, no-clobber, so it survives instead of silently vanishing behind an empty mirror;
+  # no-clobber also makes this idempotent, never overwriting memory the mirror itself wrote
+  # on a later pass.
+  local subdir
+  for subdir in projects todos tasks; do
+    [ -d "$real/$subdir" ] || continue
+    cp -Rn "$real/$subdir/." "$mirror/$subdir/" 2>/dev/null || true
+  done
+  # Symlink every top-level entry EXCEPT the three the CLI must write. A symlink farm (not a
+  # copy) means .credentials.json is always the host's current file, so token rotation on the
+  # host is picked up on the next pass with no sync step -- and no credential is ever
+  # duplicated onto a second disk.
+  local entry base
+  for entry in "$real"/* "$real"/.[!.]*; do
+    [ -e "$entry" ] || continue
+    base="$(basename "$entry")"
+    case "$base" in
+      projects|todos|tasks) continue ;;
+    esac
+    [ -e "$mirror/$base" ] && [ ! -L "$mirror/$base" ] && continue
+    ln -sfn "$entry" "$mirror/$base"
+  done
+  _account_pool_log "account=$account config dir $real is read-only -- running under writable mirror $mirror (memory, TodoWrite and tasks work; credentials symlinked from $real)"
+  printf '%s\n' "$mirror"
+}
+
 account_pool_run() {
   local account verdict rc capture
   export ACCOUNT_POOL_SELECTED="" ACCOUNT_POOL_LAST_REASON=""
@@ -420,16 +511,19 @@ account_pool_run() {
     # FLEET_ACCOUNTS-unset default, single-account case the comment above describes) may
     # legitimately inherit the ambient token; every other named account must use ITS OWN
     # credentials.json or none at all -- clear the var rather than let it leak.
-    local var_name token_override
+    local var_name token_override config_dir
     var_name="CLAUDE_CODE_OAUTH_TOKEN_$(echo "$account" | tr '[:lower:]-' '[:upper:]_')"
     token_override="${!var_name:-}"
+    # gh#818: resolve ONCE, here, so all three branches below agree. Returns
+    # $HOME/.claude-$account unchanged whenever that dir is writable.
+    config_dir="$(_account_pool_config_dir "$account")"
     if [ -n "$token_override" ]; then
-      CLAUDE_CONFIG_DIR="$HOME/.claude-$account" CLAUDE_CODE_OAUTH_TOKEN="$token_override" \
+      CLAUDE_CONFIG_DIR="$config_dir" CLAUDE_CODE_OAUTH_TOKEN="$token_override" \
         "$@" 2>&1 | tee "$capture"
     elif [ "$account" = "primary" ]; then
-      CLAUDE_CONFIG_DIR="$HOME/.claude-$account" "$@" 2>&1 | tee "$capture"
+      CLAUDE_CONFIG_DIR="$config_dir" "$@" 2>&1 | tee "$capture"
     else
-      CLAUDE_CONFIG_DIR="$HOME/.claude-$account" env -u CLAUDE_CODE_OAUTH_TOKEN \
+      CLAUDE_CONFIG_DIR="$config_dir" env -u CLAUDE_CODE_OAUTH_TOKEN \
         "$@" 2>&1 | tee "$capture"
     fi
     rc=${PIPESTATUS[0]}

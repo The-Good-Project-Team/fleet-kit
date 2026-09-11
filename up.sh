@@ -151,7 +151,16 @@ for acct in "${ACCOUNT_LIST[@]}"; do
     echo "[up]          copy your whole .credentials.json there before this fleet can build anything:"
     echo "[up]          mkdir -p $acct_creds_dir && cp ~/.claude/.credentials.json $acct_creds_dir/"
   fi
-  CREDS_MOUNT_ARGS+=(-v "$acct_creds_dir:/root/.claude-$acct:ro")
+  # NOT `:ro` (gh#818). deploy.sh's run_args() -- the path every auto-deploy actually uses --
+  # mounts this same dir read-write, and this call site silently drifted away from it, which is
+  # precisely the mount-drift failure deploy.sh:140's own header warns about. Read-only here
+  # means the Claude CLI cannot write $CLAUDE_CONFIG_DIR/projects/*/memory (every member's
+  # memory, and everything librarian's memory_tend.py exists to tend), cannot create
+  # $CLAUDE_CONFIG_DIR/tasks (TaskCreate/TodoWrite ENOENT on every call, in charters that open
+  # by mandating it), and cannot take entrypoint.sh's gh#592 worktree-guard settings.json.
+  # Confirmed live 2026-09-11 on a container started by this script. The host dir stays the
+  # single source of truth for credentials either way -- nothing in the fleet rewrites them.
+  CREDS_MOUNT_ARGS+=(-v "$acct_creds_dir:/root/.claude-$acct")
 done
 
 # 4. Check for a GitHub token the container can read (gh CLI reads GH_TOKEN directly).
