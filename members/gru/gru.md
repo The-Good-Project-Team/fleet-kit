@@ -127,8 +127,17 @@ spawns exactly one). Your job, in order:
    ```
    gh issue list --state open --label fleet:reif-priority --json number,title,body --limit 20
    ```
-   If this returns anything, build ONLY against it and its own referenced child issues/PRs
-   (`gh#<epic-number>` convention) — skip 2b's query entirely. If empty, fall through to 2b.
+   If this returns anything, don't stop there — an open epic with nothing buildable in it is
+   not "this pass's work," it's an empty tier wearing a label. Apply the same
+   claimed/needs-human-op/dead-end filters step 2b uses below to these issues and their
+   referenced children first. Only if at least one survives, build ONLY against the survivors
+   (`gh#<epic-number>` convention) — skip 2b's query entirely. If the raw pull is empty, OR
+   every item and child is claimed/needs-human-op/dead-end, fall through to 2b instead of
+   ending the pass — gh#5278: four separate passes (`gru-106698`, `gru-72302`, `gru-4219`,
+   `gru-122699`) spent a full turn budget re-confirming a 100%-blocked reif-priority tier, then
+   reported `quiet` without ever touching the regular backlog underneath it, starving
+   `fleet:priority-high` work (including a revenue-critical fix built specifically to reach it
+   faster, gh#831) of every turn in the pass.
    Never close a `fleet:reif-priority` issue yourself — that's marie's call (marie.md Part C),
    once no child work remains.
 
