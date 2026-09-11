@@ -174,6 +174,113 @@ class ProcessEndToEndTest(unittest.TestCase):
         self.assertEqual(summary["filed"], [])
 
 
+class LookupFailureTest(unittest.TestCase):
+    """gh#914: a `gh issue list` call that fails must never be read the same as "no open issue
+    found" -- that misreading is exactly what filed #911/#912 as duplicates of #814/#884."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state_path = Path(self.tmp.name) / "state.json"
+
+    def _write(self, name: str, results: dict) -> Path:
+        p = Path(self.tmp.name) / name
+        p.write_text(json.dumps(results))
+        return p
+
+    def test_ac1_list_failure_returns_a_distinct_sentinel_not_none(self):
+        def list_fails(cmd):
+            if cmd[1] == "label":
+                return 0, "ok"
+            assert cmd[2] == "list"
+            return 1, "rate limited"
+
+        self.assertIs(jif.find_open_issue("some::key", runner=list_fails), jif.LOOKUP_FAILED)
+
+    def test_ac1_unparsable_list_output_also_returns_the_sentinel(self):
+        def bad_json(cmd):
+            if cmd[1] == "label":
+                return 0, "ok"
+            return 0, "not json"
+
+        self.assertIs(jif.find_open_issue("some::key", runner=bad_json), jif.LOOKUP_FAILED)
+
+    def test_ac2_lookup_failure_files_no_issue_and_is_recorded_as_skipped(self):
+        create_calls = []
+
+        def flaky(cmd):
+            if cmd[1] == "label":
+                return 0, "ok"
+            if cmd[2] == "list":
+                return 1, "rate limited"
+            if cmd[2] == "create":
+                create_calls.append(cmd)
+                return 0, "https://github.com/x/y/issues/999"
+            raise AssertionError(f"unexpected call: {cmd}")
+
+        r = self._write("r.json", _results("fail", "run-1", "sha1"))
+        summary = jif.process(r, self.state_path, runner=flaky)
+        self.assertEqual(create_calls, [], "must not file when the dedup lookup couldn't run")
+        self.assertEqual(summary["filed"], [])
+        self.assertEqual(summary["commented"], [])
+        self.assertEqual(len(summary["skipped"]), 1)
+        self.assertEqual(summary["skipped"][0]["key"], jif.step_key("send-message", 0))
+        self.assertNotIn("skipped due to lookup failure", str(summary["errors"]))
+
+    def test_ac3_genuine_no_match_still_files_the_working_path_does_not_regress(self):
+        def clean(cmd):
+            if cmd[1] == "label":
+                return 0, "ok"
+            if cmd[2] == "list":
+                return 0, "[]"
+            if cmd[2] == "create":
+                return 0, "https://github.com/x/y/issues/1"
+            raise AssertionError(cmd)
+
+        r = self._write("r.json", _results("fail", "run-1", "sha1"))
+        summary = jif.process(r, self.state_path, runner=clean)
+        self.assertEqual(len(summary["filed"]), 1)
+        self.assertEqual(summary["skipped"], [])
+
+    def test_ac4_lookup_success_with_a_match_still_comments(self):
+        gh = FakeGh()
+        r1 = self._write("r1.json", _results("fail", "run-1", "sha1"))
+        summary1 = jif.process(r1, self.state_path, runner=gh)
+        issue_no = summary1["filed"][0]["issue"]
+
+        r2 = self._write("r2.json", _results("fail", "run-2", "sha1"))
+        summary2 = jif.process(r2, self.state_path, runner=gh)
+        self.assertEqual(len(summary2["commented"]), 1)
+        self.assertEqual(summary2["commented"][0]["issue"], issue_no)
+        self.assertEqual(summary2["skipped"], [])
+
+    def test_ac5_one_failed_lookup_does_not_abort_the_rest_of_the_run(self):
+        list_calls = {"n": 0}
+
+        def flaky(cmd):
+            if cmd[1] == "label":
+                return 0, "ok"
+            if cmd[2] == "list":
+                list_calls["n"] += 1
+                # first key's lookup fails, the second key's succeeds cleanly
+                return (1, "rate limited") if list_calls["n"] == 1 else (0, "[]")
+            if cmd[2] == "create":
+                return 0, "https://github.com/x/y/issues/2"
+            raise AssertionError(cmd)
+
+        results = _results("fail", "run-1", "sha1")
+        results["journeys"].append({
+            "id": "second-journey", "name": "Second journey",
+            "steps": [{"index": 0, "action": "do a second thing", "observable_result": "ok",
+                       "status": "fail"}],
+        })
+        r = self._write("r.json", results)
+        summary = jif.process(r, self.state_path, runner=flaky)
+        self.assertEqual(len(summary["skipped"]), 1)
+        self.assertEqual(len(summary["filed"]), 1,
+                          "the key whose lookup succeeded must still be processed normally")
+
+
 def _step0_results(run: str, sha: str, desktop_status: str, mobile_status: str) -> dict:
     """A results.json where journey `x` step 0 ran at both viewports, per journey_walker.py's
     own id convention (`x` for desktop, `x--mobile_390` for the other)."""
