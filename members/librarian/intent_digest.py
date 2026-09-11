@@ -75,21 +75,61 @@ def from_asks(d: Path, cutoff: float) -> tuple[list[dict], str]:
         return [], f"asks unreadable ({type(e).__name__})"
 
 
-def from_gh(repos: list[str], cutoff: float) -> tuple[list[dict], str]:
+_LINK_NEXT_RE = re.compile(r'<([^>]+)>\s*;\s*rel="next"')
+
+
+def _split_headers_body(raw: str) -> tuple[dict[str, str], str]:
+    """Split `gh api -i`'s curl-style output (status line, headers, blank line, body)."""
+    sep = "\r\n\r\n" if "\r\n\r\n" in raw else "\n\n"
+    head, _, body = raw.partition(sep)
+    headers = {}
+    for line in head.splitlines()[1:]:  # [0] is the HTTP status line
+        if ":" in line:
+            k, _, v = line.partition(":")
+            headers[k.strip().lower()] = v.strip()
+    return headers, body
+
+
+def _next_page_url(headers: dict[str, str]) -> str | None:
+    m = _LINK_NEXT_RE.search(headers.get("link", ""))
+    return m.group(1) if m else None
+
+
+def _gh_api_page(endpoint: str, timeout: float) -> tuple[dict[str, str], str]:
+    """Real page fetcher: one `gh api -i` call, headers + body split out for pagination."""
+    out = subprocess.run(["gh", "api", "-i", endpoint], capture_output=True, text=True,
+                         timeout=timeout, check=True).stdout
+    return _split_headers_body(out)
+
+
+def from_gh(repos: list[str], cutoff: float, run=None) -> tuple[list[dict], str]:
+    """Fetch every `Reif:`-prefixed issue/PR comment since `cutoff`, across ALL pages of the
+    (oldest-first, 100-per-page) GitHub comments feed -- not just the first. `run` is an
+    injectable (endpoint, timeout) -> (headers, body_text) page fetcher, defaulting to a real
+    `gh api -i` call; tests supply a fake to prove pagination without the network."""
+    run = run or _gh_api_page
     rows, notes = [], []
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(cutoff))
     for repo in repos:
+        repo_rows, pages_read, error = [], 0, None
+        endpoint = f"repos/{repo}/issues/comments?since={since}&per_page=100"
         try:
-            out = subprocess.run(["gh", "api", f"repos/{repo}/issues/comments?since={since}&per_page=100"],
-                                 capture_output=True, text=True, timeout=60, check=True).stdout
-            for c in json.loads(out):
-                body = c.get("body") or ""
-                if body.startswith("Reif:"):
-                    ts = time.mktime(time.strptime(c["created_at"], "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
-                    rows.append({"ts": ts, "source": f"{repo.split('/')[-1]} comment", "text": body})
-            notes.append(f"{repo}: ok")
+            while endpoint:
+                headers, body = run(endpoint, 60)
+                for c in json.loads(body):
+                    b = c.get("body") or ""
+                    if b.startswith("Reif:"):
+                        ts = time.mktime(time.strptime(c["created_at"], "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+                        repo_rows.append({"ts": ts, "source": f"{repo.split('/')[-1]} comment", "text": b})
+                pages_read += 1
+                endpoint = _next_page_url(headers)
         except Exception as e:  # noqa: BLE001 -- fail-open, named in the header
-            notes.append(f"{repo}: skipped ({type(e).__name__})")
+            error = e
+        rows.extend(repo_rows)
+        if error is not None:
+            notes.append(f"{repo}: partial ({pages_read} of >={pages_read + 1} pages, {type(error).__name__})")
+        else:
+            notes.append(f"{repo}: ok ({pages_read} page{'s' if pages_read != 1 else ''}, {len(repo_rows)} rows)")
     return rows, "; ".join(notes) if notes else "no --gh-repo"
 
 
