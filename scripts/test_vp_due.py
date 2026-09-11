@@ -171,6 +171,15 @@ class ClaimsItemTests(unittest.TestCase):
                 "VP's round-1 review of fk#634 found 5 of 6 open fleet:epic issues... #636 ...")
         self.assertFalse(vp_due._claims_item(body, 636))
 
+    def test_838_negated_mention_does_not_claim_573(self):
+        """fk#840 AC3's own named fixture: PR #838's real body said #573 was explicitly NOT
+        built yet -- the bare-token regex this replaced read it as a merged build slice for
+        #573 anyway, which is what let vp_due see a fresh 'merge' and re-review #573 while
+        the redo minion from the earlier Not-yet verdict was still working it."""
+        body = ("Finding 4 (the plan page fitting one phone screen) stays open -- it depends "
+                "on #573, which has nothing merged yet.")
+        self.assertFalse(vp_due._claims_item(body, 573))
+
     def test_does_not_match_a_different_number(self):
         self.assertFalse(vp_due._claims_item("Fixes #6360", 636))
         self.assertFalse(vp_due._claims_item("Fixes #63", 636))
