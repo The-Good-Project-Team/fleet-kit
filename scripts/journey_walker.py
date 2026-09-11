@@ -35,8 +35,10 @@ lacks a credential, not that the product broke):
                           page alice can administer, for the Verified Org checkout journey.
   NOTIFICATION_DEEPLINK_URL  a thread deep-link URL for bob, for the "open from notification"
                           journey -- this walker has no mailbox/notification-fetch of its own.
-  FLEET_CONSOLE_URL       default https://dino.luckymachines.co (the fleet dashboard host
-                          sentry.md already names) for the fleet-console journey.
+  FLEET_CONSOLE_URL       default https://dino.luckymachines.co/fleet/<instance> (<instance>
+                          from plan_rank.resolve_instance(), gh#724 -- the bare host is dino's
+                          own multi-instance container list, not a fleet console) for the
+                          fleet-console journey.
 
 RESULTS.JSON ID CONVENTION (not specified by #656/#660, decided here): a journey run at the
 desktop viewport keeps the catalog's own `id` unchanged; a journey run at any OTHER viewport
@@ -92,6 +94,9 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import plan_rank  # noqa: E402 -- shared instance-name resolver, same pattern messenger_brief.py uses
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -149,7 +154,10 @@ class TestUsers:
         self.fixture_ein = env.get("FIXTURE_EIN")
         self.fixture_claimed_org_url = env.get("FIXTURE_CLAIMED_ORG_URL")
         self.notification_deeplink_url = env.get("NOTIFICATION_DEEPLINK_URL")
-        self.fleet_console_url = env.get("FLEET_CONSOLE_URL", "https://dino.luckymachines.co")
+        self.fleet_console_url = env.get(
+            "FLEET_CONSOLE_URL",
+            f"https://dino.luckymachines.co/fleet/{plan_rank.resolve_instance()}",
+        )
         self.users = {}
         for name in ("alice", "bob"):
             email, password = env.get(f"{name.upper()}_EMAIL"), env.get(f"{name.upper()}_PASSWORD")
@@ -707,8 +715,11 @@ def run_fleet_console_loads_with_runs(ctx: JourneyCtx):
         return
 
     def s1():
+        # gh#724: the console's real markup renders each agent as
+        # `<div class="row" data-agent="...">` -- the previous selector list
+        # ([data-run],[data-testid="run-row"],tr,li) matched none of it.
         page.wait_for_function(
-            "() => document.querySelectorAll('[data-run],[data-testid=\"run-row\"],tr,li').length > 0",
+            "() => document.querySelectorAll('[data-agent]').length > 0",
             timeout=8000,
         )
 

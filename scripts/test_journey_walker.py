@@ -938,5 +938,52 @@ class WalkerOutputFeedsIssueFilerTest(unittest.TestCase):
         self.assertEqual(summary["filed"][0]["key"], jif.step_key("sign-in", 1))
 
 
+class FleetConsoleActivityRowSelectorTest(unittest.TestCase):
+    """gh#724 AC3: step 1's wait condition matches the console's real `[data-agent]` row
+    markup, and does not match a page with no activity rows -- both directions asserted, so
+    the fix cannot be a selector that matches everything."""
+
+    HEALTHY_HTML = ('<!doctype html><html><body><h1>Needs you</h1>'
+                     '<div class="row" data-agent="minion">minion 47s ago</div>'
+                     '</body></html>')
+    EMPTY_HTML = '<!doctype html><html><body><h1>Needs you</h1></body></html>'
+
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+        cls.tmp = tempfile.TemporaryDirectory()
+        catalog = jw.load_catalog(CATALOG_PATH)
+        cls.journey = next(j for j in catalog["journeys"] if j["id"] == "fleet-console-loads-with-runs")
+        cls.desktop_dims = catalog["viewports"]["desktop"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+        cls.tmp.cleanup()
+
+    def _run(self, html: str, run_id: str) -> list[str]:
+        server = _StaticPageServer(html)
+        try:
+            users = jw.TestUsers(env={"FLEET_CONSOLE_URL": server.base_url})
+            ctx = jw.JourneyCtx(self.journey, "desktop", self.desktop_dims, self.browser,
+                                 users, Path(self.tmp.name), run_id)
+            jw.run_fleet_console_loads_with_runs(ctx)
+            statuses = [s["status"] for s in ctx.results]
+            ctx.close()
+            return statuses
+        finally:
+            server.stop()
+
+    def test_real_activity_row_markup_matches(self):
+        self.assertEqual(self._run(self.HEALTHY_HTML, "healthy-run"), ["pass", "pass"])
+
+    def test_no_activity_rows_does_not_match(self):
+        self.assertEqual(self._run(self.EMPTY_HTML, "empty-run"), ["pass", "fail"])
+
+
 if __name__ == "__main__":
     unittest.main()
