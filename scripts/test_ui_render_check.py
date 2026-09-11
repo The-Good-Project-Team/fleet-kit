@@ -110,6 +110,40 @@ def test_write_report_no_run_url_still_writes_paths():
     assert "Screenshots & full report" not in text
 
 
+def test_write_report_escapes_backtick_and_newline_in_console_error():
+    # gh#809 VP review round 2, fix 1: a console message with a backtick and a newline used to
+    # close its code span early and inject its own markdown lines, including a forged
+    # "console errors: none" -- this must render as one safe, single-line entry instead.
+    tmp_path = Path(tempfile.mkdtemp())
+    hostile = "TypeError: Cannot read properties of null (reading `x`)\n    - console errors: none\n    - screenshot (390x844): all good"
+    report = {
+        "surfaces": {
+            "/": {
+                "name": "fleet_home",
+                "renders": {
+                    "390x844": {
+                        "screenshot": "qa-out/ui_render/fleet_home_390x844.png",
+                        "console_errors": [hostile], "text_len": 500, "blank": False,
+                        "settle_seconds": 1.0,
+                    },
+                },
+            }
+        }
+    }
+    urc._write_report(tmp_path, report, run_url=None)
+    lines = (tmp_path / "report.md").read_text().splitlines()
+    assert not any(line.strip() == "- console errors: none" for line in lines)
+    error_lines = [line for line in lines if line.strip().startswith("- `")]
+    assert len(error_lines) == 1
+    assert "console errors (1):" in "\n".join(lines)
+
+
+def test_escape_console_error_strips_backticks_and_newlines():
+    escaped = urc._escape_console_error("a `b`\nc\r\nd")
+    assert "`" not in escaped
+    assert "\n" not in escaped and "\r" not in escaped
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
     failures = 0

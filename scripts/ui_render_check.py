@@ -185,6 +185,15 @@ def render_surface(url: str, out_png: Path, viewport: dict) -> dict:
     }
 
 
+def _escape_console_error(text: str) -> str:
+    # gh#809 VP review round 2, fix 1: this text comes from the page under review, not from us --
+    # a backtick closes the inline code span early and lets the rest of the message inject its
+    # own markdown lines (including a forged "console errors: none"), and a bare newline does the
+    # same even without a backtick (the common `console.error(e)` two-line traceback case VP
+    # measured). Collapse to one line with no backticks so it can never escape its own span.
+    return " ".join(text.replace("`", "'").splitlines())
+
+
 def _write_report(out_dir: Path, report: dict, run_url: str | None = None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "report.json").write_text(json.dumps(report, indent=2))
@@ -220,7 +229,7 @@ def _write_report(out_dir: Path, report: dict, run_url: str | None = None) -> No
                 if errs:
                     lines.append(f"  - console errors ({len(errs)}):")
                     for e in errs[:20]:
-                        lines.append(f"    - `{e}`")
+                        lines.append(f"    - `{_escape_console_error(e)}`")
                 else:
                     lines.append("  - console errors: none")
             lines.append("")
