@@ -40,7 +40,8 @@ class GateTests(unittest.TestCase):
         self.assertEqual(out["eligible"], [3])
 
     def test_gwt_in_body_counts(self):
-        out = qg.gate_candidates([item(4, ["quality:solid"], body="Given x, when y, then z.")])
+        out = qg.gate_candidates([item(4, ["quality:solid"],
+                                       body="Given a logged-in user, when they open settings, then dark mode is off by default.")])
         self.assertEqual(out["eligible"], [4])
 
     def test_multiline_gwt_counts(self):
@@ -75,6 +76,45 @@ class GateTests(unittest.TestCase):
     def test_newest_criteria_comment_wins(self):
         out = qg.gate_candidates([item(9, ["quality:solid"], comments=[VAGUE, GWT])])
         self.assertEqual(out["eligible"], [9])
+
+    def test_bare_template_phrase_is_not_a_criterion(self):
+        """fk#765: the literal 15-char phrase `Given/When/Then` -- no clause text between the
+        keywords -- must not count as an acceptance criterion. This is the exact string that
+        certified #651/#661/#765 itself before this fix."""
+        self.assertEqual(qg.count_gwt("no Given/When/Then acceptance criterion here"), 0)
+
+    def test_multiline_real_criterion_still_counts_as_one(self):
+        text = ("Given a signed-out visitor\nwhen they POST /claim\nthen the API returns 401 "
+                "and writes no row")
+        self.assertEqual(qg.count_gwt(text), 1)
+
+    def test_decline_comment_naming_the_bare_phrase_is_dropped(self):
+        out = qg.gate_candidates([item(16, ["quality:ship-it"], comments=[
+            "marie: declined — no Given/When/Then criterion is testable from this repo."])])
+        self.assertEqual(out["eligible"], [])
+        self.assertIn("Given/When/Then", out["dropped"][0]["reason"])
+
+    def test_bare_phrase_comment_does_not_shadow_an_earlier_real_prd(self):
+        """fk#765: `_criteria_text()` takes the newest comment carrying any match. A later
+        comment that only mentions the template phrase must not shadow an earlier PRD with
+        real criteria -- the fix here (count_gwt itself ignores the bare phrase) makes
+        _criteria_text() fall through to the real PRD comment automatically."""
+        prd = "\n".join([
+            "1. **Given** a signed-out visitor, **when** they POST /claim, **then** the API "
+            "returns 401 and writes no row.",
+            "2. **Given** a signed-in visitor, **when** they POST /claim, **then** the API "
+            "returns 200 and writes one row.",
+            "3. **Given** a duplicate claim, **when** they POST /claim twice, **then** the "
+            "second call returns 409.",
+        ])
+        status_note = "Not re-ranking -- still Given/When/Then, per the PRD above."
+        self.assertEqual(qg._criteria_text("", [{"body": prd}, {"body": status_note}]), prd)
+
+        out = qg.gate_candidates([item(17, ["quality:solid"], comments=[prd, status_note])])
+        self.assertEqual(out["eligible"], [17])
+        _, reason = qg.classify_candidate(
+            [{"name": "quality:solid"}], "", [{"body": prd}, {"body": status_note}])
+        self.assertIn("3 testable criteria", reason)
 
     def test_dropped_with_fleet_prd_is_flagged_stale(self):
         out = qg.gate_candidates([item(10, ["fleet:priority-high", "fleet:prd"])])
