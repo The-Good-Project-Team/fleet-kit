@@ -152,6 +152,16 @@ class ClaimsItemTests(unittest.TestCase):
         self.assertFalse(vp_due._claims_item("Fixes #6360", 636))
         self.assertFalse(vp_due._claims_item("Fixes #63", 636))
 
+    def test_numbered_list_prefix_still_claims(self):
+        """`^\\W*` alone stops at a leading digit (digits are word characters), so a numbered
+        PR checklist -- the exact style this codebase's own PR bodies use -- needs its own
+        allowance or a real claim silently stops counting."""
+        self.assertTrue(vp_due._claims_item("1. Fixes #636", 636))
+        self.assertTrue(vp_due._claims_item("Changes:\n2) Closes #636 -- seam 2.", 636))
+
+    def test_numbered_list_item_that_only_mentions_the_number_does_not_claim(self):
+        self.assertFalse(vp_due._claims_item("1. See #636 for background.", 636))
+
     def test_collect_only_counts_claiming_prs(self):
         """End-to-end through the same filter collect() applies, without a live `gh` call."""
         prs = [

@@ -195,10 +195,13 @@ def _claims_item(body: str, n: int) -> bool:
     which epics a NEW guard now drops ("Tracking epics stop looking buildable to gru... #636
     ..."), and the old bare-`#n` regex here read that as a merged build slice for #636 -- the
     same PR that also, unrelated to #636, taught quality_gate.py to skip `fleet:epic` items.
-    A claim is matched case-insensitively, anywhere a line starts (allowing markdown/list
-    prefixes), same tolerance VERDICT_RE above already uses for verdict lines."""
+    A claim is matched case-insensitively, anywhere a line starts (allowing markdown bullets,
+    bold markers, and a numbered-list prefix like `1. Fixes #n` -- `\W*` alone stops at a
+    leading digit, since digits are word characters, so a numbered PR checklist needs its own
+    allowance), same tolerance VERDICT_RE above already uses for verdict lines."""
     claim_re = re.compile(
-        rf"^\W*(fixes|closes|resolves|part of)\s*:?\s*#{n}(?!\d)", re.IGNORECASE | re.MULTILINE
+        rf"^\W*(?:\d+[.)]\s*)?(fixes|closes|resolves|part of)\s*:?\s*#{n}(?!\d)",
+        re.IGNORECASE | re.MULTILINE,
     )
     return bool(claim_re.search(body or ""))
 
