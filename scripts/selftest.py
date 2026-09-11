@@ -7280,6 +7280,140 @@ def _account_and_tunnel_health_checks_are_actually_scheduled():
     )
 
 
+def _extract_tunnel_cron_conditional() -> str:
+    """The exact `if [ -n "$PUBLIC_URL" ]; then <cron line> fi` block entrypoint.sh generates
+    the tunnel_health_check.sh crontab line from -- extracted, not reimplemented, same idiom
+    _entrypoint_container_port_env_wins_over_fleet_env above uses for its own block."""
+    entry = (ROOT / "entrypoint.sh").read_text()
+    start_marker = 'if [ -n "${PUBLIC_URL:-}" ]; then'
+    start = entry.index(start_marker)
+    end = entry.index("\n      fi", start) + len("\n      fi")
+    return entry[start:end]
+
+
+def _tunnel_health_check_cron_line_carries_configured_public_url():
+    """gh#734 AC1: given a non-empty PUBLIC_URL at boot, entrypoint.sh's generated crontab
+    line for tunnel_health_check.sh must carry that value -- runs the real crontab-generation
+    conditional (not a reimplementation) with PUBLIC_URL set and greps the produced line."""
+    import subprocess
+    block = _extract_tunnel_cron_conditional()
+    proc = subprocess.run(["bash", "-c", block], capture_output=True, text=True, timeout=10,
+                           env={"PATH": "/usr/bin:/bin", "PUBLIC_URL": "https://dino.luckymachines.co/",
+                                "LOG_DIR": "/var/log/fleet-kit"})
+    assert proc.returncode == 0, proc.stderr
+    assert "bash /fleet-kit/scripts/tunnel_health_check.sh" in proc.stdout, (
+        f"expected a tunnel_health_check.sh cron line when PUBLIC_URL is set, got: {proc.stdout!r}")
+    assert "PUBLIC_URL=https://dino.luckymachines.co/" in proc.stdout, (
+        f"cron line did not carry the configured PUBLIC_URL: {proc.stdout!r}")
+
+
+def _tunnel_health_check_cron_line_omitted_when_public_url_unset():
+    """gh#734 AC2: given PUBLIC_URL is left empty (the shipped default, fleet.env.example:236),
+    entrypoint.sh must NOT emit a tunnel_health_check.sh cron line at all -- the old unconditional
+    line aborted every hour on tunnel_health_check.sh:47's `:?` guard, forever, on every instance
+    that never set a tunnel. Runs the real conditional with PUBLIC_URL unset."""
+    import subprocess
+    block = _extract_tunnel_cron_conditional()
+    proc = subprocess.run(["bash", "-c", block], capture_output=True, text=True, timeout=10,
+                           env={"PATH": "/usr/bin:/bin", "LOG_DIR": "/var/log/fleet-kit"})
+    assert proc.returncode == 0, proc.stderr
+    assert "tunnel_health_check.sh" not in proc.stdout, (
+        "a tunnel_health_check.sh cron line was emitted with PUBLIC_URL unset -- it will abort "
+        f"every hour on the script's own `:?` guard forever: {proc.stdout!r}")
+
+
+def _tunnel_health_check_upstream_port_default_is_caddy_9000():
+    """gh#734 AC3: with FLEET_TUNNEL_UPSTREAM_PORT unset, the ingress drift-check must expect the
+    caddy front door (9000, scripts/deploy.sh), not FLEET_VIEW_PORT (the container's own port) --
+    the defect the judge found reviewing PR#730 (gh#732): comparing against the container port
+    made the first drift tick rewrite Cloudflare's live ingress straight past caddy. Extracts
+    the script's own default-assignment line and evaluates it for real."""
+    import subprocess
+    script = (ROOT / "scripts" / "tunnel_health_check.sh").read_text()
+    line = next(l for l in script.splitlines()
+                if l.strip().startswith("FLEET_TUNNEL_UPSTREAM_PORT="))
+    proc = subprocess.run(["bash", "-c", f'{line}\necho "$FLEET_TUNNEL_UPSTREAM_PORT"'],
+                           capture_output=True, text=True, timeout=10, env={"PATH": "/usr/bin:/bin"})
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "9000", (
+        f"expected FLEET_TUNNEL_UPSTREAM_PORT to default to 9000 (caddy), got {proc.stdout.strip()!r}")
+
+
+def _tunnel_health_check_upstream_port_override_is_actually_read():
+    """gh#734 AC4: FLEET_TUNNEL_UPSTREAM_PORT=9100 set -> the script must actually read it, not
+    hardcode 9000. Same extraction as the default-value check above, override set instead."""
+    import subprocess
+    script = (ROOT / "scripts" / "tunnel_health_check.sh").read_text()
+    line = next(l for l in script.splitlines()
+                if l.strip().startswith("FLEET_TUNNEL_UPSTREAM_PORT="))
+    proc = subprocess.run(["bash", "-c", f'{line}\necho "$FLEET_TUNNEL_UPSTREAM_PORT"'],
+                           capture_output=True, text=True, timeout=10,
+                           env={"PATH": "/usr/bin:/bin", "FLEET_TUNNEL_UPSTREAM_PORT": "9100"})
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "9100", (
+        f"FLEET_TUNNEL_UPSTREAM_PORT=9100 was not honored, got {proc.stdout.strip()!r} -- "
+        "the variable is being ignored/hardcoded")
+
+
+def _extract_tunnel_ingress_compare_python() -> str:
+    """The real python heredoc tunnel_health_check.sh uses to decide whether the Cloudflare
+    ingress rule needs rewriting -- extracted verbatim so the two checks below exercise the
+    actual comparison logic, not a reimplementation of it."""
+    script = (ROOT / "scripts" / "tunnel_health_check.sh").read_text()
+    start_marker = 'new_config=$(python3 -c "\n'
+    end_marker = '\n" 2>&1)'
+    start = script.index(start_marker) + len(start_marker)
+    end = script.index(end_marker, start)
+    return script[start:end]
+
+
+def _run_tunnel_ingress_compare(config_json: str, hostname: str, port: str) -> str:
+    import subprocess
+    code = (_extract_tunnel_ingress_compare_python()
+            .replace("$config_json", config_json)
+            .replace("$HOSTNAME", hostname)
+            .replace("$FLEET_TUNNEL_UPSTREAM_PORT", port))
+    proc = subprocess.run(["python3", "-c", code], capture_output=True, text=True, timeout=10)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def _tunnel_ingress_no_drift_when_already_pointing_at_caddy_port():
+    """gh#734 AC5: the regression test for PR#730's own defect (gh#732). A container running on
+    a non-default port pair (e.g. FLEET_VIEW_PORT=8591) whose Cloudflare ingress already points
+    at caddy (the default FLEET_TUNNEL_UPSTREAM_PORT, 9000) must see NO drift and get NO
+    rewrite -- today's (pre-fix) comparison against FLEET_VIEW_PORT rewrote this exact case to
+    8591 and bypassed caddy."""
+    cfg = json.dumps({
+        "success": True,
+        "result": {"config": {"ingress": [
+            {"hostname": "dino.luckymachines.co", "service": "http://localhost:9000"},
+            {"hostname": "dino.luckymachines.co", "path": "/ssh", "service": "ssh://localhost:22"},
+        ]}},
+    })
+    out = _run_tunnel_ingress_compare(cfg, "dino.luckymachines.co", "9000")
+    assert out.startswith("NOCHANGE:"), (
+        f"expected no drift/no rewrite when ingress already points at the caddy port, got: {out!r}")
+
+
+def _tunnel_ingress_rewrite_targets_configured_upstream_port():
+    """gh#734 AC6: when the ingress genuinely drifted, the rewritten rule must name the
+    configured caddy upstream port (FLEET_TUNNEL_UPSTREAM_PORT), not a container port."""
+    cfg = json.dumps({
+        "success": True,
+        "result": {"config": {"ingress": [
+            {"hostname": "dino.luckymachines.co", "service": "http://localhost:8561"},
+        ]}},
+    })
+    out = _run_tunnel_ingress_compare(cfg, "dino.luckymachines.co", "9000")
+    assert out.startswith("{"), f"expected a rewritten config on real drift, got: {out!r}"
+    rewritten = json.loads(out)
+    service = rewritten["config"]["ingress"][0]["service"]
+    assert service == "http://localhost:9000", (
+        f"drift rewrite targeted {service!r}, expected the configured caddy upstream "
+        "http://localhost:9000")
+
+
 def _has_host_only_scheduler(root, script_name: str) -> bool:
     """True when schedulers/ carries the full host-side trio for this script."""
     sd = root / "schedulers" / "systemd"
@@ -12817,6 +12951,12 @@ if __name__ == "__main__":
     check("FLEET_CRON_MEMBERS gates entrypoint.sh's generated crontab", _fleet_cron_members_gates_entrypoint_crontab)
     check("gru's cron line redirects to its own log file (gh#511)", _gru_cron_line_redirects_to_its_own_log_file)
     check("account + tunnel health checks are actually scheduled", _account_and_tunnel_health_checks_are_actually_scheduled)
+    check("tunnel health check cron line carries a configured PUBLIC_URL (gh#734 AC1)", _tunnel_health_check_cron_line_carries_configured_public_url)
+    check("tunnel health check cron line is omitted when PUBLIC_URL is unset (gh#734 AC2)", _tunnel_health_check_cron_line_omitted_when_public_url_unset)
+    check("tunnel health check upstream port defaults to caddy's 9000 (gh#734 AC3)", _tunnel_health_check_upstream_port_default_is_caddy_9000)
+    check("tunnel health check upstream port override is actually read (gh#734 AC4)", _tunnel_health_check_upstream_port_override_is_actually_read)
+    check("tunnel ingress reports no drift when already on the caddy port (gh#734 AC5)", _tunnel_ingress_no_drift_when_already_pointing_at_caddy_port)
+    check("tunnel ingress rewrite targets the configured upstream port (gh#734 AC6)", _tunnel_ingress_rewrite_targets_configured_upstream_port)
     check("every required health-check script in README is actually scheduled", _required_health_check_scripts_in_readme_are_scheduled)
     check("account-heartbeat + budget-read have host-only schedulers, never an entrypoint.sh line (gh#376)", _account_heartbeat_and_budget_read_have_host_only_schedulers)
     check("NTFY_TOPIC is deferred to tick-time, not baked in at boot", _ntfy_topic_is_deferred_to_tick_time_not_baked_in_at_boot)

@@ -460,7 +460,20 @@ case "${1:-cron-foreground}" in
       # exactly as before -- this changes when the value is read, not what happens when it's
       # genuinely absent.
       echo "27 * * * * root export FLEET_LOG_DIR=$LOG_DIR && [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; bash /fleet-kit/scripts/account_health_check.sh >> $LOG_DIR/account_health_check.log 2>&1"
-      echo "37 * * * * root [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; export PUBLIC_URL=${PUBLIC_URL:-} FLEET_VIEW_PORT=${FLEET_VIEW_PORT:-8420}; bash /fleet-kit/scripts/tunnel_health_check.sh >> $LOG_DIR/tunnel_health_check.log 2>&1"
+      # gh#734: an unconfigured PUBLIC_URL used to still get a cron line -- tunnel_health_check.sh's
+      # own `:?` guard (line 47) then aborted it every single hour, forever, writing a log nobody
+      # reads (exactly the "fleet that looks busy" failure the README's own vision line names).
+      # $PUBLIC_URL here is entrypoint's own boot-time value (already sourced by the
+      # fleet-env-source block above) -- gate emitting the line on it so an unconfigured instance
+      # gets no hourly-failing job at all. Setting PUBLIC_URL and restarting the container is what
+      # turns the watchdog on; this is a boot-time decision, same as gh#279's non-goal for this
+      # exact line. FLEET_TUNNEL_UPSTREAM_PORT (default 9000, the caddy front door -- see
+      # scripts/deploy.sh) replaces FLEET_VIEW_PORT (the container's own port) here: comparing
+      # against the container port made the drift-check rewrite Cloudflare's ingress straight past
+      # caddy the moment PUBLIC_URL was ever configured (gh#732, found reviewing PR#730).
+      if [ -n "${PUBLIC_URL:-}" ]; then
+        echo "37 * * * * root [ -f \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\" ] && { set -a; . \"\${FLEET_ENV_FILE:-/fleet-kit/fleet.env}\"; set +a; }; export PUBLIC_URL=${PUBLIC_URL:-} FLEET_TUNNEL_UPSTREAM_PORT=${FLEET_TUNNEL_UPSTREAM_PORT:-9000}; bash /fleet-kit/scripts/tunnel_health_check.sh >> $LOG_DIR/tunnel_health_check.log 2>&1"
+      fi
       # path_health_check.sh (gh#249): the fleet's THIRD outage pager -- tunnel-health above
       # only checks the tunnel's ROOT hostname, which falls through Caddy's default route and
       # never touches either instance's real path-routed dashboard (/fleet/<name>). Same
