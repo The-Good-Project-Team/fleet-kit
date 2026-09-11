@@ -379,6 +379,12 @@ def file_or_update_incident(probes: list[ProbeResult], alerts: list[AlertCall],
     could file two open incident issues"). A stale heartbeat with every HTTP probe healthy is
     a signal only this script watches (gh#4363) -- it keeps its own separate title-based
     ticket, unmarked, so it can never be silently absorbed into an unrelated rollback ticket.
+
+    `url` is also passed through as `target` (gh#836): two different URLs failing at once must
+    now produce two issues, not one that silently absorbs the second. fixer_fire_path.py still
+    calls with no target (it has no stable per-target identifier plumbed through today -- see
+    that module and gh#836's PR body) and so still matches any open marked issue, which is what
+    keeps this cross-member race dedup working for the common single-target case.
     """
     detail = "\n".join(f"- {a.title}: {a.body}" for a in alerts)
     body = (f"Detected by `prod_health_check.py` running on dino, outside atlas-serve "
@@ -388,7 +394,7 @@ def file_or_update_incident(probes: list[ProbeResult], alerts: list[AlertCall],
     if url is not None:
         title = incident_title(url)
         number, created = prod_incident.file_or_update_incident(
-            INCIDENT_REPO, title, body, INCIDENT_LABELS, run=runner)
+            INCIDENT_REPO, title, body, INCIDENT_LABELS, run=runner, target=url)
         return {"action": "filed" if created else "commented", "issue": number,
                 "ok": number is not None}
 
