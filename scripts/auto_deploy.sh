@@ -183,7 +183,21 @@ if ! git merge-base --is-ancestor "$LOCAL_SHA" "$REMOTE_SHA"; then
     git reset --hard origin/main -q
     log "SELF-HEAL: reset complete, proceeding into normal deploy"
   else
-    log "ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged."
+    # gh#372 (Part C4): the line above told an operator nothing about what to resolve -- no
+    # branch, no SHA, no merge-base -- so #278 had to close with "why does the checkout keep
+    # ending up on a feature-branch tip" explicitly UNKNOWN, unanswerable from a log line that
+    # never recorded which tip. This appends that detail rather than replacing the sentence, so
+    # every prior ABORT-matching check (selftest, auto_deploy_race_check.sh) still matches.
+    DIVERGED_BRANCH="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "(detached HEAD)")"
+    DIVERGED_MERGE_BASE="$(git merge-base "$LOCAL_SHA" "$REMOTE_SHA" 2>/dev/null || echo "")"
+    if [ -n "$DIVERGED_MERGE_BASE" ]; then
+      DIVERGED_AHEAD="$(git rev-list --count "$DIVERGED_MERGE_BASE".."$LOCAL_SHA")"
+      DIVERGED_BEHIND="$(git rev-list --count "$DIVERGED_MERGE_BASE".."$REMOTE_SHA")"
+    else
+      DIVERGED_AHEAD="?"
+      DIVERGED_BEHIND="?"
+    fi
+    log "ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged. branch=$DIVERGED_BRANCH local=${LOCAL_SHA:0:7} remote=${REMOTE_SHA:0:7} ahead=$DIVERGED_AHEAD behind=$DIVERGED_BEHIND"
     exit 1
   fi
 fi
