@@ -102,7 +102,15 @@
   <h1>The number</h1>
   <div class="card" id="number"><div class="sub">loading…</div></div>
 
+  <!-- gh#553 fix 1: percent-of-week, alive/waiting-on-human/merged-24h and a link to Stats
+       belong on the page Reif actually lands on, not one footer tap away on /classic. This is
+       its OWN card, not folded into #number above -- renderNumber() returns early (unconfigured
+       number, not yet measured), and this card must still render when that happens. -->
+  <h1>Fleet</h1>
+  <div class="card" id="health"><div class="sub">loading…</div></div>
+
   <h1>Needs you</h1>
+  <div class="sub" id="asksSub"></div>
   <div class="card" id="asks"><div class="empty">loading…</div></div>
 
   <h1>Agents</h1>
@@ -130,7 +138,7 @@ const centralDay = d => new Intl.DateTimeFormat('en-CA', {timeZone: 'America/Chi
 let OPEN = null;        // which agent drawer is open, survives re-renders
 let OPEN_RUN = null;    // run_id shown in the side panel (fk#748), survives re-renders
 let LIVE_TIMER = null;
-let STATE = { number: null, plan: null, asks: [], members: [], runs: [], gh: {}, kpi: {}, spend: null, build: null, fleet: null };
+let STATE = { number: null, plan: null, asks: [], members: [], runs: [], gh: {}, kpi: {}, spend: null, build: null, fleet: null, budget: null };
 
 async function getJSON(path) {
   const r = await fetch(path, {cache: 'no-store'});
@@ -157,18 +165,36 @@ async function load() {
     getJSON('/api/build').catch(() => null),
     getJSON('/api/fleet_state').catch(() => null),
   ]);
-  STATE = { number, plan, asks: asks.asks || [], members: members.members || [], runs: snap.runs || [], gh: snap.gh || {},
+  STATE = { ...STATE, number, plan, asks: asks.asks || [], members: members.members || [], runs: snap.runs || [], gh: snap.gh || {},
             kpi: Object.fromEntries((kpi.kpi || []).map(k => [k.member, k])), spend, build, fleet };
   render();
 }
 
+// gh#553 fix 1: /api/budget_preview shells out to a real remote meter (maxx_reader.py) and can
+// legitimately take seconds -- same reasoning fleet_view.html's refreshGlobalSpend() documents.
+// Fetched on its own, never inside load()'s Promise.all, so a slow or failing meter read never
+// delays or breaks the rest of the page.
+async function refreshHealth() {
+  // `STATE.budget = await ...` would resolve the STATE object reference before awaiting --
+  // if load()'s `STATE = {...STATE, ...}` reassignment (a NEW object, not a mutation) lands
+  // during that await, the write would go to the orphaned old object. Await into a local
+  // first, then assign, so the assignment always targets whatever STATE currently is.
+  let budget = null;
+  try { budget = await getJSON('/api/budget_preview'); } catch (ex) { budget = null; }
+  STATE.budget = budget;
+  renderHealth();
+}
+
 function render() {
-  renderBanner(); renderNumber(); renderAsks(); renderAgents(); renderLanded(); renderFoot();
+  renderBanner(); renderNumber(); renderHealth(); renderAsks(); renderAgents(); renderLanded(); renderFoot();
 }
 
 function renderBanner() {
   const f = STATE.fleet;
   $('banner').innerHTML = (f && f.FLEET_ENABLED === false) ? `<div class="banner">The fleet is paused. Nothing new starts until it is turned back on.</div>` : '';
+  // gh#553 fix 5: the tab title comes from this instance's own config (FLEET_BRAND, or a name
+  // derived from its repo), never a hardcoded product name.
+  if (f && f.BRAND) document.title = f.BRAND;
 }
 
 function nextCheckpoint(plan) {
@@ -198,7 +224,44 @@ function renderNumber() {
     </table>`;
 }
 
+// gh#553 fix 1: newest 'ok' run (any agent) and PRs merged in the trailing 24h -- same
+// definitions /classic's renderHomePage() uses, ported here so the two pages can't disagree.
+function newestOkRunAge() {
+  let newest = null;
+  for (const r of STATE.runs) {
+    if (r.status !== 'ok') continue;
+    const t = typeof r.ts === 'number' ? r.ts : Date.parse(r.ts) / 1000;
+    if (Number.isFinite(t) && (newest === null || t > newest)) newest = t;
+  }
+  return newest;
+}
+function mergedLast24hCount() {
+  const cutoff = Date.now() - 24 * 3600 * 1000;
+  return (STATE.gh.merged || []).filter(pr => pr.mergedAt && Date.parse(pr.mergedAt) >= cutoff).length;
+}
+function needsHumanOp() {
+  return STATE.gh.needs_human_op || { count: 0, oldest_age_hours: 0 };
+}
+
+function renderHealth() {
+  const pct = STATE.budget && STATE.budget.week_bank_pct;
+  // null/undefined (meter unreadable or not configured) is its own visible state, never
+  // shown as "0% of week" -- a real zero-headroom stall must not look identical to a quiet
+  // meter (fleet_view.html's own renderGlobalSpend() comment, gh#561).
+  const pctHtml = (pct === null || pct === undefined)
+    ? `<span title="maxx meter unreadable or not configured for this instance">headroom unavailable</span>`
+    : `${Number(pct).toFixed(1)}% of week`;
+  const newest = newestOkRunAge();
+  const aliveHtml = newest === null ? 'no ok run yet' : esc(ago(newest));
+  const nho = needsHumanOp();
+  $('health').innerHTML = `
+    <div class="sub">${pctHtml} · alive ${aliveHtml}</div>
+    <div class="sub">Waiting on human ${num(nho.count)}${nho.count ? ` · oldest ${Math.round(nho.oldest_age_hours)}h` : ''} · merged 24h ${num(mergedLast24hCount())} · <a href="/classic#stats">Stats</a></div>`;
+}
+
 function renderAsks() {
+  const nho = needsHumanOp();
+  $('asksSub').textContent = nho.count ? `${nho.count} waiting on human, oldest ${Math.round(nho.oldest_age_hours)}h` : '';
   const asks = STATE.asks;
   if (!asks.length) { $('asks').innerHTML = `<div class="empty">Nothing waiting on you.</div>`; return; }
   $('asks').innerHTML = asks.map(a => `
@@ -371,7 +434,9 @@ document.addEventListener('click', async e => {
 });
 
 load().catch(ex => { $('number').innerHTML = `<div class="err">${esc(ex.message)}</div>`; });
+refreshHealth();
 setInterval(() => load().catch(() => {}), 30000);
+setInterval(refreshHealth, 30000);
 </script>
 </body>
 </html>

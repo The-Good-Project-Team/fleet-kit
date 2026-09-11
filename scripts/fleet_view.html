@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>fleet-kit console</title>
+<title>Fleet console</title>
 <style>
   :root {
     --bg: #f5f6f8; --panel: #ffffff; --panel-2: #eef0f3; --border: #d8dce2;
@@ -313,7 +313,7 @@
   <div class="topbar">
     <button class="btn small" id="menuToggle" style="display:none;" onclick="document.querySelector('.body').classList.toggle('sidebar-open')">☰</button>
     <span class="dot" id="dot"></span>
-    <span class="brand">fleet-kit</span>
+    <span class="brand" id="brand">Fleet</span>
     <select class="btn small" id="siblingSwitch" style="display:none;"></select>
     <span class="stat" id="repo"></span>
     <span class="numgrp" id="theNumber" style="display:none;">
@@ -2192,6 +2192,12 @@ async function renderFleetState() {
   FLEET_STATE = state;
   REPO_URL = state.REPO_URL || '';
   document.getElementById('repo').textContent = REPO_URL ? REPO_URL.replace(/^https?:\/\//, '') : '';
+  // gh#553 fix 5: the tab title and topbar brand come from this instance's own config
+  // (FLEET_BRAND, or a name derived from its repo) -- never the hardcoded "fleet-kit" every
+  // deploy used to show regardless of which product's console it actually was.
+  const brand = state.BRAND || 'Fleet';
+  document.getElementById('brand').textContent = brand;
+  document.title = `${brand} console`;
   renderSiblingSwitch(state.SIBLINGS || []);
 }
 
@@ -2293,6 +2299,12 @@ function appendLiveLine(rec) {
 // duplicate EventSource/listener set.
 let BOOTING = false;
 
+// gh#553 fix 1: fleet_home.html links here as "/classic#stats" (and "/classic#settings"
+// already did, unwired) so the Stats page is a real destination, not one extra click past a
+// page that just lands on Home again. Read once at boot -- this page never changes the hash
+// itself, so there's nothing to keep in sync after the initial load.
+const HASH_PAGES = ['queue', 'merged', 'evolution', 'stats', 'settings'];
+
 async function boot() {
   if (BOOTING) return;
   BOOTING = true;
@@ -2321,6 +2333,8 @@ async function boot() {
       return;
     }
     clearBootError();
+    const hashPage = (location.hash || '').slice(1);
+    if (HASH_PAGES.includes(hashPage)) PAGE = hashPage;
     // gh#228: boot() used to call selectAgent(SELECTED) unconditionally here, which forces
     // PAGE = 'agent' regardless of the fire-first default set above -- respect PAGE instead,
     // so a fresh load actually lands on 'home' (gh#560) rather than being immediately overridden
