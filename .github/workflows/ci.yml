@@ -19,6 +19,12 @@ permissions:
   contents: read
 
 jobs:
+  # This is the ONLY required status check (branch protection + auto-merge key on the name
+  # "selftest" -- see docs/ops/fleet-kit-governance.md). gh#804: it must never run a step that
+  # reaches a third party, or that third party's uptime becomes this repo's ability to merge
+  # anything -- an apt 403 from packages.microsoft.com ejected PR #801 (one markdown file, no
+  # relation to Playwright) from the merge queue. Playwright's system-dependency install lives
+  # in the playwright-tests job below instead, which still runs on every PR but is not required.
   selftest:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -31,17 +37,6 @@ jobs:
         run: pip install pyyaml
       - name: run selftest.py
         run: python3 scripts/selftest.py
-      - name: install playwright
-        run: pip install playwright==1.62.0
-      - name: cache playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-1.62.0
-      - name: install playwright chromium
-        run: playwright install --with-deps chromium
-      - name: run test_settings_wiring.py
-        run: python3 scripts/test_settings_wiring.py
       - name: run test_vp_labels.py
         run: python3 scripts/test_vp_labels.py
       - name: run members/librarian/test_librarian.py
@@ -68,3 +63,26 @@ jobs:
         run: python3 scripts/test_fixer_fire_path.py
       - name: run test_philanthropy_drivers.py
         run: python3 scripts/test_philanthropy_drivers.py
+
+  # Not a required check (see selftest above for why) -- but still runs on every PR, and its
+  # failures are still visible on the PR's checks tab. `--with-deps` here can still fail on an
+  # apt mirror outage; that is fine, since nothing required depends on this job's result.
+  playwright-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install playwright
+        run: pip install playwright==1.62.0
+      - name: cache playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-1.62.0
+      - name: install playwright chromium
+        run: playwright install --with-deps chromium
+      - name: run test_settings_wiring.py
+        run: python3 scripts/test_settings_wiring.py
