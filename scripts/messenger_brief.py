@@ -167,16 +167,41 @@ def number_header() -> str:
     return sh([sys.executable, str(KIT / "scripts" / "number_read.py"), "--render"], timeout=60).strip()
 
 
+def _plan_blocking_note(repo_slug: str = "The-Good-Project-Team/fleet-kit") -> str:
+    """One line naming what would create the plan file and what it is waiting on -- fk#559 VP
+    review round 2 fix 3: "no plan file yet" alone leaves Reif unable to tell an empty plan
+    from a dead end with nobody working it. #570 owns writing the plan file itself; checked
+    live each call rather than a hardcoded date, since a human clearing the label is exactly
+    the thing this line exists to surface. Never fatal -- an unreachable `gh` degrades to a
+    generic line, same as `world_class_open()`'s own malformed-output handling."""
+    url = f"https://github.com/{repo_slug}/issues/570"
+    raw = sh(["gh", "issue", "view", "570", "--repo", repo_slug,
+              "--json", "state,labels"], timeout=30)
+    try:
+        data = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        data = {}
+    if data.get("state") == "CLOSED":
+        return f"#570 (which builds it) has since closed -- a plan file may exist soon: {url}"
+    labels = {l.get("name") for l in data.get("labels", [])}
+    if "fleet:needs-human-op" in labels:
+        return f"waiting on a human decision at {url} (#570, fleet:needs-human-op)"
+    return f"waiting on #570 to build the plan file itself: {url}"
+
+
 def plan_bets() -> str:
     """The plan file's `## Bets` section, raw markdown. Same resolver `plan_rank.py` uses for
-    gru's build-eligibility tier (fk#559 VP review fix 1: the two must agree on one path, not
-    each guess a different one). No plan file at that path is a supported state, not silence --
-    an explicit `no plan file at <path> yet` marker (fix 4) so the charter can say so instead of
-    inventing a project."""
+    gru's build-eligibility tier (fk#559 VP review round 1 fix 1: the two must agree on one
+    path, not each guess a different one). No plan file at that path is a supported state, not
+    silence -- an explicit `no plan file at <path> yet` marker (round 1 fix 4) plus a second
+    line naming what would create it and what it's blocked on (round 2 fix 3), so the charter
+    can say so instead of leaving a dead end."""
     repo = os.environ.get("FLEET_REPO", "/repo")
     path = plan_rank.plan_path_for_instance(root=pathlib.Path(repo))
     if not path.exists():
-        return f"no plan file at {path} yet"
+        marker = f"no plan file at {path} yet"
+        note = _plan_blocking_note()
+        return f"{marker}\n{note}" if note else marker
     text = path.read_text(errors="ignore")
     i = text.find("## Bets")
     return text[i:i + 6000] if i != -1 else text[:6000]

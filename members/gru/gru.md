@@ -248,15 +248,17 @@ spawns exactly one). Your job, in order:
    Use `ranked`'s order (not the order you queried in) when you build step 3's `--items` for
    `fanout.py`. No plan file, or one with no bets named yet, degrades to the input order — a
    fully supported state, not a problem for RANKING. But say so every pass in your OWN report,
-   not just when something is wrong (fk#559 VP review fix 3): name the path `plan_rank.py`
-   resolved (`plan_path_for_instance()`, printable via `python3 -c "import sys;
-   sys.path.insert(0,'/fleet-kit/scripts'); import plan_rank;
-   print(plan_rank.plan_path_for_instance())"`) and whether the plan tier was active
-   (`bet_by_issue` non-empty) or inactive this pass. An inert tier that never says it is inert
-   is indistinguishable from a working one to anyone reading your report. A genuinely malformed
-   plan file (no `## Bets` heading at all, or unreadable) also degrades to the input order, but
-   prints one diagnostic line to stderr naming the file and the problem — surface that line in
-   your report too rather than swallowing it.
+   not just when something is wrong: `plan_rank.py` itself now prints exactly one
+   `plan_rank: plan tier inactive this pass (...)` line to stderr, naming the path it resolved
+   and why, whenever the tier does nothing this pass — no plan file, a malformed one, or one
+   naming no issues (fk#559 VP review round 2 fix 2, replacing round 1 fix 3's charter-only
+   instruction: the code announces it now, not a separate `python -c` incantation you could
+   forget to run, and one that used to re-derive the path against the kit copy of this script
+   rather than the product repo — see fix 1 below). Capture that stderr line from the CLI call
+   above verbatim into your report; when the tier IS active instead, report `bet_by_issue`.
+   Don't reconstruct the path yourself — the two used to disagree (fk#559 VP review round 2 fix
+   1: `plan_path_for_instance()` now defaults to `$FLEET_REPO`, the product repo the plan file
+   actually lives in, not `/fleet-kit`, the frozen deploy copy this script ships from).
 
    Collect each candidate's `fleet:complexity-<1-10>` label with its number — marie's size
    estimate, what makes packing possible. No label means treat it as a 5 (median), never free.

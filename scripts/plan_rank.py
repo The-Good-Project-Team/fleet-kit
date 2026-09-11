@@ -33,12 +33,27 @@ own instruction), or this module's parsing updates to match whatever #570 actual
 
 `<instance>` resolves from `$FLEET_INSTANCE_NAME`, falling back to `"default"` -- the same
 fallback entrypoint.sh's own crontab-forwarding comment already uses for this variable. A
-trailing `-green`/`-blue` deploy-slot suffix is stripped first (fk#559 VP review fix 2):
+trailing `-green`/`-blue` deploy-slot suffix is stripped first (fk#559 VP review round 1 fix 2):
 `deploy.sh:197` bakes the container's `-green` name into `FLEET_INSTANCE_NAME` at `podman run`
 time and the later cutover rename to the live name never restarts the container to pick up a
 new env, so the live value on a deployed box is permanently `<instance>-green` (confirmed
 2026-09-11: `fleet-kit-server-fleet-green`). Nobody hand-writes a plan file at
 `docs/plan/<instance>-green.md`.
+
+The plan file's directory defaults to `$FLEET_REPO`, not this script's own parent (fk#559 VP
+review round 2 fix 1): `plan_rank.py` ships to a box as a frozen deploy copy inside `/fleet-kit`
+(gru.md:244 runs it from there), while `messenger_brief.py` always resolves the plan against
+`$FLEET_REPO` (default `/repo`) -- the product repo where #570/#571's plan file actually lives.
+Defaulting to the script's own parent made the two agree only when the kit and the product
+happen to share a checkout; on any box where they don't (every venture instance), gru's tier
+silently looked in the wrong repo forever. `--plan-path` / an explicit `root=` argument still
+overrides this for tests and one-off calls.
+
+An inert plan tier says so in its own output, not only in a charter (fk#559 VP review round 2
+fix 2): whenever the resolved plan yields no bets at all -- no file, an unreadable or malformed
+one, or a `## Bets` section naming no issues -- `rank()` prints exactly one
+`plan_rank: plan tier inactive this pass (...)` line to stderr naming the resolved path and
+why, so gru can copy it into its own report instead of reconstructing the path itself.
 
 Pure core (`parse_bets`, `issue_bet_map`, `rank_candidates`), thin CLI (`main`) -- same split
 as vision_link_gate.py and quality_gate.py.
@@ -51,9 +66,6 @@ import os
 import re
 import sys
 from pathlib import Path
-
-HERE = Path(__file__).resolve().parent
-REPO_ROOT = HERE.parent
 
 _BETS_HEADING_RE = re.compile(r"^(#{1,6})\s*bets\s*$", re.IGNORECASE | re.MULTILINE)
 _ANY_HEADING_RE = re.compile(r"^(#{1,6})\s+\S", re.MULTILINE)
@@ -69,8 +81,16 @@ def resolve_instance() -> str:
     return _SLOT_SUFFIX_RE.sub("", name)
 
 
+def default_root() -> Path:
+    """Where the product repo lives -- `$FLEET_REPO`, falling back to `/repo`, the same
+    fallback `messenger_brief.py` already uses (fk#559 VP review round 2 fix 1). NOT this
+    script's own parent: `plan_rank.py` is a frozen deploy copy under `/fleet-kit`, a different
+    directory from the product repo whenever the two aren't the same checkout."""
+    return Path(os.environ.get("FLEET_REPO", "/repo"))
+
+
 def plan_path_for_instance(instance: str | None = None, root: Path | None = None) -> Path:
-    root = root or REPO_ROOT
+    root = root or default_root()
     instance = instance or resolve_instance()
     return root / "docs" / "plan" / f"{instance}.md"
 
@@ -127,10 +147,10 @@ def load_bets(path: Path) -> tuple[list[dict], str | None]:
     try:
         text = path.read_text()
     except OSError as exc:
-        return [], f"plan_rank: {path}: could not read plan file ({exc})"
+        return [], f"{path}: could not read plan file ({exc})"
     bets, diagnostic = parse_bets(text)
     if diagnostic:
-        return bets, f"plan_rank: {path}: {diagnostic}"
+        return bets, f"{path}: {diagnostic}"
     return bets, None
 
 
@@ -160,13 +180,24 @@ def rank_candidates(candidates: list[int], bet_map: dict[int, str]) -> list[int]
 
 def rank(candidates: list[int], plan_path: Path | None = None) -> dict:
     """End-to-end: load the plan for `plan_path` (default: this instance's), rank
-    `candidates`, print any AC4 diagnostic to stderr. Never raises -- a malformed or absent
-    plan always degrades to unchanged order plus exit 0, per AC2/AC3/AC4."""
+    `candidates`. Never raises -- a malformed or absent plan always degrades to unchanged
+    order plus exit 0, per AC2/AC3/AC4.
+
+    Whenever that degrade happens (`bet_map` ends up empty, for any reason), print exactly one
+    `plan_rank: plan tier inactive this pass (...)` line to stderr naming the resolved path and
+    why (fk#559 VP review round 2 fix 2) -- an inactive tier used to say nothing at all for the
+    AC2/AC3 cases, indistinguishable from a tier quietly doing its job."""
     path = plan_path or plan_path_for_instance()
     bets, diagnostic = load_bets(path)
-    if diagnostic:
-        print(diagnostic, file=sys.stderr)
     bet_map = issue_bet_map(bets)
+    if not bet_map:
+        if diagnostic:
+            reason = diagnostic
+        elif not path.exists():
+            reason = f"no plan file at {path}"
+        else:
+            reason = f"{path}: bets section names no issues"
+        print(f"plan_rank: plan tier inactive this pass ({reason})", file=sys.stderr)
     ranked = rank_candidates(candidates, bet_map)
     return {
         "ranked": ranked,
