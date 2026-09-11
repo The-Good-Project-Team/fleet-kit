@@ -4480,6 +4480,80 @@ def _closes_gate_blocks_an_epic_with_unaccepted_children():
     assert r["verdict"] == "ok", r
 
 
+def _closes_gate_epic_stays_open_when_its_own_thread_says_so_gh879():
+    """fk#879: `epic_closable()` also reads the epic's OWN comment thread, not just its
+    children's state -- reproduces #785 and #553, both closed wrongly by jefe on 2026-09-11
+    despite a human-written "stays open" verdict, because every child was CLOSED and the old
+    check never looked past that. Covers AC1, AC3, AC4, AC5 of the fk#879 PRD comment."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("closes_gate", ROOT / "scripts" / "closes_gate.py")
+    cg = importlib.util.module_from_spec(spec); spec.loader.exec_module(cg)
+
+    # AC1: real subIssues (no closedAt available, the live #785/#553 shape) all CLOSED, but a
+    # newer comment on the epic's own thread carries a documented stays-open marker -> blocked,
+    # reason names the marker and its timestamp
+    epic_reopened = {
+        "title": "epic", "labels": [{"name": "fleet:epic"}],
+        "body": "", "subIssues": {"nodes": [{"number": 1, "state": "CLOSED"}, {"number": 2, "state": "CLOSED"}]},
+        "comments": [{"createdAt": "2026-09-09T21:40:04Z", "body": "marie: all children closed as cruft -- this epic stays open, verification remains."}],
+    }
+    ec = cg.epic_closable(epic_reopened, {785: epic_reopened})
+    assert ec["closable"] is False and "stays open" in ec["reason"] and "2026-09-09T21:40:04Z" in ec["reason"], ec
+    r = cg.evaluate("Closes #785", ["src/x.py"], {785: epic_reopened})
+    assert r["verdict"] == "ok", "evaluate()'s PR path is unchanged by this issue -- only --epic reads the marker"
+
+    # AC3: same marker, but it is now OLDER than the newest child close (later work answered
+    # it) -> stale marker must not permanently block the epic
+    epic_answered = dict(epic_reopened, subIssues={"nodes": [
+        {"number": 1, "state": "CLOSED", "closedAt": "2026-09-10T00:00:00Z"},
+        {"number": 2, "state": "CLOSED", "closedAt": "2026-09-11T00:00:00Z"},
+    ]})
+    ec = cg.epic_closable(epic_answered, {785: epic_answered})
+    assert ec["closable"] is True and ec["reason"] == "every child is closed", ec
+
+    # AC4: no children discoverable at all (the #728 shape), but the thread carries VP's own
+    # reopen phrase -> still blocked; the marker check runs whether or not children were found
+    epic_unlinked_reopened = {
+        "title": "epic", "labels": [{"name": "fleet:epic"}], "body": "",
+        "comments": [{"createdAt": "2026-09-11T03:58:37Z", "body": "Not yet (VP review): the core deliverable does not work."}],
+    }
+    ec = cg.epic_closable(epic_unlinked_reopened, {728: epic_unlinked_reopened})
+    assert ec["closable"] is False and "Not yet (VP review):" in ec["reason"], ec
+    # ...but with no marker, an unlinked epic is still never blocked on epic grounds
+    epic_unlinked_plain = {"title": "epic", "labels": [{"name": "fleet:epic"}], "body": "", "comments": []}
+    ec = cg.epic_closable(epic_unlinked_plain, {729: epic_unlinked_plain})
+    assert ec["closable"] is True and "no children found" in ec["reason"], ec
+
+    # AC5: `decomposed into` fallback children now carry real closedAt -- a marker OLDER than
+    # the newest child close is stale (mirrors AC3 on the fallback path, with real timestamps)
+    epic_fallback = {
+        "title": "epic", "labels": [{"name": "fleet:epic"}], "body": "",
+        "comments": [
+            {"createdAt": "2026-09-01T00:00:00Z", "body": "marie: decomposed into #10, #11 (Part C2b) -- tracking-only from here, closes once every child is closed."},
+            {"createdAt": "2026-09-02T00:00:00Z", "body": "reif: epic stays open, still verifying."},
+        ],
+    }
+    issues_stale = {10: {"state": "CLOSED", "closedAt": "2026-09-03T00:00:00Z"}, 11: {"state": "CLOSED", "closedAt": "2026-09-04T00:00:00Z"}}
+    ec = cg.epic_closable(epic_fallback, {634: epic_fallback, **issues_stale})
+    assert ec["closable"] is True and ec["reason"] == "every child is closed", \
+        "'tracking-only from here' is routine Part C2b boilerplate, not a marker, and the genuine marker is stale here"
+    issues_fresh = {10: {"state": "CLOSED", "closedAt": "2026-08-30T00:00:00Z"}, 11: {"state": "CLOSED", "closedAt": "2026-08-31T00:00:00Z"}}
+    ec = cg.epic_closable(epic_fallback, {634: epic_fallback, **issues_fresh})
+    assert ec["closable"] is False and "stays open" in ec["reason"], ec
+
+    # AC5 (children discoverable via the fallback comment, but their fetched state carries no
+    # closedAt -- e.g. a partial fetch failure) -> marker wins rather than crash
+    ec = cg.epic_closable(epic_fallback, {634: epic_fallback, 10: {"state": "CLOSED"}, 11: {"state": "CLOSED"}})
+    assert ec["closable"] is False, ec
+
+    # regression check named in AC6/AC8: never trust a bare `closable: true` -- the module
+    # docstring and --epic help both name all three meanings
+    doc = cg.__doc__
+    assert "three" in doc.lower() and "stays-open" in doc.lower(), "module docstring must state the three closable:true meanings (AC8)"
+    ap_src = (ROOT / "scripts" / "closes_gate.py").read_text()
+    assert "closable:true means one of three things" in ap_src, "--epic help text must state the three meanings (AC8)"
+
+
 def _jefe_runs_the_epic_close_check_before_closing_an_epic():
     """AC4: members/jefe/jefe.md's epic-closing step invokes closes_gate.py's `--epic` check
     before jefe closes a `fleet:epic` issue, documented in the same shape gru.md uses for
@@ -13514,6 +13588,7 @@ if __name__ == "__main__":
     check("stash_pile_expiry report is parseable and tracks the last run's drop count (gh#714 AC4)", _stash_pile_expiry_report_is_parseable_and_tracks_last_run_gh714)
     check("stash_pile_expiry warns distinctly when the pile is still over ceiling after a run (gh#714 AC5)", _stash_pile_expiry_warns_distinctly_when_still_over_ceiling_gh714)
     check("closes_gate.py blocks an epic with unaccepted children, never blocks an unlinked one (fk#652)", _closes_gate_blocks_an_epic_with_unaccepted_children)
+    check("closes_gate.py --epic reads the epic's own thread for a stays-open marker, ignores stale ones (fk#879)", _closes_gate_epic_stays_open_when_its_own_thread_says_so_gh879)
     check("jefe.md runs closes_gate.py --epic before closing a fleet:epic issue (fk#652)", _jefe_runs_the_epic_close_check_before_closing_an_epic)
     check("vp.md authorizes every label vp_due.VP_LABELS spawns on (gh#855 AC5)", _vp_md_authorizes_every_label_vp_due_spawns_on_gh855)
 
