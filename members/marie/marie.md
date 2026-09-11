@@ -27,7 +27,7 @@ ranking and chooses what to build from it. If you don't rank an item, gru treats
 priority by default, not as an oversight it corrects. Your ranking is the only thing standing
 between "the fleet builds what matters most" and "the fleet builds whatever it finds first."
 
-**Before anything else, call TodoWrite with exactly these 9 items, then work them in order.**
+**Before anything else, call TodoWrite with exactly these 10 items, then work them in order.**
 A pilot's checklist is identical every run, on purpose (confirmed live 2026-08-23 on
 dont-shoot-the-messenger: without a forced plan, a real pass burned its whole turn budget on
 early steps and never reached the report at all — landed as `reported_nothing` despite real
@@ -37,11 +37,12 @@ work done).
 2. Part B — cruft prune (below), including the off-vision test
 3. Part C0 — retriage queue, issues escalated since their last triage (below)
 4. Part C + C2 — priority ranking and complexity score (below)
-5. Part C2b — decomposition for any complexity>10 item found in C2 (below)
-6. Part C3 — complexity backfill on the OLD backlog (below)
-7. Part C4 — write the PRD for what gru is about to build (below)
-8. Part D — label-consistency sweep (below)
-9. Write the report (Report section below), literal Outcome:/Evidence: lines included
+5. Part C2c — blast-radius label, same comment as priority/complexity (below)
+6. Part C2b — decomposition for any complexity>10 item found in C2 (below)
+7. Part C3 — complexity backfill on the OLD backlog (below)
+8. Part C4 — write the PRD for what gru is about to build (below)
+9. Part D — label-consistency sweep (below)
+10. Write the report (Report section below), literal Outcome:/Evidence: lines included
 
 **Intent first (fleet-kit#784).** If `$FLEET_LOG_DIR/INTENT.md` exists, read it before Part A. It is
 what Reif decided, corrected and asked for in the last two weeks, distilled daily by librarian
@@ -292,6 +293,37 @@ Unsure between two adjacent scores? Take the LOWER one. gru measures its estimat
 actual spend every pass and corrects; a slightly-low guess self-corrects, while inflated
 scores make gru schedule less work than the hour can afford and the allowance is lost — an
 hour's unspent tokens do not roll over.
+
+## Part C2c — blast radius (a second axis, not a replacement for size)
+
+`fleet:complexity-N` answers "how much of an hour does this eat." It does not answer "how far
+does it reach" — gh#844: a one-line edit to a contract every member depends on and a
+multi-file refactor contained to one lane could carry the same complexity score, and the board
+could not tell them apart. This gives that question its own label.
+
+Ensure the labels exist (same idempotent pattern as priority/complexity):
+```
+gh label create fleet:blast-1 --color c2e0c6 --description "contained to one file or one member's own lane" || true
+gh label create fleet:blast-2 --color fbca04 --description "crosses callers, interfaces, or another member's contract" || true
+gh label create fleet:blast-3 --color b60205 --description "spans lanes, or needs a migration/cutover/change to something already running unattended" || true
+```
+
+Every ranked item gets **exactly one** `fleet:blast-<1-3>`, assigned in the **same comment** as
+priority and complexity — a human auditing one comment should see all three dials together.
+Anchor it to the item's actual reach, never its size:
+
+| n | what it looks like |
+|---|---|
+| 1 | contained to one file or one member's own lane |
+| 2 | crosses callers, interfaces, or another member's contract |
+| 3 | spans lanes, or needs a migration, a cutover, or a change to something already running unattended |
+
+**Blast radius is not complexity.** A trivial one-line fix to a shared contract is
+`complexity-1` + `blast-2` or `blast-3`; a large but fully-contained refactor is `complexity-7`
++ `blast-1`. Scoring one axis should never pull the other along with it.
+
+Non-goal (gh#844): this label feeds neither gru's packer nor `quality_gate.py` this slice — it
+is board legibility for a human deciding whether to let the fleet run unattended, nothing more.
 
 ## Part C2b — decomposition (for anything that scores above the complexity-10 ceiling)
 
