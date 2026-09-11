@@ -58,6 +58,9 @@
   .ask { padding: 10px 0; border-top: 1px solid var(--line); }
   .ask:first-child { border-top: 0; }
   .ask .why { font-weight: 600; }
+  .ask .why-detail { margin: 4px 0; }
+  .ask .why-detail summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+  .ask .why-full { color: var(--muted); font-size: 13px; margin-top: 6px; white-space: pre-wrap; }
   .ask .prop { color: var(--muted); font-size: 14px; margin: 4px 0 8px; }
   .ask input { font: inherit; font-size: 15px; min-height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); width: 100%; }
   .empty { color: var(--muted); padding: 6px 4px; }
@@ -165,21 +168,36 @@ async function postJSON(path, body) {
   return j;
 }
 
+// gh#553 VP review round 2, fix 5: FLEET card measured 2.20s to fill against a 1s budget
+// because render() used to wait on all 9 boot fetches before drawing anything -- including
+// kpi/spend/plan/asks/members/build, none of which renderBanner()/renderHealth() read. Both
+// waves still start at the same instant (fired together below, same total network load), but
+// the card's own two dependencies -- snapshot and fleet_state -- are no longer stuck behind
+// whichever of the other seven happens to answer slowest.
 async function load() {
-  const [number, plan, asks, members, snap, kpi, spend, build, fleet] = await Promise.all([
+  const criticalP = Promise.all([
+    getJSON('/api/snapshot').catch(() => ({runs: [], gh: {}})),
+    getJSON('/api/fleet_state').catch(() => null),
+  ]);
+  const restP = Promise.all([
     getJSON('/api/number').catch(() => null),
     getJSON('/api/plan').catch(() => null),
     getJSON('/api/asks').catch(() => ({asks: []})),
     getJSON('/api/members').catch(() => ({members: []})),
-    getJSON('/api/snapshot').catch(() => ({runs: [], gh: {}})),
     getJSON('/api/kpi').catch(() => ({kpi: []})),
     getJSON('/api/spend?hours=24').catch(() => null),
     getJSON('/api/build').catch(() => null),
-    getJSON('/api/fleet_state').catch(() => null),
   ]);
-  STATE = { ...STATE, number, plan, asks: asks.asks || [], members: members.members || [], runs: snap.runs || [], gh: snap.gh || {},
-            kpi: Object.fromEntries((kpi.kpi || []).map(k => [k.member, k])), spend, build, fleet };
-  render();
+  const [snap, fleet] = await criticalP;
+  STATE = { ...STATE, runs: snap.runs || [], gh: snap.gh || {}, fleet };
+  renderBanner(); renderHealth();
+
+  const [number, plan, asks, members, kpi, spend, build] = await restP;
+  STATE = { ...STATE, number, plan, asks: asks.asks || [], members: members.members || [],
+            kpi: Object.fromEntries((kpi.kpi || []).map(k => [k.member, k])), spend, build };
+  // renderBanner()/renderHealth() already ran above off the critical wave and don't depend on
+  // anything this second wave adds -- rerunning them here would just rewrite the same DOM twice.
+  renderNumber(); renderAsks(); renderAgents(); renderLanded(); renderFoot();
 }
 
 // gh#553 fix 1: /api/budget_preview shells out to a real remote meter (maxx_reader.py) and can
@@ -271,14 +289,35 @@ function renderHealth() {
     <div class="sub">Waiting on human ${num(nho.count)}${nho.count ? ` · oldest ${Math.round(nho.oldest_age_hours)}h` : ''} · merged 24h ${num(mergedLast24hCount())} · <a href="${withBase('/classic#stats')}">Stats</a></div>`;
 }
 
+// gh#553 VP review round 2, fix 4: the fleet's own asks are filed in raw engineering prose by
+// whichever script hit trouble (gru_allowance.py, pacing_gate.py, ...) -- rewriting that text
+// at the source would mean touching every ask-filing call site across the fleet, well past
+// what this page can safely do. What this page CAN fix: it was showing that whole paragraph
+// unconditionally, which is why Home ran ~8 screens of ask prose before Reif ever reached the
+// AGENTS list (measured 8,497px). A short headline now stands in front, and the full text is
+// one tap away instead of always on screen.
+function askHeadline(why) {
+  // Array.from() splits on code points, not UTF-16 code units, so a 110-char cut never
+  // lands in the middle of a surrogate pair (e.g. an emoji) the way String.slice() can.
+  const chars = Array.from(String(why || ''));
+  if (chars.length <= 110) return chars.join('');
+  const cut = chars.slice(0, 110);
+  const sp = cut.lastIndexOf(' ');
+  return (sp > 40 ? cut.slice(0, sp) : cut).join('') + '…';
+}
+
 function renderAsks() {
   const nho = needsHumanOp();
   $('asksSub').textContent = nho.count ? `${nho.count} waiting on human, oldest ${Math.round(nho.oldest_age_hours)}h` : '';
   const asks = STATE.asks;
   if (!asks.length) { $('asks').innerHTML = `<div class="empty">Nothing waiting on you.</div>`; return; }
-  $('asks').innerHTML = asks.map(a => `
+  $('asks').innerHTML = asks.map(a => {
+    const why = String(a.why || '');
+    const headline = askHeadline(why);
+    return `
     <div class="ask" data-id="${esc(a.id)}">
-      <div class="why">${esc(a.why)}</div>
+      <div class="why">${esc(headline)}</div>
+      ${headline !== why ? `<details class="why-detail"><summary>full detail</summary><div class="why-full">${esc(why)}</div></details>` : ''}
       <div class="prop">${a.member ? `from ${esc(a.member)} · ` : ''}${a.unblocks ? `unblocks ${esc(a.unblocks)} · ` : ''}${a.proposed ? `fleet proposes: ${esc(a.proposed)}` : 'no proposed answer'}</div>
       <div class="btns">
         ${a.proposed ? `<button class="primary" data-act="answer" data-answer="${esc(a.proposed)}">Yes, do that</button>` : ''}
@@ -286,7 +325,8 @@ function renderAsks() {
         <button data-act="send">Send</button>
       </div>
       <div class="err" data-act="err"></div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 function lastRuns(name) {
