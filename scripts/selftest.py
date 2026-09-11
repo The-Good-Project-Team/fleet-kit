@@ -12841,7 +12841,8 @@ def _control_plane_agent_creates_and_removes_an_instance_over_http_gh759():
         cp.used_ports = lambda reg: {8420, 8562, 8591, 8592}
         srv = cp.make_server(0, registry, deploy_fn=lambda d, name, log: deployed.append((d, name)))
         port = srv.server_address[1]
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        serve_thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        serve_thread.start()
         try:
             base = f"http://127.0.0.1:{port}"
             token = cp.ensure_token()
@@ -12896,7 +12897,13 @@ def _control_plane_agent_creates_and_removes_an_instance_over_http_gh759():
             assert post("/remove", name="b")[0] == 401
         finally:
             srv.shutdown()
+            for t in srv.jobs.values():  # the /new background job(s) must not outlive the fixture
+                t.join(timeout=5)
+            serve_thread.join(timeout=5)
+            srv.server_close()
             cp.CADDYFILE, cp.TOKEN_FILE, cp.OUT_DIR, cp.read_crontab, cp.write_crontab, cp.reload_caddy, cp.used_ports = saved
+            assert not serve_thread.is_alive(), "serve_forever thread outlived the test"
+            assert all(not t.is_alive() for t in srv.jobs.values()), "a /new job thread outlived the test"
 
 
 def _control_plane_secret_store_init_check_adopt_set_gh759():
