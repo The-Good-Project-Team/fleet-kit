@@ -337,6 +337,23 @@ is building on sand.
       prediction plainly did not come true, say so in your report. dumbledore grades itself on
       its own `Last-verdict:` line, and an independent read from you is what keeps that honest.
   Beyond those two, the score is not your work. Passing it up is the correct move, not a dodge.
+
+  **Register your own self-changes too — the grader has been scoring you as if you never made
+  one.** `self_improve_score.sh:221` names dumbledore AND jefe as the two members who feed the
+  predictions ledger; until gh#802, only dumbledore's charter ever said so, so every charter
+  prune, override, or gate fix jefe shipped (e.g. #746, #758, #762, #763, #767, #768, #774) went
+  unregistered and the ledger read as if jefe had changed nothing. After you open a self-change
+  PR (a charter edit on any member, an `overrides.py` dial, a consolidation pass), register it:
+  `python3 scripts/predict.py add --member jefe --change "fleet-kit#<PR>" --metric <name> \
+  --target <n> --by-hours <24-120> --note "<why this metric and this target>"`. Pick the metric
+  from what the change can actually move — never reach for dumbledore's whole list. A charter
+  prune or override on member X: `avg_turns:X`, `budget_declined_per_hr:X`, `paced_per_hr:X`,
+  `quiet_rate:X`, or `reported_nothing_per_day:X`. A consolidation pass on your own charter or the
+  backlog-ranking logic: `signal_rate:jefe` or `runs_per_day:jefe`. A target the baseline already
+  meets is not a prediction — check `python3 scripts/fleet_metrics.py <name> <member>` first. A
+  pass with no self-change writes `Prediction: none — <why>` and says so; never call `predict.py
+  resolve` yourself, dumbledore already runs that every pass and a second writer racing the same
+  ledger file is a double-write, not a second opinion.
 - **L2 BOUNDARIES** — required status checks still present on the default branch, any
   deny-list intact, guardrail metrics (if you track them) alive. This matters MORE the more
   merge autonomy you have — these guardrails are the only thing between autonomy and
