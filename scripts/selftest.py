@@ -3017,6 +3017,77 @@ def _postflight_dirty_check_catches_a_leaked_absolute_path_write():
         assert "ALERT" in member_log.read_text(), "a fresh, different leak raised no ALERT"
 
 
+def _postflight_dirty_check_ignores_qa_out_so_sentrys_evidence_survives():
+    """gh#856: `qa-out/` was untracked and unignored, so every other member's postflight sweep
+    stashed sentry's own screenshots and results minutes after they were written -- the
+    evidence *was* the dirt the sweep exists to clear (the VP watched a results directory
+    written at 06:33:37Z vanish by 06:39Z). This copies the real project `.gitignore` into a
+    throwaway repo -- so the test actually exercises whatever `qa-out/` line lands there,
+    not a hand-written stand-in -- and proves a fresh `qa-out/<ts>/` directory is left alone
+    (repo reads clean, no stash, directory survives) while a genuinely dirty tracked file
+    elsewhere is still stashed exactly as before.
+    """
+    import subprocess
+    script_path = ROOT / "scripts" / "postflight_dirty_check.sh"
+    real_gitignore = (ROOT / ".gitignore").read_text()
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp) / "repo"
+        repo.mkdir()
+        for cmd in (
+            ["git", "init", "-q"],
+            ["git", "config", "user.email", "t@t"],
+            ["git", "config", "user.name", "t"],
+        ):
+            subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+        (repo / ".gitignore").write_text(real_gitignore)
+        (repo / "f.txt").write_text("x")
+        subprocess.run(["git", "add", "f.txt", ".gitignore"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        member_log = log_dir / "member.log"
+        alerts_file = log_dir / "repo_dirty_alerts.log"
+
+        def run_check(label):
+            script = (
+                "set -uo pipefail\n"
+                f'REPO="{repo}"\n'
+                f'LOG_DIR="{log_dir}"\n'
+                f'log() {{ echo "$*" >> "{member_log}"; }}\n'
+                f'. "{script_path}"\n'
+                f'check_repo_clean_postflight "{label}"\n'
+            )
+            proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+            assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+
+        # AC2: a fresh qa-out/<ts>/ directory, alone, must read as clean -- no stash, and the
+        # directory must still be there afterwards (nothing swept it).
+        qa_out_dir = repo / "qa-out" / "20260911T063337Z"
+        qa_out_dir.mkdir(parents=True)
+        (qa_out_dir / "result.json").write_text("{}")
+        run_check("run-qa-out-only")
+        assert not alerts_file.exists(), "a qa-out/-only $REPO alerted anyway -- qa-out/ is not ignored"
+        assert not member_log.exists() or member_log.read_text().strip() == "", \
+            "a qa-out/-only $REPO logged an alert -- qa-out/ is not ignored"
+        assert qa_out_dir.is_dir() and (qa_out_dir / "result.json").exists(), \
+            "sentry's evidence directory was swept even though it should be ignored"
+
+        # AC3: a genuinely dirty tracked file alongside it must still be stashed as before, and
+        # qa-out/ must still survive that stash untouched.
+        (repo / "f.txt").write_text("genuinely dirty")
+        run_check("run-dirty-plus-qa-out")
+        assert alerts_file.exists(), "a genuinely dirty tracked file next to qa-out/ produced no alert"
+        assert "REMEDIATED" in member_log.read_text(), \
+            "a genuinely dirty tracked file next to qa-out/ was not auto-stashed"
+        status_after = subprocess.run(
+            ["git", "status", "--short"], cwd=repo, check=True, capture_output=True, text=True
+        ).stdout
+        assert "f.txt" not in status_after, "the genuinely dirty tracked file was not stashed"
+        assert qa_out_dir.is_dir() and (qa_out_dir / "result.json").exists(), \
+            "qa-out/ did not survive a stash of unrelated dirty tracked files"
+
+
 def _postflight_dirty_check_auto_stashes_a_leak_so_gitpull_can_proceed():
     """gh#4542: detection alone left $REPO dirty for hours -- the gitpull cron's `git merge
     --ff-only` (git_pull_guard.sh) has no way past a dirty tree, so it just kept refusing on
@@ -12164,6 +12235,7 @@ if __name__ == "__main__":
     check("lost_passes flags a started row with no completion past the grace window", _lost_passes_flags_a_started_row_with_no_completion_past_the_grace_window)
     check("signal_rate/dormant exclude killed+timed_out, not just budget_declined", _signal_rate_excludes_all_never_executed_statuses)
     check("a leaked absolute-path write into $REPO is caught and alerted", _postflight_dirty_check_catches_a_leaked_absolute_path_write)
+    check("qa-out/ is ignored so sentry's evidence survives the postflight sweep (gh#856)", _postflight_dirty_check_ignores_qa_out_so_sentrys_evidence_survives)
     check("a git-status failure alerts rather than reading as clean", _postflight_dirty_check_alerts_rather_than_hides_a_git_status_failure)
     check("a leak is auto-stashed so gitpull can proceed on its next tick (gh#4542)", _postflight_dirty_check_auto_stashes_a_leak_so_gitpull_can_proceed)
     check("the stash pile escalates once it crosses the review threshold (gh#4542)", _postflight_dirty_check_escalates_once_the_stash_pile_crosses_the_threshold)
