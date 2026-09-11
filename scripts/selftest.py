@@ -9624,6 +9624,45 @@ def _fleet_alert_queues_an_undelivered_alarm_and_retries_it_next_call():
         assert queue.read_text().strip() == "", f"delivered retry must leave the queue: {queue.read_text()!r}"
 
 
+def _fleet_alert_defaults_log_and_queue_under_fleet_log_dir():
+    """gh#861: FLEET_ALERT_LOG/FLEET_ALERT_QUEUE are unset in every containerised instance, so
+    the script fell back to a host-only /home/ubuntu path that does not exist in a container --
+    silently dropping the fleet-kit#512 undelivered-alarm retry queue. Now the default derives
+    from FLEET_LOG_DIR, same as the severity-gate call four lines below already does. Same
+    queue-then-retry shape as _fleet_alert_queues_an_undelivered_alarm_and_retries_it_next_call,
+    but with FLEET_ALERT_LOG/FLEET_ALERT_QUEUE unset -- only FLEET_LOG_DIR set, as every
+    container actually has it (AC4)."""
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        bin_dir = tmp / "bin"; bin_dir.mkdir()
+        calls = tmp / "curl_calls.log"
+        (bin_dir / "curl").write_text('#!/bin/bash\necho "$@" >> "$CURL_CALLS"\nexit "${CURL_RC:-0}"\n')
+        (bin_dir / "curl").chmod(0o755)
+        log_dir = tmp / "fleet-kit-logs"; log_dir.mkdir()
+        log = log_dir / "fleet_alert.log"; queue = log_dir / "alerts_undelivered.jsonl"
+        script = str(ROOT / "scripts" / "fleet_alert.sh")
+        env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "NTFY_TOPIC": "selftest-fake-topic",
+               "FLEET_LOG_DIR": str(log_dir), "CURL_CALLS": str(calls), "SELFTEST": "1"}
+
+        proc = subprocess.run(["bash", script, "container title", "container body"],
+                              capture_output=True, text=True, timeout=30, env={**env, "CURL_RC": "22"})
+        assert proc.returncode == 0, f"helper must never exit non-zero: {proc.stderr[:300]}"
+        assert log.exists(), f"log must land under FLEET_LOG_DIR, not /home/ubuntu: {proc.stderr[:300]}"
+        assert "/home/ubuntu" not in log.read_text()
+        assert queue.exists() and "container title" in queue.read_text(), \
+            f"undelivered queue must land under FLEET_LOG_DIR too: {queue.read_text() if queue.exists() else None!r}"
+
+        calls.unlink(missing_ok=True)
+        proc = subprocess.run(["bash", script, "second title", "second body"], capture_output=True,
+                              text=True, timeout=30, env={**env, "CURL_RC": "0"})
+        assert proc.returncode == 0, proc.stderr[:300]
+        sent = calls.read_text()
+        assert "[retry] container title" in sent, \
+            f"queued alarm must be retried first, still under FLEET_LOG_DIR: {_redact_secrets(sent)!r}"
+        assert queue.read_text().strip() == "", f"delivered retry must leave the queue: {queue.read_text()!r}"
+
+
 def _number_read_fetches_from_a_url_and_renders_five_lines():
     """fleet-kit#513: the venture's number goes above every charter. --fetch reads the URL
     (file:// here, so the suite touches no network) and writes number.json + a history line;
@@ -12556,6 +12595,7 @@ if __name__ == "__main__":
     check("member liveness is quiet and resolves after a recent ok run (fleet-kit#512)", _member_liveness_is_quiet_and_resolves_when_a_member_worked_recently)
     check("member liveness names the reset time when the pool is exhausted (fleet-kit#512)", _member_liveness_names_the_reset_when_the_pool_is_exhausted)
     check("fleet_alert queues an undelivered alarm and retries it next call (fleet-kit#512)", _fleet_alert_queues_an_undelivered_alarm_and_retries_it_next_call)
+    check("fleet_alert defaults log and queue under FLEET_LOG_DIR in a container (gh#861)", _fleet_alert_defaults_log_and_queue_under_fleet_log_dir)
     check("sync health check pages on a real stalled offset, not on a caught-up one (gh#273)", _sync_health_check_pages_on_a_real_stalled_offset_not_on_a_caught_up_one)
     check("sync health check re-pages on a fixed interval instead of once", _sync_health_check_repages_on_a_fixed_interval)
     check("nothing hardcodes a read of the frozen instances/*/logs mirror", _nothing_hardcodes_a_read_of_the_frozen_instance_log_mirror)

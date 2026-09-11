@@ -52,7 +52,7 @@ done
 
 TITLE="${1:?usage: fleet_alert.sh [--check X --problem Y --severity Z] <title> <body>}"
 BODY="${2:-}"
-LOG="${FLEET_ALERT_LOG:-/home/ubuntu/fleet-kit-logs/fleet_alert.log}"
+LOG="${FLEET_ALERT_LOG:-${FLEET_LOG_DIR:-/home/ubuntu/fleet-kit-logs}/fleet_alert.log}"
 # Alarms neither channel could deliver wait here and are retried at the front of the NEXT
 # call (fleet-kit#512). See the drain block below for why.
 QUEUE="${FLEET_ALERT_QUEUE:-$(dirname "$LOG")/alerts_undelivered.jsonl}"
