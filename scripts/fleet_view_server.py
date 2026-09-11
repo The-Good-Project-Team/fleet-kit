@@ -29,6 +29,7 @@ import datetime
 import hmac
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -71,6 +72,19 @@ def _resolve_repo_url() -> str:
 
 
 REPO_URL = _resolve_repo_url()
+
+
+def _brand_from_repo_url(repo_url: str) -> str:
+    """Fallback display name derived from the target repo's slug (e.g. "philanthropy-atlas"
+    -> "Philanthropy Atlas"), used when an operator hasn't set FLEET_BRAND. Every instance of
+    this kit points at a different repo, so the repo it watches is itself instance-specific
+    configuration -- unlike the "fleet-kit" string this replaces, which was the same on every
+    deploy regardless of which product's console it served (gh#553 fix 5)."""
+    if not repo_url:
+        return ""
+    slug = repo_url.rstrip("/").rsplit("/", 1)[-1]
+    words = re.split(r"[-_]+", slug)
+    return " ".join(w.capitalize() for w in words if w)
 
 
 def _resolve_siblings() -> list[dict]:
@@ -349,8 +363,9 @@ def read_env_flags() -> dict:
     strings, blank if unset) and SIBLINGS for the Settings page -- same file, same request,
     one round trip."""
     values = read_env_values()
+    brand = (values.get("FLEET_BRAND", "") or "").strip() or _brand_from_repo_url(REPO_URL) or "Fleet"
     out = {"FLEET_ENABLED": values.get("FLEET_ENABLED", "true") == "true", "REPO_URL": REPO_URL,
-           "SIBLINGS": SIBLINGS}
+           "BRAND": brand, "SIBLINGS": SIBLINGS}
     for key in DIAL_FIELDS:
         out[key] = values.get(key, "")
     try:
