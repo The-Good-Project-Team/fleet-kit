@@ -162,5 +162,57 @@ class ClaimsItemTests(unittest.TestCase):
         self.assertEqual([p["number"] for p in claiming], [1])
 
 
+def epic(n, comments=()):
+    return {"number": n, "labels": ["fleet:epic"],
+            "comments": [{"body": b, "createdAt": t} for b, t in comments]}
+
+
+class RedoTargetsTests(unittest.TestCase):
+    """fk#634 round-2 fix 1: PR#842 closed gru's door onto a tracking-only epic; this one --
+    vp_due spawning a redo minion straight at the epic -- was still open, and is the bug that
+    built round 1's own fix."""
+
+    def test_non_epic_redo_targets_itself(self):
+        it = item(30, comments=[("Not yet (VP review): thin\n1. ...", T1)])
+        targets, why = vp_due.redo_targets(it, is_open=lambda n: True)
+        self.assertEqual(targets, [30])
+        self.assertEqual(why, "single item")
+
+    def test_epic_redo_targets_open_named_children(self):
+        body = ("**Not yet (VP review):** ...\nFixes belong to #652 (slices) and #653 "
+                "(reif-asked), plus PR #842 which already merged.")
+        it = epic(634, comments=[(body, T1)])
+        opened = {652, 653}
+        targets, why = vp_due.redo_targets(it, is_open=lambda n: n in opened)
+        self.assertEqual(targets, [652, 653])
+        self.assertIn("open child issue", why)
+
+    def test_epic_redo_falls_back_to_parent_when_no_child_named(self):
+        it = epic(634, comments=[("**Not yet (VP review):** thin, no child named", T1)])
+        targets, why = vp_due.redo_targets(it, is_open=lambda n: True)
+        self.assertEqual(targets, [634])
+        self.assertEqual(why, "epic-level redo: no child named")
+
+    def test_epic_redo_falls_back_when_named_children_are_closed(self):
+        """#649 and #650 are named in the prose (already closed and built) -- naming them is
+        not enough to dispatch a builder onto a closed issue."""
+        body = "**Not yet (VP review):** #649 and #650 are closed and built."
+        it = epic(634, comments=[(body, T1)])
+        targets, why = vp_due.redo_targets(it, is_open=lambda n: False)
+        self.assertEqual(targets, [634])
+        self.assertEqual(why, "epic-level redo: no child named")
+
+    def test_redo_items_dispatches_epic_children(self):
+        body = "**Not yet (VP review):** #652 owns it."
+        it = epic(634, comments=[(body, T1)])
+        out = vp_due.redo_items([it], is_open=lambda n: True)
+        self.assertEqual(out["redo"], [{"number": 634, "targets": [652], "why": "1 open child issue(s) named in the verdict"}])
+
+    def test_redo_items_preserves_non_epic_shape(self):
+        it = item(31, comments=[("Not yet (VP review): a", T1)])
+        out = vp_due.redo_items([it])
+        self.assertEqual(out["redo"], [{"number": 31, "targets": [31], "why": "single item"}])
+
+
 if __name__ == "__main__":
     unittest.main()
