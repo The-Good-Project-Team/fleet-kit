@@ -128,5 +128,39 @@ class DueTests(unittest.TestCase):
         self.assertEqual(out["skipped"][0]["number"], 11)
 
 
+class ClaimsItemTests(unittest.TestCase):
+    """gh#636 VP round-2 fix 7: `collect()` must only count a PR as a merged build slice for
+    #N when its body actually CLAIMS #N (Fixes/Closes/Resolves/Part of), never a bare `#N`
+    mention in prose. Live proof: PR #842's body says '...epics stop looking buildable to
+    gru... #636...' -- a sentence about a different item's fix, not a claim on #636."""
+
+    def test_fixes_hash_n_claims(self):
+        self.assertTrue(vp_due._claims_item("Fixes #636", 636))
+
+    def test_closes_hash_n_claims(self):
+        self.assertTrue(vp_due._claims_item("Some intro.\n\nCloses #636.", 636))
+
+    def test_part_of_hash_n_claims(self):
+        self.assertTrue(vp_due._claims_item("Part of #636 -- seam 3 of 7.", 636))
+
+    def test_bare_mention_in_prose_does_not_claim(self):
+        body = ("Tracking epics stop looking buildable to gru (gh#634 fix 1)\n\n"
+                "VP's round-1 review of fk#634 found 5 of 6 open fleet:epic issues... #636 ...")
+        self.assertFalse(vp_due._claims_item(body, 636))
+
+    def test_does_not_match_a_different_number(self):
+        self.assertFalse(vp_due._claims_item("Fixes #6360", 636))
+        self.assertFalse(vp_due._claims_item("Fixes #63", 636))
+
+    def test_collect_only_counts_claiming_prs(self):
+        """End-to-end through the same filter collect() applies, without a live `gh` call."""
+        prs = [
+            {"number": 1, "mergedAt": T1, "body": "Fixes #636"},
+            {"number": 2, "mergedAt": T2, "body": "unrelated PR that happens to say #636 in passing"},
+        ]
+        claiming = [p for p in prs if vp_due._claims_item(p["body"], 636)]
+        self.assertEqual([p["number"] for p in claiming], [1])
+
+
 if __name__ == "__main__":
     unittest.main()
