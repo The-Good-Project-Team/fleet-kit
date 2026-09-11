@@ -868,10 +868,17 @@ def _open_streak_ask_exists(reason: str, db_path: Path | None) -> bool:
     """AC4's dedup check: an open ask already naming this exact block reason means a later run
     crossing the threshold again must not file a second one -- same rule dont-shoot-the-
     messenger.md:117 states for its own asks ("check first so you never file the same one
-    twice")."""
+    twice"). Restricted to sentry's own `credential`-class asks (the only class this function
+    ever files under) -- a bare substring match against EVERY open ask from sentry, regardless
+    of class, could false-positive on an unrelated ask that happens to quote the same short
+    reason text (e.g. "missing FIXTURE_EIN") and silently suppress a real, never-filed ask."""
     import ask  # deferred: pulls in fleet_db/authority, unneeded for callers that never block
     conn = ask.fleet_db.connect(db_path)
-    return any(reason in (row.get("why") or "") for row in ask.list_asks(conn, status="open", member="sentry"))
+    return any(
+        reason in (row.get("why") or "")
+        for row in ask.list_asks(conn, status="open", member="sentry")
+        if row.get("class") == "credential"
+    )
 
 
 def file_streak_asks(blocked: list[dict], threshold: int = BLOCKED_STREAK_ASK_THRESHOLD,
@@ -897,10 +904,14 @@ def file_streak_asks(blocked: list[dict], threshold: int = BLOCKED_STREAK_ASK_TH
     for reason, entries in sorted(groups.items()):
         if _open_streak_ask_exists(reason, db_path):
             continue
+        # A viewport-independent reason (a missing credential, say) blocks the SAME journey at
+        # both desktop and mobile_390 -- two `blocked` entries, one real journey -- so the
+        # human-facing count is distinct journey ids, not raw entries (would otherwise double
+        # a two-viewport block into "2 journeys" when only one is actually broken).
         ids = sorted({e["id"] for e in entries})
         streak = max(e["blocked_streak"] for e in entries)
         why = (
-            f"{len(entries)} journey(s) blocked {streak} consecutive runs on: {reason} "
+            f"{len(ids)} journey(s) blocked {streak} consecutive runs on: {reason} "
             f"(affected: {', '.join(ids)})"
         )
         argv = []
@@ -945,11 +956,18 @@ def main() -> int:
         finally:
             browser.close()
 
+    # AC1/AC2/AC6: streak accounting is pure-Python and mutates `blocked` in place, so it must
+    # run before results.json is built below. `save_streak_state` is best-effort (an unwritable
+    # cache dir must not cost the run its results) -- everything past this point (state save,
+    # ask filing) is deliberately allowed to fail without losing the journey results run_all()
+    # already produced; a runner bug elsewhere in this file doesn't get to end the whole pass
+    # (see run_all's own docstring), and neither does a broken fleet.db connection here.
     prior_streak_state = load_streak_state(args.streak_state)
     new_streak_state = apply_blocked_streaks(blocked, prior_streak_state)
-    save_streak_state(args.streak_state, new_streak_state)
-    if blocked:
-        file_streak_asks(blocked)
+    try:
+        save_streak_state(args.streak_state, new_streak_state)
+    except OSError as exc:
+        print(f"journey_walker: failed to save streak state: {exc}", file=sys.stderr)
 
     summary = summarize(journeys_out, blocked)
     results = {"run": run_id, "deploy_sha": args.deploy_sha, "journeys": journeys_out,
@@ -958,6 +976,12 @@ def main() -> int:
     results_dir.mkdir(parents=True, exist_ok=True)
     results_path = results_dir / "results.json"
     results_path.write_text(json.dumps(results, indent=2))
+
+    if blocked:
+        try:
+            file_streak_asks(blocked)
+        except Exception:  # noqa: BLE001 -- filing a streak ask must never cost the run its results
+            traceback.print_exc()
 
     print(f"journey_walker: wrote {results_path}")
     print(

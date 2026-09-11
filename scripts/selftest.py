@@ -12318,6 +12318,53 @@ def _journey_walker_streak_ask_dedupes_against_an_already_open_ask_gh857():
         assert len(rows) == 1, f"exactly one open ask must exist after two runs, got {rows}"
 
 
+def _journey_walker_streak_ask_counts_distinct_journeys_not_viewport_entries_gh857():
+    """gh#857 code-review follow-up: a viewport-independent reason (a missing credential) blocks
+    the SAME journey at both `desktop` and `mobile_390` -- two `blocked` entries sharing one
+    journey id. The ask's blocked-count must read '1 journey', not '2', since only one journey
+    is actually broken."""
+    import ask, fleet_db
+    import journey_walker as jw
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        authority_path = Path(d) / "does-not-exist.json"
+        reason = "missing test user credentials for: alice"
+        blocked = [
+            {"id": "sign-in", "viewport": "desktop", "reason": reason, "blocked_streak": 3},
+            {"id": "sign-in", "viewport": "mobile_390", "reason": reason, "blocked_streak": 3},
+        ]
+        filed = jw.file_streak_asks(blocked, db_path=db_path, authority_path=authority_path, no_notify=True)
+        assert filed == [reason]
+
+        conn = fleet_db.connect(db_path)
+        why = ask.list_asks(conn, status="open", member="sentry")[0]["why"]
+        assert "1 journey(s) blocked" in why, \
+            f"a single journey blocked at two viewports must count as 1 journey, got: {why}"
+
+
+def _journey_walker_streak_ask_dedup_ignores_open_ask_of_a_different_class_gh857():
+    """gh#857 code-review follow-up: the AC4 dedup check must only look at sentry's own
+    `credential`-class asks -- an unrelated open ask (any other class) whose `why` happens to
+    contain the same short reason substring must never suppress filing a real one."""
+    import ask, fleet_db
+    import journey_walker as jw
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        authority_path = Path(d) / "does-not-exist.json"
+        reason = "missing FIXTURE_EIN"
+
+        conn = fleet_db.connect(db_path)
+        ask.file_ask(conn, member="sentry", why=f"unrelated: {reason} came up in a code review",
+                     ask_class="infra")
+        assert len(ask.list_asks(conn, status="open", member="sentry")) == 1
+
+        blocked = [{"id": "open-990-report", "viewport": "desktop", "reason": reason, "blocked_streak": 3}]
+        filed = jw.file_streak_asks(blocked, db_path=db_path, authority_path=authority_path, no_notify=True)
+        assert filed == [reason], \
+            f"an open ask of a DIFFERENT class must never suppress a real credential ask, got {filed}"
+        assert len(ask.list_asks(conn, status="open", member="sentry")) == 2
+
+
 def _stash_pile_test_repo(tmp_path):
     """A throwaway git repo with three stash entries: a managed one whose diff will already be
     on HEAD (redundant), a managed one that is still unique (must survive), and a foreign one
@@ -12935,6 +12982,8 @@ if __name__ == "__main__":
     check("journey_walker streak state round-trips through disk, degrades cleanly if missing/corrupt (gh#857)", _journey_walker_streak_state_round_trips_through_disk_gh857)
     check("journey_walker streak ask groups by reason, names count/streak/reason/ids, skips sub-threshold journeys (gh#857 AC3)", _journey_walker_streak_ask_files_once_per_reason_and_names_required_facts_gh857)
     check("journey_walker streak ask dedupes against an already-open ask for the same reason (gh#857 AC4)", _journey_walker_streak_ask_dedupes_against_an_already_open_ask_gh857)
+    check("journey_walker streak ask counts distinct journeys, not raw viewport entries (gh#857 review)", _journey_walker_streak_ask_counts_distinct_journeys_not_viewport_entries_gh857)
+    check("journey_walker streak ask dedup ignores an open ask of a different class (gh#857 review)", _journey_walker_streak_ask_dedup_ignores_open_ask_of_a_different_class_gh857)
 
     check("stash_pile_expiry drops a managed entry whose diff is already on HEAD, keeps a still-unique one (gh#714 AC1/AC2)", _stash_pile_expiry_drops_only_redundant_managed_entries_gh714)
     check("stash_pile_expiry never inspects or drops a foreign (non-run=) stash entry (gh#714 AC3)", _stash_pile_expiry_never_touches_foreign_entries_gh714)
