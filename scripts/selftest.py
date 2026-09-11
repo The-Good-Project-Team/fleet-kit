@@ -4267,7 +4267,10 @@ def _console_v2_is_one_phone_first_page_with_five_blocks():
     assert "<script src=" not in page and "cdn" not in page.lower(), "no framework, no CDN"
     for api in ("/api/number", "/api/asks", "/api/members", "/api/snapshot", "/api/kpi", "/api/build", "/api/plan", "/api/run_now", "/api/fleet_toggle", "/api/asks/answer"):
         assert api in page, f"page does not use {api}"
-    assert 'href="/classic"' in page
+    # gh#553 fix 1 (round 2): the link no longer hardcodes a root-absolute "/classic" -- it is
+    # built from withBase('/classic') so it still resolves under this console's own path
+    # prefix when Caddy is routing multiple instances by path (see test_fleet_home_base_path.py).
+    assert "withBase('/classic')" in page
     sv = (ROOT / "scripts" / "fleet_view_server.py").read_text()
     assert 'if path in ("/", "/classic"):' in sv and "PAGE_V2" in sv, "root must serve v2 and /classic the old page"
     for route in ('if path == "/api/asks":', 'if path == "/api/build":', 'if path == "/api/plan":', 'if path == "/api/asks/answer":'):
