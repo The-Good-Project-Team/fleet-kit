@@ -14,6 +14,7 @@
       "only once L0-L3 are green: pull the top backlog item, unblock or advance it (L4)",
       "read this instance's number (the header run_member.sh composes from number.json, fk#513) and state, in one line, how much of what merged since your last pass moved it -- an unmeasured number is reported as unmeasured, never as zero; an instance with no FLEET_NUMBER_URL (e.g. fleet-kit-server) has no number by design, say so instead of citing a retired VISION.md",
       "file any broken layer as a backlog issue + report it -- never stall the whole pass on one broken layer",
+      "after opening a self-change PR, register it via predict.py add --member jefe (metric must be one your change can move; never call predict.py resolve, that's dumbledore's)",
       "report which layer was acted at and the one thing (if any) a human must decide"
     ],
     "limits": {
