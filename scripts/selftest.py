@@ -4925,6 +4925,36 @@ def _sidebar_shows_spawned_scheduled_disabled_not_strikethrough_gh565():
         assert f".amode.mode-{mode} {{" in html_src, f"missing a distinct visual rule for {mode}"
 
 
+def _status_dot_carries_a_non_color_channel_at_both_render_sites_gh430():
+    """gh#430, marie PRD: the astatus dot used to be an empty <span> whose whole meaning was
+    hue -- invisible to a screen reader and unreadable to a colorblind operator (ok/bad is
+    exactly the red-green pair). Both render sites (sidebar renderSidebar() and Home's
+    homeAgentsHtml()) must now expose accessible text naming the state (AC1/AC3), and the four
+    states must stay visually distinct with color removed (AC2), while the four color values
+    themselves are untouched (AC5, that mapping is #166/#267/#410's to fix).
+    """
+    html_src = (ROOT / "scripts" / "fleet_view.html").read_text()
+    assert "const STATUS_TEXT = {ok: 'ok', warn: 'warning', bad: 'failing', off: 'off'};" in html_src
+    sidebar = html_src[html_src.index("function renderSidebar()"):html_src.index("function homeAgentsHtml()")]
+    home = html_src[html_src.index("function homeAgentsHtml()"):html_src.index("function homeNavHtml()")]
+    for site_name, site in (("sidebar", sidebar), ("home", home)):
+        assert 'astatus ${cls}" role="img" aria-label="${STATUS_TEXT[cls]}" title="${STATUS_TEXT[cls]}"' in site, \
+            f"{site_name} status dot must carry an accessible name and a hover tooltip (AC1/AC3)"
+        assert "></span>" in site
+    # AC5: the four color custom properties are untouched -- only shape/border rules were added.
+    assert "--ok: #1f8b4c; --warn: #a6720f; --bad: #c13a2e; --accent: #2166c4;" in html_src, \
+        "the four status colors must not change -- that's #166/#267/#410's mapping to fix"
+    # AC2: each state gets a distinct shape/border, not just a color -- grayscale still reads.
+    assert ".astatus.ok { background: var(--ok); border-radius: 50%; }" in html_src
+    assert "clip-path: polygon(50% 0%, 0% 100%, 100% 100%)" in html_src, "warn must render as a triangle, not a circle"
+    assert ".astatus.bad { background: var(--bad); border-radius: 1px; }" in html_src, "bad must render as a square, not a circle"
+    assert "border: 2px solid var(--dimmer)" in html_src, "off must render as a hollow ring, not a filled circle"
+    # the second render site (Home's agent grid) never had an explicit dot size -- without one
+    # the astatus span renders at 0x0 and the color/shape rules have nothing to paint onto.
+    assert ".home-agent .astatus{width:8px;height:8px;border-radius:50%;flex:none}" in html_src, \
+        "Home's status dot has no size rule -- it would be invisible regardless of color/shape"
+
+
 def _backlog_row_renders_blast_radius_as_chilli_not_a_grey_pill_gh844():
     """gh#844, marie PRD: fleet:blast-N is a second axis (reach) separate from
     fleet:complexity-N (size). renderIssueRow must render it as a 🌶️ x N glyph run, never as an
@@ -14131,6 +14161,7 @@ if __name__ == "__main__":
     check("deploy.sh rolls over via caddy without a cordon (gh#625)", _deploy_sh_rolls_over_via_caddy_without_a_cordon)
     check("console shows each member's emoji, role and the steps a pass takes", _console_shows_role_and_steps_per_member)
     check("sidebar shows spawned/scheduled/disabled as distinct badges, not strikethrough (gh#565)", _sidebar_shows_spawned_scheduled_disabled_not_strikethrough_gh565)
+    check("status dot carries a non-color channel at both render sites, colors untouched (gh#430)", _status_dot_carries_a_non_color_channel_at_both_render_sites_gh430)
     check("console Home is usable on a phone and the number tile reads fleet.env", _console_home_is_usable_on_a_phone_and_the_number_tile_reads_fleet_env)
     check("console v2 is one phone-first page with five blocks (fk#645)", _console_v2_is_one_phone_first_page_with_five_blocks)
     check("share dials offer every 5% labelled as a percent", _share_dials_offer_every_five_percent_labelled_as_percent)

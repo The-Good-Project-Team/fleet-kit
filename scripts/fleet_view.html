@@ -77,10 +77,12 @@
   .agent-item:hover { background: var(--panel-2); }
   .agent-item.active { background: var(--panel-2); border-left-color: var(--accent); }
   .agent-item .astatus { width: 8px; height: 8px; border-radius: 50%; flex: none; margin-top: 5px; }
-  .astatus.ok { background: var(--ok); }
-  .astatus.bad { background: var(--bad); }
-  .astatus.warn { background: var(--warn); }
-  .astatus.off { background: var(--dimmer); }
+  /* gh#430: colors below are unchanged (that mapping is #166/#267/#410's to fix) -- each rule
+     adds a shape/border difference so the four states stay distinguishable with color removed. */
+  .astatus.ok { background: var(--ok); border-radius: 50%; }
+  .astatus.bad { background: var(--bad); border-radius: 1px; }
+  .astatus.warn { background: var(--warn); border-radius: 0; clip-path: polygon(50% 0%, 0% 100%, 100% 100%); }
+  .astatus.off { background: none; border-radius: 50%; border: 2px solid var(--dimmer); }
   .agent-item .atext { flex: 1; min-width: 0; }
   .agent-item .aname { overflow-wrap: break-word; }
   /* gh#565: how a member is DRIVEN (scheduled/spawned/disabled) is a separate axis from the
@@ -308,6 +310,9 @@
 .home-agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px 14px;margin-top:8px}
 .home-agent{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--line,#e4e4e4);border-radius:8px;cursor:pointer;background:var(--panel,#fff);min-height:40px}
 .home-agent:hover{background:var(--panel-2)}
+/* gh#430: same status dot as the sidebar (.agent-item .astatus) -- this rule had never set a
+   size, so the dot was invisible here for every state except .off's border. */
+.home-agent .astatus{width:8px;height:8px;border-radius:50%;flex:none}
 .home-agent .ha-name{font-weight:600;white-space:nowrap}
 .home-agent .ha-meta{opacity:.7;font-size:12px;margin-left:auto;text-align:right}
 .home-nav-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-top:8px}
@@ -532,6 +537,12 @@ function statusClass(status) {
   return 'bad'; // no_vision_link, fail, etc.
 }
 
+// gh#430: the status dot carries its whole meaning in hue -- unreadable to a colorblind
+// operator (ok/bad are exactly the red-green pair) and absent from the accessibility tree
+// for a screen reader (an empty <span>). This is the accessible-name text for both; the CSS
+// shape/border rules on .astatus.* carry the redundant visual (non-color) channel.
+const STATUS_TEXT = {ok: 'ok', warn: 'warning', bad: 'failing', off: 'off'};
+
 // gh#166: enabled:false is a legitimate permanent throttle for a dispatch-only member (nerd,
 // minion -- they only ever run via another member's task-override, never self-fire), not proof
 // the member is dead. Only treat "disabled" as "actually off" when there's also no run inside
@@ -593,7 +604,7 @@ function renderSidebar() {
       ? `<div class="akpi">${k.total} ${esc(k.unit)}</div>` : '';
     return `<div class="agent-item ${active ? 'active' : ''}"
         data-agent="${esc(name)}">
-      <span class="astatus ${cls}"></span>
+      <span class="astatus ${cls}" role="img" aria-label="${STATUS_TEXT[cls]}" title="${STATUS_TEXT[cls]}"></span>
       <div class="atext">
         <div class="aname">${m.spec.emoji ? esc(m.spec.emoji) + ' ' : ''}${esc(name)}<span class="amode mode-${mode}" title="${esc(MODE_TITLE[mode])}">${MODE_LABEL[mode]}</span></div>
         <div class="aago">${last ? ago(last.ts) : 'never run'}</div>
@@ -1104,7 +1115,7 @@ function homeAgentsHtml() {
     const k = KPI_BY_MEMBER[name];
     const kpi = (k && k.total !== null && k.total !== undefined && k.unit) ? `${k.total} ${esc(k.unit)}` : '';
     return `<div class="home-agent" data-agent="${esc(name)}">
-        <span class="astatus ${cls}"></span>
+        <span class="astatus ${cls}" role="img" aria-label="${STATUS_TEXT[cls]}" title="${STATUS_TEXT[cls]}"></span>
         <span class="ha-name">${m.spec.emoji ? esc(m.spec.emoji) + ' ' : ''}${esc(name)}<span class="amode mode-${mode}" title="${esc(MODE_TITLE[mode])}">${MODE_LABEL[mode]}</span></span>
         <span class="ha-meta">${last ? esc(ago(last.ts)) : 'never run'}${kpi ? ' · ' + kpi : ''}</span>
       </div>`;
