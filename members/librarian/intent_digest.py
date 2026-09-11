@@ -65,7 +65,7 @@ def from_asks(d: Path, cutoff: float) -> tuple[list[dict], str]:
         return [], "fleet.db absent"
     try:
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-        cur = con.execute("SELECT id, question, answer, answered_by, answered_at FROM asks "
+        cur = con.execute("SELECT id, why, answer, answered_by, answered_at FROM asks "
                           "WHERE answered_at IS NOT NULL AND answered_at >= ? ORDER BY answered_at", (cutoff,))
         rows = [{"ts": float(a_at), "source": f"ask#{i} answered by {by or '?'}",
                  "text": f"Q: {q}  A: {a}"} for i, q, a, by, a_at in cur.fetchall()]
