@@ -157,7 +157,10 @@ def analyze(paths: list[str], prs: list[dict]) -> dict:
                     match.get("deletions", 0),
                 )
             )
-        touching.sort(reverse=True)  # newest first
+        # Sort by mergedAt only: `number` mixes int (squash-merged, `#NNN`) and str (direct
+        # push, short SHA) across rows, and Python can't compare those -- sorting on the full
+        # tuple raised TypeError whenever two rows tied on mergedAt's second precision.
+        touching.sort(key=lambda t: t[0], reverse=True)  # newest first
 
         since = 0
         last_consolidation_pr = None
