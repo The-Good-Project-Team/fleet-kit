@@ -11557,6 +11557,39 @@ def _filer_red_profile_uses_red_label_and_marker_gh785():
     assert label_create[3].endswith("red-team")
 
 
+def _filer_lookup_failure_never_files_a_duplicate_gh914():
+    # gh#914: a `gh issue list` call that fails (rate limit, network blip) must never be read
+    # as "no open issue found" -- that misreading filed #911/#912 as duplicates of #814/#884.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("jif", ROOT / "scripts" / "journey_issue_filer.py")
+    jif = importlib.util.module_from_spec(spec); sys.modules[spec.name] = jif; spec.loader.exec_module(jif)
+
+    create_calls = []
+
+    def flaky(cmd):
+        if cmd[1] == "label":
+            return 0, "ok"
+        if cmd[2] == "list":
+            return 1, "rate limited"
+        if cmd[2] == "create":
+            create_calls.append(cmd)
+            return 0, "https://github.com/x/y/issues/999"
+        raise AssertionError(f"unexpected call: {cmd}")
+
+    d = Path(tempfile.mkdtemp())
+    results = {
+        "run": "r1", "deploy_sha": "sha1",
+        "journeys": [{"id": "send-message", "name": "Send a message",
+                      "steps": [{"index": 0, "action": "fill and send", "observable_result": "sent",
+                                 "status": "fail"}]}],
+    }
+    (d / "results.json").write_text(json.dumps(results))
+    summary = jif.process(d / "results.json", d / "state.json", runner=flaky)
+    assert create_calls == [], f"a lookup failure must file zero new issues, got {create_calls}"
+    assert summary["filed"] == [], summary
+    assert len(summary["skipped"]) == 1, summary
+
+
 def _red_member_paced_and_vp_gates_on_red_gh785():
     import member_spec
     red = member_spec.by_name("red", ROOT / "members")
@@ -13443,6 +13476,7 @@ if __name__ == "__main__":
     check("librarian-scrub is a shell member on the hourly line; librarian is the daily reader with /repo and /fleet-kit denied; marie+gru read INTENT.md (gh#784 AC1)", _librarian_scrub_is_shell_hourly_and_librarian_runs_daily_gh784)
     check("red_walker expands an overflow payload, inverts landed_when to fail, and blocks a 403 (gh#785 AC1-3)", _red_walker_payload_landed_and_blocked_gh785)
     check("journey_issue_filer red profile files under fleet:red-team with its own marker, sentry unchanged (gh#785 AC4)", _filer_red_profile_uses_red_label_and_marker_gh785)
+    check("journey_issue_filer never files a duplicate when the dedup lookup itself fails (gh#914)", _filer_lookup_failure_never_files_a_duplicate_gh914)
     check("red is a paced 6h member and vp requires a red pass before Accepted (gh#785 AC5)", _red_member_paced_and_vp_gates_on_red_gh785)
     check("worktree_guard_hook blocks an Edit under the shared $REPO when isolated (gh#592 AC2)", _worktree_guard_blocks_edit_under_shared_repo_gh592)
     check("worktree_guard_hook allows an Edit under the pass's own $WT_PATH (gh#592 AC5)", _worktree_guard_allows_edit_under_own_worktree_gh592)
