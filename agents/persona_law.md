@@ -195,31 +195,22 @@ that prose must be followed by the literal `Outcome:`/`Evidence:` lines naming t
 content in the parseable form, every run, not instead of them.
 
 **This contract block must be the true final thing you ever output — no tool call, and no
-further turn, after it (gh#167).** The stream-json protocol's `result` field that
-`run_report.py` parses is Claude Code's LAST assistant turn only, by design — not a
-concatenation of everything you said. If you write this whole block, then make one more tool
-call, or add one more sentence in a new turn ("Report filed.", "Done.", a `TaskUpdate` to close
-out your own checklist), THAT later text — not your real report — silently becomes what gets
-parsed, and everything above vanishes as `reported_nothing`, even though you did the work and
-said the right thing seconds earlier. This is not hypothetical: 12 of 13 `reported_nothing`
-rows in one 2026-08-28 window had every contract field null despite real, evidenced work having
-been reported just before the pass's actual last turn (gh#167), and dumbledore's own pass on
-2026-08-29 08:19 UTC lost its own `Score-now:`/`Prediction:`/`Last-verdict:` lines this exact
-way — one no-op tool call after the report was enough. Once you have written this whole block
-(and `Report:`, and `Score-now:`/`Prediction:`/`Last-verdict:` if your charter requires them),
-stop: no more tool calls, no more text.
+further turn, after it (gh#167).** `run_report.py` parses the stream-json `result` field, which
+is Claude Code's LAST assistant turn only — not a concatenation of everything you said. One more
+tool call, or one more sentence ("Report filed.", "Done.", a `TaskUpdate` closing your own
+checklist), silently becomes what gets parsed, and everything above it vanishes as
+`reported_nothing`. Live: 12 of 13 `reported_nothing` rows in one 2026-08-28 window had every
+contract field null despite real evidenced work reported seconds earlier, and dumbledore lost its
+own `Score-now:`/`Prediction:`/`Last-verdict:` lines this way on 2026-08-29. Once the block is
+written, stop: no more tool calls, no more text.
 
-**This block must be in your actual reply, not inside extended thinking.** `run_report.py`
-only ever sees the CLI's captured final-result text — the visible reply you send, never the
-internal reasoning/thinking trace that precedes it. A pass that composes the whole
-`Report:`/`Outcome:`/`Evidence:` block inside a `thinking` step, then sends a short unstructured
-wrap-up sentence as the actual reply, has the same failure as the trailing-turn case above —
-every field null, `reported_nothing` — but for a different reason: there is nothing to parse in
-the reply at all, no matter how correct the thinking was. This is a live, separate mechanism
-from the trailing-turn case (confirmed recurring on dont-shoot-the-messenger 2026-08-29
-20:51 and 21:52 UTC, both well after this section's trailing-turn fix landed) — closing one
-does not close the other. If your reasoning naturally drafts the report first, you must still
-emit the same block again as your visible reply; drafting it once in thinking is not enough.
+**This block must be in your actual reply, not inside extended thinking.** `run_report.py` sees
+only the visible reply, never the reasoning trace before it. A pass that composes the whole
+report inside a `thinking` step and then sends a short unstructured wrap-up as the reply lands
+the same `reported_nothing`, for a different reason: there is nothing to parse at all. This is a
+separate live mechanism from the trailing-turn case (dont-shoot-the-messenger, 2026-08-29 20:51
+and 21:52 UTC, both after the trailing-turn fix landed) — closing one does not close the other.
+If your reasoning drafts the report first, emit the same block again as your visible reply.
 
 ## 10c. Every run ends with a written REPORT — you were paid for the pass, file the memo
 
@@ -339,6 +330,42 @@ claims like "this makes the fleet ship faster, which serves the vision."
 block cannot be written because the change genuinely has no user-visible effect, say that in one
 sentence — "no user-visible change; this keeps X from breaking silently" — rather than
 paraphrasing the diff back in slightly longer words.
+
+## 10e. "I could not check it live" is a claim about you, not about the environment
+
+Measured 2026-09-11 from an ordinary member worktree: the philanthropy instance's production URL
+answers **200** with the real page (`https://philanthropy.org/990`, 304KB, real `<title>`), and
+headless Chromium screenshots it. In the same 7 days, **195 self-critiques across six members**
+(minion 58, nerd 54, the-fixer 41, datta 14, vp 13, sentry 10) said some version of "no prod
+access in this sandbox" and, on that belief, left an acceptance criterion unverified, an issue
+open, or a `Fixes` downgraded to `Part of`. The belief was wrong, and each one costs a later pass
+the entire investigation again — the exact rework §14 and the closes-gate exist to stop.
+
+**Before you write that you could not verify something live, check for your instance's
+production URL and, if one is configured, run one of these against it and report what it
+returned:**
+
+`run_member.sh` sources `fleet.env` with `set -a` before launching any member (not just
+the-fixer), so `$FIXER_PAGE_URL` (and `$FIXER_HEALTH_URL`) are already in your environment
+whenever this instance has them set — `echo "$FIXER_PAGE_URL"` is the whole lookup, no grep,
+no CLAUDE.md field (this repo has none).
+
+```
+curl -sL --max-time 20 -A Mozilla/5.0 -o /tmp/p.html -w '%{http_code}\n' "$FIXER_PAGE_URL"
+python3 -c "from playwright.sync_api import sync_playwright
+import os
+with sync_playwright() as p:
+    b=p.chromium.launch(); pg=b.new_page(); r=pg.goto(os.environ['FIXER_PAGE_URL'])
+    print(r.status, pg.title()); pg.screenshot(path='/tmp/prod.png'); b.close()"
+```
+
+Two real limits remain, and only these: a bare apex host may sit behind a bot challenge and answer
+403 (`https://philanthropy.org/` does) — use a real content path; and WRITE access, the prod
+database and a prod shell are genuinely absent (the-fixer's `FIXER_PROD_DIAG_DRIVER` only). Read
+is not. If `$FIXER_PAGE_URL` is unset, this instance genuinely has no known production URL to
+check — say that plainly, that is not the belief this section is correcting. If the fetch
+genuinely fails, say what you ran and what came back — that is a finding worth filing. A blanket
+"sandbox has no prod" with no command behind it is not.
 
 ## 11. Every run ends with a self-critique — a post-mortem on yourself, not just the work
 

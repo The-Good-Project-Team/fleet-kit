@@ -4237,6 +4237,63 @@ def _judge_runs_the_closes_gate_and_reads_the_issue():
     assert (ROOT / "docs" / "quality-standard.md").exists()
 
 
+def _closes_gate_blocks_an_epic_with_unaccepted_children():
+    """fk#652 (Part C0 re-scope, 2026-09-11): an epic (`fleet:epic`) closes only when every
+    child is accepted -- the same principle closes_gate.py already enforces per-issue, one
+    layer up. Covers AC1-3, AC5 of the superseding PRD comment."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("closes_gate", ROOT / "scripts" / "closes_gate.py")
+    cg = importlib.util.module_from_spec(spec); spec.loader.exec_module(cg)
+
+    epic_all_closed = {"title": "epic", "labels": [{"name": "fleet:epic"}], "body": "", "comments": [],
+                        "subIssues": {"nodes": [{"number": 1, "state": "CLOSED"}, {"number": 2, "state": "CLOSED"}, {"number": 3, "state": "CLOSED"}]}}
+    # AC1: three closed children -> closable
+    r = cg.evaluate("Closes #634", ["src/x.py"], {634: epic_all_closed})
+    assert r["verdict"] == "ok", r
+    assert cg.epic_closable(epic_all_closed, {634: epic_all_closed})["closable"] is True
+
+    epic_one_open = dict(epic_all_closed, subIssues={"nodes": [{"number": 1, "state": "CLOSED"}, {"number": 2, "state": "OPEN"}, {"number": 3, "state": "CLOSED"}]})
+    # AC2: one open child -> blocked, names it
+    r = cg.evaluate("Closes #634", ["src/x.py"], {634: epic_one_open})
+    assert r["verdict"] == "block" and "#2" in r["reasons"][0], r
+    ec = cg.epic_closable(epic_one_open, {634: epic_one_open})
+    assert ec["closable"] is False and "#2" in ec["reason"], ec
+
+    # AC3: no subIssues at all, no "decomposed into" comment -> never blocks on epic grounds
+    epic_unlinked = {"title": "epic", "labels": [{"name": "fleet:epic"}], "body": "", "comments": []}
+    r = cg.evaluate("Closes #634", ["src/x.py"], {634: epic_unlinked})
+    assert r["verdict"] == "ok", r
+    assert cg.epic_closable(epic_unlinked, {634: epic_unlinked})["closable"] is True
+
+    # AC3 fallback: no subIssues, but marie's "decomposed into #a, #b" comment names children
+    epic_fallback = {"title": "epic", "labels": [{"name": "fleet:epic"}], "body": "",
+                      "comments": [{"createdAt": "2026-09-01T00:00:00Z", "body": "marie: decomposed into #10, #11 (Part C2b)"}]}
+    r = cg.evaluate("Closes #634", ["src/x.py"], {634: epic_fallback, 10: {"state": "CLOSED"}, 11: {"state": "OPEN"}})
+    assert r["verdict"] == "block" and "#11" in r["reasons"][0], r
+
+    # AC5: a docs/tests-only PR can never close an epic, message distinguishes epic reason
+    # from the generic docs-only-on-a-lane-item reason
+    r = cg.evaluate("Closes #634", ["docs/x.md", "scripts/test_x.py"], {634: epic_all_closed})
+    assert r["verdict"] == "block" and "docs/tests" in r["reasons"][0] and "epic" in r["reasons"][0], r
+
+    # a non-epic issue is unaffected by any of this
+    plain = {"title": "x", "labels": [{"name": "lane:ui"}], "body": "body", "comments": []}
+    r = cg.evaluate("Closes #1", ["src/x.py"], {1: plain})
+    assert r["verdict"] == "ok", r
+
+
+def _jefe_runs_the_epic_close_check_before_closing_an_epic():
+    """AC4: members/jefe/jefe.md's epic-closing step invokes closes_gate.py's `--epic` check
+    before jefe closes a `fleet:epic` issue, documented in the same shape gru.md uses for
+    vision_link_gate.py / quality_gate.py (a fenced command plus the JSON shape it returns)."""
+    md = (ROOT / "members" / "jefe" / "jefe.md").read_text()
+    assert "closes epics, not PRs" in md
+    assert "closes_gate.py --epic" in md, "jefe.md never invokes the epic-closure check"
+    assert '"closable"' in md, "jefe.md does not document the check's JSON shape"
+    ap_src = (ROOT / "scripts" / "closes_gate.py").read_text()
+    assert '"--epic"' in ap_src, "closes_gate.py has no --epic CLI mode for jefe to call"
+
+
 def _share_dials_offer_every_five_percent_labelled_as_percent():
     """Reif, 2026-09-07: "where is .3, etc. and show them as percents." The two fraction dials
     list every 5% step from 5% to 100%, labelled as percents, and a stored "0.20" matches the
@@ -4305,7 +4362,13 @@ def _console_run_panel_shows_everything_about_one_run_fk748():
     assert llm["report"] is None, "an llm pass with no Report: block must stay None (reported_nothing stays honest)"
     jj = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
     assert "Report:\\n%s" in jj or "Report:\n%s" in jj, "judge-judy's report_run must carry the review text as Report:"
-    assert jj.count('"$FINDINGS"') >= 1 and "sed '/^VERDICT: /d' \"$OUT_FILE\"" in jj, "both verdict paths must pass the review text"
+    # gh#806: the review text now comes from judge_judy_verdict.py's structured findings_text,
+    # not a sed-stripped slice of the raw prose OUT_FILE -- both report_run calls must still
+    # carry it through.
+    assert jj.count('"$FINDINGS"') >= 1, "block verdict path must pass the review text via FINDINGS"
+    approve_report_i = jj.index('report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "approved PR #$PR"')
+    assert "FINDINGS" in jj[approve_report_i:approve_report_i + 300], \
+        "approve path's report_run call must still surface any (non-blocking) findings text"
 
 
 def _console_home_is_usable_on_a_phone_and_the_number_tile_reads_fleet_env():
@@ -4427,6 +4490,37 @@ def _deploy_sh_kicks_a_gru_pass_right_after_cutover():
     assert "/etc/cron.d/" in kick_line, "kick must source the cron.d env (FLEET_SHARE_DIR, FLEET_LEASE_DIR, FLEET_INSTANCE_NAME)"
     assert "9>&-" in kick_line, "kick must close the auto_deploy flock fd (deploy.sh's own rule for every podman spawn)"
     assert "gh#622" in src[kick:kick + 600], "kick outcome must be logged"
+
+
+def _deploy_sh_kicks_a_sentry_pass_right_after_cutover():
+    """gh#663: deploy.sh runs one sentry pass in the live container immediately after DEPLOYED,
+    same as it already does for gru -- so a deploy-broken journey is caught within minutes
+    instead of at sentry's next scheduled cron tick. Pins the kick to inside finish_deploy,
+    AFTER the gru kick (so it shares the exact same proxy_mode/rolling-deploy call sites and can
+    never be skipped on a different condition than the gru kick), detached (`podman exec -d`),
+    through run_member.sh sentry, with the cron.d env sourced, and with its own distinct log
+    line so an operator reading deploy.log can tell the two kicks apart.
+    """
+    src = (ROOT / "scripts" / "deploy.sh").read_text()
+    deployed_at = src.index('log "DEPLOYED:')
+    gru_kick = src.find("run_gru_fanout.sh", deployed_at)
+    assert gru_kick != -1, "deploy.sh does not kick a gru pass after DEPLOYED (gh#622)"
+    kick = src.find("run_member.sh sentry", gru_kick)
+    assert kick != -1, "deploy.sh does not kick a sentry pass after the gru kick (gh#663)"
+    kick_line = src[src.rfind("\n", 0, kick) + 1: src.find("\n", kick)]
+    assert 'podman exec -d "$CONTAINER"' in kick_line, f"kick must be detached in the live container: {kick_line[:120]!r}"
+    assert "/etc/cron.d/" in kick_line, "kick must source the cron.d env (FLEET_SHARE_DIR, FLEET_LEASE_DIR, FLEET_INSTANCE_NAME)"
+    assert "9>&-" in kick_line, "kick must close the auto_deploy flock fd (deploy.sh's own rule for every podman spawn)"
+    outcome = src[kick:kick + 600]
+    assert "gh#663" in outcome, "kick outcome must be logged"
+    assert "next cron tick" in outcome, "a failed kick must log that the next cron tick will run it, never fail the deploy"
+    assert "kicked one sentry pass" in outcome, "sentry kick's success line must be distinct wording from the gru kick's"
+    # AC4: the sentry kick must live inside finish_deploy() itself (not a separate call site),
+    # so it is structurally skipped on exactly the same condition as the gru kick -- e.g.
+    # proxy_mode, where finish_deploy is simply never reached.
+    fn_start = src.index("finish_deploy() {")
+    fn_end = src.index("\n}\n", fn_start)
+    assert fn_start < gru_kick < kick < fn_end, "sentry kick must live in the same finish_deploy() function as the gru kick"
 
 
 def _auto_deploy_sh_coalesces_main_moves_inside_the_min_interval():
@@ -5162,6 +5256,137 @@ def _judge_judy_skips_an_empty_diff_instead_of_blocking():
     assert "continue" in empty_branch, "an empty diff must continue the tick loop, not fall through into a verdict"
     assert "VERDICT" not in empty_branch, \
         "an empty diff must never reach a VERDICT -- it should skip before the model is ever called"
+
+
+def _judge_judy_verdict_reads_validated_json_not_prose():
+    """gh#806 AC1/AC2/AC5/AC6: judge_judy_verdict.py reads the verdict from validated JSON --
+    prefers the CLI's own `structured_output`, falls back to a second `json.loads` of `.result`
+    -- and never leaves a genuinely bad answer looking like a valid one. This is the behavioral
+    test AC5 asks for: it runs the real script as a subprocess against a deliberately
+    unparseable envelope and asserts the result is "held" (ok=False, a named reason, exit 1),
+    never an absent/ambiguous status. It fails against `main` today because the script does not
+    exist there at all (FileNotFoundError) -- this IS the fix, not a test written after it.
+    """
+    import subprocess
+
+    script = ROOT / "scripts" / "judge_judy_verdict.py"
+
+    def run(raw: str) -> tuple[int, dict]:
+        p = subprocess.run([sys.executable, str(script)], input=raw,
+                            capture_output=True, text=True, timeout=30)
+        return p.returncode, json.loads(p.stdout)
+
+    # AC1: a valid approve verdict parses clean, no regex over prose involved.
+    rc, out = run(json.dumps({"result": json.dumps({"verdict": "approve", "findings": []})}))
+    assert rc == 0 and out == {"ok": True, "verdict": "approve", "findings": [], "findings_text": ""}, out
+
+    # Prefer the CLI's own already-parsed structured_output over a second parse of .result.
+    rc, out = run(json.dumps({"structured_output": {"verdict": "block", "findings": [
+        {"file": "a.py", "line": 10, "severity": "high", "what_breaks": "null deref"}]},
+        "result": "{\"verdict\": \"approve\", \"findings\": []}"}))
+    assert rc == 0 and out["verdict"] == "block", "must prefer structured_output over .result"
+    assert out["findings_text"] == "- a.py:10 (high): null deref", out["findings_text"]
+
+    # AC2/AC5: deliberately unparseable output -- the outer envelope itself is not JSON. Must
+    # hold (ok=False, exit 1), never come back looking like a valid, silently-approved answer.
+    rc, out = run("the model hedged and never emitted valid json at all")
+    assert rc == 1 and out["ok"] is False and out["reason"], \
+        "unparseable output must be a named, non-empty reason at exit 1 -- never a silent pass"
+
+    # AC6: the reason names the SPECIFIC schema violation, not a generic "parsing failed".
+    rc, out = run(json.dumps({"result": json.dumps({"verdict": "maybe", "findings": []})}))
+    assert rc == 1 and "verdict" in out["reason"] and "maybe" in out["reason"], \
+        f"reason must name the specific violation (bad verdict value), got: {out['reason']!r}"
+
+    # gh#3170, folded into the same schema-violation path: a block with zero findings is not a
+    # valid answer either.
+    rc, out = run(json.dumps({"result": json.dumps({"verdict": "block", "findings": []})}))
+    assert rc == 1 and "empty findings" in out["reason"], out
+
+    # judge-judy.sh itself must call --json-schema and read this script's output -- no regex
+    # grep over a VERDICT: line left anywhere.
+    src = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    assert "--json-schema" in src, "judge-judy.sh no longer requests structured output"
+    assert "judge_judy_verdict.py" in src, "judge-judy.sh no longer reads the validated verdict parser"
+    assert "grep -E '^VERDICT: (approve|block)$'" not in src, \
+        "a regex-over-prose verdict grep is still present -- gh#806 was supposed to remove it"
+
+
+def _judge_judy_holds_a_pr_on_schema_invalid_verdict_not_just_marks_it():
+    """gh#806 AC2: "a verdict that cannot be obtained holds the PR instead of releasing it."
+
+    Verified live this pass (2026-09-11) against this repo's own branch protection --
+    `fleet-code-review` is NOT a required status check (only `selftest` is), so posting
+    `state=error` alone changes nothing the merge queue looks at. The only thing that actually
+    holds a PR here is `unqueue_pr` (dequeue + `--disable-auto`, fk#523) -- exactly what the
+    BLOCK branch already did and the state=error/strike-exhausted branch did NOT, until this
+    fix. auto_update_branch.sh's own re-arm guard used to key off "failure" only, so an errored
+    head could still get re-armed later -- both are checked here.
+    """
+    src = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    strike_branch = src.index('if [ -z "$VERDICT" ]; then')
+    error_i = src.index('post_status "$HEAD_SHA" "error"', strike_branch)
+    max_strikes_i = src.index('if [ "$N" -ge "$MAX_PARSE_STRIKES" ]; then', strike_branch)
+    unqueue_i = src.index('unqueue_pr "$PR"', error_i)
+    assert max_strikes_i < error_i < unqueue_i, \
+        "state=error must be followed by unqueue_pr inside the MAX_PARSE_STRIKES branch -- posting the status alone does not hold the PR"
+    next_continue = src.index("continue", unqueue_i)
+    # unqueue_i must still be inside the same strike-exhausted branch, well before the loop
+    # moves on to the next PR.
+    assert unqueue_i < next_continue < unqueue_i + 1500, \
+        "unqueue_pr call for the error path landed outside the strike-exhausted branch"
+
+    aub = (ROOT / "scripts" / "auto_update_branch.sh").read_text()
+    assert aub.count('[ "$verdict" = "failure" ] || [ "$verdict" = "error" ]') >= 1, \
+        "auto_update_branch.sh's re-arm guard must also exclude state=error, not just failure"
+    assert aub.count('"$verdict" = "error"') >= 2, \
+        "both the re-arm guard AND the stale-close reason check must treat error like failure"
+
+
+def _judge_judy_records_block_events_for_override_audit():
+    """gh#806 AC4: an override ("blocked, then merged anyway at the same head with no
+    remediation commit") must be recorded somewhere a later pass can count it, rather than
+    reconstructed by hand every time -- exactly what 3 separate marie passes on this issue did
+    manually before this fix. judge-judy.sh appends one line per block; review_override_audit.py
+    reads them back and cross-checks against each PR's actual merge state.
+    """
+    src = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    block_i = src.index("fleet-code-review: BLOCK")
+    record_i = src.index("judge-judy-blocks.jsonl", block_i)
+    report_i = src.index('report_run "$PR" "$HEAD_SHA"', block_i)
+    assert block_i < record_i < report_i, \
+        "the block event must be recorded in the BLOCK branch, before report_run"
+
+    import review_override_audit as roa
+
+    blocks = [
+        {"pr": 100, "head": "aaa111", "blocked_at": 1},   # merges unfixed -> override
+        {"pr": 101, "head": "bbb222", "blocked_at": 2},    # merges after a real push -> not an override
+        {"pr": 102, "head": "ccc333", "blocked_at": 3},    # still open -> not an override
+    ]
+
+    def fake_run(cmd, timeout=30):
+        pr = cmd[cmd.index("view") + 1]
+        states = {
+            "100": {"state": "MERGED", "headRefOid": "aaa111", "mergedAt": "2026-09-11T00:00:00Z"},
+            "101": {"state": "MERGED", "headRefOid": "zzz999", "mergedAt": "2026-09-11T00:00:00Z"},
+            "102": {"state": "OPEN", "headRefOid": "ccc333", "mergedAt": None},
+        }
+        return 0, json.dumps(states[pr])
+
+    result = roa.audit(blocks, run=fake_run)
+    assert result["total_blocks"] == 3
+    assert result["override_count"] == 1 and result["overrides"][0]["pr"] == 100, result
+    assert abs(result["override_rate"] - 1 / 3) < 1e-9, result
+
+    # A torn/partial line in the jsonl store must never crash the read, same discipline
+    # overrides.py's live_overrides() already applies to its own append-only store.
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "blocks.jsonl"
+        p.write_text('{"pr": 1, "head": "a"}\nnot json\n{"pr": 2, "head": "b"}\n')
+        rows = roa.read_blocks(p)
+        assert len(rows) == 2, "a torn line must be skipped, not crash the whole read"
 
 
 def _heartbeat_is_not_an_executed_run():
@@ -11528,6 +11753,7 @@ if __name__ == "__main__":
     check("auto_deploy.sh names branch and SHAs on a diverged-HEAD ABORT (gh#372)", _auto_deploy_sh_names_branch_and_shas_on_diverged_abort_gh372)
     check("auto_deploy.sh coalesces main moves inside FLEET_DEPLOY_MIN_INTERVAL_S (gh#619)", _auto_deploy_sh_coalesces_main_moves_inside_the_min_interval)
     check("deploy.sh kicks one gru pass right after cutover (gh#622)", _deploy_sh_kicks_a_gru_pass_right_after_cutover)
+    check("deploy.sh kicks one sentry pass right after cutover (gh#663)", _deploy_sh_kicks_a_sentry_pass_right_after_cutover)
     check("deploy.sh rolls over via caddy without a cordon (gh#625)", _deploy_sh_rolls_over_via_caddy_without_a_cordon)
     check("console shows each member's emoji, role and the steps a pass takes", _console_shows_role_and_steps_per_member)
     check("sidebar shows spawned/scheduled/disabled as distinct badges, not strikethrough (gh#565)", _sidebar_shows_spawned_scheduled_disabled_not_strikethrough_gh565)
@@ -11550,6 +11776,9 @@ if __name__ == "__main__":
     check("board_github file_item can add a priority label alongside backlog/lane", _board_github_file_item_can_add_a_priority_label)
     check("judge-judy files a priority-high fix item when it blocks a PR", _judge_judy_files_a_fix_item_on_block)
     check("judge-judy skips an empty diff instead of blocking (gh#531)", _judge_judy_skips_an_empty_diff_instead_of_blocking)
+    check("judge-judy's verdict is read from validated JSON, not prose (gh#806)", _judge_judy_verdict_reads_validated_json_not_prose)
+    check("judge-judy holds a PR on a schema-invalid verdict, not just marks it (gh#806 AC2)", _judge_judy_holds_a_pr_on_schema_invalid_verdict_not_just_marks_it)
+    check("judge-judy records block events for a later override audit (gh#806 AC4)", _judge_judy_records_block_events_for_override_audit)
     check("a heartbeat is not an executed run (fk#819)", _heartbeat_is_not_an_executed_run)
     check("judge-judy writes a heartbeat row on a no-PR tick (gh#267)", _judge_judy_writes_a_heartbeat_row_on_a_no_pr_tick)
     check("judge-judy's heartbeat status reads distinct from a real review outcome (gh#267 AC1)", _judge_judy_heartbeat_status_is_distinct_from_a_real_review_outcome)
@@ -11758,6 +11987,8 @@ if __name__ == "__main__":
     check("stash_pile_expiry never inspects or drops a foreign (non-run=) stash entry (gh#714 AC3)", _stash_pile_expiry_never_touches_foreign_entries_gh714)
     check("stash_pile_expiry report is parseable and tracks the last run's drop count (gh#714 AC4)", _stash_pile_expiry_report_is_parseable_and_tracks_last_run_gh714)
     check("stash_pile_expiry warns distinctly when the pile is still over ceiling after a run (gh#714 AC5)", _stash_pile_expiry_warns_distinctly_when_still_over_ceiling_gh714)
+    check("closes_gate.py blocks an epic with unaccepted children, never blocks an unlinked one (fk#652)", _closes_gate_blocks_an_epic_with_unaccepted_children)
+    check("jefe.md runs closes_gate.py --epic before closing a fleet:epic issue (fk#652)", _jefe_runs_the_epic_close_check_before_closing_an_epic)
     check("vp.md authorizes every label vp_due.VP_LABELS spawns on (gh#855 AC5)", _vp_md_authorizes_every_label_vp_due_spawns_on_gh855)
     for n in ok:
         print(f"  ok    {n}")

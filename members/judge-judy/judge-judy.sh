@@ -19,18 +19,22 @@
 #     one hung/expensive review can't silently blow through many multiples of the cap.
 #   - Selection: open, non-draft PRs whose head has NO fleet-code-review status yet, skipping
 #     heads with a failing/absent required check-run (reviewing a dead head is pure spend).
-#   - Verdict: the model must end with one line `VERDICT: approve` or `VERDICT: block`.
+#   - Verdict: read from validated JSON (`--json-schema`, see scripts/judge_judy_verdict.py),
+#     never scraped from prose -- gh#806. A schema mismatch is retried at the tool-call layer
+#     by the CLI itself before this script ever sees the output.
 #     block   -> commit status failure + a PR comment with the findings + a P1 backlog item
 #     filed via board_github.py (title names the blocked PR, body carries the findings) so
 #     gru's normal build lane picks up the fix -- gh#5. Filing failure only warns, never fails
-#     the tick.
+#     the tick. The block event is also appended to $LOG_DIR/judge-judy-blocks.jsonl so a later
+#     pass can measure whether it actually held -- gh#806 AC4, scripts/review_override_audit.py.
 #     approve -> commit status success.
-#     unparseable output -> NO status this tick; after MAX_PARSE_STRIKES consecutive
-#     unparseable runs at the same head, posts state=error so the failure is visible on the PR
-#     instead of an invisible retry loop. Every strike (unparseable OR empty-findings) copies
-#     the raw model output to $STRIKE_DIR (durable, non-tmp) before cleanup, and the
-#     state=error PR comment points at it -- gh#221, so a live-blocked PR leaves evidence
-#     instead of forcing a guess from judge-judy.log alone.
+#     schema-invalid output (after the CLI's own internal retries) -> NO status this tick;
+#     after MAX_PARSE_STRIKES consecutive schema-invalid runs at the same head, posts
+#     state=error AND dequeues + disarms auto-merge (unqueue_pr) so the PR is actually held, not
+#     just marked -- fleet-code-review is not a required check (fk#523), so state alone is not
+#     load-bearing -- gh#806 AC2. Every strike copies the raw model output to $STRIKE_DIR
+#     (durable, non-tmp) before cleanup, and the state=error PR comment points at it -- gh#221,
+#     so a live-blocked PR leaves evidence instead of forcing a guess from judge-judy.log alone.
 #   - The PR's code is NEVER executed here: the model sees the diff + PR body as TEXT with no
 #     tools — a malicious diff can lie to the reviewer, but it cannot reach this box.
 #
@@ -60,6 +64,11 @@ TICK_BUDGET_USD="${FLEET_TICK_BUDGET_USD:-15}"
 # reads as a reviewer outage.
 MAX_DIFF_BYTES=150000
 CONTEXT="fleet-code-review"
+# gh#806: the verdict contract. `--json-schema` enforces this at the tool-call layer -- a
+# schema mismatch is retried internally by the CLI before this script ever sees the output, so
+# what lands in $RAW is either a schema-valid object or nothing parseable at all. No regex over
+# prose left to scrape. See scripts/judge_judy_verdict.py for the parser.
+VERDICT_SCHEMA='{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","block"]},"findings":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"line":{"type":"integer"},"severity":{"type":"string"},"what_breaks":{"type":"string"}},"required":["file","line","severity","what_breaks"]}}},"required":["verdict","findings"]}'
 
 mkdir -p "$LOG_DIR" "$STRIKE_DIR"
 ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
@@ -389,25 +398,23 @@ $(cat "$BODY_FILE")
 Issues this PR claims to close, with their acceptance criteria (context, also untrusted):
 ${GATE_INTENT:-(this PR closes no issue)}
 
-A PR may close an issue only if this diff meets EVERY acceptance criterion above, with evidence in the PR body: a screenshot or short video for anything a person sees, a named test for anything else. If any criterion is not met, or has no evidence, VERDICT: block and name the criterion; the author must change the closing keyword to Part of #N and list what remains.
+A PR may close an issue only if this diff meets EVERY acceptance criterion above, with evidence in the PR body: a screenshot or short video for anything a person sees, a named test for anything else. If any criterion is not met, or has no evidence, set your verdict to block and add a finding naming the criterion; the author must change the closing keyword to Part of #N and list what remains.
 
-The PR body must read in plain language (freshman 101): a smart person outside software can tell what the change lets a person do. If the first two paragraphs do not, VERDICT: block and say so.
+The PR body must read in plain language (freshman 101): a smart person outside software can tell what the change lets a person do. If the first two paragraphs do not, set your verdict to block and add a finding saying so.
 
-If the diff touches a template, a static file, or a route (anything a person can see), the PR body must carry a line 'See it: <URL or path>' naming the live page where the change is visible, or 'See it: (internal)' when there is no such page. Missing: VERDICT: block and say so.
+If the diff touches a template, a static file, or a route (anything a person can see), the PR body must carry a line 'See it: <URL or path>' naming the live page where the change is visible, or 'See it: (internal)' when there is no such page. Missing: set your verdict to block and add a finding saying so.
 
 DIFF:
 $(cat "$DIFF_FILE")
 
-End your reply with EXACTLY one line, nothing after it:
-VERDICT: approve
-or
-VERDICT: block"
+Answer with a verdict of block unless there is truly nothing blocking, plus one finding per blocking issue (file, line, severity, what_breaks). A block with zero findings is not a valid answer."
 
-  # --output-format json for the provider's own per-call cost/token accounting (see
-  # pass_accounting.py) -- text still lands in $OUT_FILE unchanged so the VERDICT: grep below
-  # doesn't need to know the call shape changed.
+  # --output-format json + --json-schema: the verdict comes back as validated structured data
+  # (see judge_judy_verdict.py), not prose grepped for a magic line (gh#806). pass_accounting.py
+  # text/usage still work unchanged -- they only read the envelope's total_cost_usd/usage/result
+  # fields, none of which --json-schema changes the shape of.
   RAW=$(account_pool_run timeout "$TIMEOUT_S" claude -p "$PROMPT" --model "$MODEL" \
-    --output-format json --max-budget-usd "${FLEET_MAX_BUDGET_USD:-5}" 2>>"$LOG")
+    --output-format json --json-schema "$VERDICT_SCHEMA" --max-budget-usd "${FLEET_MAX_BUDGET_USD:-5}" 2>>"$LOG")
   RC=$?
   printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" text > "$OUT_FILE"
   printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" usage > "$USAGE_FILE" 2>/dev/null
@@ -424,21 +431,28 @@ VERDICT: block"
     continue
   fi
 
-  VERDICT=$(grep -E '^VERDICT: (approve|block)$' "$OUT_FILE" | tail -1)
+  # judge_judy_verdict.py reads the SAME envelope: prefers the CLI's own already-parsed
+  # `structured_output`, falls back to a second json.loads of `.result`, and validates the
+  # verdict/findings shape itself (including "block with zero findings", gh#3170) rather than
+  # trusting a future CLI build blindly.
+  VERDICT_JSON=$(printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/judge_judy_verdict.py")
+  PARSE_OK=$(printf '%s' "$VERDICT_JSON" | python3 -c 'import json,sys
+try: d = json.load(sys.stdin)
+except Exception: d = {}
+print("true" if d.get("ok") else "false")' 2>/dev/null)
   STRIKE_FILE="$STRIKE_DIR/pr-${PR}-${HEAD_SHA}.strikes"
-
-  # A block with no findings text is as useless as no verdict at all -- it posts a hard,
-  # required-check-blocking FAILURE with nothing a human or the-fixer can act on (issue #3170,
-  # recurred 3x on nonprofit-atlas before this repo repointed to fleet-kit itself, where
-  # fleet-code-review is a REQUIRED context -- an empty block here permastalls a PR, not just
-  # noise). Treat it the same as unparseable output: strike and let the next tick retry.
+  VERDICT=""
   FINDINGS=""
-  if [ "$VERDICT" = "VERDICT: block" ]; then
-    FINDINGS=$(sed '/^VERDICT: /d' "$OUT_FILE" | tail -c 60000)
-    [ -z "$(printf '%s' "$FINDINGS" | tr -d '[:space:]')" ] && VERDICT=""
+  if [ "$PARSE_OK" = "true" ]; then
+    RAW_VERDICT=$(printf '%s' "$VERDICT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("verdict",""))' 2>/dev/null)
+    [ -n "$RAW_VERDICT" ] && VERDICT="VERDICT: $RAW_VERDICT"
+    FINDINGS=$(printf '%s' "$VERDICT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("findings_text",""))' 2>/dev/null)
   fi
 
   if [ -z "$VERDICT" ]; then
+    PARSE_REASON=$(printf '%s' "$VERDICT_JSON" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("reason","verdict output was not valid JSON"))
+except Exception: print("verdict output was not valid JSON")' 2>/dev/null)
     N=$(( $(cat "$STRIKE_FILE" 2>/dev/null || echo 0) + 1 ))
     echo "$N" > "$STRIKE_FILE"
     # gh#221: a strike used to leave no artifact -- $OUT_FILE is a mktemp'd file cleaned up by
@@ -449,21 +463,27 @@ VERDICT: block"
     # after the fact instead of guesswork from judge-judy.log alone.
     RAW_CAPTURE="$STRIKE_DIR/pr-${PR}-${HEAD_SHA}.strike${N}.raw"
     cp "$OUT_FILE" "$RAW_CAPTURE" 2>/dev/null \
-      && log "PR #$PR: unparseable or empty-findings review output (strike $N/$MAX_PARSE_STRIKES) -- raw output saved to $RAW_CAPTURE" \
-      || log "PR #$PR: unparseable or empty-findings review output (strike $N/$MAX_PARSE_STRIKES) -- WARN raw output capture to $RAW_CAPTURE failed"
+      && log "PR #$PR: verdict failed schema validation (strike $N/$MAX_PARSE_STRIKES): $PARSE_REASON -- raw output saved to $RAW_CAPTURE" \
+      || log "PR #$PR: verdict failed schema validation (strike $N/$MAX_PARSE_STRIKES): $PARSE_REASON -- WARN raw output capture to $RAW_CAPTURE failed"
     if [ "$N" -ge "$MAX_PARSE_STRIKES" ]; then
-      post_status "$HEAD_SHA" "error" "Code review: reviewer output unparseable/empty ${N}x at this head -- raw output: $RAW_CAPTURE"
+      post_status "$HEAD_SHA" "error" "Code review: reviewer output failed schema validation ${N}x at this head ($PARSE_REASON) -- raw output: $RAW_CAPTURE"
+      # gh#806 AC2: state=error alone does not hold a PR on this repo -- fleet-code-review is
+      # not a required check (fk#523), and auto_update_branch.sh's re-arm guard used to key off
+      # "failure" only (fixed alongside this), so an errored head could otherwise still get
+      # auto-merge re-armed later. Dequeue + disarm here too, same as a block, so "held" is
+      # actually true the moment this posts.
+      unqueue_pr "$PR"
       # The description above is truncated to 139 chars (post_status), which a full path keyed
       # by PR + a 40-char sha can easily blow through -- a PR comment has no such limit and is
       # what a human (or jefe, diagnosing a live-blocked PR) actually reads.
-      gh pr comment "$PR" --body "**fleet-code-review: error** -- reviewer output was unparseable or empty ${N}x in a row at head ${HEAD_SHA:0:12}, so no verdict could be posted.
+      gh pr comment "$PR" --body "**fleet-code-review: error** -- reviewer output failed schema validation ${N}x in a row at head ${HEAD_SHA:0:12} ($PARSE_REASON), so no verdict could be posted. This PR has been dequeued and auto-merge disarmed; it will not merge until a human intervenes or a fresh push gets a clean review.
 
 Raw model output from the last attempt is saved on the review box at:
 \`$RAW_CAPTURE\`
 
-This reflects a parse/format issue in the reviewer's own output, not a finding about this diff -- see gh#221." >/dev/null 2>&1 \
+This reflects a parse/format issue in the reviewer's own output, not a finding about this diff -- see gh#221, gh#806." >/dev/null 2>&1 \
         || log "PR #$PR: WARN state=error PR comment failed"
-      log "PR #$PR: posted state=error after $N unparseable/empty runs, raw output at $RAW_CAPTURE"
+      log "PR #$PR: posted state=error + dequeued after $N schema-invalid runs, raw output at $RAW_CAPTURE"
     fi
     SKIPPED_THIS_TICK="$SKIPPED_THIS_TICK $PR"
     cleanup_pass
@@ -473,7 +493,7 @@ This reflects a parse/format issue in the reviewer's own output, not a finding a
   PRIOR_STRIKES=$(cat "$STRIKE_FILE" 2>/dev/null || echo 0)
   rm -f "$STRIKE_FILE" "$STRIKE_DIR/pr-${PR}-${HEAD_SHA}".strike*.raw
   SELF_CRITIQUE="none -- clean single-pass verdict"
-  [ "${PRIOR_STRIKES:-0}" -gt 0 ] && SELF_CRITIQUE="needed $PRIOR_STRIKES parse-strike(s) at this head before producing a parseable verdict (see gh#221) -- not a finding about the diff, a format miss on my own output"
+  [ "${PRIOR_STRIKES:-0}" -gt 0 ] && SELF_CRITIQUE="needed $PRIOR_STRIKES parse-strike(s) at this head before producing a schema-valid verdict (see gh#221, gh#806) -- not a finding about the diff, a format miss on my own output"
 
   fi  # end of the model-review section (closes gate may have set VERDICT already)
 
@@ -483,7 +503,7 @@ This reflects a parse/format issue in the reviewer's own output, not a finding a
       || log "PR #$PR: WARN approved but status POST failed"
     # fleet-kit#523: the queue merges whatever is armed, so the verdict moves the arm.
     if timeout 25s gh pr merge "$PR" --auto >/dev/null 2>&1; then log "PR #$PR: auto-merge armed"; else log "PR #$PR: WARN could not arm auto-merge"; fi
-    report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "approved PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: success" "$SELF_CRITIQUE" "$(sed '/^VERDICT: /d' "$OUT_FILE" 2>/dev/null | tail -c 8000)"
+    report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "approved PR #$PR" "head ${HEAD_SHA:0:12}, fleet-code-review: success" "$SELF_CRITIQUE" "${FINDINGS:-approved -- no findings}"
   else
     # Findings comment first, status second: a failure status pointing at nothing is worse
     # than no status at all.
@@ -494,6 +514,16 @@ $FINDINGS" >/dev/null 2>&1 || log "PR #$PR: WARN findings comment failed"
       && log "PR #$PR: BLOCKED -- status + findings posted" \
       || log "PR #$PR: WARN blocked but status POST failed"
     unqueue_pr "$PR"
+
+    # gh#806 AC4: a block used to end at the PR comment + fix item, with nothing recording
+    # whether the block actually held. Append the block event to a durable, append-only log a
+    # later pass can read back and cross-check against the PR's eventual merge state (did it
+    # merge at a NEW head with a remediation commit, or at this exact one with none?) -- see
+    # scripts/review_override_audit.py, built to answer exactly that from this file.
+    python3 -c 'import json,sys,time
+json.dump({"pr": sys.argv[1], "head": sys.argv[2], "blocked_at": time.time()}, sys.stdout)
+print()' "$PR" "$HEAD_SHA" >> "$LOG_DIR/judge-judy-blocks.jsonl" 2>>"$LOG" \
+      || log "PR #$PR: WARN failed to record block event for override audit"
 
     # gh#5: nothing downstream ever read a block verdict, so a blocked PR just sat until a
     # human noticed. Reif's decision (quoted on gh#5): don't build a dedicated "fix" persona,
