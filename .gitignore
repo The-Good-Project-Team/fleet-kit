@@ -8,3 +8,4 @@ __pycache__/
 .webhook_secret
 instances/
 .fenix/
+qa-out/
