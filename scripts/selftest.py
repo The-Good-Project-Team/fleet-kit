@@ -7435,6 +7435,121 @@ def _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget():
         "Dockerfile does not accept/write DEPLOY_SHA -- deploy.sh's build-arg has nowhere to land"
 
 
+def _kit_staleness_check_warns_only_when_actually_behind():
+    """gh#731: /fleet-kit is a baked, non-git snapshot (Dockerfile:97's `COPY . /fleet-kit`) --
+    .deploy_sha has been written at build time since gh#201, but nothing read it back for
+    staleness. gh#638 burned four passes on exactly that gap: three "still broken, fresh direct
+    repro" comments each ran the frozen snapshot's copy of a script, not main, and each read as
+    strong evidence precisely because a repro that "reproduces" is the confidence-building kind
+    of wrong -- one landed 31 seconds after the real fix had already merged.
+
+    Unlike deploy_staleness_check.sh (gh#201, its own hourly ops watchdog with a multi-hour
+    paging budget), this check has no budget: N > 0 is worth a line, because the reader is a
+    member mid-repro, not an on-call human deciding whether to page.
+
+    Runs the REAL kit_staleness_check.sh under a stub `gh` executable on PATH (same technique
+    judge-judy's pick_pr test above uses) so every branch is deterministic and offline -- never
+    the real network. Covers AC1 (genuinely behind -> exactly one line naming the short SHA, N,
+    and a build time), AC2 (already current -> silent), AC3 (missing/empty/placeholder/
+    remote-unknown SHA -> silent, never a crash), and AC4 (gh entirely unreachable -> silent).
+    AC6 (exit 0 in every case) is asserted on every call below.
+    """
+    import os
+    import subprocess
+
+    script = ROOT / "scripts" / "kit_staleness_check.sh"
+
+    def run(deploy_sha, gh_body, repo_slug="acme/widgets"):
+        with tempfile.TemporaryDirectory() as td:
+            gh_path = Path(td) / "gh"
+            gh_path.write_text("#!/bin/bash\n" + gh_body)
+            gh_path.chmod(0o755)
+            sha_file = Path(td) / "deploy_sha"
+            if deploy_sha is not None:
+                sha_file.write_text(deploy_sha)
+            else:
+                sha_file = Path(td) / "does-not-exist"
+            env = dict(os.environ)
+            env["PATH"] = f"{td}:{env['PATH']}"
+            env["FLEET_ENV_FILE"] = "/dev/null"
+            env["KIT_REPO_SLUG"] = repo_slug
+            env["KIT_STALENESS_DEPLOY_SHA_FILE"] = str(sha_file)
+            proc = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                                   timeout=15, env=env)
+            return proc.returncode, proc.stdout.strip()
+
+    MAIN_SHA = "a" * 40
+    OLD_SHA = "b" * 40
+
+    stub_stale = (
+        'case "$2" in\n'
+        f'  repos/*/commits/main) echo "{MAIN_SHA}"; exit 0 ;;\n'
+        '  repos/*/compare/*) echo "18"; exit 0 ;;\n'
+        f'  repos/*/commits/{OLD_SHA}) echo "2026-09-08T06:35:00Z"; exit 0 ;;\n'
+        'esac\n'
+        'exit 1\n'
+    )
+    # AC1: genuinely behind -- exactly one line naming the short SHA, N, and a build time.
+    rc, out = run(OLD_SHA, stub_stale)
+    assert rc == 0, f"must exit 0 even when stale: {out!r}"
+    assert out and "\n" not in out, f"expected exactly one line, got: {out!r}"
+    assert OLD_SHA[:7] in out, out
+    assert "18 commit" in out, out
+    assert "2026-09-08" in out, out
+
+    stub_current = f'case "$2" in repos/*/commits/main) echo "{MAIN_SHA}"; exit 0 ;; esac; exit 1\n'
+
+    # AC2: deployed SHA already equals main -- silent, so the line only ever means something.
+    rc, out = run(MAIN_SHA, stub_current)
+    assert rc == 0 and out == "", f"must stay silent when already current: {out!r}"
+
+    # AC3: no .deploy_sha file at all.
+    rc, out = run(None, stub_current)
+    assert rc == 0 and out == "", f"must stay silent with no .deploy_sha: {out!r}"
+
+    # AC3: empty .deploy_sha.
+    rc, out = run("", stub_current)
+    assert rc == 0 and out == "", f"must stay silent with an empty .deploy_sha: {out!r}"
+
+    # AC3: a placeholder, not a real SHA.
+    rc, out = run("unknown", stub_current)
+    assert rc == 0 and out == "", f"must stay silent for the literal 'unknown' placeholder: {out!r}"
+
+    # AC3: a SHA this remote has never heard of (shallow clone / unfetched commit / stray
+    # rebuild) -- main resolves fine but the compare call 404s.
+    stub_unknown_sha = (
+        f'case "$2" in repos/*/commits/main) echo "{MAIN_SHA}"; exit 0 ;; '
+        'repos/*/compare/*) exit 1 ;; esac; exit 1\n'
+    )
+    rc, out = run("c" * 40, stub_unknown_sha)
+    assert rc == 0 and out == "", f"must stay silent for a SHA the remote can't resolve: {out!r}"
+
+    # AC4: gh itself fails outright (network/auth down, or pointed at a nonexistent remote) --
+    # silent, exit 0, never a crash.
+    rc, out = run(OLD_SHA, "exit 1\n")
+    assert rc == 0 and out == "", f"must stay silent (not crash) when gh is entirely unreachable: {out!r}"
+
+
+def _kit_staleness_line_reaches_run_member_log_before_member_specific_work():
+    """gh#731 AC5: the staleness line must land in a member pass's own log before any
+    member-specific work runs (nerd lane validation, worktree build, `claude -p`) -- otherwise
+    gh#638's exact failure (a repro trusted because it "reproduced") can happen before this
+    warning was ever written anywhere the pass could see it.
+    """
+    src = (ROOT / "scripts" / "run_member.sh").read_text()
+    call_idx = src.index("kit_staleness_check.sh")
+    log_def_idx = src.index('log() { echo "[$(ts)] $*" >> "$LOG"; }')
+    lane_reject_idx = src.index("REJECTED: nerd dispatched")
+    worktree_idx = src.index("WORKTREE_ENABLED=")
+    claude_p_idx = src.index('account_pool_run timeout "$TIMEOUT_S" claude -p')
+    assert log_def_idx < call_idx < lane_reject_idx < worktree_idx < claude_p_idx, (
+        "kit_staleness_check.sh must run right after log() is defined and before any "
+        "member-specific dispatch (lane validation, worktree build, claude -p)"
+    )
+    assert 'log "$STALENESS_LINE"' in src, \
+        "staleness output is computed but never actually written to the member's own log"
+
+
 # _lane_kpi_is_actually_scheduled (gh#324) was folded into
 # _every_entrypoint_scheduled_script_is_actually_scheduled above (gh#378).
 
@@ -12076,6 +12191,133 @@ def _journey_walker_console_url_env_override_wins_unchanged_gh724():
     assert users.fleet_console_url == "https://example.com/custom-console", users.fleet_console_url
 
 
+def _journey_walker_blocked_streak_extends_on_same_reason_gh857():
+    """gh#857 AC1: a journey blocked for the same reason two runs running gets blocked_streak
+    2, not 1 -- the whole point is a streak that survives across separate walker runs, not a
+    per-run count."""
+    import journey_walker as jw
+    reason = "missing test user credentials for: alice"
+    blocked_run1 = [{"id": "sign-in", "viewport": "desktop", "reason": reason}]
+    state1 = jw.apply_blocked_streaks(blocked_run1, {})
+    assert blocked_run1[0]["blocked_streak"] == 1, blocked_run1
+
+    blocked_run2 = [{"id": "sign-in", "viewport": "desktop", "reason": reason}]
+    jw.apply_blocked_streaks(blocked_run2, state1)
+    assert blocked_run2[0]["blocked_streak"] == 2, blocked_run2
+
+
+def _journey_walker_blocked_streak_restarts_on_new_reason_or_first_block_gh857():
+    """gh#857 AC2: a journey blocked for the first time ever gets blocked_streak 1. A journey
+    already on a streak whose block reason CHANGES also restarts at 1 -- a new reason is a new
+    problem, not a continuation of the old one."""
+    import journey_walker as jw
+    first = [{"id": "sign-in", "viewport": "desktop", "reason": "missing test user credentials for: alice"}]
+    assert jw.apply_blocked_streaks(first, {})
+    assert first[0]["blocked_streak"] == 1
+
+    prior_state = {"sign-in::desktop": {"reason": "missing test user credentials for: alice", "streak": 5}}
+    changed_reason = [{"id": "sign-in", "viewport": "desktop", "reason": "a completely different block"}]
+    jw.apply_blocked_streaks(changed_reason, prior_state)
+    assert changed_reason[0]["blocked_streak"] == 1, \
+        f"a changed block reason must restart the streak, got {changed_reason[0]['blocked_streak']}"
+
+
+def _journey_walker_blocked_streak_resets_once_journey_is_no_longer_blocked_gh857():
+    """gh#857 AC6: once a journey is no longer blocked (it is simply absent from this run's
+    `blocked` list), the NEXT time it blocks again its streak must start over at 1, not resume
+    the old count -- proven by round-tripping through `apply_blocked_streaks` the way
+    `main()` does across three separate runs."""
+    import journey_walker as jw
+    reason = "missing test user credentials for: alice"
+    state = jw.apply_blocked_streaks([{"id": "sign-in", "viewport": "desktop", "reason": reason}], {})
+    state = jw.apply_blocked_streaks([{"id": "sign-in", "viewport": "desktop", "reason": reason}], state)
+    assert state["sign-in::desktop"]["streak"] == 2
+
+    state = jw.apply_blocked_streaks([], state)  # sign-in ran unblocked this time
+    assert "sign-in::desktop" not in state, "an unblocked run must drop the journey's streak state"
+
+    resumed = [{"id": "sign-in", "viewport": "desktop", "reason": reason}]
+    jw.apply_blocked_streaks(resumed, state)
+    assert resumed[0]["blocked_streak"] == 1, \
+        f"a streak must restart at 1 after a run where the journey was not blocked, got {resumed[0]['blocked_streak']}"
+
+
+def _journey_walker_streak_state_round_trips_through_disk_gh857():
+    """gh#857: `load_streak_state`/`save_streak_state` are what let the streak survive across
+    separate walker PROCESSES (each `journey_walker.py` invocation is a fresh interpreter) --
+    a missing/corrupt file must degrade to 'no prior state', never crash the walker."""
+    import journey_walker as jw
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "streak.json"
+        assert jw.load_streak_state(path) == {}, "a missing state file must read as empty, not raise"
+        path.write_text("{not json")
+        assert jw.load_streak_state(path) == {}, "a corrupt state file must read as empty, not raise"
+
+        state = {"sign-in::desktop": {"reason": "x", "streak": 4}}
+        jw.save_streak_state(path, state)
+        assert jw.load_streak_state(path) == state
+
+
+def _journey_walker_streak_ask_files_once_per_reason_and_names_required_facts_gh857():
+    """gh#857 AC3: once any journey's blocked_streak reaches the threshold, exactly one ask is
+    filed per DISTINCT block reason -- grouping two journeys sharing a reason into a single ask
+    naming both -- and a journey whose streak has not yet crossed the threshold is left out of
+    every ask entirely. The `why` text must carry the blocked count, the streak length, the
+    literal reason, and the affected journey ids (AC3's own four required facts)."""
+    import ask, fleet_db
+    import journey_walker as jw
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        authority_path = Path(d) / "does-not-exist.json"
+        reason = "missing test user credentials for: alice"
+        blocked = [
+            {"id": "sign-in", "viewport": "desktop", "reason": reason, "blocked_streak": 3},
+            {"id": "claim-org-through-verify-screen", "viewport": "desktop", "reason": reason,
+             "blocked_streak": 3},
+            {"id": "open-990-report", "viewport": "desktop", "reason": "missing FIXTURE_EIN",
+             "blocked_streak": 2},  # below threshold -- must not be asked about at all
+        ]
+        filed = jw.file_streak_asks(blocked, db_path=db_path, authority_path=authority_path, no_notify=True)
+        assert filed == [reason], f"expected exactly one ask, for the reason that crossed threshold: {filed}"
+
+        conn = fleet_db.connect(db_path)
+        rows = ask.list_asks(conn, status="open", member="sentry")
+        assert len(rows) == 1, f"expected exactly one filed ask, got {rows}"
+        why = rows[0]["why"]
+        assert rows[0]["class"] == "credential"
+        assert "2" in why, f"why must name the blocked count: {why}"
+        assert "3" in why, f"why must name the streak length: {why}"
+        assert reason in why, f"why must name the literal block reason: {why}"
+        assert "sign-in" in why and "claim-org-through-verify-screen" in why, \
+            f"why must name every affected journey id: {why}"
+        assert "open-990-report" not in why, \
+            f"a journey below threshold must not appear in an unrelated reason's ask: {why}"
+
+
+def _journey_walker_streak_ask_dedupes_against_an_already_open_ask_gh857():
+    """gh#857 AC4: a later run crossing the threshold again for the SAME reason must not file a
+    second ask while the first one is still open -- the dedup rule dont-shoot-the-
+    messenger.md:117 already states ('check first so you never file the same one twice')."""
+    import ask, fleet_db
+    import journey_walker as jw
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        authority_path = Path(d) / "does-not-exist.json"
+        reason = "missing test user credentials for: alice"
+        blocked = [{"id": "sign-in", "viewport": "desktop", "reason": reason, "blocked_streak": 3}]
+
+        first = jw.file_streak_asks(blocked, db_path=db_path, authority_path=authority_path, no_notify=True)
+        assert first == [reason]
+
+        blocked_again = [{"id": "sign-in", "viewport": "desktop", "reason": reason, "blocked_streak": 4}]
+        second = jw.file_streak_asks(blocked_again, db_path=db_path, authority_path=authority_path, no_notify=True)
+        assert second == [], f"a second run crossing threshold for the same reason must not file again, got {second}"
+
+        conn = fleet_db.connect(db_path)
+        rows = ask.list_asks(conn, status="open", member="sentry")
+        assert len(rows) == 1, f"exactly one open ask must exist after two runs, got {rows}"
+
+
 def _stash_pile_test_repo(tmp_path):
     """A throwaway git repo with three stash entries: a managed one whose diff will already be
     on HEAD (redundant), a managed one that is still unique (must survive), and a foreign one
@@ -12501,6 +12743,8 @@ if __name__ == "__main__":
     check("NTFY_TOPIC is deferred to tick-time, not baked in at boot", _ntfy_topic_is_deferred_to_tick_time_not_baked_in_at_boot)
     check("every gh api call in a shell script is timeout-guarded", _every_gh_api_call_is_timeout_guarded)
     check("deploy staleness check reads a baked SHA and only alerts past budget", _deploy_staleness_check_reads_a_baked_sha_and_only_alerts_past_budget)
+    check("kit staleness check warns only when actually behind (gh#731)", _kit_staleness_check_warns_only_when_actually_behind)
+    check("kit staleness line reaches run_member's log before member-specific work (gh#731)", _kit_staleness_line_reaches_run_member_log_before_member_specific_work)
     check("deploy.sh's host log dir survives sourcing the instance's container-scoped fleet.env", _deploy_sh_host_log_dir_survives_sourcing_the_instances_container_scoped_fleet_env)
     check("deploy cordons the fleet, then drains, and always uncordons", _deploy_cordons_then_drains_and_always_uncordons)
     check("deploy.sh's log is durable regardless of caller", _deploy_log_is_durable_regardless_of_caller)
@@ -12684,6 +12928,13 @@ if __name__ == "__main__":
 
     check("journey_walker fleet-console default resolves to the instance's real console path, not the bare host (gh#724 AC1)", _journey_walker_console_url_defaults_to_fleet_instance_path_gh724)
     check("journey_walker fleet-console URL: an explicit FLEET_CONSOLE_URL wins unchanged (gh#724 AC2)", _journey_walker_console_url_env_override_wins_unchanged_gh724)
+
+    check("journey_walker blocked_streak extends across runs for the same reason (gh#857 AC1)", _journey_walker_blocked_streak_extends_on_same_reason_gh857)
+    check("journey_walker blocked_streak starts at 1 on a first block or a changed reason (gh#857 AC2)", _journey_walker_blocked_streak_restarts_on_new_reason_or_first_block_gh857)
+    check("journey_walker blocked_streak resets once a journey is no longer blocked (gh#857 AC6)", _journey_walker_blocked_streak_resets_once_journey_is_no_longer_blocked_gh857)
+    check("journey_walker streak state round-trips through disk, degrades cleanly if missing/corrupt (gh#857)", _journey_walker_streak_state_round_trips_through_disk_gh857)
+    check("journey_walker streak ask groups by reason, names count/streak/reason/ids, skips sub-threshold journeys (gh#857 AC3)", _journey_walker_streak_ask_files_once_per_reason_and_names_required_facts_gh857)
+    check("journey_walker streak ask dedupes against an already-open ask for the same reason (gh#857 AC4)", _journey_walker_streak_ask_dedupes_against_an_already_open_ask_gh857)
 
     check("stash_pile_expiry drops a managed entry whose diff is already on HEAD, keeps a still-unique one (gh#714 AC1/AC2)", _stash_pile_expiry_drops_only_redundant_managed_entries_gh714)
     check("stash_pile_expiry never inspects or drops a foreign (non-run=) stash entry (gh#714 AC3)", _stash_pile_expiry_never_touches_foreign_entries_gh714)
