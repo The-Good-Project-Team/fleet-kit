@@ -10393,13 +10393,18 @@ def _ask_classes_and_real_callers_carry_a_class_gh558():
         "the thinking-project ask must name --class idea explicitly, gh#558 finding 4"
 
 
-def _run_worktree_guard_hook(repo, wt_path, tool_name, tool_input):
+def _run_worktree_guard_hook(repo, wt_path, tool_name, tool_input, cwd=None):
     """Runs the real worktree_guard_hook.py CLI (gh#592) as a subprocess, exactly as Claude
     Code's PreToolUse hook mechanism would -- proving its ACTUAL exit-code behavior (AC5), not
-    just its importable decide() logic."""
+    just its importable decide() logic. `cwd` mirrors the `cwd` field Claude Code's own
+    PreToolUse payload carries (gh#834); omitted, it matches every pre-gh#834 test's payload
+    shape exactly."""
     import os
     import subprocess
-    payload = json.dumps({"tool_name": tool_name, "tool_input": tool_input})
+    payload_dict = {"tool_name": tool_name, "tool_input": tool_input}
+    if cwd is not None:
+        payload_dict["cwd"] = cwd
+    payload = json.dumps(payload_dict)
     env = dict(os.environ)
     if repo is None:
         env.pop("REPO", None)
@@ -10782,6 +10787,70 @@ def _worktree_guard_still_blocks_quoted_single_token_mutation_target_gh715():
         cmd = f'sed -i "{repo}/f"'
         p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd})
         assert p.returncode == 2, f"expected block (exit 2), got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_blocks_bare_branch_switch_by_cwd_gh834():
+    """gh#834: the fleet's own incident -- the host checkout of a self-hosted instance was found
+    on a stray feature branch (`rework-metric`, ahead=1 behind=2) with no in-repo script ever
+    checking it out. Confirmed live before this fix: `git checkout <branch>` and
+    `git switch <branch>`, run with cwd=$REPO and no explicit path in the command at all (the
+    exact shape of `cd $REPO && git checkout <branch>`), both returned exit 0 (allowed) -- the
+    old regex only matched `checkout --` (the file-restore form) and never looked at cwd, so a
+    bare branch switch was invisible to the guard no matter where it ran."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        for cmd in ("git checkout rework-metric", "git switch rework-metric"):
+            p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=repo)
+            assert p.returncode == 2, f"expected block (exit 2) for {cmd!r} with cwd=repo, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_blocks_bare_mutating_verbs_by_cwd_gh834():
+    """gh#834: not just checkout/switch -- ANY bare mutating git verb (commit/reset/pull/add/
+    etc.) run with cwd=$REPO and no `-C`/explicit path was equally invisible before this fix,
+    since the guard never inspected the command's cwd at all, only path-shaped tokens inside the
+    command string."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        for cmd in ("git commit -am wip", "git reset --hard origin/main", "git pull"):
+            p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=repo)
+            assert p.returncode == 2, f"expected block (exit 2) for {cmd!r} with cwd=repo, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_allows_bare_mutating_verbs_when_cwd_is_own_worktree_gh834():
+    """gh#834: the cwd-based check must not over-block -- the normal, correct case (a bare
+    mutating git command with cwd=$WT_PATH, this pass's own worktree) must stay allowed."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        for cmd in ("git checkout main", "git switch main", "git commit -am wip"):
+            p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=wt)
+            assert p.returncode == 0, f"expected allow (exit 0) for {cmd!r} with cwd=wt, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_allows_dash_c_wt_override_even_with_cwd_repo_gh834():
+    """gh#834: a command that explicitly redirects via `git -C $WT_PATH` must stay allowed even
+    when the pass's own cwd happens to be $REPO -- `-C` already names the real target, and the
+    new cwd-fallback must defer to it rather than double-guessing."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        cmd = f"git -C {wt} commit -am wip"
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=repo)
+        assert p.returncode == 0, f"expected allow (exit 0), got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_allows_readonly_bash_by_cwd_gh834():
+    """gh#834: the cwd-fallback only applies to the existing mutating-verb list -- a read-only
+    command (`git status`, `git log`) with cwd=$REPO must stay allowed, same as it always was
+    when the command explicitly named a path under $REPO."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        for cmd in ("git status", "git log --oneline -5", "ls -la"):
+            p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=repo)
+            assert p.returncode == 0, f"expected allow (exit 0) for {cmd!r} with cwd=repo, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_no_cwd_field_behaves_exactly_as_before_gh834():
+    """gh#834: a payload with no `cwd` field at all (older Claude Code, or any caller that omits
+    it) must behave exactly as the pre-gh#834 hook did -- fail open on the new check, decided
+    only by explicit path tokens in the command, same as every gh#592/gh#715/gh#837 test above
+    (none of which pass cwd)."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": "git checkout rework-metric"})
+        assert p.returncode == 0, f"expected allow (exit 0) with no cwd field, got {p.returncode}: {p.stderr}"
 
 
 def _worktree_guard_install_merges_without_clobbering_existing_settings_gh592():
@@ -12027,6 +12096,12 @@ if __name__ == "__main__":
     check("worktree_guard_hook allows a heredoc to /tmp whose body quotes a repo path (gh#715 AC2)", _worktree_guard_allows_heredoc_to_tmp_whose_body_quotes_repo_path_gh715)
     check("worktree_guard_hook blocks a real shell redirect into $REPO despite a read-only-looking leading program (gh#715 AC4)", _worktree_guard_blocks_redirect_into_repo_despite_readonly_leading_program_gh715)
     check("worktree_guard_hook still blocks a quoted single-token mutation target (gh#715, no new bypass)", _worktree_guard_still_blocks_quoted_single_token_mutation_target_gh715)
+    check("worktree_guard_hook blocks a bare `git checkout`/`git switch` branch change via cwd, no explicit path needed (gh#834)", _worktree_guard_blocks_bare_branch_switch_by_cwd_gh834)
+    check("worktree_guard_hook blocks other bare mutating git verbs (commit/reset/pull) via cwd (gh#834)", _worktree_guard_blocks_bare_mutating_verbs_by_cwd_gh834)
+    check("worktree_guard_hook allows bare mutating git verbs when cwd is the pass's own worktree (gh#834)", _worktree_guard_allows_bare_mutating_verbs_when_cwd_is_own_worktree_gh834)
+    check("worktree_guard_hook allows an explicit `git -C $WT_PATH` override even when cwd is $REPO (gh#834)", _worktree_guard_allows_dash_c_wt_override_even_with_cwd_repo_gh834)
+    check("worktree_guard_hook allows read-only git commands via cwd=$REPO (gh#834)", _worktree_guard_allows_readonly_bash_by_cwd_gh834)
+    check("worktree_guard_hook with no cwd field behaves exactly as before gh#834 (backward compat)", _worktree_guard_no_cwd_field_behaves_exactly_as_before_gh834)
 
     check("fleet.env.example documents FIXER_HEALTH_URL/PAGE_URL/PROD_DIAG_DRIVER/FLEET_DEPLOY_DRIVER with examples and what breaks empty (gh#728 AC8)", _fleet_env_example_documents_the_fixer_prod_visibility_vars_gh728)
 
