@@ -4823,6 +4823,28 @@ def _sidebar_shows_spawned_scheduled_disabled_not_strikethrough_gh565():
         assert f".amode.mode-{mode} {{" in html_src, f"missing a distinct visual rule for {mode}"
 
 
+def _backlog_row_renders_blast_radius_as_chilli_not_a_grey_pill_gh844():
+    """gh#844, marie PRD: fleet:blast-N is a second axis (reach) separate from
+    fleet:complexity-N (size). renderIssueRow must render it as a 🌶️ x N glyph run, never as an
+    eighth grey `fleet:blast-N` pill (AC2); an unlabelled issue must render no glyph and every
+    other pill unchanged (AC3); two fleet:blast-* labels on one issue must collapse to the
+    highest N and exactly one glyph run, never two concatenated runs (AC4).
+    """
+    html_src = (ROOT / "scripts" / "fleet_view.html").read_text()
+    row_fn = html_src[html_src.index("const renderIssueRow = i => {"):html_src.index("const epicsHtml = epics.map(renderIssueRow)")]
+    # AC4: a single computed level (Math.max over every fleet:blast-N label), never a per-label
+    # accumulation -- this is what guarantees exactly one glyph run even with two+ labels.
+    assert "Math.max(max, Number(m[1]))" in row_fn, "renderIssueRow does not reduce to a single highest blast level (AC4)"
+    assert "'🌶️'.repeat(blastLevel)" in row_fn, "renderIssueRow does not render exactly one chilli glyph run"
+    # AC2: fleet:blast-* must never reach the grey-pill label list.
+    assert ".filter(l => !/^fleet:blast-\\d+$/.test(l.name))" in row_fn, \
+        "renderIssueRow must drop fleet:blast-* from the grey-pill label list (AC2)"
+    # AC3: the glyph is conditional on blastLevel -- an issue with none renders no glyph, and the
+    # pill filter is unconditional so every other label still renders exactly as before.
+    assert "blastLevel ? `<span class=\"blast\"" in row_fn, \
+        "glyph must be conditional on a real blast level, never rendered for an unlabelled issue (AC3)"
+
+
 def _deploy_sh_rolls_over_via_caddy_without_a_cordon():
     """gh#625: on a caddy-fronted box deploy.sh cuts over by swapping the proxy upstream, never
     by cordoning the fleet and draining passes. Pins (a) the proxy path runs INSTEAD of
@@ -11783,6 +11805,51 @@ def _filer_lookup_failure_never_files_a_duplicate_gh914():
     assert len(summary["skipped"]) == 1, summary
 
 
+def _filer_ensure_label_forwards_repo_gh922():
+    # gh#922: ensure_label() was the one call site process() made that dropped `repo`, so on a
+    # fresh target repo it created the label in the WRONG (ambient) repo and every later
+    # `--label` issue create failed "not found" -- the same mis-pointing class as gh#151/#770,
+    # reintroduced by the very PR (#916) written to close it.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("jif", ROOT / "scripts" / "journey_issue_filer.py")
+    jif = importlib.util.module_from_spec(spec); sys.modules[spec.name] = jif; spec.loader.exec_module(jif)
+
+    calls = []
+    def runner(cmd):
+        calls.append(cmd)
+        return 0, ""
+    jif.ensure_label(runner, jif.SENTRY, repo="owner/name")
+    idx = calls[0].index("--repo")
+    assert calls[0][idx + 1] == "owner/name", calls[0]
+
+    calls.clear()
+    jif.ensure_label(runner, jif.SENTRY)
+    assert "--repo" not in calls[0], calls[0]
+
+    # end to end: every gh call process() makes, label create included, carries --repo.
+    calls = []
+    def recording(cmd):
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "issue", "list"]:
+            return 0, "[]"
+        if cmd[:3] == ["gh", "issue", "create"]:
+            return 0, "https://github.com/x/y/issues/1"
+        return 0, ""
+    d = Path(tempfile.mkdtemp())
+    results = {"run": "r1", "deploy_sha": "sha", "journeys": [
+        {"id": "send-message", "name": "Send a message",
+         "steps": [{"index": 0, "action": "fill and send", "observable_result": "sent", "status": "fail"}]}]}
+    (d / "results.json").write_text(json.dumps(results))
+    summary = jif.process(d / "results.json", d / "state.json", runner=recording, repo="owner/name")
+    assert summary["errors"] == [], summary
+    assert len(summary["filed"]) == 1, summary
+    for cmd in calls:
+        assert "--repo" in cmd, f"missing --repo in {cmd}"
+        assert cmd[cmd.index("--repo") + 1] == "owner/name", cmd
+    label_create = [c for c in calls if c[:3] == ["gh", "label", "create"]]
+    assert label_create, "ensure_label never called label create"
+
+
 def _red_member_paced_and_vp_gates_on_red_gh785():
     import member_spec
     red = member_spec.by_name("red", ROOT / "members")
@@ -13997,6 +14064,7 @@ if __name__ == "__main__":
     check("red_walker expands an overflow payload, inverts landed_when to fail, and blocks a 403 (gh#785 AC1-3)", _red_walker_payload_landed_and_blocked_gh785)
     check("journey_issue_filer red profile files under fleet:red-team with its own marker, sentry unchanged (gh#785 AC4)", _filer_red_profile_uses_red_label_and_marker_gh785)
     check("journey_issue_filer never files a duplicate when the dedup lookup itself fails (gh#914)", _filer_lookup_failure_never_files_a_duplicate_gh914)
+    check("journey_issue_filer ensure_label forwards --repo to every gh call, label create included (gh#922)", _filer_ensure_label_forwards_repo_gh922)
     check("red is a paced 6h member and vp requires a red pass before Accepted (gh#785 AC5)", _red_member_paced_and_vp_gates_on_red_gh785)
     check("worktree_guard_hook blocks an Edit under the shared $REPO when isolated (gh#592 AC2)", _worktree_guard_blocks_edit_under_shared_repo_gh592)
     check("worktree_guard_hook allows an Edit under the pass's own $WT_PATH (gh#592 AC5)", _worktree_guard_allows_edit_under_own_worktree_gh592)
@@ -14084,6 +14152,7 @@ if __name__ == "__main__":
     check("ask.py authority reports a grant's level and ask_ids over the CLI (gh#771 AC5)", _ask_authority_cli_reports_grants_gh771)
     check("run_args() strips a trailing -green suffix from FLEET_INSTANCE_NAME, anchored not substring (gh#780 AC1/AC2/AC3)", _run_args_strips_green_suffix_from_instance_name_gh780)
 
+    check("backlog row renders blast radius as a chilli glyph, never a grey fleet:blast-N pill (gh#844 AC2/AC3/AC4)", _backlog_row_renders_blast_radius_as_chilli_not_a_grey_pill_gh844)
     check("pacing_hold_check pages once on a sustained fleet-wide hold, suppresses the repeat, resolves on recovery (gh#812 AC1/AC2/AC3/AC4)", _pacing_hold_check_pages_on_sustained_hold_gh812)
     check("pacing_hold_check never pages a single held tick that clears on its own (gh#812 AC6)", _pacing_hold_check_single_tick_does_not_page_gh812)
     check("pacing_hold_check never pages on two sparse single-row hours (one early ticker each, not a real fleet-wide hold)", _pacing_hold_check_sparse_single_row_hours_never_page_gh812)

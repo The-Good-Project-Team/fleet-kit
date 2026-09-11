@@ -560,6 +560,58 @@ class RepoArgTest(unittest.TestCase):
         self.assertNotIn("--repo", jif.build_comment_cmd(5, "n"))
         self.assertNotIn("--repo", jif.build_close_cmd(5, "n"))
 
+    def test_gh922_ac1_ensure_label_includes_repo(self):
+        calls = []
+
+        def runner(cmd):
+            calls.append(cmd)
+            return 0, ""
+
+        jif.ensure_label(runner, jif.SENTRY, repo="owner/name")
+        idx = calls[0].index("--repo")
+        self.assertEqual(calls[0][idx + 1], "owner/name")
+
+    def test_gh922_ac2_ensure_label_omits_repo_when_unset(self):
+        calls = []
+
+        def runner(cmd):
+            calls.append(cmd)
+            return 0, ""
+
+        jif.ensure_label(runner, jif.SENTRY)
+        self.assertNotIn("--repo", calls[0])
+
+    def test_gh922_ac3_process_forwards_repo_to_every_board_call_including_label(self):
+        # gh#922: the real regression -- ensure_label() was the one call site process() made
+        # that dropped `repo`, so it created the label in the wrong repo on a fresh target and
+        # every later `--label` issue create failed "not found". This drives process() end to
+        # end and checks EVERY captured gh invocation, label create included.
+        calls = []
+        fake = FakeGh()
+
+        def runner(cmd):
+            calls.append(cmd)
+            return fake(cmd)
+
+        results_path = self._write("r.json", _results("fail", "run-1", "sha1"))
+        summary = jif.process(results_path, self.state_path, runner=runner, repo="owner/name")
+
+        self.assertTrue(calls, "process() made no gh calls to check")
+        for cmd in calls:
+            self.assertIn("--repo", cmd, f"missing --repo in {cmd}")
+            idx = cmd.index("--repo")
+            self.assertEqual(cmd[idx + 1], "owner/name")
+        self.assertEqual(fake.label_create_calls[0][fake.label_create_calls[0].index("--repo") + 1], "owner/name")
+
+    def test_gh922_ac4_cold_start_target_repo_files_clean_with_no_errors(self):
+        # gh#922 AC4: a target repo where the label does not yet exist must still end with an
+        # empty error summary and the finding filed -- the end-to-end scenario the defect broke.
+        fake = FakeGh()
+        results_path = self._write("r.json", _results("fail", "run-1", "sha1"))
+        summary = jif.process(results_path, self.state_path, runner=fake, repo="owner/name")
+        self.assertEqual(summary["errors"], [])
+        self.assertEqual(len(summary["filed"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
