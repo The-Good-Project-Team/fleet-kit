@@ -116,6 +116,11 @@ ROOT = HERE.parent
 
 BYPASS_HEADER = "X-Atlas-Test-Bypass"
 
+# gh#890: the exact text Chromium's own devtools protocol logs as a console "error" when a
+# sub-resource fetch fails (a 404, a blocked request, a net:: error) -- distinct from a
+# console.error() call the page's own code made, which never has this shape.
+_SUBRESOURCE_FAILURE_RE = re.compile(r"^Failed to load resource:", re.I)
+
 
 def redact_secret(text: str, secret: str | None) -> str:
     """Strips a literal secret value out of free text before it is stored in a step's
@@ -273,12 +278,17 @@ class JourneyCtx:
 
                 context.route("**/*", _inject_bypass)
             page_obj = context.new_page()
-            errors: list[str] = self._console_errors.setdefault(id(page_obj), [])
+            errors: list[tuple[str, str, str | None]] = self._console_errors.setdefault(id(page_obj), [])
             page_obj.on(
                 "console",
-                lambda msg, _errors=errors: _errors.append(msg.text) if msg.type == "error" else None,
+                lambda msg, _errors=errors: _errors.append(
+                    ("console", msg.text, (msg.location or {}).get("url"))
+                ) if msg.type == "error" else None,
             )
-            page_obj.on("pageerror", lambda exc, _errors=errors: _errors.append(str(exc)))
+            page_obj.on(
+                "pageerror",
+                lambda exc, _errors=errors: _errors.append(("pageerror", str(exc), None)),
+            )
             self._contexts[key] = (context, page_obj)
         return self._contexts[key][1]
 
@@ -287,9 +297,13 @@ class JourneyCtx:
             context.close()
         self._contexts.clear()
 
-    def _drain_console_errors(self, page) -> list[str]:
+    def _drain_console_errors(self, page) -> list[tuple[str, str, str | None]]:
         """New console.error/pageerror entries on `page` since the last drain -- a cursor per
-        page so a later step never re-reports an earlier step's console noise."""
+        page so a later step never re-reports an earlier step's console noise. Each entry is
+        (kind, text, location_url): kind is "console" or "pageerror"; location_url is the URL
+        Chromium attaches to the message (for a "Failed to load resource" diagnostic this is the
+        failing resource's own URL, verified live against a real fixture server -- gh#890) or
+        None when the browser didn't attach one (e.g. every pageerror)."""
         if page is None:
             return []
         errors = self._console_errors.get(id(page))
@@ -299,6 +313,27 @@ class JourneyCtx:
         drained = errors[cursor:]
         self._console_cursor[id(page)] = len(errors)
         return drained
+
+    @staticmethod
+    def _console_error_is_related(kind: str, text: str, location_url: str | None,
+                                   target_url: str | None) -> bool:
+        """gh#890: does this console entry say anything about the step it fired during, or is it
+        noise from an unrelated sub-resource (a favicon, a blocked analytics beacon, a third-party
+        script) that happens to log through the same browser event? An uncaught page exception
+        (`pageerror`) is always about the page -- there's no such thing as an unrelated one. A
+        console.error that IS Chromium's own "Failed to load resource" diagnostic for a failed
+        network fetch carries the failing resource's own URL in its `location` (verified live: a
+        <img> 404 reports the image's URL, a failed navigation reports the page's own URL) -- so
+        it's related only when that URL is the step's own navigation target, i.e. the failure was
+        the page itself, not something it happened to also request. Any other console.error (the
+        page's own code calling console.error, a syntax error, anything not shaped like a resource
+        diagnostic) is treated as page-authored and stays related -- that's the line non-goal #1
+        draws: stop misreading sub-resource noise, not go blind to real console errors."""
+        if kind == "pageerror":
+            return True
+        if _SUBRESOURCE_FAILURE_RE.match(text):
+            return bool(location_url) and location_url == target_url
+        return True
 
     def step(self, index: int, fn, page=None, budget_ms: int | None = None) -> bool:
         step_def = self.journey["steps"][index]
@@ -316,15 +351,31 @@ class JourneyCtx:
             detail = redact_secret(f"{type(exc).__name__}: {exc}", self.users.bypass)
         duration_ms = round((time.monotonic() - start) * 1000)
 
-        console_errors = self._drain_console_errors(shot_page)
-        if console_errors:
-            console_detail = redact_secret(
-                "browser console error: " + "; ".join(console_errors), self.users.bypass
-            )
-            if status == "pass":
-                status, detail = "fail", console_detail
-            else:
-                detail = f"{detail} | {console_detail}"
+        console_entries = self._drain_console_errors(shot_page)
+        console_errors_recorded: list[str] = []
+        if console_entries:
+            target_url = None
+            if shot_page is not None:
+                try:
+                    target_url = shot_page.url
+                except Exception:  # noqa: BLE001 -- losing the target url must not lose the run
+                    target_url = None
+            related = []
+            for kind, text, location_url in console_entries:
+                redacted_text = redact_secret(text, self.users.bypass)
+                # location_url is the whole reason a "Failed to load resource" entry is
+                # otherwise unreadable evidence -- the message text alone never names which
+                # resource failed, only that one did.
+                recorded_text = f"{redacted_text} ({location_url})" if location_url else redacted_text
+                console_errors_recorded.append(recorded_text)
+                if self._console_error_is_related(kind, text, location_url, target_url):
+                    related.append(redacted_text)
+            # AC4: an assertion that already threw keeps ITS OWN message as `detail` -- a
+            # console error, related or not, is never appended to it. AC2: the evidence still
+            # survives on the record via `console_errors` below, regardless of relatedness.
+            if related and status == "pass":
+                status = "fail"
+                detail = "browser console error: " + "; ".join(related)
 
         if budget_ms is not None and status == "pass" and duration_ms > budget_ms:
             status = "fail"
@@ -334,6 +385,8 @@ class JourneyCtx:
                   "status": status, "duration_ms": duration_ms}
         if detail:
             result["detail"] = detail
+        if console_errors_recorded:
+            result["console_errors"] = console_errors_recorded
         if shot_page is not None:
             jid = self.journey["id"]
             shot_dir = self.base_out / self.run_id / "journeys" / jid / self.viewport
