@@ -179,15 +179,17 @@ report_run() { # <pr> <head_sha> <usage_file> <outcome-line> <evidence-line> <se
 # compute_and_record_datadog() (gh#352) both read "age of the last runs row" as the liveness
 # signal, so a long quiet-PR stretch (ticks happening fine, nothing to review) read identically
 # to judge-judy being dead. This writes a lightweight heartbeat row on that path so "last row
-# age" stays a true liveness signal even when there was nothing to review. STATUS_QUIET (an
-# Outcome starting "QUIET") is reused rather than a new status string -- fleet_view.html's
-# statusClass() already maps it to the "warn" (amber) dot with no code change needed here; per
-# marie's PRD comment on gh#267, whether amber is the right color for a healthy-idle tick (vs a
-# new, distinct status) is an open UNKNOWN left for a human to decide.
+# age" stays a true liveness signal even when there was nothing to review. fk#819: the row now
+# carries its own status (`--heartbeat` -> "heartbeat") instead of reusing STATUS_QUIET --
+# fleet_metrics.py counted `quiet` as an EXECUTED run, so 94 of 106 "executed" runs in a
+# trailing 24h were these pings and fleet-wide signal_rate read 0.0849 against a real 0.7500.
+# The console still paints it the same amber, so marie's PRD comment on gh#267 -- whether amber
+# is the right colour for a healthy-idle tick -- is still the open UNKNOWN for a human.
 report_heartbeat() { # <evidence-line>
   printf 'Outcome: QUIET -- no PR needs review this tick\nEvidence: %s\nSelf-critique: none -- heartbeat only, no review performed\n' "$1" \
     | python3 "$KIT_DIR/scripts/run_report.py" \
       --member "judge-judy" --run-id "heartbeat-$(date -u +%s)-$$" --kind shell --exit-code 0 \
+      --heartbeat \
       --pass-file - >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
 }
 
