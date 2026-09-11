@@ -123,8 +123,8 @@ _ntfy() {
 if [[ "$last_line" != *"ALL accounts in"*"failed this call"* ]]; then
   # newest line in the log is not a failure -- pool is healthy (or has never failed).
   if [ -n "$already_paged" ]; then
-    _ntfy "fleet-kit: accounts recovered" \
-      "Fleet account pool is succeeding again after an outage flagged at $already_paged." \
+    _ntfy "fleet-kit[$CONTAINER_NAME]: accounts recovered" \
+      "Instance: $CONTAINER_NAME. Its account pool is succeeding again after the outage flagged at $already_paged." \
       "resolve"
     rm -f "$STATE_FILE" "$RESTART_STATE_FILE"
   fi
@@ -215,15 +215,15 @@ if [ "$age_minutes" -ge "$THRESHOLD_MINUTES" ] && [ -z "$already_paged" ]; then
 
     if podman exec "$CONTAINER_NAME" sh -c 'getent hosts api.anthropic.com' >/dev/null 2>&1; then
       echo "$paged_at" > "$RESTART_STATE_FILE"
-      _ntfy "fleet-kit: auto-recovered from a dead-network outage" \
-        "No fleet account had succeeded in ${age_minutes}+ minutes -- DNS inside $CONTAINER_NAME was unreachable (dead slirp4netns), same class as the 2026-08-28 outage. Restarted the container automatically; DNS resolves again. Watching for the next tick to confirm real recovery." \
+      _ntfy "fleet-kit[$CONTAINER_NAME]: auto-recovered from a dead-network outage" \
+        "Instance: $CONTAINER_NAME. No account in its pool had succeeded in ${age_minutes}+ minutes -- DNS inside $CONTAINER_NAME was unreachable (dead slirp4netns), same class as the 2026-08-28 outage. Restarted the container automatically; DNS resolves again. Watching for the next tick to confirm real recovery." \
         "info"
       echo "[account_health_check] auto-recovery restart succeeded -- DNS resolves again"
       exit 0
     else
       echo "$paged_at" > "$RESTART_STATE_FILE"
-      _ntfy "🚨 fleet-kit: auto-recovery FAILED, needs a human" \
-        "DNS inside $CONTAINER_NAME was unreachable; attempted a container restart but DNS is still broken afterward. Last pool-log line: $last_line" \
+      _ntfy "🚨 fleet-kit[$CONTAINER_NAME]: auto-recovery FAILED, needs a human" \
+        "Instance: $CONTAINER_NAME. DNS inside $CONTAINER_NAME was unreachable; attempted a container restart but DNS is still broken afterward. Last pool-log line: $last_line" \
         "urgent"
       echo "$paged_at" > "$STATE_FILE"
       echo "[account_health_check] auto-recovery restart did NOT fix DNS -- PAGED"
@@ -233,8 +233,37 @@ if [ "$age_minutes" -ge "$THRESHOLD_MINUTES" ] && [ -z "$already_paged" ]; then
 
   # Not a network problem (or we already tried the restart once this outage) -- this is the
   # auth-flap/exhaustion class, which no restart can fix. Page a human, as before.
-  _ntfy "🚨 fleet-kit: ALL accounts exhausted" \
-    "No fleet account has succeeded in ${age_minutes}+ minutes (threshold ${THRESHOLD_MINUTES}m). DNS check: $([ "$dns_broken" -eq 1 ] && echo 'broken (already attempted auto-restart)' || echo 'ok -- looks like a real account/auth problem, not network'). Last pool-log line: $last_line" \
+  # NAME THE INSTANCE. Three instances (philanthropy, sketchyswap, fleet-kit-server-fleet)
+  # run this same script on the same 5-minute cron into the same channel, and this page
+  # carried no instance in either the title or the body -- so a sketchyswap quota gate read
+  # as a philanthropy outage, and the first thing a human did was go debug the wrong fleet
+  # (2026-09-11, live). CONTAINER_NAME defaults to "philanthropy", which makes an
+  # unattributed page actively misleading rather than merely vague.
+  #
+  # DIAGNOSE, DON'T GUESS. "looks like a real account/auth problem" was asserted whenever
+  # DNS resolved. But the pool logs its own verdict, and `gated:exhausted_until_<epoch>` is
+  # a known weekly-quota gate with a known reset -- nothing is broken, nothing is flapping,
+  # and no amount of re-auth helps. Calling that an auth problem sends a human to look for
+  # a fault that does not exist. Read the verdict the pool already wrote.
+  # The gate verdict is logged PER ACCOUNT, one line per account, and the "ALL accounts
+  # failed" summary lands after them -- so $last_line alone never carries it. Scan the tail
+  # for the most recent gate instead of only the final line.
+  reset_epoch="$(tail -20 "$POOL_LOG" 2>/dev/null \
+    | sed -n 's/.*exhausted_until_\([0-9][0-9]*\).*/\1/p' | tail -1)"
+  if [ -n "$reset_epoch" ]; then
+    reset_human="$(date -u -d "@$reset_epoch" '+%Y-%m-%d %H:%M UTC' 2>/dev/null \
+      || date -u -r "$reset_epoch" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "epoch $reset_epoch")"
+    diagnosis="every account in the pool is QUOTA-GATED, not broken -- the pool's own verdict is
+\`gated:exhausted_until_$reset_epoch\` (resets $reset_human). Re-auth will not help; this fleet is
+idle until the reset, or until it is pointed at an account with headroom."
+  elif [ "$dns_broken" -eq 1 ]; then
+    diagnosis="DNS inside $CONTAINER_NAME is broken (auto-restart already attempted)."
+  else
+    diagnosis="DNS resolves, and the pool reported no quota gate -- this looks like a real account/auth problem."
+  fi
+
+  _ntfy "🚨 fleet-kit[$CONTAINER_NAME]: ALL accounts exhausted" \
+    "Instance: $CONTAINER_NAME (pool log: $POOL_LOG). No account in THIS instance's pool has succeeded in ${age_minutes}+ minutes (threshold ${THRESHOLD_MINUTES}m). Other instances are unaffected unless they page separately. Diagnosis: $diagnosis Last pool-log line: $last_line" \
     "urgent"
   echo "$paged_at" > "$STATE_FILE"
   echo "[account_health_check] PAGED -- last success was ${age_minutes}m ago"
@@ -255,8 +284,8 @@ elif [ "$age_minutes" -ge "$THRESHOLD_MINUTES" ] && [ -n "$already_paged" ]; the
     since_first_page_minutes="$age_minutes"
     [ -n "$first_paged_epoch" ] && since_first_page_minutes=$(( (now_epoch - first_paged_epoch) / 60 ))
     h=$(( since_first_page_minutes / 60 )); m=$(( since_first_page_minutes % 60 ))
-    _ntfy "🚨🚨 fleet-kit: accounts STILL exhausted (re-page)" \
-      "Still down, ${h}h ${m}m since first page -- no fleet account has succeeded in ${age_minutes}+ minutes. Last pool-log line: $last_line" \
+    _ntfy "🚨🚨 fleet-kit[$CONTAINER_NAME]: accounts STILL exhausted (re-page)" \
+      "Instance: $CONTAINER_NAME. Still down, ${h}h ${m}m since first page -- no account in ITS pool has succeeded in ${age_minutes}+ minutes. Last pool-log line: $last_line" \
       "repage"
     printf '%s\nlast_repage=%s\n' "$already_paged" "$repaged_at" > "$STATE_FILE"
     echo "[account_health_check] RE-PAGED -- outage still open (${since_first_page_minutes}m since first page), next re-page in ${REPAGE_MINUTES}m"
