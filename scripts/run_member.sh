@@ -96,6 +96,16 @@ LOG="$LOG_DIR/${MEMBER}.log"
 ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
 
+# gh#731: warn THIS pass, in its own log, before any member-specific work runs, when
+# /fleet-kit's baked snapshot (COPY . /fleet-kit at build time -- see Dockerfile:97/.deploy_sha)
+# is behind origin/main. gh#638 burned four passes on exactly the failure this line exists to
+# stop: a member running the kit's own scripts against stale code, seeing a "repro", and
+# defending the wrong conclusion because a repro that reproduces reads as strong evidence.
+# Silent (and never fatal -- `|| true`) when current, unknown, or unreachable; see
+# kit_staleness_check.sh's own header for why each of those stays quiet.
+STALENESS_LINE="$(bash "$KIT_DIR/scripts/kit_staleness_check.sh" 2>>"$LOG" || true)"
+[ -n "$STALENESS_LINE" ] && log "$STALENESS_LINE"
+
 # gh#374: a `lane=<name>` dispatch to nerd whose name is not one of the current target's real
 # lanes burns a full pass discovering only that it should never have run -- no matching
 # checklist, no expected credentials, no code surface. Reject BEFORE the worktree is built,
