@@ -1182,6 +1182,38 @@ def _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing():
     assert "per_diem_hourly_pct" in payload and "headroom_fraction" in payload, payload
 
 
+def _maxx_fetch_budget_classifies_mcp_auth_rejection():
+    """gh#825: a 200 OK MCP envelope can itself carry a rejection --
+    {"result": {"isError": true, "content": [{"text": "unauthorized"}]}} -- confirmed live
+    against api.meetmaxx.co when a maxx-meter credential goes stale while the underlying
+    Claude API key still works. Before this, json.loads() on the plain-text "unauthorized"
+    body raised ValueError and _classify_envelope's predecessor folded THAT into
+    "maxx_unexpected_shape" -- the same label used for a genuinely malformed payload -- which
+    hid the one signal (maxx_auth_rejected) an operator would actually act on."""
+    import maxx_reader
+
+    auth_reject = {"jsonrpc": "2.0", "id": 1,
+                   "result": {"isError": True, "content": [{"type": "text", "text": "unauthorized"}]}}
+    assert maxx_reader._classify_envelope(auth_reject) == "maxx_auth_rejected", \
+        maxx_reader._classify_envelope(auth_reject)
+
+    # A different MCP-level error must not be misread as an auth problem either.
+    other_error = {"jsonrpc": "2.0", "id": 1,
+                    "result": {"isError": True, "content": [{"type": "text", "text": "rate limited"}]}}
+    assert maxx_reader._classify_envelope(other_error) == "maxx_mcp_error", \
+        maxx_reader._classify_envelope(other_error)
+
+    # A genuinely malformed (non-isError) envelope is still "maxx_unexpected_shape".
+    malformed = {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text"}]}}
+    assert maxx_reader._classify_envelope(malformed) == "maxx_unexpected_shape", \
+        maxx_reader._classify_envelope(malformed)
+
+    # The real-payload path is untouched.
+    real = {"jsonrpc": "2.0", "id": 1,
+            "result": {"content": [{"type": "text", "text": json.dumps({"verdict": "ok"})}]}}
+    assert maxx_reader._classify_envelope(real) == {"verdict": "ok"}, maxx_reader._classify_envelope(real)
+
+
 def _gru_md_clamps_allowance_to_share_ceiling():
     """2026-09-01 audit (Reif): FLEET_SHARE_FRACTION (this instance's slice of fleet-wide
     hourly headroom, run_member.sh -> maxx_share_ceiling.py -> FLEET_SHARE_CEILING_PCT) and
@@ -11036,6 +11068,7 @@ if __name__ == "__main__":
     check("vision_link_gate applies gh#525's eligibility rule", _vision_link_gate_eligibility_rule)
     check("gru.md gates on a Vision-link before packing (gh#525)", _gru_md_gates_on_vision_link_before_packing)
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
+    check("maxx fetch_budget classifies an MCP-level auth rejection, not maxx_unexpected_shape (gh#825)", _maxx_fetch_budget_classifies_mcp_auth_rejection)
     check("maxx lease reserves, releases, and self-expires", _maxx_lease_reserves_releases_and_self_expires)
     check("maxx lease concurrent reserves don't clobber each other", _maxx_lease_concurrent_reserves_dont_clobber_each_other)
     check("maxx share ceiling uses hourly headroom, not the week bank", _maxx_share_ceiling_uses_hourly_headroom_not_the_week_bank)

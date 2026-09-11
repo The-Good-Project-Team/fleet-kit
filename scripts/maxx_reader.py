@@ -97,6 +97,29 @@ def fetch_budget(base_url: str, handle: str, key: str, timeout: float = TIMEOUT_
     except (urllib.error.URLError, TimeoutError, OSError):
         return "maxx_unreachable"
 
+    return _classify_envelope(envelope)
+
+
+# gh#825: a 200 OK MCP envelope can carry its OWN rejection --
+# {"result": {"isError": true, "content": [{"text": "unauthorized"}]}} -- which is a maxx-level
+# credential problem, not a malformed payload. Before this split, json.loads() on that plain-text
+# body raised ValueError and both cases (a real auth rejection and a genuinely unparseable shape)
+# collapsed into the same "maxx_unexpected_shape" label, hiding the one signal
+# (maxx_auth_rejected) an operator would actually act on. Pulled into its own function so
+# selftest can exercise it without mocking the network.
+_MCP_AUTH_REJECT_STRINGS = ("unauthoriz", "forbidden", "invalid key", "invalid handle", "invalid token")
+
+
+def _classify_envelope(envelope: dict) -> dict | str:
+    result = envelope.get("result") if isinstance(envelope, dict) else None
+    if isinstance(result, dict) and result.get("isError"):
+        try:
+            err_text = str(result["content"][0]["text"])
+        except (KeyError, IndexError, TypeError):
+            err_text = ""
+        if any(s in err_text.lower() for s in _MCP_AUTH_REJECT_STRINGS):
+            return "maxx_auth_rejected"
+        return "maxx_mcp_error"
     try:
         text = envelope["result"]["content"][0]["text"]
         return json.loads(text)
