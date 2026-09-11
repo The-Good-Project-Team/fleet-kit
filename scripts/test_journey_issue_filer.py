@@ -9,6 +9,8 @@ to a list, `list` returns open ones, `comment`/`close` mutate them by number. Pa
 `process()`'s `runner` is the same "pure builders, mocked execution" split board_github.py's
 own tests use.
 """
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -25,10 +27,12 @@ class FakeGh:
     def __init__(self):
         self.issues = {}  # number -> {"body": str, "open": bool, "comments": [str]}
         self._next = 100
+        self.label_create_calls = []  # argv of every "gh label create" call, in order
 
     def __call__(self, cmd: list[str]) -> tuple[int, str]:
         assert cmd[0] == "gh"
         if cmd[1] == "label":
+            self.label_create_calls.append(cmd)
             return 0, "label ensured"  # ensure_label() is idempotent no-op in this fake
         assert cmd[1] == "issue"
         sub = cmd[2]
@@ -279,6 +283,102 @@ class ViewportCollapsingTest(unittest.TestCase):
         self.assertEqual(summary2["closed"], [])
         self.assertEqual(len(summary2["commented"]), 1)
         self.assertTrue(all(v["open"] for v in self.gh.issues.values()))
+
+
+class LabelDescriptionTest(unittest.TestCase):
+    """gh#892 AC1: every profile's label description must fit GitHub's 100-char cap -- past it,
+    `gh label create` 422s, the label is never made, and every later `--label` issue create
+    fails 'not found'. Iterates PROFILES so a future profile can't reintroduce this."""
+
+    def test_every_profile_description_fits_the_100_char_cap(self):
+        for key, profile in jif.PROFILES.items():
+            self.assertLessEqual(
+                len(profile.desc), 100,
+                f"{key} profile's label description is {len(profile.desc)} chars, over "
+                f"GitHub's 100-char cap: {profile.desc!r}",
+            )
+
+
+class EnsureLabelTest(unittest.TestCase):
+    """gh#892 AC2-4: ensure_label() creates RED's label within the cap, stays silent on the
+    benign duplicate-create (today's intended idempotent behaviour), and surfaces -- rather
+    than swallows -- any other create failure."""
+
+    def test_ac2_red_create_argv_fits_cap_and_names_red_and_785(self):
+        calls = []
+
+        def runner(cmd):
+            calls.append(cmd)
+            return 0, ""
+
+        result = jif.ensure_label(runner, jif.RED)
+        self.assertIsNone(result)
+        self.assertEqual(len(calls), 1)
+        desc = calls[0][calls[0].index("--description") + 1]
+        self.assertLessEqual(len(desc), 100)
+        self.assertIn("red", desc.lower())
+        self.assertIn("785", desc)
+
+    def test_ac3_duplicate_create_failure_is_silent(self):
+        def runner(cmd):
+            return 1, ('label with name "fleet:red-team" already exists; '
+                       "use `--force` to update its color and description")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = jif.ensure_label(runner, jif.RED)
+        self.assertIsNone(result)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_ac4_non_duplicate_failure_is_surfaced_on_stderr(self):
+        def runner(cmd):
+            return 1, ("HTTP 422: Validation Failed\n"
+                       "description is too long (maximum is 100 characters)")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = jif.ensure_label(runner, jif.RED)
+        self.assertIsNotNone(result)
+        self.assertIn("fleet:red-team", stderr.getvalue())
+        self.assertIn("too long", stderr.getvalue())
+
+    def test_ac4_zero_finding_run_cannot_report_clean_errors_when_label_create_fails(self):
+        def runner(cmd):
+            if cmd[1] == "label":
+                return 1, ("HTTP 422: Validation Failed\n"
+                           "description is too long (maximum is 100 characters)")
+            assert cmd[1] == "issue" and cmd[2] == "list"
+            return 0, "[]"  # no prior issue -- a passing step with no history is a true noop
+
+        with tempfile.TemporaryDirectory() as tmp:
+            results_path = Path(tmp) / "clean.json"
+            results_path.write_text(json.dumps(_results("pass", "run-1", "sha1")))
+            summary = jif.process(
+                results_path, Path(tmp) / "state.json", runner=runner, profile=jif.RED
+            )
+        self.assertTrue(
+            summary["errors"],
+            "a failed label create must not report a clean {'errors': []}",
+        )
+
+
+class RedProfileEndToEndTest(unittest.TestCase):
+    """gh#892 AC5: --profile red works end to end (label create + issue file) against a repo
+    that does not yet have the fleet:red-team label."""
+
+    def test_red_profile_creates_label_and_files_issue_from_cold_start(self):
+        gh = FakeGh()
+        with tempfile.TemporaryDirectory() as tmp:
+            results_path = Path(tmp) / "r.json"
+            results_path.write_text(json.dumps(_results("fail", "run-1", "sha1")))
+            summary = jif.process(
+                results_path, Path(tmp) / "state.json", runner=gh, profile=jif.RED
+            )
+        self.assertEqual(summary["errors"], [])
+        self.assertEqual(len(summary["filed"]), 1)
+        issue_no = summary["filed"][0]["issue"]
+        self.assertIn("fleet:red-team", gh.label_create_calls[0])
+        self.assertIn("LANDED", gh.issues[issue_no]["body"])
 
 
 if __name__ == "__main__":
