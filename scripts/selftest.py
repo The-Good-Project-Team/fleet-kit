@@ -3374,12 +3374,20 @@ def _auto_deploy_race_check_detects_the_unrecognized_git_failure():
         assert "deploy OK" in alerts, "alert does not cross-reference the next tick's deploy outcome"
 
 
-def _fixer_check_sh(tmp, stale_prs_json, state_contents=None, state_age_hours=None, env_extra=None):
+def _fixer_check_sh(tmp, stale_prs_json, state_contents=None, state_age_hours=None, env_extra=None,
+                     curl_burst=None):
     """Run the-fixer's check.sh against a stubbed `gh`, return its one stdout line.
 
     The stub answers the three shapes check.sh asks for: `gh run list` for CI and deploy
     (always green here -- these tests are about the stale-PR path), and `gh pr list` for the
     open-PR sweep, which is fed verbatim from stale_prs_json.
+
+    `curl_burst`, when given, is a list of "code:time" strings (e.g. "000:10.0") stubbing
+    sample_degraded_page()'s burst probe, cycled by call order via a counter file so a test can
+    control exactly which of the n probes in a burst times out or runs slow. A curl call whose
+    `-w` format has no `time_total` (the hard-down health/page double-probe, not the burst) is
+    always answered "200" -- these tests are about the degraded-burst path, not the hard-down
+    one, which gh#4546's own tests already cover via a real refused connection.
     """
     import os
     import subprocess
@@ -3402,6 +3410,26 @@ def _fixer_check_sh(tmp, stale_prs_json, state_contents=None, state_age_hours=No
         "exit 0\n"
     )
     (bin_dir / "gh").chmod(0o755)
+
+    if curl_burst is not None:
+        counter = Path(tmp) / "curl_page_calls"
+        spec_literal = " ".join(curl_burst)
+        (bin_dir / "curl").write_text(
+            "#!/bin/bash\n"
+            "is_page=0\n"
+            "for a in \"$@\"; do case \"$a\" in *time_total*) is_page=1 ;; esac; done\n"
+            "if [ \"$is_page\" = 0 ]; then printf '200'; exit 0; fi\n"
+            f"spec=({spec_literal})\n"
+            f"counter=\"{counter}\"\n"
+            "n=0\n"
+            "[ -f \"$counter\" ] && n=$(cat \"$counter\")\n"
+            "echo $((n + 1)) > \"$counter\"\n"
+            "idx=$(( n % ${#spec[@]} ))\n"
+            "entry=\"${spec[$idx]}\"\n"
+            "code=\"${entry%%:*}\"; t=\"${entry#*:}\"\n"
+            "printf '%s %s' \"$code\" \"$t\"\n"
+        )
+        (bin_dir / "curl").chmod(0o755)
 
     state = log_dir / "the-fixer.state"
     if state_contents is not None:
@@ -3523,6 +3551,96 @@ def _fixer_charter_handles_every_reason_check_sh_emits():
         f"check.sh can emit {missing} but the-fixer.md has no rule naming them -- a sub-pass "
         "dispatched for one of these has no instruction to follow"
     )
+
+
+def _fixer_degraded_env():
+    """FIXER_HEALTH_URL/FIXER_PAGE_URL just need to be non-empty to switch on the double-probe
+    and burst-sampling paths -- curl itself is stubbed via `curl_burst`, so the URLs are never
+    actually dialed."""
+    return {"FIXER_HEALTH_URL": "http://health.invalid", "FIXER_PAGE_URL": "http://page.invalid"}
+
+
+def _fixer_degraded_sample_counts_a_timeout_as_an_error():
+    """gh#841 AC1: curl's own `000` -- a timeout, connection refusal, or TLS failure, the most
+    common way a dying site actually fails -- was never matched by check.sh's `case "$code" in
+    5??)`, so a hung probe scored as a clean sample. Real case: the VP ran this function
+    verbatim against https://philanthropy.org/990 and watched a full 10s timeout get recorded
+    as `error_pct 0.00%`.
+
+    Reads the sample straight out of fixer_fire_path.py's own persisted post-promote state
+    file rather than parsing a FIRE line, so this targets sample_degraded_page()'s arithmetic
+    specifically -- AC2 (the two-consecutive-tick fire) is a different, already-covered path.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _fixer_degraded_env()
+        env["FIXER_DEGRADED_SAMPLE_REQUESTS"] = "5"
+        burst = ["200:0.1", "200:0.1", "000:10.0", "200:0.1", "200:0.1"]  # 1 timeout in 5
+        out = _fixer_check_sh(tmp, "", env_extra=env, curl_burst=burst)
+        assert out.startswith("green"), f"a single degraded burst must not itself fire: {out!r}"
+
+        state = json.loads((Path(tmp) / "logs" / "the-fixer.postpromote").read_text())
+        assert state[-1]["error_pct"] == 20.0, (
+            f"a 1-in-5 timeout must count as a 20.00% error rate, got {state[-1]!r}"
+        )
+
+
+def _fixer_degraded_sample_p95_reports_the_slowest_request():
+    """gh#841 AC3: check.sh's old `idx=int((n-1)*0.95)` was off by one low and, at the default
+    n=5, could never select the final (slowest) sorted sample no matter how slow it was. The
+    issue's own worked example -- sorted times 0.6 0.8 0.9 1.0 9.5 -- must report p95=9.500,
+    not the old code's 1.000."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _fixer_degraded_env()
+        env["FIXER_DEGRADED_SAMPLE_REQUESTS"] = "5"
+        burst = ["200:1.0", "200:0.6", "200:9.5", "200:0.8", "200:0.9"]  # order shouldn't matter
+        out = _fixer_check_sh(tmp, "", env_extra=env, curl_burst=burst)
+        assert out.startswith("green"), f"a clean-error, slow-tail burst must not fire: {out!r}"
+
+        state = json.loads((Path(tmp) / "logs" / "the-fixer.postpromote").read_text())
+        assert state[-1]["p95_s"] == 9.5, (
+            f"nearest-rank p95 over [0.6 0.8 0.9 1.0 9.5] must be 9.500, got {state[-1]!r}"
+        )
+
+
+def _fixer_degraded_sample_default_n_is_above_five():
+    """gh#841 AC5: at n=5 the top 5% of a burst is a single request, so nearest-rank p95 is
+    really just "max" in disguise. FIXER_DEGRADED_SAMPLE_REQUESTS' default must be raised above
+    5, and check.sh must say why in a comment next to the default (a human reading the file
+    should not have to reconstruct the reasoning from this test)."""
+    check_sh = (ROOT / "members" / "the-fixer" / "check.sh").read_text()
+    m = re.search(r'FIXER_DEGRADED_SAMPLE_REQUESTS:-(\d+)\}', check_sh)
+    assert m, "could not find sample_degraded_page()'s FIXER_DEGRADED_SAMPLE_REQUESTS default"
+    default_n = int(m.group(1))
+    assert default_n > 5, f"default sample count must exceed 5, got {default_n}"
+    assert "top 5%" in check_sh, (
+        "no comment near the raised default explains why 5 was too small (the top-5%-is-one- "
+        "request reasoning AC5 requires a human-readable justification for)"
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _fixer_degraded_env()
+        out = _fixer_check_sh(tmp, "", env_extra=env, curl_burst=["200:0.05"])
+        assert out.startswith("green"), f"an all-clean burst must not fire: {out!r}"
+        calls = int((Path(tmp) / "curl_page_calls").read_text())
+        assert calls == default_n, (
+            f"sample_degraded_page() made {calls} burst probes but the default it read is "
+            f"{default_n} -- they must match"
+        )
+        assert calls > 5, f"the unset-default burst made only {calls} probes, still <= 5"
+
+
+def _fixer_degraded_sample_all_clean_stays_green_and_error_free():
+    """gh#841 AC6: fixing 1 and 3/4 above must not introduce a false positive on an entirely
+    healthy burst -- every probe 200, fast -- which stays 0.00% errors and never fires."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _fixer_degraded_env()
+        env["FIXER_DEGRADED_SAMPLE_REQUESTS"] = "5"
+        out = _fixer_check_sh(tmp, "", env_extra=env, curl_burst=["200:0.2"])
+        assert out.startswith("green"), f"an all-clean burst fired: {out!r}"
+
+        state = json.loads((Path(tmp) / "logs" / "the-fixer.postpromote").read_text())
+        assert state[-1]["error_pct"] == 0.0, f"an all-200 burst reported errors: {state[-1]!r}"
+        assert state[-1]["p95_s"] == 0.2, f"an all-0.2s burst reported a different p95: {state[-1]!r}"
 
 
 def _fixer_prod_down_env(diag_driver=None):
@@ -13218,6 +13336,10 @@ if __name__ == "__main__":
     check("the-fixer dedup still suppresses an unchanged batch", _fixer_dedup_still_suppresses_an_unchanged_batch)
     check("the-fixer dedup expires so a wedge cannot last forever", _fixer_dedup_expires_so_a_wedge_cannot_last_forever)
     check("the-fixer charter handles every reason check.sh emits", _fixer_charter_handles_every_reason_check_sh_emits)
+    check("the-fixer degraded sample counts a timeout as an error (gh#841)", _fixer_degraded_sample_counts_a_timeout_as_an_error)
+    check("the-fixer degraded sample p95 reports the slowest request (gh#841)", _fixer_degraded_sample_p95_reports_the_slowest_request)
+    check("the-fixer degraded sample default n is above five (gh#841)", _fixer_degraded_sample_default_n_is_above_five)
+    check("the-fixer degraded sample all-clean burst stays green and error-free (gh#841)", _fixer_degraded_sample_all_clean_stays_green_and_error_free)
     check("the-fixer captures diag output when FIXER_PROD_DIAG_DRIVER is configured (gh#4546)", _fixer_prod_down_captures_diag_output_when_driver_is_configured)
     check("the-fixer logs the gap when no diag driver is configured (gh#4546)", _fixer_prod_down_logs_the_gap_when_no_driver_is_configured)
     check("the-fixer distinguishes a broken diag driver from a healthy read (gh#4546)", _fixer_prod_down_reports_a_nonzero_driver_without_pretending_it_succeeded)
