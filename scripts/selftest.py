@@ -10464,6 +10464,49 @@ def _worktree_guard_blocks_chained_git_dash_c_where_only_a_later_verb_mutates_gh
         assert p.returncode == 2, f"expected block (exit 2) on the chained mutating call, got {p.returncode}: {p.stderr}"
 
 
+def _worktree_guard_allows_readonly_stash_subcommands_via_dash_c_gh837():
+    """gh#837 AC1/AC2: `git -C $REPO stash list` and `git -C $REPO stash show` are reads (the
+    exact commands postflight_dirty_check.sh's own POLICY line tells a human to run to
+    investigate the leaked-stash pile, gh#714) and must be allowed, unlike every other verb in
+    _MUTATING_SUBCOMMANDS which stays decided by the verb alone."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        for sub in ("list", "show"):
+            p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": f"git -C {repo} stash {sub}"})
+            assert p.returncode == 0, f"expected allow (exit 0) for stash {sub}, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_still_blocks_mutating_stash_forms_via_dash_c_gh837():
+    """gh#837 AC3/AC4: `stash pop` (and every other real mutation) must stay blocked, and a
+    bare `git -C $REPO stash` with no subcommand -- which git itself treats as `stash push` --
+    must not be misread as a read."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": f"git -C {repo} stash pop"})
+        assert p.returncode == 2, f"expected block (exit 2) for stash pop, got {p.returncode}: {p.stderr}"
+        assert "BLOCKED" in p.stderr and "gh#592" in p.stderr, "block message wording must be unchanged"
+        p2 = _run_worktree_guard_hook(repo, wt, "Bash", {"command": f"git -C {repo} stash"})
+        assert p2.returncode == 2, f"expected block (exit 2) for bare stash, got {p2.returncode}: {p2.stderr}"
+
+
+def _worktree_guard_no_regression_on_other_mutating_verbs_via_dash_c_gh837():
+    """gh#837 AC5: the stash narrowing must not loosen any other verb already in
+    _MUTATING_SUBCOMMANDS -- commit/reset/add/checkout via `git -C $REPO` stay blocked."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        for cmd in (f"git -C {repo} commit -m x", f"git -C {repo} reset --hard",
+                    f"git -C {repo} add -A", f"git -C {repo} checkout main"):
+            p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd})
+            assert p.returncode == 2, f"expected block (exit 2) for {cmd!r}, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_blocks_chained_readonly_stash_then_mutating_verb_gh837():
+    """gh#837 AC6: a chained command where an earlier `git -C $REPO stash list` is innocent but
+    a later `git -C $REPO commit` mutates must still block -- the stash allowance must not
+    reintroduce the first-match bug the chained-command test above already guards against."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        cmd = f"git -C {repo} stash list && git -C {repo} commit -m wip"
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd})
+        assert p.returncode == 2, f"expected block (exit 2) on the chained mutating call, got {p.returncode}: {p.stderr}"
+
+
 def _worktree_guard_allows_readonly_command_quoting_mutating_text_gh715():
     """gh#715 AC1: a pure read-only command (`gh issue comment`, no filesystem write path at
     all) whose --body TEXT happens to quote a mutating verb and a path under $REPO must not be
@@ -11529,6 +11572,10 @@ if __name__ == "__main__":
     check("worktree_guard_hook blocks a mutating Bash command targeting $REPO (gh#592 AC2)", _worktree_guard_blocks_mutating_bash_against_repo_gh592)
     check("worktree_guard_hook allows a read-only Bash reference to $REPO (gh#592 AC3)", _worktree_guard_allows_readonly_bash_reference_to_repo_gh592)
     check("worktree_guard_hook blocks a chained git -C command where only a later verb mutates (gh#592)", _worktree_guard_blocks_chained_git_dash_c_where_only_a_later_verb_mutates_gh592)
+    check("worktree_guard_hook allows read-only `git -C $REPO stash list`/`stash show` (gh#837 AC1/AC2)", _worktree_guard_allows_readonly_stash_subcommands_via_dash_c_gh837)
+    check("worktree_guard_hook still blocks `stash pop` and bare `stash` via `git -C $REPO` (gh#837 AC3/AC4)", _worktree_guard_still_blocks_mutating_stash_forms_via_dash_c_gh837)
+    check("worktree_guard_hook has no regression on commit/reset/add/checkout via `git -C $REPO` (gh#837 AC5)", _worktree_guard_no_regression_on_other_mutating_verbs_via_dash_c_gh837)
+    check("worktree_guard_hook blocks a chained read-only stash then a mutating verb via `git -C $REPO` (gh#837 AC6)", _worktree_guard_blocks_chained_readonly_stash_then_mutating_verb_gh837)
     check("worktree_guard_hook_install merges into existing settings.json and is idempotent (gh#592)", _worktree_guard_install_merges_without_clobbering_existing_settings_gh592)
     check("worktree_guard_hook_install accepts a CLAUDE_CONFIG_DIR path, not just a settings.json path (gh#592)", _worktree_guard_install_cli_accepts_claude_config_dir_not_just_settings_json_gh592)
     check("worktree_guard_hook allows a read-only command whose --body text quotes a mutating verb and repo path (gh#715 AC1)", _worktree_guard_allows_readonly_command_quoting_mutating_text_gh715)
