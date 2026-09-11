@@ -50,6 +50,14 @@ EPIC = "fleet:epic"
 # One criterion: Given ... When ... Then ..., on one line or across up to three lines, any
 # markdown wrapping (bold, list bullets, numbering).  Case-insensitive.
 _GWT_RE = re.compile(r"\bgiven\b[\s\S]{1,600}?\bwhen\b[\s\S]{1,600}?\bthen\b", re.IGNORECASE)
+# fk#765: the bare template phrase "Given/When/Then" (15 chars, no clause text between the
+# keywords) matches _GWT_RE with nothing to build against -- it shows up verbatim in marie's
+# own decline comments (marie.md Part C4) and in prose discussing the format. A real criterion,
+# one line or multi-line, runs 50+ chars once it names an actor and an outcome; the shortest
+# live example measured on fk#765 itself is 53. A span-length floor rejects the bare phrase
+# without requiring a non-`/` separator, which would risk rejecting an unusual-but-real
+# one-line criterion instead.
+_MIN_GWT_SPAN = 30
 _REFERENCES_RE = re.compile(r"^\W*references?\s*:", re.IGNORECASE | re.MULTILINE)
 # "Design approved (VP review):" from members/vp/vp.md, or the older "Design approved:" form.
 _DESIGN_APPROVED_RE = re.compile(r"^\W*design approved(?:\s*\(vp review\))?\s*:", re.IGNORECASE | re.MULTILINE)
@@ -63,7 +71,7 @@ def _label_names(labels) -> list[str]:
 
 
 def count_gwt(text: str | None) -> int:
-    return len(_GWT_RE.findall(text or ""))
+    return sum(1 for span in _GWT_RE.findall(text or "") if len(span) >= _MIN_GWT_SPAN)
 
 
 def _criteria_text(body: str | None, comments: list[dict] | None) -> str | None:
