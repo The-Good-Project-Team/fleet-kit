@@ -617,6 +617,16 @@ finish_deploy() {
     else
         log "post-deploy: could not kick a gru pass in $CONTAINER -- the next cron tick will run it (gh#622)"
     fi
+
+    # gh#663: same reasoning as the gru kick above, applied to the member whose whole mandate is
+    # catching what a deploy broke. Without this, a journey a deploy just broke sits undetected
+    # until sentry's next scheduled cron tick (up to hours later) instead of being caught within
+    # seconds. Best-effort, same as the gru kick: a failed kick is logged, never fatal.
+    if podman exec -d "$CONTAINER" bash -c 'set -a; eval "$(grep -hE "^[A-Z_]+=" /etc/cron.d/* 2>/dev/null)"; set +a; export GH_TOKEN=$(cat /root/.gh_token 2>/dev/null); cd /fleet-kit && bash scripts/run_member.sh sentry >> /var/log/fleet-kit/sentry.log 2>&1' 9>&- 2>/dev/null; then
+        log "post-deploy: kicked one sentry pass in $CONTAINER so it walks the new build's journeys now, not at the next cron tick (gh#663)"
+    else
+        log "post-deploy: could not kick a sentry pass in $CONTAINER -- the next cron tick will run it (gh#663)"
+    fi
 }
 
 if proxy_mode; then
