@@ -476,13 +476,42 @@ except Exception: print("verdict output was not valid JSON")' 2>/dev/null)
       # The description above is truncated to 139 chars (post_status), which a full path keyed
       # by PR + a 40-char sha can easily blow through -- a PR comment has no such limit and is
       # what a human (or jefe, diagnosing a live-blocked PR) actually reads.
-      gh pr comment "$PR" --body "**fleet-code-review: error** -- reviewer output failed schema validation ${N}x in a row at head ${HEAD_SHA:0:12} ($PARSE_REASON), so no verdict could be posted. This PR has been dequeued and auto-merge disarmed; it will not merge until a human intervenes or a fresh push gets a clean review.
+      gh pr comment "$PR" --body "**fleet-code-review: error** -- reviewer output failed schema validation ${N}x in a row at head ${HEAD_SHA:0:12} ($PARSE_REASON), so no verdict could be posted. This PR has been dequeued and auto-merge disarmed. A priority-high fix item has been filed so the fleet's own build lane picks this up -- no human step is required. A fresh push that gets a clean review also clears it.
 
 Raw model output from the last attempt is saved on the review box at:
 \`$RAW_CAPTURE\`
 
-This reflects a parse/format issue in the reviewer's own output, not a finding about this diff -- see gh#221, gh#806." >/dev/null 2>&1 \
+This reflects a parse/format issue in the reviewer's own output, not a finding about this diff -- see gh#221, gh#806, gh#5290." >/dev/null 2>&1 \
         || log "PR #$PR: WARN state=error PR comment failed"
+
+      # gh#5290: this path used to end here. A BLOCK files a priority-high fix item so gru's
+      # build lane picks it up (see the block branch below); an ERROR filed nothing, so the PR
+      # was dequeued, disarmed and left with no owner at all -- the comment above asked a human
+      # to intervene, and nothing in the fleet was watching. That is strictly worse than a
+      # block: a block means the DIFF is wrong and the author has something to fix, while an
+      # error means the REVIEWER malfunctioned, so the author has no signal and no reason to
+      # push again. The PR sits until a person happens to look.
+      #
+      # File the same shape of item the block path files, so the same lane picks it up. Best
+      # effort (`||`, never `set -e`): the status and the hold already landed above, and a
+      # filing failure must not stop the tick from draining the rest of the queue.
+      ERR_VISION_LINK=$(grep -iE '^[[:space:]]*#{0,6}[[:space:]]*[*_]{0,2}Vision-link' "$BODY_FILE" 2>/dev/null | head -1)
+      [ -z "$ERR_VISION_LINK" ] && ERR_VISION_LINK="Vision-link: none (maintenance)"
+      ERR_FIX_TITLE="fix: code review could not run on PR #$PR -- reviewer output failed schema validation"
+      ERR_FIX_BODY="judge-judy dequeued PR #$PR at head ${HEAD_SHA:0:12} and disarmed auto-merge, but could NOT post a verdict: its own output failed schema validation ${N}x in a row ($PARSE_REASON).
+
+This is a reviewer malfunction, not a finding about the diff. The PR is held and has no owner
+until this item is worked. Raw model output from the last attempt: $RAW_CAPTURE
+
+Re-run the review on this head first. If it parses, the hold clears on its own; if it fails the
+same way again, the defect is in the reviewer (prompt or schema), not in PR #$PR.
+
+$ERR_VISION_LINK"
+      python3 "$KIT_DIR/scripts/board_github.py" file "$ERR_FIX_TITLE" --context "$ERR_FIX_BODY" \
+          --priority high >>"$LOG" 2>&1 \
+        && log "PR #$PR: filed fix item for errored review" \
+        || log "PR #$PR: WARN failed to file fix item for errored review"
+
       log "PR #$PR: posted state=error + dequeued after $N schema-invalid runs, raw output at $RAW_CAPTURE"
     fi
     SKIPPED_THIS_TICK="$SKIPPED_THIS_TICK $PR"
