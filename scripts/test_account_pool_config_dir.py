@@ -93,6 +93,29 @@ class ConfigDirTest(unittest.TestCase):
         with open(creds) as fh:
             self.assertIn("rotated", fh.read())
 
+    def test_mirror_preserves_preexisting_project_history(self):
+        """fleet-code-review BLOCK on this PR: a project dir that already existed under the
+        read-only $real (e.g. seeded before the :ro mount landed) must not become invisible
+        just because it now routes through the mirror -- that's the exact amnesia this PR
+        exists to cure, reintroduced via a different mechanism."""
+        old_memory = os.path.join(self.real, "projects", "-repo", "memory")
+        os.makedirs(old_memory)
+        with open(os.path.join(old_memory, "MEMORY.md"), "w") as fh:
+            fh.write("- [Old thing](old.md)")
+
+        got = run_helper(self.home, self.logs, force_unwritable=True)
+
+        mirrored = os.path.join(got, "projects", "-repo", "memory", "MEMORY.md")
+        self.assertTrue(os.path.exists(mirrored), "pre-existing project history was dropped")
+        with open(mirrored) as fh:
+            self.assertEqual(fh.read(), "- [Old thing](old.md)")
+
+        # A fresh write alongside the preserved history must still work (mirror stays writable).
+        new_file = os.path.join(got, "projects", "-repo", "memory", "NEW.md")
+        with open(new_file, "w") as fh:
+            fh.write("new")
+        self.assertTrue(os.path.exists(new_file))
+
     def test_mirror_is_idempotent_and_preserves_written_state(self):
         """Every pass calls this; a second call must not wipe the memory the first one wrote."""
         got = run_helper(self.home, self.logs, force_unwritable=True)

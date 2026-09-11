@@ -447,6 +447,19 @@ _account_pool_config_dir() {
     printf '%s\n' "$real"
     return 0
   fi
+  # projects/todos/tasks can't join the symlink farm below -- they must stay WRITABLE, and
+  # $real is read-only, so a symlink into it would be exactly as unwritable as $real itself.
+  # But $real/projects (etc.) can already hold real history that predates this mirror (a
+  # project's memory/, prior session transcripts) -- the same "seeded before the mount"
+  # scenario the PR description already calls out for settings.json. Copy that content in
+  # once, no-clobber, so it survives instead of silently vanishing behind an empty mirror;
+  # no-clobber also makes this idempotent, never overwriting memory the mirror itself wrote
+  # on a later pass.
+  local subdir
+  for subdir in projects todos tasks; do
+    [ -d "$real/$subdir" ] || continue
+    cp -Rn "$real/$subdir/." "$mirror/$subdir/" 2>/dev/null || true
+  done
   # Symlink every top-level entry EXCEPT the three the CLI must write. A symlink farm (not a
   # copy) means .credentials.json is always the host's current file, so token rotation on the
   # host is picked up on the next pass with no sync step -- and no credential is ever
