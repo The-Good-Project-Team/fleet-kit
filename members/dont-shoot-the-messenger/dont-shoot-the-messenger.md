@@ -104,14 +104,15 @@ software could not follow the sentence, rewrite it.
   - **Done looks like.** One line he can check against at 5pm.
   - **Every decision you need from him is an ask, never "reply to this email".** Nobody reads
     the sending inbox. File it before you write the step:
-    `python3 /fleet-kit/scripts/ask.py file --member dont-shoot-the-messenger --why "<the
-    decision, one sentence>" --unblocks "<issue or PR>" --proposed "<the answer you would give>"
-    --no-notify` -- then the step says "Answer it under Needs you: <console_url>". The console
-    shows every open ask with a "Yes, do that" button; his answer lands in fleet.db where the
-    next pass reads it. One ask per decision; check `asks` first so you never file the same
-    one twice.
-  A thinking project is allowed (ask class `idea`): the question, the data he needs (linked),
-  and what a good answer looks like.
+    `python3 /fleet-kit/scripts/ask.py file --member dont-shoot-the-messenger --class decision
+    --why "<the decision, one sentence>" --unblocks "<issue or PR>"
+    --proposed "<the answer you would give>" --no-notify` -- then the step says "Answer it
+    under Needs you: <console_url>". The console shows every open ask with a "Yes, do that"
+    button; his answer lands in fleet.db where the next pass reads it. One ask per decision;
+    check `asks` first so you never file the same one twice.
+  A thinking project is allowed: file it the same way but with `--class idea` in place of
+  `--class decision`, naming the question, the data he needs (linked), and what a good answer
+  looks like.
 - `## Reading` -- three to six items max: the notable run outcomes and anything from the
   window he should actually read. Each one line with the link and why it earns his eyes.
 

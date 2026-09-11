@@ -33,12 +33,18 @@ ASK_COLUMNS = (
     "answer", "answered_by", "answered_at", "filed_at", "class",
 )
 
-# gh#650: the closed set quality_gate.py's world-class seam needs -- `decision` (approve a
-# design spec before build, quality-standard.md §0 step 4) and `acceptance` (Reif accepts a
-# finished slice, rule 5). A closed set, not an open string, so `--class banana` is caught
-# here rather than silently stored (issue #650's own open question; a builder who wants an
-# open string instead should say so on the PR, not choose it silently).
-ASK_CLASSES = ("decision", "acceptance")
+# gh#558 finding 4 ("the ladder has nothing to climb"): gh#650 narrowed this to just the two
+# classes quality_gate.py's world-class seam needed (`decision`, `acceptance`), which silently
+# dropped the rest of #558's own class list -- so every real ask filed by gru.md/
+# dont-shoot-the-messenger.md landed with class=NULL and #771's authority ladder (class ->
+# level) had nothing to promote. Restored to the full set #558 names: `credential`, `money`,
+# `pricing`, `product-copy`, `infra`, `external-merge` alongside the two gh#650 already added,
+# plus `idea` (the thinking-project ask class named in #558's later comments). A closed set,
+# not an open string, so `--class banana` is still caught here rather than silently stored.
+ASK_CLASSES = (
+    "decision", "acceptance", "credential", "money", "pricing",
+    "product-copy", "infra", "external-merge", "idea",
+)
 
 
 def file_ask(conn, member: str, why: str, unblocks: str | None = None,

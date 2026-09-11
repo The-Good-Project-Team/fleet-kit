@@ -108,7 +108,7 @@ spawns exactly one). Your job, in order:
    (a label alone carries no `why`/`unblocks`/`proposed`, leaving no record of how it was
    answered):
    ```
-   python3 /fleet-kit/scripts/ask.py file --member gru \
+   python3 /fleet-kit/scripts/ask.py file --member gru --class infra \
      --why "budget/account drought unresolved: allowance_pct=<n> week_bank_pct=<n>, still the \
    same order of magnitude as gh#361's original block" \
      --unblocks "step 2-3's issue pull and packer call resume" \
