@@ -2455,6 +2455,13 @@ async function boot() {
     // slow fetches fill it in below gets a deep link onto the right tab well under 5s.
     const hashPage = (location.hash || '').slice(1);
     if (HASH_PAGES.includes(hashPage)) { PAGE = hashPage; selectPage(PAGE); }
+    // gh#875: fired here, NOT awaited and NOT in the Promise.all below -- /api/budget_preview
+    // shells out through maxx_reader.py and measured 7.9-9.6s on its own (VP, 2026-09-11). The
+    // comment at refreshGlobalSpend()'s definition already documents this call has nothing to
+    // do with whether the member/spend/KPI/Stats tiles loaded; it had drifted into the awaited
+    // Promise.all anyway and was blocking every tab -- including Stats, which never reads it --
+    // behind the topbar's one slow figure.
+    refreshGlobalSpend();
     let snap;
     try {
       // renderQueue() is folded into this same try -- it's still part of boot()'s own
@@ -2467,7 +2474,6 @@ async function boot() {
         loadMembers(),
         renderAlerts(),
         renderTheNumberTile(),
-        refreshGlobalSpend(),
       ]);
       ALL_RUNS = snap.runs || [];
       GH = snap.gh || { prs: [], issues: [], merged: [], self_evolution: [] };

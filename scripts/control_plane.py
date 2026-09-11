@@ -502,7 +502,11 @@ def new_instance(reg: dict, name: str, repo_url: str, weight: float = 1.0,
     def step(msg):
         status["steps"].append({"ts": time.time(), "msg": msg})
         print(f"new {name}: {msg}", flush=True)
-        (d / "new.json").write_text(json.dumps(status, indent=1))
+        # atomic write (tmp + replace, same idiom as save_registry) -- GET /new/<name> reads
+        # this file concurrently and must never see a partial write
+        tmp = (d / "new.json").with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(status, indent=1))
+        tmp.replace(d / "new.json")
 
     (d / "logs").mkdir(parents=True)
     try:
@@ -766,6 +770,21 @@ def make_server(port: int, registry: Path = REGISTRY, deploy_fn=run_deploy):
         def log_message(self, fmt, *args):  # one line per request, cron-log style
             print(f"[{_central(time.time())}] {self.address_string()} {fmt % args}", flush=True)
 
+        def send_response(self, code, message=None):  # tracks whether a response ever went out,
+            self._responded = True                     # so a crashed handler knows if it can still
+            super().send_response(code, message)        # answer with a 500 instead of just closing
+
+        def _respond_error(self, exc: Exception) -> None:
+            import traceback
+            self.log_message("EXC %s %s: %s", self.command, self.path,
+                             "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip())
+            if getattr(self, "_responded", False):
+                return  # already sent a response; the connection is past saving
+            try:
+                self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
+            except Exception:
+                pass  # best effort -- the socket may already be gone
+
         def _json(self, code: int, obj) -> None:
             body = json.dumps(obj, indent=1).encode()
             self.send_response(code)
@@ -800,57 +819,65 @@ def make_server(port: int, registry: Path = REGISTRY, deploy_fn=run_deploy):
             self.wfile.write(body)
 
         def do_GET(self):
-            path = self.path.split("?", 1)[0]
-            if path in ("/", "/index.html", ""):
-                return self._page()
-            if path.startswith("/new/"):
-                name = path[len("/new/"):].strip("/")
-                f = registry.parent / name / "new.json"
-                if NAME_RE.match(name) and f.exists():
-                    return self._json(200, json.loads(f.read_text()))
-                return self._json(404, {"error": f"no job for {name!r}"})
-            self.send_error(404)
+            self._responded = False
+            try:
+                path = self.path.split("?", 1)[0]
+                if path in ("/", "/index.html", ""):
+                    return self._page()
+                if path.startswith("/new/"):
+                    name = path[len("/new/"):].strip("/")
+                    f = registry.parent / name / "new.json"
+                    if NAME_RE.match(name) and f.exists():
+                        return self._json(200, json.loads(f.read_text()))
+                    return self._json(404, {"error": f"no job for {name!r}"})
+                self.send_error(404)
+            except Exception as exc:  # a handler that raises must still answer -- see _respond_error
+                self._respond_error(exc)
 
         def do_POST(self):
+            self._responded = False
             action = self.path.split("?", 1)[0].strip("/")
-            form = self._form()
-            name = form.get("name", "")
             try:
-                reg = load_registry(registry)
-                if action in ("new", "remove"):
-                    if not self._authed(form):
-                        return self._json(401, {"error": "Authorization: Bearer <token> required "
-                                                         "(control_plane.py token prints the path)"})
-                    if action == "remove":
-                        return self._json(200, {"ok": remove_instance(reg, name, registry)})
-                    repo_url = form.get("repo_url", "")
-                    weight = float(form.get("w") or 1)
-                    # Validate now (400 before anything is touched), then run the long part
-                    # in a thread and answer 202 with where to look.
-                    if not NAME_RE.match(name):
-                        raise ValueError("name must match ^[a-z0-9][a-z0-9-]{0,31}$")
-                    if any(i["name"] == name for i in reg["instances"]) or (registry.parent / name).exists():
-                        return self._json(409, {"error": f"instance {name!r} already exists"})
-                    if not re.match(r"^(https://|git@|/)", repo_url):
-                        raise ValueError("repo_url must be an https://, git@, or absolute path")
-                    if name in jobs and jobs[name].is_alive():
-                        return self._json(409, {"error": f"{name!r} is already being created"})
-                    t = threading.Thread(target=self._create, args=(reg, name, repo_url, weight), daemon=True)
-                    jobs[name] = t
-                    t.start()
-                    return self._json(202, {"job": name, "status": f"new/{name}",
-                                            "then": f"POST resume name={name} when it should spend"})
-                receipt = apply_action(reg, action, name, form.get("w"), registry)
-                tick(reg)
-                print(receipt, flush=True)
-            except ValueError as exc:
-                if "json" in (self.headers.get("Content-Type") or "") or action in ("new", "remove"):
-                    return self._json(400, {"error": str(exc)})
-                self.send_error(400, str(exc))
-                return
-            self.send_response(303)
-            self.send_header("Location", "./")
-            self.end_headers()
+                form = self._form()
+                name = form.get("name", "")
+                try:
+                    reg = load_registry(registry)
+                    if action in ("new", "remove"):
+                        if not self._authed(form):
+                            return self._json(401, {"error": "Authorization: Bearer <token> required "
+                                                             "(control_plane.py token prints the path)"})
+                        if action == "remove":
+                            return self._json(200, {"ok": remove_instance(reg, name, registry)})
+                        repo_url = form.get("repo_url", "")
+                        weight = float(form.get("w") or 1)
+                        # Validate now (400 before anything is touched), then run the long part
+                        # in a thread and answer 202 with where to look.
+                        if not NAME_RE.match(name):
+                            raise ValueError("name must match ^[a-z0-9][a-z0-9-]{0,31}$")
+                        if any(i["name"] == name for i in reg["instances"]) or (registry.parent / name).exists():
+                            return self._json(409, {"error": f"instance {name!r} already exists"})
+                        if not re.match(r"^(https://|git@|/)", repo_url):
+                            raise ValueError("repo_url must be an https://, git@, or absolute path")
+                        if name in jobs and jobs[name].is_alive():
+                            return self._json(409, {"error": f"{name!r} is already being created"})
+                        t = threading.Thread(target=self._create, args=(reg, name, repo_url, weight), daemon=True)
+                        jobs[name] = t
+                        t.start()
+                        return self._json(202, {"job": name, "status": f"new/{name}",
+                                                "then": f"POST resume name={name} when it should spend"})
+                    receipt = apply_action(reg, action, name, form.get("w"), registry)
+                    tick(reg)
+                    print(receipt, flush=True)
+                except ValueError as exc:
+                    if "json" in (self.headers.get("Content-Type") or "") or action in ("new", "remove"):
+                        return self._json(400, {"error": str(exc)})
+                    self.send_error(400, str(exc))
+                    return
+                self.send_response(303)
+                self.send_header("Location", "./")
+                self.end_headers()
+            except Exception as exc:  # a handler that raises must still answer -- see _respond_error
+                self._respond_error(exc)
 
         @staticmethod
         def _create(reg, name, repo_url, weight):
@@ -859,7 +886,9 @@ def make_server(port: int, registry: Path = REGISTRY, deploy_fn=run_deploy):
             except Exception as exc:  # noqa: BLE001 -- already in new.json; keep the thread quiet
                 print(f"new {name}: failed: {exc}", flush=True)
 
-    return ThreadingHTTPServer(("127.0.0.1", port), H)
+    server = ThreadingHTTPServer(("127.0.0.1", port), H)
+    server.jobs = jobs  # so a caller (tests, mainly) can join the /new background threads it started
+    return server
 
 
 def serve(port: int) -> None:

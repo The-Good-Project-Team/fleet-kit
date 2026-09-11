@@ -1,0 +1,16 @@
+[Unit]
+Description=Run fleetkit-pacing-hold hourly
+
+[Timer]
+# Hourly -- matching entrypoint.sh's own container-crontab cadence for this check (which
+# runs at minute 52), though this timer's own OnBootSec/OnUnitActiveSec pair is NOT
+# wall-clock-aligned to that same minute (it fires 5min after boot, then every 60min from
+# there, and drifts further on any restart). That's fine: pacing_hold_check.py buckets by
+# wall-clock UTC hour regardless of when within the hour it happens to run, so an unaligned
+# hourly tick still watches for consecutive HOURLY ticks of a fleet-wide pacing hold (gh#812
+# AC1) exactly as intended -- sampling faster than hourly buys nothing either way.
+OnBootSec=5min
+OnUnitActiveSec=60min
+
+[Install]
+WantedBy=timers.target
