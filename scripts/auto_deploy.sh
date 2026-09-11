@@ -191,8 +191,8 @@ if ! git merge-base --is-ancestor "$LOCAL_SHA" "$REMOTE_SHA"; then
     DIVERGED_BRANCH="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "(detached HEAD)")"
     DIVERGED_MERGE_BASE="$(git merge-base "$LOCAL_SHA" "$REMOTE_SHA" 2>/dev/null || echo "")"
     if [ -n "$DIVERGED_MERGE_BASE" ]; then
-      DIVERGED_AHEAD="$(git rev-list --count "$DIVERGED_MERGE_BASE".."$LOCAL_SHA")"
-      DIVERGED_BEHIND="$(git rev-list --count "$DIVERGED_MERGE_BASE".."$REMOTE_SHA")"
+      DIVERGED_AHEAD="$(git rev-list --count "$DIVERGED_MERGE_BASE".."$LOCAL_SHA" 2>/dev/null || echo "?")"
+      DIVERGED_BEHIND="$(git rev-list --count "$DIVERGED_MERGE_BASE".."$REMOTE_SHA" 2>/dev/null || echo "?")"
     else
       DIVERGED_AHEAD="?"
       DIVERGED_BEHIND="?"
