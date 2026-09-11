@@ -205,27 +205,24 @@ def _write_report(out_dir: Path, report: dict, run_url: str | None = None) -> No
             lines.append("")
         for path, s in sorted(report["surfaces"].items()):
             lines.append(f"### `{path}` ({s['name']})")
-            if s.get("error"):
-                lines.append(f"- render error: {s['error']}")
-            else:
-                for vp_label, r in sorted(s.get("renders", {}).items()):
-                    if r.get("error"):
-                        lines.append(f"- {vp_label}: render error: {r['error']}")
-                        continue
-                    lines.append(f"- screenshot ({vp_label}): `{r['screenshot']}`, "
-                                 f"waited {r['settle_seconds']}s for the page to settle")
-                    if r.get("blank"):
-                        lines.append(
-                            f"  - **BLANK RENDER** -- only {r['text_len']} chars of body text "
-                            f"(threshold {BLANK_TEXT_THRESHOLD})"
-                        )
-                    errs = r.get("console_errors") or []
-                    if errs:
-                        lines.append(f"  - console errors ({len(errs)}):")
-                        for e in errs[:20]:
-                            lines.append(f"    - `{e}`")
-                    else:
-                        lines.append("  - console errors: none")
+            for vp_label, r in sorted(s.get("renders", {}).items()):
+                if r.get("error"):
+                    lines.append(f"- {vp_label}: render error: {r['error']}")
+                    continue
+                lines.append(f"- screenshot ({vp_label}): `{r['screenshot']}`, "
+                             f"waited {r['settle_seconds']}s for the page to settle")
+                if r.get("blank"):
+                    lines.append(
+                        f"  - **BLANK RENDER** -- only {r['text_len']} chars of body text "
+                        f"(threshold {BLANK_TEXT_THRESHOLD})"
+                    )
+                errs = r.get("console_errors") or []
+                if errs:
+                    lines.append(f"  - console errors ({len(errs)}):")
+                    for e in errs[:20]:
+                        lines.append(f"    - `{e}`")
+                else:
+                    lines.append("  - console errors: none")
             lines.append("")
     (out_dir / "report.md").write_text("\n".join(lines) + "\n")
 
