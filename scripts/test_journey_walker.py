@@ -122,32 +122,6 @@ class _StaticPageServer:
         self.dir.cleanup()
 
 
-class _StaticFixtureServer:
-    """Serves one fixed HTML fixture at /index.html, on its own port -- gh#724, for the
-    fleet-console journey's step 1 selector, which navigates straight to a configured
-    FLEET_CONSOLE_URL rather than a philanthropy.org path _FixtureServer's login/account
-    shape assumes."""
-
-    def __init__(self, html: str):
-        self.dir = tempfile.TemporaryDirectory()
-        (Path(self.dir.name) / "index.html").write_text(html)
-        self.port = _free_port()
-        handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(  # noqa: E731
-            *a, directory=self.dir.name, **kw)
-        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), handler)
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
-        self.thread.start()
-
-    @property
-    def url(self) -> str:
-        return f"http://127.0.0.1:{self.port}/index.html"
-
-    def stop(self):
-        self.httpd.shutdown()
-        self.httpd.server_close()
-        self.dir.cleanup()
-
-
 class _HeaderRecordingServer:
     """A minimal HTTP server that just records every request's headers -- used to assert the
     bypass header attaches (or doesn't) against a REAL recorded request server-side, per gh#729
@@ -992,9 +966,9 @@ class FleetConsoleActivityRowSelectorTest(unittest.TestCase):
         cls.tmp.cleanup()
 
     def _run(self, html: str, run_id: str) -> list[str]:
-        server = _StaticFixtureServer(html)
+        server = _StaticPageServer(html)
         try:
-            users = jw.TestUsers(env={"FLEET_CONSOLE_URL": server.url})
+            users = jw.TestUsers(env={"FLEET_CONSOLE_URL": server.base_url})
             ctx = jw.JourneyCtx(self.journey, "desktop", self.desktop_dims, self.browser,
                                  users, Path(self.tmp.name), run_id)
             jw.run_fleet_console_loads_with_runs(ctx)
