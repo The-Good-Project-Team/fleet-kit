@@ -49,12 +49,15 @@ COMPONENTS = [
     ("Tunnel",
      ["tunnel_health_check.cron.log", "tunnel_health_check.log"],
      "cloudflared tunnel to dino"),
-    ("Budget meter (tgp)",
-     ["anchor_staleness.reif_tgp.cron.log"],
-     "maxx anchor freshness for reif_tgp"),
-    ("Budget meter (gmail)",
-     ["anchor_staleness.reif.cron.log", "anchor_staleness.cron.log"],
-     "maxx anchor freshness for reif"),
+    ("Budget meter",
+     # gh#373 (marie PRD, 2026-09-09, supersedes the 2026-09-04 two-tile version): the two
+     # `anchor_staleness.*` names above were never written by any script in this repo --
+     # `budget_read_check.sh` (PR#338) is the real, shipped check and it writes exactly one
+     # log for whichever account resolve_maxx_handle.sh picks. One spending account at a
+     # time means one tile, not one per handle; the handle is read from the log line itself
+     # (see _current_handle below), not baked into this label.
+     ["budget_read_check.cron.log", "budget_read_check.log"],
+     "budget_read_check.sh's readability check for the account the fleet actually spends from"),
     ("Deploy",
      ["deploy_staleness_check.cron.log", "deploy_staleness_check.log"],
      "fleet-kit's own deploy pipeline"),
@@ -102,7 +105,7 @@ def _cadence_minutes(path: Path) -> int:
     """Minutes between lines the resolved file's own writer produces -- used only to
     back-fill lines that carry no per-line timestamp of their own (see _TS above for the
     lines that do). A `*.cron.log` name is one of this fleet's 5-minute host-cron writers
-    (e.g. account_health_check.cron.log, the anchor_staleness budget meters); a bare `*.log`
+    (e.g. account_health_check.cron.log, budget_read_check.cron.log); a bare `*.log`
     name is entrypoint.sh's own hourly in-container crontab (path/tunnel-health tick at
     :24/:37). Hardcoding 5 minutes for every resolved file (gh#387) packed an hourly log's
     real history into a couple of hours instead of spreading it across the window it was
@@ -194,6 +197,32 @@ def number_snapshot() -> dict:
         return {"configured": False}
 
 
+_HANDLE_RE = re.compile(r"\bhandle=(\S+)")
+
+
+def _current_handle(names) -> str | None:
+    """The most recent `handle=<x>` field written to the resolved log, tail-only. AC5 (gh#373):
+    there is one spending account at a time and it can change without a code change, so the
+    tile's own label must follow the log's own field rather than a name baked in here.
+    """
+    path = _resolve(names)
+    if path is None:
+        return None
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 4_000))
+            text = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    handle = None
+    for line in text.splitlines():
+        m = _HANDLE_RE.search(line)
+        if m:
+            handle = m.group(1)
+    return handle
+
+
 def snapshot(hours: int = 72) -> dict:
     comps = []
     worst = OK
@@ -204,6 +233,10 @@ def snapshot(hours: int = 72) -> dict:
             worst = BAD
         elif current == UNKNOWN and worst == OK:
             worst = UNKNOWN
+        if label == "Budget meter":
+            handle = _current_handle(names)
+            if handle:
+                label = f"Budget meter (@{handle})"
         comps.append({"label": label, "description": desc, "cells": cells,
                       "uptime_pct": pct, "current": current})
     return {
