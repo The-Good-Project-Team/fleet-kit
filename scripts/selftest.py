@@ -2521,8 +2521,8 @@ def _status_data_other_components_unaffected_by_members_fix():
 
     labels = [label for label, _names, _desc in status_data.COMPONENTS]
     assert labels == [
-        "Account pool", "Public path", "Tunnel", "Budget meter (tgp)",
-        "Budget meter (gmail)", "Deploy", "Prod (philanthropy.org)",
+        "Account pool", "Public path", "Tunnel", "Budget meter",
+        "Deploy", "Prod (philanthropy.org)",
     ], f"COMPONENTS list drifted: {labels!r}"
 
     old = _os.environ.get("FLEET_LOG_DIR")
@@ -2539,6 +2539,100 @@ def _status_data_other_components_unaffected_by_members_fix():
             cells, pct = status_data.read_component(names)
             assert cells[-1] == status_data.OK, (
                 f"Account pool must still classify a healthy line as ok, got {cells[-1]!r}")
+        finally:
+            if old is None:
+                _os.environ.pop("FLEET_LOG_DIR", None)
+            else:
+                _os.environ["FLEET_LOG_DIR"] = old
+            _il.reload(status_data)
+
+
+def _status_data_budget_meter_reads_real_check_not_anchor_staleness():
+    """gh#373 AC1/AC2/AC4: the Budget meter tile must read `budget_read_check.sh`'s real,
+    shipped log -- not the `anchor_staleness.*` names no script has ever written -- and there
+    must be exactly one Budget meter component, not one per handle (one spending account at a
+    time, per marie's superseding 2026-09-09 PRD comment).
+    """
+    import importlib as _il
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    import status_data
+
+    names_by_label = {label: names for label, names, _d in status_data.COMPONENTS}
+    assert "Budget meter" in names_by_label, "Budget meter component missing"
+    assert "Budget meter (tgp)" not in names_by_label
+    assert "Budget meter (gmail)" not in names_by_label
+    names = names_by_label["Budget meter"]
+    assert not any("anchor_staleness" in n for n in names), (
+        f"Budget meter still references a filename no script writes: {names!r}")
+    assert "budget_read_check.log" in names
+
+    old = _os.environ.get("FLEET_LOG_DIR")
+    with tempfile.TemporaryDirectory() as td:
+        _os.environ["FLEET_LOG_DIR"] = td
+        try:
+            _il.reload(status_data)
+            names = next(n for label, n, _d in status_data.COMPONENTS
+                         if label == "Budget meter")
+            now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+            # AC1: a real "ok" line from budget_read_check.sh's clean-run branch (line 208)
+            # classifies healthy.
+            (Path(td) / "budget_read_check.log").write_text(
+                f"[{now}] ok handle=reif_tgp label=ok anchor=5s\n")
+            cells, _pct = status_data.read_component(names)
+            assert cells[-1] == status_data.OK, (
+                f"a clean budget_read_check.sh line must classify ok, got {cells[-1]!r}")
+
+            # AC2: an ALARM line classifies unhealthy, not gray.
+            (Path(td) / "budget_read_check.log").write_text(
+                f"[{now}] ALARM [critical] handle=reif_tgp anchor STALE "
+                "(3700s old, max 3600s)\n")
+            cells, _pct = status_data.read_component(names)
+            assert cells[-1] == status_data.BAD, (
+                f"an ALARM line must classify down, got {cells[-1]!r}")
+
+            # AC3: no log at all still renders "no data" (all-unknown), no crash.
+            (Path(td) / "budget_read_check.log").unlink()
+            cells, pct = status_data.read_component(names)
+            assert all(c == status_data.UNKNOWN for c in cells), (
+                "a missing budget_read_check.log must render as no-data, not crash or fake ok")
+            assert pct is None
+        finally:
+            if old is None:
+                _os.environ.pop("FLEET_LOG_DIR", None)
+            else:
+                _os.environ["FLEET_LOG_DIR"] = old
+            _il.reload(status_data)
+
+
+def _status_data_budget_meter_handle_follows_the_log_not_a_hardcoded_label():
+    """gh#373 AC5: the account name shown on the tile comes from the log's own `handle=`
+    field, so switching the spending account needs no code change -- pinned by feeding a
+    fixture whose newest line names a DIFFERENT handle than the old hardcoded tile suffixes
+    ever used.
+    """
+    import importlib as _il
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT / "scripts"))
+    import status_data
+
+    old = _os.environ.get("FLEET_LOG_DIR")
+    with tempfile.TemporaryDirectory() as td:
+        _os.environ["FLEET_LOG_DIR"] = td
+        try:
+            _il.reload(status_data)
+            (Path(td) / "budget_read_check.log").write_text(
+                "[2026-09-09 12:00:00 UTC] ok handle=some_other_account label=ok anchor=5s\n")
+            snap = status_data.snapshot(hours=1)
+            comp = next(c for c in snap["components"]
+                        if c["label"].startswith("Budget meter"))
+            assert comp["label"] == "Budget meter (@some_other_account)", (
+                f"tile label did not follow the log's handle=: {comp['label']!r}")
         finally:
             if old is None:
                 _os.environ.pop("FLEET_LOG_DIR", None)
@@ -11319,6 +11413,8 @@ if __name__ == "__main__":
     check("status page's Deploy component classifies a STALE line as down (gh#367)", _status_page_deploy_component_classifies_stale_as_down)
     check("status_data.members() reads fleet.db in-process, no podman on $PATH needed (gh#364)", _status_data_members_reads_fleet_db_with_no_podman_on_path)
     check("status_data's other four components are unaffected by the members() fix (gh#364)", _status_data_other_components_unaffected_by_members_fix)
+    check("Budget meter reads budget_read_check.sh's real log, not anchor_staleness (gh#373)", _status_data_budget_meter_reads_real_check_not_anchor_staleness)
+    check("Budget meter's shown handle follows the log, not a hardcoded label (gh#373 AC5)", _status_data_budget_meter_handle_follows_the_log_not_a_hardcoded_label)
     check("status page's Public path resolves the bare cron.log before the suffixed/legacy fallbacks (gh#387)", _status_page_public_path_resolves_bare_cron_log_first)
     check("status page's hourly-cadence log is not flattened to a 5-minute back-fill (gh#387)", _status_page_hourly_log_cadence_not_flattened_to_5min)
     check("status page banner distinguishes unknown from good and bad (gh#358)", _status_page_banner_distinguishes_unknown_from_good)
