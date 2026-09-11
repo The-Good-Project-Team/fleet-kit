@@ -11653,7 +11653,8 @@ def _predict_add_resolve_hit_miss_unavailable_gh782():
     d = Path(tempfile.mkdtemp()); p = d / "predictions.jsonl"
     predict.save(p, rows)
     assert [r["status"] for r in predict.load(p)] == ["hit", "miss", "unavailable", "open"]
-    assert predict.judge(None, 0.5, 0.6) == ("hit", None)   # no baseline: only "reaches target" is checkable
+    # no baseline: direction comes from the metric's own catalog entry (gh#789)
+    assert predict.judge(None, 0.5, 0.6, metric="signal_rate:gru") == ("hit", None)
 
 
 def _predict_ledger_reports_hit_rate_and_pass_cost_gh782():
@@ -11678,6 +11679,53 @@ def _predict_ledger_reports_hit_rate_and_pass_cost_gh782():
     assert s["rows"][0]["error_ratio"] is not None
     text = predict.as_text(s)
     assert "1 hit, 2 miss" in text and "#1 hit" in text, text
+
+
+def _predict_judge_uses_metric_direction_when_baseline_missing_gh789():
+    import predict
+    # lower-is-better metric, no baseline: overshooting the target the wrong way is a miss,
+    # not a hit -- gh#789 finding 2 (judge() used to assume higher-is-better unconditionally).
+    assert predict.judge(None, 1.0, 5.0, metric="avg_cost_usd:gru") == ("miss", None)
+    assert predict.judge(None, 1.0, 0.5, metric="avg_cost_usd:gru") == ("hit", None)
+    # higher-is-better metric, no baseline: the direction that already worked keeps working.
+    assert predict.judge(None, 0.8, 0.9, metric="signal_rate:gru") == ("hit", None)
+    # a metric fleet_metrics.direction() doesn't know never guesses -- unavailable, not a coin flip.
+    assert predict.judge(None, 0.5, 0.6, metric="status_per_day:ok:gru") == ("unavailable", None)
+
+
+def _predict_ledger_excludes_unattributed_cost_from_hit_average_gh789():
+    import predict
+    now = 1_800_000_000.0
+    runs = [{"member": "dumbledore", "run_id": "dumb-1", "status": "ok", "ts": now - 5000,
+             "tokens": {"num_turns": 40, "cost_usd": 2.0}}]
+    rows = []
+    attributed = predict.make(rows, member="dumbledore", change="fleet-kit#1", metric="signal_rate:dumbledore",
+                              target=0.1, baseline=0.05, by_hours=1, note="", now=now - 7200,
+                              runs=runs, run_id="dumb-1")
+    rows.append(attributed)
+    # "nobody" and a run_id that matches nothing: _authoring_pass() finds no row by id and no
+    # member/window fallback either, so pass_cost_usd is None -- gh#789 finding 1 used to book
+    # this as $0 and drag the average down.
+    unattributed = predict.make(rows, member="nobody", change="fleet-kit#2", metric="signal_rate:dumbledore",
+                                target=0.1, baseline=0.05, by_hours=1, note="", now=now - 7200,
+                                runs=runs, run_id="missing-run-id")
+    rows.append(unattributed)
+    predict.resolve(rows, runs, now)
+    assert [r["status"] for r in rows] == ["hit", "hit"], rows
+    s = predict.summarize(rows, runs, now, 14)
+    # Before gh#789: (2.0 + 0) / 2 == 1.0 -- the unattributed hit was booked as free work.
+    assert s["cost_per_hit_usd"] == 2.0, s["cost_per_hit_usd"]
+    assert s["hits_cost_unattributed"] == 1, s
+
+    # Every hit unattributable: cost_per_hit_usd is None, never 0 (docs/kpi-doctrine.md rule 5).
+    rows2 = [predict.make([], member="nobody", change="fleet-kit#3", metric="signal_rate:dumbledore",
+                          target=0.1, baseline=0.05, by_hours=1, note="", now=now - 7200,
+                          runs=runs, run_id="missing-run-id")]
+    predict.resolve(rows2, runs, now)
+    assert rows2[0]["status"] == "hit", rows2
+    s2 = predict.summarize(rows2, runs, now, 14)
+    assert s2["cost_per_hit_usd"] is None, s2
+    assert s2["hits_cost_unattributed"] == 1, s2
 
 
 def _self_improve_score_reads_the_ledger_gh782():
@@ -12995,6 +13043,8 @@ if __name__ == "__main__":
     check("fleet_metrics computes signal_rate/avg_cost over a window, unavailable when empty (gh#782 AC1)", _fleet_metrics_windows_runs_and_says_unavailable_gh782)
     check("predict.py add/resolve: hit in the baseline->target direction, miss otherwise, unavailable on no data (gh#782 AC2)", _predict_add_resolve_hit_miss_unavailable_gh782)
     check("predict.py ledger reports hit rate and the authoring pass turns/cost (gh#782 AC3)", _predict_ledger_reports_hit_rate_and_pass_cost_gh782)
+    check("predict.py judge() reads direction from the metric when baseline is unknown, never guesses (gh#789 AC4-6)", _predict_judge_uses_metric_direction_when_baseline_missing_gh789)
+    check("predict.py ledger excludes a hit's unattributed cost from cost_per_hit_usd instead of booking it as $0 (gh#789 AC1-3)", _predict_ledger_excludes_unattributed_cost_from_hit_average_gh789)
     check("self_improve_score.sh resolves the ledger, feeds it to the prompt first, and stamps hits/misses on the row (gh#782 AC4)", _self_improve_score_reads_the_ledger_gh782)
     check("dumbledore: <=140 lines, opus, ledger-first, one predict.py add per pass, reads INTENT.md, grader off-limits (gh#783)", _dumbledore_charter_is_short_on_opus_and_ledger_first_gh783)
     check("run_member.sh calls pacing_gate after the ceiling and the exempt specs are the three named (gh#781)", _run_member_wires_pacing_gate_and_exempt_specs_gh781)
