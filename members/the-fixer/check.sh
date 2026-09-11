@@ -16,6 +16,7 @@
 # member's normal run_member.sh invocation, so there is exactly one path that calls claude.
 #
 # Prints one line to stdout: "green" or "FIRE <what> <sha-prefix> [PROD_DOWN detail]".
+# A "green" that was never able to look at prod says so: "green (prod unobserved: ...)".
 # Exit 0 either way -- this tool reports state, it never itself decides success/failure.
 set -uo pipefail
 
@@ -247,6 +248,18 @@ STALE_KEY=$(printf '%s' "$STALE_PRS" | tr -s ' ' ' ' | sed 's/^ *//; s/ *$//')
 # enable. Both must fail before this counts as a fire -- a single timeout is a blip, not an
 # outage.
 PROD_DOWN=""
+# Silence is not health. When these two vars are unset this script used to print a bare
+# "green" -- the same word it prints after a successful probe -- so the-fixer's charter
+# (Step 1: `Outcome: QUIET -- check.sh reported <its exact output>`) reported a clean bill of
+# health for prod it had never looked at. Confirmed live on sketchyswap 2026-09-11 00:47 UTC:
+# `POST /api/auth/start` had been 502 for 37 hours (gh#62, gh#77) and the-fixer's own log reads
+# `tool result (ok): green` / "No stale-PRs, no wedged checks, no prod-down signal". There WAS
+# no signal because nothing probed. An unconfigured probe now says so, in the one string the
+# charter copies verbatim into runs.jsonl, at zero extra cost on a green tick.
+PROD_NOTE=""
+if [ -z "${FIXER_HEALTH_URL:-}" ] || [ -z "${FIXER_PAGE_URL:-}" ]; then
+  PROD_NOTE=" (prod unobserved: FIXER_HEALTH_URL/FIXER_PAGE_URL unset)"
+fi
 if [ -n "${FIXER_HEALTH_URL:-}" ] && [ -n "${FIXER_PAGE_URL:-}" ]; then
   probe() {
     local code
@@ -311,7 +324,7 @@ fi
 # 6-hourly liveness so a ghost/deadman audit can tell "quiet" from "dead".
 if [ ! -f "$HB_STAMP" ] || [ -n "$(find "$HB_STAMP" -mmin +360 2>/dev/null)" ]; then
   touch "$HB_STAMP"
-  log "alive -- last check ci=$CI_CONC deploy=$DEP_CONC (quiet ticks emit nothing else)"
+  log "alive -- last check ci=$CI_CONC deploy=$DEP_CONC prod=$([ -n "$PROD_NOTE" ] && echo unobserved || echo observed) (quiet ticks emit nothing else)"
 fi
 
 LAST=$(cat "$STATE" 2>/dev/null || echo "")
@@ -319,7 +332,7 @@ LAST=$(cat "$STATE" 2>/dev/null || echo "")
 if [ -z "$FIRE_SHA" ]; then
   [ -n "$LAST" ] && [ "${LAST%% *}" = "red" ] && log "EXTINGUISHED: green again (ci=$CI_CONC deploy=$DEP_CONC)"
   echo "green $CI_SHA" > "$STATE"
-  echo "green"
+  echo "green$PROD_NOTE"
   exit 0
 fi
 
@@ -340,7 +353,7 @@ if [ "$LAST" = "red $FIRE_SHA" ]; then
     exit 0
   fi
   log "still red at $FIRE_SHA -- already fought this head, waiting for the fix PR / a new sha"
-  echo "green (already-fighting $FIRE_SHA)"
+  echo "green (already-fighting $FIRE_SHA)$PROD_NOTE"
   exit 0
 fi
 

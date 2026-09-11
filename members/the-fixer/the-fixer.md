@@ -43,16 +43,22 @@ state file so the same failing SHA never fires twice. It prints one line:
   a worktree, do not spend more turns beyond writing the report -- a poll that costs nothing on
   a green tick is the whole reason the check is a script and not a prompt, keeping this member
   cheap to run on any cadence. Report `Outcome: QUIET — check.sh reported <its exact output>`
-  (the literal `QUIET` prefix, not prose like "checked, all green" -- run_report.py's
-  `classify()` only routes to `quiet` when `outcome` starts with that literal word; anything
-  else with no `#123`/URL/`file:line` artifact in it falls through to `reported_nothing` instead,
-  which is exactly what happened to 14+ real, correct green passes before this fix, confirmed
-  live 2026-09-04 via `runs.jsonl`), then immediately follow it with `Self-critique: none —
-  deterministic check.sh output, no ambiguity to critique this pass.` "Do not spend more turns"
-  means no extra investigation -- it never means skip that mandatory line: confirmed live
-  2026-09-05, ~40% of green-tick passes over the prior 2 days emitted no `Self-critique:` line at
-  all (`fleet.db`'s `runs.self_critique` NULL) once these two instructions sat far apart in this
-  file and the green path's emphasis on ending fast read as license to drop it.
+  then `Self-critique: none — deterministic check.sh output, no ambiguity to critique this
+  pass.` Both lines are mandatory and both have been dropped before: prose like "checked, all
+  green" lands as `reported_nothing` because `classify()` only routes to `quiet` on the literal
+  `QUIET` prefix (14+ correct passes lost that way, `runs.jsonl` 2026-09-04), and "do not spend
+  more turns" was read as license to omit `Self-critique:` (~40% of green ticks, `fleet.db`
+  2026-09-05). It means no extra investigation -- never skip a required line.
+- `green (prod unobserved: FIXER_HEALTH_URL/FIXER_PAGE_URL unset)` -- still green, still stop
+  here, still spend nothing. But this suffix is not decoration: it means this instance has NO
+  automated eyes on the live product at all, so "green" covers CI and open PRs only. Copy the
+  suffix verbatim into your `Outcome:` line like any other exact output (that is the whole
+  point -- it puts the gap in `runs.jsonl` every hour until a human wires the two URLs). Do not
+  treat it as a fire, do not investigate, do not open an issue for it: one standing issue is
+  enough, and re-filing it hourly is the noise this suffix exists to replace. Confirmed live
+  2026-09-11 on sketchyswap: `POST /api/auth/start` had 502'd for 37 hours (gh#62) while this
+  member reported a bare `green` every tick, because the bare word is indistinguishable from a
+  probe that passed.
 - `FIRE <what> <sha-prefix>` -- proceed to Step 2.
 
 ## Step 2: fix or revert, PR-backed only
