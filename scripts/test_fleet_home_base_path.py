@@ -61,7 +61,10 @@ REQUEST_URLS = []
 def _mocks(route):
     REQUEST_URLS.append(route.request.url)
     path = urlparse(route.request.url).path
-    if path == PREFIX + "api/snapshot":
+    if path == PREFIX + "api/home_summary":
+        # gh#876: this is now the critical-wave route the FLEET card's health strip reads.
+        route.fulfill(json={"newest_ok_run_ts": None, "merged_24h": 0, "needs_human_op": NEEDS_HUMAN_OP})
+    elif path == PREFIX + "api/snapshot":
         route.fulfill(json={"runs": [], "gh": {"merged": [], "needs_human_op": NEEDS_HUMAN_OP}})
     elif path == PREFIX + "api/number":
         route.fulfill(json={"configured": False})

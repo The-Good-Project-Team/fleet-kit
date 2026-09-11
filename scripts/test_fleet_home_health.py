@@ -10,8 +10,9 @@ Promise.all finishes.
 That last case is not incidental: `STATE.budget = await getJSON(...)` resolves the STATE object
 reference BEFORE awaiting, so if load()'s `STATE = {...STATE, ...}` reassignment (a NEW object,
 not a mutation of the old one) completes during that await, the eventual write lands on the
-orphaned old object and STATE.budget is silently lost forever. /api/snapshot is delayed here
-specifically to force that ordering.
+orphaned old object and STATE.budget is silently lost forever. /api/home_summary (gh#876: the
+critical-wave request that now backs this health strip, replacing /api/snapshot) is delayed
+here specifically to force that ordering.
 
 Run: python3 scripts/test_fleet_home_health.py
 """
@@ -66,11 +67,15 @@ NEEDS_HUMAN_OP = {"count": 65, "oldest_age_hours": 680.0}
 
 def _mocks(route):
     path = urlparse(route.request.url).path
-    if path == "/api/snapshot":
-        # Deliberately the slowest response in load()'s Promise.all -- forces
+    if path == "/api/home_summary":
+        # Deliberately the slowest response in load()'s critical Promise.all -- forces
         # refreshHealth()'s single-request fetch (never awaited inside that Promise.all) to
         # resolve first, reproducing the stale-STATE-reference race gh#553 fix 1 hit live.
+        # gh#876: this route replaced /api/snapshot as the critical wave's health source.
         time.sleep(0.3)
+        route.fulfill(json={"newest_ok_run_ts": RUNS[0]["ts"], "merged_24h": 1,
+                             "needs_human_op": NEEDS_HUMAN_OP})
+    elif path == "/api/snapshot":
         route.fulfill(json={"runs": RUNS, "gh": {"merged": MERGED, "needs_human_op": NEEDS_HUMAN_OP}})
     elif path == "/api/number":
         route.fulfill(json={"configured": False})

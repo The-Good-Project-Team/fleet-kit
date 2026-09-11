@@ -977,6 +977,37 @@ class State:
         with self.lock:
             return {"runs": list(self.runs), "gh": dict(self.gh)}
 
+    def home_summary(self) -> dict:
+        """The handful of fields Home's FLEET card reads (gh#876) -- same in-memory
+        self.runs/self.gh snapshot() already carries (no extra `gh` calls, no new cache
+        layer), just the three numbers the card needs instead of runs[] (last 500) +
+        gh.{prs,issues,merged,self_evolution}. Small because it's a slice, not because
+        anything upstream got smaller.
+        """
+        with self.lock:
+            newest_ok_run_ts = None
+            for r in self.runs:
+                if r.get("status") != "ok":
+                    continue
+                ts = r.get("ts")
+                if isinstance(ts, (int, float)) and (newest_ok_run_ts is None or ts > newest_ok_run_ts):
+                    newest_ok_run_ts = ts
+            cutoff = time.time() - 24 * 3600
+            merged_24h = 0
+            for pr in (self.gh.get("merged") or []):
+                merged_at = pr.get("mergedAt")
+                if not merged_at:
+                    continue
+                try:
+                    ts = datetime.datetime.fromisoformat(merged_at.replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    continue
+                if ts >= cutoff:
+                    merged_24h += 1
+            needs_human_op = self.gh.get("needs_human_op") or {"count": 0, "oldest_age_hours": 0.0}
+            return {"newest_ok_run_ts": newest_ok_run_ts, "merged_24h": merged_24h,
+                    "needs_human_op": dict(needs_human_op)}
+
 
 STATE = State()
 
@@ -1223,6 +1254,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/snapshot":
             self._json(STATE.snapshot())
+            return
+        if path == "/api/home_summary":
+            # gh#876: Home's FLEET card used to sit in the same critical wave as /api/snapshot
+            # (~570KB) even though it reads three numbers out of it. This route derives those
+            # same three numbers from the identical in-memory STATE snapshot() already reads --
+            # no new poll, no new cache -- so the card's own render never waits on the rest of
+            # that payload.
+            self._json(STATE.home_summary())
             return
         if path == "/api/spend":
             qs = parse_qs(urlparse(self.path).query)

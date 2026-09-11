@@ -421,6 +421,7 @@ from the dashboard URL. All of these return JSON and send
 | route | size | what it carries |
 |---|---|---|
 | `/api/snapshot` | ~570KB | everything: `runs[]` (last 500) + `gh.{prs,issues,merged,self_evolution}` |
+| `/api/home_summary` | <1KB | gh#876: the 3 fields Home's FLEET card reads (`newest_ok_run_ts`, `merged_24h`, `needs_human_op`), sliced from the same in-memory state `snapshot()` reads, so Home never waits on the 570KB route just to fill one card |
 | `/api/query?member=&status=&item_id=&limit=100` | varies | filtered runs out of the sqlite mirror — prefer this over `snapshot`; `item_id` matches both an exact `--item N` build-claim AND a free-text `#N` mention in outcome/evidence/self_critique (gh#405) |
 | `/api/stats/runs_summary?hours=24` | ~3KB | `signal_rate`, `executed`, `total`, `budget_wall`, `declined`, `dormant[]`, `statuses`, `agent_rates`, `hourly[]` |
 | `/api/stats/token_usage?hours=24` | ~2KB | hourly buckets: input/output tokens, `cost_usd` |

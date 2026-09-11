@@ -141,7 +141,7 @@ const centralDay = d => new Intl.DateTimeFormat('en-CA', {timeZone: 'America/Chi
 let OPEN = null;        // which agent drawer is open, survives re-renders
 let OPEN_RUN = null;    // run_id shown in the side panel (fk#748), survives re-renders
 let LIVE_TIMER = null;
-let STATE = { number: null, plan: null, asks: [], members: [], runs: [], gh: {}, kpi: {}, spend: null, build: null, fleet: null, budget: null };
+let STATE = { number: null, plan: null, asks: [], members: [], runs: [], gh: {}, kpi: {}, spend: null, build: null, fleet: null, budget: null, homeSummary: null };
 
 // gh#553 fix 1 (round 2): this console is served behind a path prefix (Caddy routes
 // /fleet/<instance>/* to this backend, e.g. /fleet/fleet-kit/), but this page's own root-
@@ -174,12 +174,20 @@ async function postJSON(path, body) {
 // waves still start at the same instant (fired together below, same total network load), but
 // the card's own two dependencies -- snapshot and fleet_state -- are no longer stuck behind
 // whichever of the other seven happens to answer slowest.
+//
+// gh#876 round 3: that split wasn't enough -- the critical wave still carried /api/snapshot
+// itself, ~570KB (runs[] last 500 + gh.{prs,issues,merged,self_evolution}), because
+// renderHealth() reads a few fields out of it. /api/home_summary carries only those fields
+// (same in-memory STATE, see State.home_summary() in fleet_view_server.py), so /api/snapshot
+// moves to the rest wave -- it's still fetched (renderAgents/renderLanded need the full runs/gh
+// data), just never on the card's own critical path.
 async function load() {
   const criticalP = Promise.all([
-    getJSON('/api/snapshot').catch(() => ({runs: [], gh: {}})),
+    getJSON('/api/home_summary').catch(() => ({newest_ok_run_ts: null, merged_24h: 0, needs_human_op: {count: 0, oldest_age_hours: 0}})),
     getJSON('/api/fleet_state').catch(() => null),
   ]);
   const restP = Promise.all([
+    getJSON('/api/snapshot').catch(() => ({runs: [], gh: {}})),
     getJSON('/api/number').catch(() => null),
     getJSON('/api/plan').catch(() => null),
     getJSON('/api/asks').catch(() => ({asks: []})),
@@ -188,12 +196,13 @@ async function load() {
     getJSON('/api/spend?hours=24').catch(() => null),
     getJSON('/api/build').catch(() => null),
   ]);
-  const [snap, fleet] = await criticalP;
-  STATE = { ...STATE, runs: snap.runs || [], gh: snap.gh || {}, fleet };
+  const [summary, fleet] = await criticalP;
+  STATE = { ...STATE, homeSummary: summary, fleet };
   renderBanner(); renderHealth();
 
-  const [number, plan, asks, members, kpi, spend, build] = await restP;
-  STATE = { ...STATE, number, plan, asks: asks.asks || [], members: members.members || [],
+  const [snap, number, plan, asks, members, kpi, spend, build] = await restP;
+  STATE = { ...STATE, runs: snap.runs || [], gh: snap.gh || {}, number, plan, asks: asks.asks || [],
+            members: members.members || [],
             kpi: Object.fromEntries((kpi.kpi || []).map(k => [k.member, k])), spend, build };
   // renderBanner()/renderHealth() already ran above off the critical wave and don't depend on
   // anything this second wave adds -- rerunning them here would just rewrite the same DOM twice.
@@ -254,21 +263,9 @@ function renderNumber() {
     </table>`;
 }
 
-// gh#553 fix 1: newest 'ok' run (any agent) and PRs merged in the trailing 24h -- same
-// definitions /classic's renderHomePage() uses, ported here so the two pages can't disagree.
-function newestOkRunAge() {
-  let newest = null;
-  for (const r of STATE.runs) {
-    if (r.status !== 'ok') continue;
-    const t = typeof r.ts === 'number' ? r.ts : Date.parse(r.ts) / 1000;
-    if (Number.isFinite(t) && (newest === null || t > newest)) newest = t;
-  }
-  return newest;
-}
-function mergedLast24hCount() {
-  const cutoff = Date.now() - 24 * 3600 * 1000;
-  return (STATE.gh.merged || []).filter(pr => pr.mergedAt && Date.parse(pr.mergedAt) >= cutoff).length;
-}
+// gh#876: needsHumanOp() still backs renderAsks() below, off the full STATE.gh the rest wave
+// populates. renderHealth() no longer calls this (or a run/merged-count equivalent) -- it reads
+// STATE.homeSummary instead, precisely so the card never waits on that wave.
 function needsHumanOp() {
   return STATE.gh.needs_human_op || { count: 0, oldest_age_hours: 0 };
 }
@@ -281,12 +278,16 @@ function renderHealth() {
   const pctHtml = (pct === null || pct === undefined)
     ? `<span title="maxx meter unreadable or not configured for this instance">headroom unavailable</span>`
     : `${Number(pct).toFixed(1)}% of week`;
-  const newest = newestOkRunAge();
-  const aliveHtml = newest === null ? 'no ok run yet' : esc(ago(newest));
-  const nho = needsHumanOp();
+  // gh#876: sourced from /api/home_summary (STATE.homeSummary), not STATE.runs/STATE.gh --
+  // those two only get populated once the rest wave's /api/snapshot resolves, which must
+  // never gate this card's own render.
+  const summary = STATE.homeSummary || {};
+  const newest = summary.newest_ok_run_ts;
+  const aliveHtml = (newest === null || newest === undefined) ? 'no ok run yet' : esc(ago(newest));
+  const nho = summary.needs_human_op || { count: 0, oldest_age_hours: 0 };
   $('health').innerHTML = `
     <div class="sub">${pctHtml} · alive ${aliveHtml}</div>
-    <div class="sub">Waiting on human ${num(nho.count)}${nho.count ? ` · oldest ${Math.round(nho.oldest_age_hours)}h` : ''} · merged 24h ${num(mergedLast24hCount())} · <a href="${withBase('/classic#stats')}">Stats</a></div>`;
+    <div class="sub">Waiting on human ${num(nho.count)}${nho.count ? ` · oldest ${Math.round(nho.oldest_age_hours)}h` : ''} · merged 24h ${num(summary.merged_24h || 0)} · <a href="${withBase('/classic#stats')}">Stats</a></div>`;
 }
 
 // gh#553 VP review round 2, fix 4: the fleet's own asks are filed in raw engineering prose by
