@@ -13904,6 +13904,123 @@ def _ask_authority_cli_reports_grants_gh771():
             f"ask.py authority must show the grant's level and ask_ids, got {out}"
 
 
+def _authority_unreadable_file_degrades_to_ask_not_raise_gh888():
+    """gh#888 AC1: `_read()` caught only FileNotFoundError, so a real read failure --
+    PermissionError on a chmod 000 file -- propagated straight through `level_for()` instead of
+    degrading to 'ask' the way AC1 of #771 promises. Root (this box, and some CI runners) bypasses
+    file mode bits entirely, so a real chmod 000 can't be trusted to actually raise here --
+    a duck-typed stand-in that raises PermissionError from `.read_text()` proves the code path
+    regardless of which user runs the check."""
+    import authority
+
+    class _Unreadable:
+        def __str__(self):
+            return "/fake/authority.json"
+
+        def read_text(self):
+            raise PermissionError(13, "Permission denied")
+
+    assert authority.level_for("credential", store=_Unreadable()) == "ask", (
+        "a PermissionError reading authority.json must degrade to 'ask', not raise")
+
+
+def _authority_store_path_is_a_directory_degrades_to_ask_gh888():
+    """gh#888 AC2: FLEET_AUTHORITY_PATH pointed at a directory raises IsADirectoryError today.
+    Unlike a chmod'd file, this one is real and deterministic under any user, including root --
+    reading a directory as a file is a syscall type mismatch, not a permission check."""
+    import authority
+    with tempfile.TemporaryDirectory() as d:
+        as_dir = Path(d) / "authority.json"
+        as_dir.mkdir()
+        assert authority.level_for("credential", store=as_dir) == "ask", (
+            "authority path pointing at a directory must degrade to 'ask', not raise")
+
+
+def _authority_unreadable_writes_one_stderr_line_missing_file_silent_gh888():
+    """gh#888 AC3/AC6: the asymmetry the PRD calls out by name -- a genuinely missing file is
+    normal and silent (today's only covered case), but an unreadable-yet-present file is an
+    operator problem and must not be silent. Same check proves both sides so they can't drift
+    apart again: the missing-file branch already existed pre-gh888, the unreadable branch is new."""
+    import contextlib
+    import io
+    import authority
+
+    with tempfile.TemporaryDirectory() as d:
+        missing = Path(d) / "does-not-exist.json"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            data = authority._read(missing)
+        assert data == {} and err.getvalue() == "", (
+            f"a missing authority file must be silent, got stderr={err.getvalue()!r}")
+
+        as_dir = Path(d) / "is-a-dir.json"
+        as_dir.mkdir()
+        err2 = io.StringIO()
+        with contextlib.redirect_stderr(err2):
+            data2 = authority._read(as_dir)
+        assert data2 == {}, data2
+        assert str(as_dir) in err2.getvalue() and "IsADirectoryError" in err2.getvalue(), (
+            f"an unreadable authority file must name the path and error type on stderr, "
+            f"got {err2.getvalue()!r}")
+
+
+def _authority_unknown_level_still_raises_after_io_widening_gh888():
+    """gh#888 AC4: widening `_read()`'s except clause to the OSError family must not swallow
+    AuthorityError too -- a file that PARSES but names an unknown level is still a real grant
+    written wrong (AC6 of gh#771) and must still raise, locked here so this change can't erode
+    that on top of the existing gh#771 coverage."""
+    import authority
+    with tempfile.TemporaryDirectory() as d:
+        bad_level = Path(d) / "authority.json"
+        bad_level.write_text(json.dumps({"credential": {"level": "always"}}))
+        raised = False
+        try:
+            authority.level_for("credential", store=bad_level)
+        except authority.AuthorityError:
+            raised = True
+        assert raised, "an unknown level in a readable, parseable file must still raise"
+
+
+def _ask_file_survives_unreadable_authority_store_gh888():
+    """gh#888 AC5: `ask.py file` must exit 0 and actually file the ask when the authority store
+    can't be read, not traceback -- the exact failure PR #885 put on the live path for every ask
+    a member files (judge-judy medium finding on PR#885, this issue). A directory-pointed store
+    is the deterministic real-OSError case (works under root, unlike chmod)."""
+    import subprocess
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "fleet.db"
+        authority_path = Path(d) / "authority.json"
+        authority_path.mkdir()
+        p = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "ask.py"), "--db-path", str(db_path),
+             "--authority-path", str(authority_path),
+             "file", "--member", "gru", "--why", "need a human", "--class", "credential",
+             "--no-notify"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert p.returncode == 0, f"ask.py file must exit 0 despite an unreadable store: {p.stderr}"
+        assert "Traceback" not in p.stderr, f"ask.py file must not traceback: {p.stderr}"
+        assert "filed" in p.stdout, f"ask.py file must still file the ask, got {p.stdout!r}"
+
+
+def _ask_authority_cli_survives_unreadable_authority_store_gh888():
+    """gh#888 AC5's second case: `ask.py authority` is the OTHER call site that only caught
+    `authority.AuthorityError` around a `_read()` that could raise a raw OSError -- must also
+    exit clean, not traceback, once the store can't be read."""
+    import subprocess
+    with tempfile.TemporaryDirectory() as d:
+        authority_path = Path(d) / "authority.json"
+        authority_path.mkdir()
+        p = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "ask.py"), "--authority-path", str(authority_path),
+             "authority"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert p.returncode == 0, f"ask.py authority must exit 0 despite an unreadable store: {p.stderr}"
+        assert "Traceback" not in p.stderr, f"ask.py authority must not traceback: {p.stderr}"
+        assert json.loads(p.stdout) == {}, p.stdout
+
+
 def _pacing_hold_check_env(tmp: Path, ntfy_calls: Path):
     """Shared fixture plumbing for both gh#812 tests below: a stubbed `curl` on PATH (so
     fleet_alert.sh's real network legs never fire -- same shape
@@ -14418,6 +14535,12 @@ if __name__ == "__main__":
     check("authority: a malformed authority.json fails loudly and files nothing (gh#771 AC6)", _authority_malformed_file_fails_loudly_and_files_nothing_gh771)
     check("authority.grant() itself refuses an unknown class or level at write time (gh#771)", _authority_grant_itself_rejects_unknown_class_or_level_gh771)
     check("ask.py authority reports a grant's level and ask_ids over the CLI (gh#771 AC5)", _ask_authority_cli_reports_grants_gh771)
+    check("authority: an unreadable file degrades to 'ask', not a raise (gh#888 AC1)", _authority_unreadable_file_degrades_to_ask_not_raise_gh888)
+    check("authority: a store path pointing at a directory degrades to 'ask' (gh#888 AC2)", _authority_store_path_is_a_directory_degrades_to_ask_gh888)
+    check("authority: unreadable file logs one stderr line, missing file stays silent (gh#888 AC3/AC6)", _authority_unreadable_writes_one_stderr_line_missing_file_silent_gh888)
+    check("authority: an unknown level still raises after widening the I/O catch (gh#888 AC4)", _authority_unknown_level_still_raises_after_io_widening_gh888)
+    check("ask.py file survives an unreadable authority store, files the ask (gh#888 AC5)", _ask_file_survives_unreadable_authority_store_gh888)
+    check("ask.py authority survives an unreadable authority store (gh#888 AC5)", _ask_authority_cli_survives_unreadable_authority_store_gh888)
     check("run_args() strips a trailing -green suffix from FLEET_INSTANCE_NAME, anchored not substring (gh#780 AC1/AC2/AC3)", _run_args_strips_green_suffix_from_instance_name_gh780)
 
     check("backlog row renders blast radius as a chilli glyph, never a grey fleet:blast-N pill (gh#844 AC2/AC3/AC4)", _backlog_row_renders_blast_radius_as_chilli_not_a_grey_pill_gh844)
