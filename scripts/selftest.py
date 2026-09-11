@@ -10222,7 +10222,7 @@ def _epoch_beyond_sanity_ceiling_is_refused_not_written():
         state_text = state.read_text() if state.exists() else ""
         log_text = log.read_text() if log.exists() else ""
     assert "acct" not in state_text, (
-        f"a ~370-day-out epoch was written to the state file -- sanity ceiling did not refuse "
+        f"a ~year-out epoch was written to the state file -- sanity ceiling did not refuse "
         f"it: {state_text!r}"
     )
     assert "exceeds the sanity ceiling" in log_text, (
