@@ -11204,7 +11204,8 @@ def _plan_rank_ac2_no_plan_file_is_byte_identical_order_gh572():
 def _plan_rank_ac3_prose_only_bets_degrade_to_unchanged_order_gh572():
     """gh#572 AC3: a plan file that exists but names no issue numbers at all (prose-only bets)
     returns the input order unchanged and exits 0 -- a half-written plan degrades rather than
-    erroring the pass."""
+    erroring the pass. fk#559 VP review round 2 fix 2: it now also announces the inactive tier
+    on stderr (one line, naming the path) -- silent-on-AC3 was itself the finding."""
     import subprocess
     import plan_rank as pr
     with tempfile.TemporaryDirectory() as tmp:
@@ -11217,7 +11218,9 @@ def _plan_rank_ac3_prose_only_bets_degrade_to_unchanged_order_gh572():
          "--plan-path", str(path)],
         capture_output=True, text=True)
     assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
-    assert proc.stderr == "", proc.stderr
+    stderr_lines = proc.stderr.strip().splitlines()
+    assert len(stderr_lines) == 1, proc.stderr
+    assert "plan tier inactive this pass" in stderr_lines[0], proc.stderr
 
 
 def _plan_rank_ac4_malformed_plan_exits_0_with_one_diagnostic_never_a_traceback_gh572():

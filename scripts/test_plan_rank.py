@@ -101,6 +101,86 @@ class RankEndToEndTests(unittest.TestCase):
             self.assertEqual(out["ranked"], [456, 123])
 
 
+class InertTierAnnouncesItselfTests(unittest.TestCase):
+    """fk#559 VP review round 2 fix 2: an inactive plan tier prints exactly one stderr line
+    naming the resolved path and why, for every reason `bet_map` can end up empty."""
+
+    def _stderr(self, path):
+        buf = unittest.mock.MagicMock()
+        with unittest.mock.patch("sys.stderr", buf):
+            pr.rank([456, 123], plan_path=path)
+        lines = [c.args[0] for c in buf.write.call_args_list if c.args[0].strip()]
+        return lines
+
+    def test_missing_file_announces_inactive_with_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "nope.md"
+            lines = self._stderr(path)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("plan tier inactive this pass", lines[0])
+        self.assertIn(str(path), lines[0])
+
+    def test_malformed_file_announces_inactive_with_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "instance.md"
+            path.write_text("no bets heading at all\n")
+            lines = self._stderr(path)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("plan tier inactive this pass", lines[0])
+        self.assertIn(str(path), lines[0])
+
+    def test_prose_only_bets_announces_inactive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "instance.md"
+            path.write_text("## Bets\nJust prose, no issue numbers.\n")
+            lines = self._stderr(path)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("plan tier inactive this pass", lines[0])
+
+    def test_active_plan_prints_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "instance.md"
+            path.write_text("## Bets\n1. Verified Org -- #123\n")
+            lines = self._stderr(path)
+        self.assertEqual(lines, [])
+
+
+class DefaultRootTests(unittest.TestCase):
+    """fk#559 VP review round 2 fix 1: the plan path resolves against $FLEET_REPO, the product
+    repo, never this script's own (possibly-frozen-kit-copy) parent directory."""
+
+    def test_default_root_is_fleet_repo_env(self):
+        with unittest.mock.patch.dict("os.environ", {"FLEET_REPO": "/some/product/repo"}):
+            self.assertEqual(pr.default_root(), Path("/some/product/repo"))
+
+    def test_default_root_falls_back_to_repo(self):
+        env = dict(os.environ)
+        env.pop("FLEET_REPO", None)
+        with unittest.mock.patch.dict("os.environ", env, clear=True):
+            self.assertEqual(pr.default_root(), Path("/repo"))
+
+    def test_cli_resolves_fleet_repo_not_script_directory(self):
+        """Invoke the CLI from a directory that is not the repo (KIT), with $FLEET_REPO
+        pointing elsewhere, and prove it resolves the plan under $FLEET_REPO, not under the
+        kit copy of this script."""
+        with tempfile.TemporaryDirectory() as product_repo:
+            plan_dir = Path(product_repo) / "docs" / "plan"
+            plan_dir.mkdir(parents=True)
+            (plan_dir / "default.md").write_text("## Bets\n1. Verified Org -- #123\n")
+            env = dict(os.environ)
+            env.pop("FLEET_INSTANCE_NAME", None)
+            env["FLEET_REPO"] = product_repo
+            out = subprocess.run(
+                [sys.executable, str(KIT / "scripts" / "plan_rank.py"),
+                 "--items", "[456, 123]"],
+                capture_output=True, text=True, cwd=tempfile.gettempdir(), env=env,
+            )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(),
+                          '{"ranked": [123, 456], "bet_by_issue": {"123": "Verified Org -- #123"}}')
+        self.assertEqual(out.stderr, "")
+
+
 class ResolveInstanceTests(unittest.TestCase):
     """fk#559 VP review fix 2: FLEET_INSTANCE_NAME carries a deploy-slot suffix live."""
 
@@ -153,11 +233,16 @@ class CliTests(unittest.TestCase):
         return subprocess.run(argv, capture_output=True, text=True)
 
     def test_ac2_cli_exits_0_with_unchanged_order_when_no_plan_file(self):
+        """fk#559 VP review round 2 fix 2: a missing plan file still ranks unchanged, but now
+        announces the inactive tier -- it no longer prints nothing at all."""
         with tempfile.TemporaryDirectory() as tmp:
-            out = self._run("[456, 123]", plan_path=Path(tmp) / "nope.md")
+            path = Path(tmp) / "nope.md"
+            out = self._run("[456, 123]", plan_path=path)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(out.stdout.strip(), '{"ranked": [456, 123], "bet_by_issue": {}}')
-        self.assertEqual(out.stderr, "")
+        self.assertEqual(len(out.stderr.strip().splitlines()), 1, out.stderr)
+        self.assertIn("plan tier inactive this pass", out.stderr)
+        self.assertIn(str(path), out.stderr)
 
     def test_ac4_cli_exits_0_prints_one_diagnostic_line_never_a_traceback(self):
         with tempfile.TemporaryDirectory() as tmp:
