@@ -4237,6 +4237,63 @@ def _judge_runs_the_closes_gate_and_reads_the_issue():
     assert (ROOT / "docs" / "quality-standard.md").exists()
 
 
+def _closes_gate_blocks_an_epic_with_unaccepted_children():
+    """fk#652 (Part C0 re-scope, 2026-09-11): an epic (`fleet:epic`) closes only when every
+    child is accepted -- the same principle closes_gate.py already enforces per-issue, one
+    layer up. Covers AC1-3, AC5 of the superseding PRD comment."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("closes_gate", ROOT / "scripts" / "closes_gate.py")
+    cg = importlib.util.module_from_spec(spec); spec.loader.exec_module(cg)
+
+    epic_all_closed = {"title": "epic", "labels": [{"name": "fleet:epic"}], "body": "", "comments": [],
+                        "subIssues": {"nodes": [{"number": 1, "state": "CLOSED"}, {"number": 2, "state": "CLOSED"}, {"number": 3, "state": "CLOSED"}]}}
+    # AC1: three closed children -> closable
+    r = cg.evaluate("Closes #634", ["src/x.py"], {634: epic_all_closed})
+    assert r["verdict"] == "ok", r
+    assert cg.epic_closable(epic_all_closed, {634: epic_all_closed})["closable"] is True
+
+    epic_one_open = dict(epic_all_closed, subIssues={"nodes": [{"number": 1, "state": "CLOSED"}, {"number": 2, "state": "OPEN"}, {"number": 3, "state": "CLOSED"}]})
+    # AC2: one open child -> blocked, names it
+    r = cg.evaluate("Closes #634", ["src/x.py"], {634: epic_one_open})
+    assert r["verdict"] == "block" and "#2" in r["reasons"][0], r
+    ec = cg.epic_closable(epic_one_open, {634: epic_one_open})
+    assert ec["closable"] is False and "#2" in ec["reason"], ec
+
+    # AC3: no subIssues at all, no "decomposed into" comment -> never blocks on epic grounds
+    epic_unlinked = {"title": "epic", "labels": [{"name": "fleet:epic"}], "body": "", "comments": []}
+    r = cg.evaluate("Closes #634", ["src/x.py"], {634: epic_unlinked})
+    assert r["verdict"] == "ok", r
+    assert cg.epic_closable(epic_unlinked, {634: epic_unlinked})["closable"] is True
+
+    # AC3 fallback: no subIssues, but marie's "decomposed into #a, #b" comment names children
+    epic_fallback = {"title": "epic", "labels": [{"name": "fleet:epic"}], "body": "",
+                      "comments": [{"createdAt": "2026-09-01T00:00:00Z", "body": "marie: decomposed into #10, #11 (Part C2b)"}]}
+    r = cg.evaluate("Closes #634", ["src/x.py"], {634: epic_fallback, 10: {"state": "CLOSED"}, 11: {"state": "OPEN"}})
+    assert r["verdict"] == "block" and "#11" in r["reasons"][0], r
+
+    # AC5: a docs/tests-only PR can never close an epic, message distinguishes epic reason
+    # from the generic docs-only-on-a-lane-item reason
+    r = cg.evaluate("Closes #634", ["docs/x.md", "scripts/test_x.py"], {634: epic_all_closed})
+    assert r["verdict"] == "block" and "docs/tests" in r["reasons"][0] and "epic" in r["reasons"][0], r
+
+    # a non-epic issue is unaffected by any of this
+    plain = {"title": "x", "labels": [{"name": "lane:ui"}], "body": "body", "comments": []}
+    r = cg.evaluate("Closes #1", ["src/x.py"], {1: plain})
+    assert r["verdict"] == "ok", r
+
+
+def _jefe_runs_the_epic_close_check_before_closing_an_epic():
+    """AC4: members/jefe/jefe.md's epic-closing step invokes closes_gate.py's `--epic` check
+    before jefe closes a `fleet:epic` issue, documented in the same shape gru.md uses for
+    vision_link_gate.py / quality_gate.py (a fenced command plus the JSON shape it returns)."""
+    md = (ROOT / "members" / "jefe" / "jefe.md").read_text()
+    assert "closes epics, not PRs" in md
+    assert "closes_gate.py --epic" in md, "jefe.md never invokes the epic-closure check"
+    assert '"closable"' in md, "jefe.md does not document the check's JSON shape"
+    ap_src = (ROOT / "scripts" / "closes_gate.py").read_text()
+    assert '"--epic"' in ap_src, "closes_gate.py has no --epic CLI mode for jefe to call"
+
+
 def _share_dials_offer_every_five_percent_labelled_as_percent():
     """Reif, 2026-09-07: "where is .3, etc. and show them as percents." The two fraction dials
     list every 5% step from 5% to 100%, labelled as percents, and a stored "0.20" matches the
@@ -4427,6 +4484,37 @@ def _deploy_sh_kicks_a_gru_pass_right_after_cutover():
     assert "/etc/cron.d/" in kick_line, "kick must source the cron.d env (FLEET_SHARE_DIR, FLEET_LEASE_DIR, FLEET_INSTANCE_NAME)"
     assert "9>&-" in kick_line, "kick must close the auto_deploy flock fd (deploy.sh's own rule for every podman spawn)"
     assert "gh#622" in src[kick:kick + 600], "kick outcome must be logged"
+
+
+def _deploy_sh_kicks_a_sentry_pass_right_after_cutover():
+    """gh#663: deploy.sh runs one sentry pass in the live container immediately after DEPLOYED,
+    same as it already does for gru -- so a deploy-broken journey is caught within minutes
+    instead of at sentry's next scheduled cron tick. Pins the kick to inside finish_deploy,
+    AFTER the gru kick (so it shares the exact same proxy_mode/rolling-deploy call sites and can
+    never be skipped on a different condition than the gru kick), detached (`podman exec -d`),
+    through run_member.sh sentry, with the cron.d env sourced, and with its own distinct log
+    line so an operator reading deploy.log can tell the two kicks apart.
+    """
+    src = (ROOT / "scripts" / "deploy.sh").read_text()
+    deployed_at = src.index('log "DEPLOYED:')
+    gru_kick = src.find("run_gru_fanout.sh", deployed_at)
+    assert gru_kick != -1, "deploy.sh does not kick a gru pass after DEPLOYED (gh#622)"
+    kick = src.find("run_member.sh sentry", gru_kick)
+    assert kick != -1, "deploy.sh does not kick a sentry pass after the gru kick (gh#663)"
+    kick_line = src[src.rfind("\n", 0, kick) + 1: src.find("\n", kick)]
+    assert 'podman exec -d "$CONTAINER"' in kick_line, f"kick must be detached in the live container: {kick_line[:120]!r}"
+    assert "/etc/cron.d/" in kick_line, "kick must source the cron.d env (FLEET_SHARE_DIR, FLEET_LEASE_DIR, FLEET_INSTANCE_NAME)"
+    assert "9>&-" in kick_line, "kick must close the auto_deploy flock fd (deploy.sh's own rule for every podman spawn)"
+    outcome = src[kick:kick + 600]
+    assert "gh#663" in outcome, "kick outcome must be logged"
+    assert "next cron tick" in outcome, "a failed kick must log that the next cron tick will run it, never fail the deploy"
+    assert "kicked one sentry pass" in outcome, "sentry kick's success line must be distinct wording from the gru kick's"
+    # AC4: the sentry kick must live inside finish_deploy() itself (not a separate call site),
+    # so it is structurally skipped on exactly the same condition as the gru kick -- e.g.
+    # proxy_mode, where finish_deploy is simply never reached.
+    fn_start = src.index("finish_deploy() {")
+    fn_end = src.index("\n}\n", fn_start)
+    assert fn_start < gru_kick < kick < fn_end, "sentry kick must live in the same finish_deploy() function as the gru kick"
 
 
 def _auto_deploy_sh_coalesces_main_moves_inside_the_min_interval():
@@ -11336,6 +11424,18 @@ def _journey_walker_console_url_env_override_wins_unchanged_gh724():
     assert users.fleet_console_url == "https://example.com/custom-console", users.fleet_console_url
 
 
+def _vp_md_authorizes_every_label_vp_due_spawns_on_gh855():
+    """gh#855 AC5: fk#805 widened vp_due.VP_LABELS to quality:world-class,quality:solid but
+    left vp.md's line-120 stop rule world-class-only, so vp declined 126 of 150 (84%) of the
+    items it was spawned on. This is the guard that stops that desync recurring a third time:
+    the next widening of VP_LABELS must also touch vp.md, or this fails."""
+    import vp_due
+    md = (ROOT / "members" / "vp" / "vp.md").read_text()
+    missing = [lbl for lbl in vp_due.VP_LABELS if lbl not in md]
+    assert not missing, \
+        f"vp_due.VP_LABELS has label(s) vp.md never mentions -- {missing} (gh#855/fk#805 desync)"
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -11418,6 +11518,7 @@ if __name__ == "__main__":
     check("auto_deploy.sh names branch and SHAs on a diverged-HEAD ABORT (gh#372)", _auto_deploy_sh_names_branch_and_shas_on_diverged_abort_gh372)
     check("auto_deploy.sh coalesces main moves inside FLEET_DEPLOY_MIN_INTERVAL_S (gh#619)", _auto_deploy_sh_coalesces_main_moves_inside_the_min_interval)
     check("deploy.sh kicks one gru pass right after cutover (gh#622)", _deploy_sh_kicks_a_gru_pass_right_after_cutover)
+    check("deploy.sh kicks one sentry pass right after cutover (gh#663)", _deploy_sh_kicks_a_sentry_pass_right_after_cutover)
     check("deploy.sh rolls over via caddy without a cordon (gh#625)", _deploy_sh_rolls_over_via_caddy_without_a_cordon)
     check("console shows each member's emoji, role and the steps a pass takes", _console_shows_role_and_steps_per_member)
     check("sidebar shows spawned/scheduled/disabled as distinct badges, not strikethrough (gh#565)", _sidebar_shows_spawned_scheduled_disabled_not_strikethrough_gh565)
@@ -11643,6 +11744,10 @@ if __name__ == "__main__":
 
     check("journey_walker fleet-console default resolves to the instance's real console path, not the bare host (gh#724 AC1)", _journey_walker_console_url_defaults_to_fleet_instance_path_gh724)
     check("journey_walker fleet-console URL: an explicit FLEET_CONSOLE_URL wins unchanged (gh#724 AC2)", _journey_walker_console_url_env_override_wins_unchanged_gh724)
+
+    check("closes_gate.py blocks an epic with unaccepted children, never blocks an unlinked one (fk#652)", _closes_gate_blocks_an_epic_with_unaccepted_children)
+    check("jefe.md runs closes_gate.py --epic before closing a fleet:epic issue (fk#652)", _jefe_runs_the_epic_close_check_before_closing_an_epic)
+    check("vp.md authorizes every label vp_due.VP_LABELS spawns on (gh#855 AC5)", _vp_md_authorizes_every_label_vp_due_spawns_on_gh855)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:

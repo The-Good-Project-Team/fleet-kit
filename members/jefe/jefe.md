@@ -389,6 +389,36 @@ check only" as their whole contribution, against a blocker needing a human's han
 Live 2026-09-08/09: 10 of jefe's 20 consecutive `ok` self-critiques say the pass went to
 re-deriving gh#578/gh#308 instead of reaching L4 — ≈23 dollars, ~0 backlog items advanced.)
 
+## Closing an epic — you, not a PR
+
+`docs/quality-standard.md` rule 3: "An epic closes only when every child is accepted... jefe
+closes epics, not PRs." A `fleet:epic` issue is a tracking-only parent (`scripts/quality_gate.py`
+already refuses gru a build on the epic itself, for the same reason); nothing closes it
+automatically, and a PR should never carry `Closes #N` on one (`scripts/closes_gate.py` blocks
+that PR-side attempt, fk#652). Closing the epic itself, once its children genuinely are all
+done, is your call to make at L4 — never a PR merge's side effect.
+
+**Before you close any `fleet:epic` issue, run the same deterministic check
+`closes_gate.py` uses on the PR side, in the same documented shape gru.md uses for
+`vision_link_gate.py` / `quality_gate.py`:**
+
+```
+python3 /fleet-kit/scripts/closes_gate.py --epic <issue-number>
+# {"closable": true,  "reason": "every child is closed"}
+# {"closable": true,  "reason": "no children found (no real GitHub sub-issues, no
+#                                `decomposed into` comment) -- an unlinked epic is never
+#                                blocked on epic grounds"}
+# {"closable": false, "reason": "unaccepted children: #651, #653"}
+```
+Exit 0 means closable; exit 1 means blocked. `closable: true` with the "no children found"
+reason is not a green light to treat the epic as done — it means this check cannot see under
+it (marie has not linked its sub-issues yet); read the issue yourself before closing on that
+reason alone. A `closable: false` result names every unaccepted child — refuse the close and
+say so in your report, naming each child by number, exactly as `closes_gate.py`'s own PR-side
+block message does. This is a **block**, never an automation: a green `closable: true` with
+real children, all closed, is what actually lets you close the epic — this check never closes
+one for you.
+
 ## The pass (Observe → Orient → Decide → Act, then exit)
 
 **Before anything else, call TodoWrite with exactly these 4 items, then work them in order.**

@@ -243,8 +243,9 @@
   .kpi-cell .kpi-label { color: var(--dim); font-size: 11.5px; }
   .kpi-cell .kpi-value { font-size: 24px; font-weight: 700; margin-top: 2px; }
   .kpi-cell .kpi-sub { color: var(--dimmer); font-size: 11px; margin-top: 2px; }
-  /* gh#563: the Magikarp verdict sentence -- second-most prominent thing in the card after
-     the score itself, so it reads as the answer rather than as footnote metadata like the
+  /* gh#563, bolded per gh#553 VP review round 2 fix 2 (500 still read as body copy live):
+     the Magikarp verdict sentence is the second-most prominent thing in the card after the
+     score itself, so it must read as the answer rather than as footnote metadata like the
      surrounding kpi-sub date/staleness lines. */
   .kpi-cell .kpi-verdict { color: var(--text); font-size: 13.5px; font-weight: 700;
     line-height: 1.4; margin-top: 5px; }
@@ -272,6 +273,17 @@
        itself. It's the least essential item in the topbar on a phone -- brand name and the
        live dot already say which console this is -- so it's hidden rather than truncated. */
     #repo { display: none; }
+    /* gh#553 VP review round 2, fix 3: the same overflow gh#157 partly fixed for #repo --
+       measured live at 390px, the topbar's remaining stats (the Number tile's 3 spans, the
+       weekly-spend stat, needs-human-op's full sentence) still don't fit one nowrap row and
+       push scrollWidth to ~609px. The Number tile is redundant with Home's own FLEET card now
+       (gh#553 fix 1/gh#851), so it's hidden here rather than wrapped; needs-human-op is the
+       one thing worth keeping visible, so it ellipsizes instead of forcing scroll. */
+    .topbar { overflow: hidden; }
+    #theNumber { display: none !important; }
+    #globalSpend { display: none; }
+    .topbar .brand { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 88px; }
+    #needsHumanOp { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .body { grid-template-columns: 1fr; position: relative; overflow: hidden; }
     .sidebar { position: absolute; inset: 0; z-index: 20; width: 100%;
       transform: translateX(-100%); transition: transform .18s ease; }
@@ -362,6 +374,29 @@
   </div>
 </div>
 <script>
+// ---------------------------------------------------------------------------------------------
+// gh#553 VP review round 2, fix 1: this console is served under a path prefix (e.g.
+// /fleet/philanthropy/) that only the reverse proxy knows about -- the server behind it has
+// no idea the prefix exists, so every one of this page's root-absolute "/api/..." calls
+// below actually reached the proxy's OWN root, which then guessed which backend to answer
+// from by sniffing the Referer header (wrong or silently absent in privacy mode, an in-app
+// webview, or any Referrer-Policy: no-referrer). Patching fetch()/EventSource() once here,
+// before any call site runs, makes every request self-identifying by construction instead of
+// requiring every current and future call site to remember to prefix itself.
+// ---------------------------------------------------------------------------------------------
+const PREFIX = location.pathname.endsWith('/') ? location.pathname
+  : location.pathname.slice(0, location.pathname.lastIndexOf('/') + 1);
+const _nativeFetch = window.fetch.bind(window);
+window.fetch = (input, init) => {
+  if (typeof input === 'string' && input.startsWith('/')) input = PREFIX + input.slice(1);
+  return _nativeFetch(input, init);
+};
+const _NativeEventSource = window.EventSource;
+window.EventSource = function (url, opts) {
+  if (typeof url === 'string' && url.startsWith('/')) url = PREFIX + url.slice(1);
+  return new _NativeEventSource(url, opts);
+};
+
 // ---------------------------------------------------------------------------------------------
 // State: one flat run list (all agents, as they stream in) + a per-agent index into it, so
 // switching the sidebar selection never refetches -- it just re-filters what's already in memory.
