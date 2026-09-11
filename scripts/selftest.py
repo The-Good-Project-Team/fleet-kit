@@ -5276,6 +5276,37 @@ def _account_page_names_its_instance_and_reads_the_pool_verdict():
         "line ABOVE the 'ALL accounts failed' summary, so the last line never carries it")
     assert "QUOTA-GATED" in src, "no quota-gate branch in the diagnosis"
 
+def _vp_due_cadence_is_a_validated_minute_dial():
+    """vp_due's cadence is tunable, and validated as a MINUTE field (fk, 2026-09-11).
+
+    fk#810 widened vp_due from quality:world-class (3 issues) to also collect
+    quality:solid (76). vp had never run once in its life before that; afterwards it ran
+    462 times in 24h for 168M tokens -- 15.8% of the whole instance's spend -- as an
+    acceptance judge, while the account sat at week_bank_pct=-27 with zero headroom. A fix
+    for "never runs" became "runs constantly" because the cadence was a literal and the
+    population behind it grew 25x.
+
+    It must be validated as 0-59, NOT reused from _CRON_HOUR_FIELDS: this is the minute
+    position, and the hour validator would reject its own default of */15. That is the
+    same family-by-name-resemblance error that took the fleet dark for 40h in gh#380, in
+    the opposite direction.
+    """
+    import fleet_view_server as fvs
+    entry = (ROOT / "entrypoint.sh").read_text()
+    assert "${FLEET_VP_DUE_CADENCE:-*/15} * * * *" in entry, \
+        "vp_due line must splice FLEET_VP_DUE_CADENCE into the MINUTE field, default */15"
+
+    assert "FLEET_VP_DUE_CADENCE" in fvs.DIAL_FIELDS, "dial not exposed in DIAL_FIELDS"
+    assert "FLEET_VP_DUE_CADENCE" in fvs._CRON_MINUTE_FIELDS, "dial not validated as a minute"
+    assert "FLEET_VP_DUE_CADENCE" not in fvs._CRON_HOUR_FIELDS, \
+        "a minute dial validated as an hour field rejects its own default of */15"
+
+    assert not fvs._validate_dial_value("FLEET_VP_DUE_CADENCE", "*/15"), "default must validate"
+    assert not fvs._validate_dial_value("FLEET_VP_DUE_CADENCE", "0,30"), \
+        "0,30 is legitimate in a MINUTE field (it is only fatal in the hour position)"
+    assert fvs._validate_dial_value("FLEET_VP_DUE_CADENCE", "60"), "60 is not a minute"
+    assert fvs._validate_dial_value("FLEET_VP_DUE_CADENCE", "$(id)"), "injection must be refused"
+
 def _judge_judy_ticks_dont_overlap():
     """A judge-judy cron tick that overlaps a still-running prior tick must not review.
 
@@ -12249,6 +12280,7 @@ if __name__ == "__main__":
     check("git_pull_guard.sh serializes via a lock on the .git directory", _git_pull_guard_serializes_via_a_lock_on_the_git_directory)
     check("every judge-judy hold hands the PR to the fleet", _every_hold_hands_the_pr_to_the_fleet)
     check("an account page names its instance and reads the pool verdict", _account_page_names_its_instance_and_reads_the_pool_verdict)
+    check("vp_due cadence is a validated minute dial", _vp_due_cadence_is_a_validated_minute_dial)
     check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
     check("a judge-judy BLOCK pulls the PR out of the merge queue (fleet-kit#523)",
           _judge_block_pulls_the_pr_out_of_the_queue)
