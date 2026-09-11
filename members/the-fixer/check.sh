@@ -276,6 +276,40 @@ if [ -n "${FIXER_HEALTH_URL:-}" ] && [ -n "${FIXER_PAGE_URL:-}" ]; then
     esac ;;
   *) PROD_DOWN="health=$P_HEALTH" ;;
   esac
+
+  # "Degraded" -- the second half of this check's own PROD DOWN detection, and until gh#728's
+  # VP follow-up (2026-09-11) it was dead code: should_fire_post_promote() existed and was
+  # unit-tested, but nothing ever called it. A page that answers 2xx/3xx on every single probe
+  # above can still be serving 5xx to a real fraction of its traffic underneath -- one clean
+  # request proves nothing about the other 29. This takes a small burst of requests against
+  # FIXER_PAGE_URL each tick (one "sample"), persists it alongside the last couple of ticks'
+  # samples (fixer_fire_path.py's own state file, same "$LOG_DIR-backed, survives across ticks"
+  # convention as the dedup/heartbeat files above), and fires only when TWO CONSECUTIVE ticks'
+  # samples both breach -- one bad burst is a blip, same reasoning as the hard-down double-probe
+  # just above. Skipped entirely once a hard PROD_DOWN already fired this tick -- no point
+  # burst-probing a page that's already confirmed down.
+  if [ -z "$PROD_DOWN" ] && command -v python3 >/dev/null 2>&1; then
+    sample_degraded_page() { # -> "error_pct p95_s" over FIXER_DEGRADED_SAMPLE_REQUESTS probes
+      local n="${FIXER_DEGRADED_SAMPLE_REQUESTS:-5}" i out code t errors=0 times=()
+      for i in $(seq 1 "$n"); do
+        out=$(curl -s -m 10 -o /dev/null -w '%{http_code} %{time_total}' -A 'Mozilla/5.0 (fleet-kit the-fixer)' "$FIXER_PAGE_URL" 2>/dev/null)
+        code="${out%% *}"; t="${out#* }"
+        [ -z "$code" ] && code=000
+        [ -z "$t" ] && t=0
+        case "$code" in 5??) errors=$((errors + 1)) ;; esac
+        times+=("$t")
+      done
+      local p95
+      p95=$(printf '%s\n' "${times[@]}" | sort -n | awk -v n="$n" '{a[NR-1]=$1} END{idx=int((n-1)*0.95); if (idx<0) idx=0; printf "%.3f", a[idx]}')
+      awk -v e="$errors" -v n="$n" -v p="$p95" 'BEGIN{printf "%.2f %s", (e*100.0/n), p}'
+    }
+    DEGRADED_STATE="${FIXER_DEGRADED_STATE:-$LOG_DIR/the-fixer.postpromote}"
+    FFP_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/fixer_fire_path.py"
+    read -r DEG_ERR_PCT DEG_P95_S < <(sample_degraded_page)
+    if [ -f "$FFP_SCRIPT" ] && python3 "$FFP_SCRIPT" --check-post-promote "$DEGRADED_STATE" "$DEG_ERR_PCT" "$DEG_P95_S" >>"$LOG" 2>&1; then
+      PROD_DOWN="degraded error_pct=${DEG_ERR_PCT}% p95=${DEG_P95_S}s (two consecutive breaching samples on $FIXER_PAGE_URL)"
+    fi
+  fi
 fi
 
 FIRE_SHA=""
