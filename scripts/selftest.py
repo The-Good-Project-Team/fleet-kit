@@ -4334,6 +4334,55 @@ def _messenger_is_scheduled_three_times_a_day_with_creds_mounted():
     assert spec["enabled"] is True and spec["llm"]["model"] == "sonnet"
     charter = (ROOT / "members" / "dont-shoot-the-messenger" / "dont-shoot-the-messenger.md").read_text()
     assert "messenger_brief.py collect" in charter and "messenger_brief.py send" in charter and "Afternoon block" in charter
+def _run_args_strips_green_suffix_from_instance_name_gh780():
+    """gh#780: `run_args()` used to bake `FLEET_INSTANCE_NAME="$name"` verbatim, so the green
+    candidate (started as `run_args "${CONTAINER}-green" ...`) booted permanently believing its
+    own name was "<instance>-green" -- `podman rename "${CONTAINER}-green" "$CONTAINER"` at
+    cutover renames the container OBJECT but can't rewrite an env var already baked into the
+    running process. That left publish_share.sh writing "<instance>-green.json" forever while
+    the real "<instance>.json" aged past FLEET_SHARE_STALE_AFTER_S and check_share_sum.sh read
+    PARTIAL on every run. AC1/AC2/AC3: the fix strips a trailing "-green" (anchored, not a
+    substring replace) from the value handed to FLEET_INSTANCE_NAME while leaving `--name`
+    (the actual podman container name) untouched.
+    """
+    import subprocess
+    dep = (ROOT / "scripts" / "deploy.sh").read_text()
+    begin = dep.index("run_args() {")
+    end = dep.index("\n}\n", begin) + 2
+    fn = dep[begin:end]
+
+    def run_args_output(name):
+        script = (
+            'set -euo pipefail\n'
+            f'FLEET_CREDS_DIR="{tempfile.mkdtemp()}"\n'
+            'FLEET_REPO_URL=x GH_TOKEN=x INSTANCE_DIR=/tmp/inst SHARED_LEASE_DIR=/tmp/l '
+            'SHARED_SHARE_DIR=/tmp/s IMAGE=x\n'
+            f'{fn}\n'
+            f'run_args "{name}" 8571 8572\n'
+        )
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        assert proc.returncode == 0, f"run_args failed: {proc.stderr.strip()[:300]}"
+        return proc.stdout
+
+    # AC1: the green candidate's container name strips to the real instance name for
+    # FLEET_INSTANCE_NAME, while --name keeps the -green suffix.
+    out = run_args_output("fleet-kit-smoke-green")
+    assert "-e FLEET_INSTANCE_NAME=fleet-kit-smoke " in out or out.rstrip().endswith("-e FLEET_INSTANCE_NAME=fleet-kit-smoke"), \
+        f"green candidate did not get the real instance name: {out!r}"
+    assert "--name fleet-kit-smoke-green" in out, "run_args no longer names the podman container with its -green suffix"
+
+    # AC2: a non-cutover name (no -green suffix) passes through unchanged.
+    out = run_args_output("fleet-kit-smoke")
+    assert "-e FLEET_INSTANCE_NAME=fleet-kit-smoke " in out or out.rstrip().endswith("-e FLEET_INSTANCE_NAME=fleet-kit-smoke"), \
+        f"non-cutover name was mangled: {out!r}"
+
+    # AC3: the suffix strip is anchored, not a substring replace -- a name that merely
+    # *contains* "green" without ending in "-green" must be untouched.
+    out = run_args_output("evergreen-fleet")
+    assert "-e FLEET_INSTANCE_NAME=evergreen-fleet " in out or out.rstrip().endswith("-e FLEET_INSTANCE_NAME=evergreen-fleet"), \
+        f"substring 'green' wrongly stripped from a name not ending in -green: {out!r}"
+
+
 def _closes_gate_blocks_a_partial_or_docs_only_pr_from_closing_an_issue():
     """fk#629: a PR may only close an issue it finishes. The pure evaluator blocks (a) a PR
     whose own body says it is partial, (b) a docs-only PR closing a product-lane item, and
@@ -13032,6 +13081,7 @@ if __name__ == "__main__":
     check("authority: a malformed authority.json fails loudly and files nothing (gh#771 AC6)", _authority_malformed_file_fails_loudly_and_files_nothing_gh771)
     check("authority.grant() itself refuses an unknown class or level at write time (gh#771)", _authority_grant_itself_rejects_unknown_class_or_level_gh771)
     check("ask.py authority reports a grant's level and ask_ids over the CLI (gh#771 AC5)", _ask_authority_cli_reports_grants_gh771)
+    check("run_args() strips a trailing -green suffix from FLEET_INSTANCE_NAME, anchored not substring (gh#780 AC1/AC2/AC3)", _run_args_strips_green_suffix_from_instance_name_gh780)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:
