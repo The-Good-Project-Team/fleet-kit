@@ -60,8 +60,19 @@ _MUTATING_BASH_RE = re.compile(
     r"|\b(rm|mv|cp|sed\s+-i|mkdir|touch|chmod|chown|tee)\b"
     r"|(?:^|[\s;&|])>>?(?!=)\s*\S"
 )
+_MUTATING_GIT_VERB_RE = re.compile(
+    r"\bgit\s+(?:commit|checkout|switch|reset|add|merge|rebase|push|pull|stash\s+pop|clean)\b")
 _GIT_DASH_C_RE = re.compile(r"git\s+-C\s+(\S+)\s+(\S+)(?:\s+(\S+))?")
 _MUTATING_SUBCOMMANDS = {"commit", "checkout", "switch", "reset", "add", "merge", "rebase", "push", "pull", "stash", "clean", "rm", "mv"}
+# gh#894: a leading/compound `cd <path>` segment (`cd $REPO && git checkout <branch>`, or with
+# `;`) changes the process's ACTUAL cwd by the time the git verb runs, but the Bash tool's own
+# payload['cwd'] is always the pre-execution cwd (the pass's own $WT_PATH per run_member.sh) --
+# PR #893's fallback never re-derived cwd from this, so this exact compound shape (the shape the
+# PRD's incident theory names) sailed straight through. Only a bare `cd <path>` right after the
+# start of the command or a `&&`/`;` separator counts -- PRD non-goal 1: no general shell parser,
+# so a variable assigned mid-command, `eval`, or command substitution deciding the path is left
+# uncovered and falls back to the existing pre-execution cwd unchanged.
+_LEADING_CD_RE = re.compile(r"(?:^|&&|;)\s*cd\s+('[^']*'|\"[^\"]*\"|[^\s;&]+)")
 # gh#837: `stash` alone is too coarse -- `stash list`/`stash show` are read-only, `stash pop`
 # (and bare `stash`, which git treats as `stash push`) are not. Only `stash` gets this second
 # check; every other verb in _MUTATING_SUBCOMMANDS stays decided by the verb alone.
@@ -101,6 +112,24 @@ def _under(path: str, root: str) -> bool:
     path = path.rstrip("/") + "/"
     root = root.rstrip("/") + "/"
     return path == root or path.startswith(root)
+
+
+def _effective_cwd(command: str, cwd_real: str | None, verb_start: int) -> str | None:
+    """gh#894: walks `cd <path>` segments that occur strictly before `verb_start` (the position
+    of the matched mutating verb), tracking cwd left to right the way a shell actually would.
+    A `cd` with an unresolvable target (e.g. a literal `$REPO` the hook never expands -- PRD's
+    own UNKNOWN, left fail-open on purpose) or one after `verb_start` is ignored and the cwd
+    tracked so far is kept."""
+    effective = cwd_real
+    for m in _LEADING_CD_RE.finditer(command, 0, verb_start):
+        target = m.group(1).strip("'\"")
+        base = effective or os.getcwd()
+        try:
+            resolved = target if os.path.isabs(os.path.expanduser(target)) else os.path.join(base, target)
+            effective = _resolve(resolved)
+        except OSError:
+            continue
+    return effective
 
 
 def _bash_targets_repo(command: str, repo_real: str, wt_real: str, cwd_real: str | None) -> bool:
@@ -149,9 +178,18 @@ def _bash_targets_repo(command: str, repo_real: str, wt_real: str, cwd_real: str
     # (and not this pass's own worktree), the command targets $REPO regardless of what it spells
     # out. `-C` is excluded here because it already redirects git elsewhere, and that case is
     # fully handled by the loop above (including the "allowed" case of `-C $WT_PATH`).
-    if (cwd_real and _under(cwd_real, repo_real) and not _under(cwd_real, wt_real)
-            and re.search(r"\bgit\b", command) and not _GIT_DASH_C_RE.search(command)):
-        return True
+    #
+    # gh#894: `cwd_real` itself is always the Bash tool's PRE-EXECUTION cwd (this pass's own
+    # $WT_PATH per run_member.sh) -- it is never updated by a `cd` that lives INSIDE the command
+    # string. `_effective_cwd` walks any leading/compound `cd <path>` segments before the
+    # matched mutating verb so `cd $REPO && git checkout <branch>` (one command, cwd starts at
+    # $WT_PATH) is judged by the cwd the git verb actually runs under, not the shell's starting
+    # cwd -- PR #893's own comment claimed this closed, and it did not (judge-judy on #893).
+    git_verb_match = _MUTATING_GIT_VERB_RE.search(command)
+    if git_verb_match and not _GIT_DASH_C_RE.search(command):
+        effective_cwd = _effective_cwd(command, cwd_real, git_verb_match.start())
+        if effective_cwd and _under(effective_cwd, repo_real) and not _under(effective_cwd, wt_real):
+            return True
     return False
 
 

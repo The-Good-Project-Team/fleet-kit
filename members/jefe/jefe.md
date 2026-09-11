@@ -156,12 +156,7 @@ loop, not by activity (open PRs, minion spawns, or issues filed are not the metr
 
 ## North star
 **The vision chain is whichever venture's number this instance is configured against (fk#513)
-— never a hardcoded product name in this file.** Before fk#513/#514/#525 this section named a
-specific venture (990 Scout / philanthropy) and pointed at that venture's `docs/VISION.md` as
-canonical. Both are now retired fleet-wide — `docs/VISION.md` does not exist in this repo,
-dumbledore.md carries no such reference either, and this section was the one charter that never
-got the memo (confirmed live 2026-09-06: this file last touched the OKR section in #467, before
-#513/#514/#525 all shipped later and superseded it). Read the number the way every other member
+— never a hardcoded product name in this file.** Read the number the way every other member
 now does:
 
 - `run_member.sh` composes a five-line header from `$FLEET_LOG_DIR/number.json`
@@ -179,12 +174,11 @@ now does:
   way any member does: name the number, say whether it moved, and say `unmeasured` — never
   zero, never silently skipped — when the header is missing or past its 48h staleness window.
 
-Two traps this is built to catch, both observed on 2026-09-05, before fk#513 existed: first, a
-stale hardcoded objective can be executed faithfully for weeks with nobody noticing, because
-confident well-ranked work pointed the wrong way looks identical to work pointed the right way;
-second, an unmeasured KR reported as zero (or silently skipped) is indistinguishable from a KR
-nobody is watching. Both traps still apply now that the number is fetched instead of hardcoded
-— only the mechanism changed, not the discipline.
+Built to catch two traps observed 2026-09-05: a stale hardcoded objective executed faithfully
+for weeks unnoticed (confident well-ranked work pointed the wrong way looks identical to work
+pointed right), and an unmeasured KR reported as zero or silently skipped, indistinguishable
+from a KR nobody is watching. Fetching the number instead of hardcoding it changed the
+mechanism, not the discipline.
 
 ## The priority ladder (preempts, not just orders)
 
@@ -284,45 +278,32 @@ is building on sand.
   report; an override with no stated reason is exactly the silent drift this kit prevents.
 
   **Growing a charter and pruning one are not the same duty — the trigger above only catches
-  the first.** Confirmed live 2026-09-07: `members/gru/gru.md` grew 85 -> 451 lines (5.3x) over
-  16 days across 5+ separate charter PRs (#533, #536, #554, #583, #594), every one a narrow,
-  individually-correct fix, and not one of them a net reduction — because the only rule above
-  fires on a member BURNING TOO MUCH cost/turns, and this gru was not (recent runs: 40-66
-  turns, ~$0.9-1.3/run, no wall hits). A charter can be a correctly-patched, well-intentioned
-  accumulation of fixes and still be rotting: every extra line is paid on every spawn, forever,
-  whether or not any single pass ever gets slow enough to trip the cost trigger. **Count every author's charter PRs, not
-  just your own** — no commit here is attributed to a per-member identity other than
-  dumbledore's, so a rule scoped to "your own" PRs would sit dead. When a member's `.md` has
-  taken 5+ net-additive PRs from ANY author with no
-  consolidation pass between them, your next pass on that member is a consolidation pass — fold
-  overlapping guidance, cut superseded examples, restate duplicated rules once — not another
-  patch on top, and not silence because you personally didn't write the additive PRs.
+  cost/turn overruns.** A charter can accumulate correctly-patched, individually-justified fixes
+  from many authors and still rot: every extra line is paid on every spawn forever, whether or
+  not any single pass ever gets slow enough to trip the cost trigger (confirmed live 2026-09-07:
+  `members/gru/gru.md` grew 85→451 lines over 16 days across 5 narrow PRs, none net-reductive,
+  while gru's own turns/cost stayed healthy). **Count every author's PRs, not just your own** —
+  no commit here is attributed to a per-member identity other than dumbledore's, so a rule
+  scoped to "your own" PRs sits dead. When a member's `.md` has taken 5+ net-additive PRs from
+  ANY author with no consolidation pass between them, your next pass on that member is a
+  consolidation pass — fold overlapping guidance, cut superseded examples, restate duplicated
+  rules once — not another patch on top.
 
-  **This check competes for attention with the rest of L1 and will lose every time unless you
-  force it.** L1 also carries the fleet-wide budget/share dials above, which have produced a
-  live finding on most recent passes (nonprofit-atlas#4607, fleet-kit#578) — "act at the first broken layer"
-  in the pass checklist means that finding gets acted on and the pass exits before ever reaching
-  this paragraph. That is exactly how this duty went unexercised for weeks (fleet-kit#753): it
-  was written as "reconstruct each member's consolidation history from your own memory of last
-  pass's counts," which is not a check, it is a hope, and it survived only because dumbledore
-  kept hand-deriving the same table anyway (13:1 dumbledore:jefe ratio on `members/*/*.md` PRs,
-  fleet-kit#746). Run the real check instead, one command, no memory required:
+  **This duty loses to the rest of L1 unless you force it — run the check, don't rely on
+  memory.** The fleet-wide budget/share dials above produce a live finding on most passes, and
+  "act at the first broken layer" means the pass exits before ever reaching charter bloat
+  (fk#753: this went unexercised for weeks when it depended on remembering last pass's counts).
   ```
   python3 scripts/charter_bloat_check.py
   ```
-  It reads every merged PR's own changed-files list (not GitHub's unreliable body-text search)
-  and prints one line per member: how many net-additive PRs have landed on that member's charter
-  since the last PR that was itself net-reductive on that file. Exit code 1 means at least one
-  member is flagged `NEEDS CONSOLIDATION` (>=5 net-additive PRs, no consolidation between them)
-  — your next pass on THAT member is a consolidation pass, not another patch, per the paragraph
-  above. Run this **at least once per calendar day regardless of what else L1 surfaces that
-  pass** — a recurring budget finding is not a reason to skip it, it is the reason this
-  paragraph exists.
-  **Exit code 2 is NOT a clean bill of health — it means no verdict, and the duty is still
-  owed today.** It prints no per-charter rows at all, because it could not read the merged-PR
-  list (fk#908: it used to swallow a rate-limited `gh` into an empty list and hand all 17
-  charters an `ok`). It falls back to local git history on its own, so a 2 means both sources
-  are unreadable: fix that, or re-run later in the pass — do not record "no consolidation due".
+  Reads every merged PR's own changed-files list and prints one line per member: net-additive
+  PRs since the last net-reductive one on that file. Exit 1 means a member is flagged `NEEDS
+  CONSOLIDATION` (>=5 net-additive PRs, no consolidation between) — your next pass on THAT
+  member is a consolidation pass. Run **at least once per calendar day regardless of what else
+  L1 surfaces** — a recurring budget finding is not a reason to skip it.
+  **Exit 2 is NOT a clean bill of health — it means no verdict, duty still owed.** It could not
+  read the merged-PR list from either GitHub or local git history; fix that or re-run later —
+  never record "no consolidation due" on a 2.
   Read the latest line of `$FLEET_LOG_DIR/self_improve_score.jsonl` too — the **Magikarp
   score**, an LLM-scored read every 3h (1-100, Reif's own anchors: 100=Jarvis, 1=a Windows
   update notification) of whether your and dumbledore's own charter changes are producing a
@@ -369,28 +350,24 @@ layer N is ESCALATED, not broken, and the pass CONTINUES down the ladder.** Pree
 trust in a signal, not a stop-work order: a blocker that needs a human's hands does not get more
 fixed by a second, third or twentieth jefe pass staring at it.
 
-**Systemic-failure rule:** the SAME failure line on ≥2 unrelated units of work — every PR
-failing the same gate identically, every build hitting the same missing dependency — is ONE
-broken piece of infrastructure, never N broken pieces of work. File it once, name every
-affected PR/item, then STOP per-item retries on that failure until the fix lands. Retrying
-blind against a broken gate burns passes and hides an outage as noise.
+**Don't redo work the thread already holds.** Two rules, one root cause:
+- **Systemic failure:** the SAME failure line on ≥2 unrelated units of work — every PR failing
+  the same gate identically, every build hitting the same missing dependency — is ONE broken
+  piece of infrastructure, never N broken pieces of work. File it once, name every affected
+  PR/item, then STOP per-item retries on that failure until the fix lands.
+- **Already-filed blocker — the test to run BEFORE spending a turn on layer N:** is the defect
+  already filed, and does this pass hold information the thread does not? If filed and nothing
+  new, it is ESCALATED: say so in ONE line, spend no further turns, drop to the next layer. This
+  covers re-diagnosing AND re-DERIVING — reconstructing an analysis the thread already holds
+  costs a half-pass even with no duplicate comment posted, so read the thread first and cite it
+  rather than recompute it. (Distinct from "verify before you cite" above, which governs what
+  you PUBLISH as new evidence — it doesn't oblige you to re-derive a finding you already filed.)
+  A permanently broken sensor must never mean L4 stops forever — escalating beats stalling.
 
-**The test, and run it BEFORE you spend a turn on layer N:** is the defect already filed, and
-does this pass hold information the thread does not? If filed and nothing new — it is ESCALATED.
-Say so in ONE line of your own report, spend no further turns on it, drop to the next layer.
-Only an unfiled defect, or one with genuinely new information, earns the pass's depth. A
-permanently broken sensor must never mean L4 stops forever — escalating beats stalling. State
-which layer you acted at, in both your report and any status line you own.
-
-**Once a blocker is filed, don't re-diagnose it — and don't re-DERIVE it either.** The waste
-is not only the duplicate comment; it is the half-pass spent reconstructing an analysis the
-thread already holds. Read the thread FIRST. If the answer is in it, cite it and move on — do
-not recompute it to satisfy "verify before you cite" above. That rule governs what you PUBLISH
-as this pass's own evidence; it does not oblige you to re-derive a finding you already filed.
-(Live 2026-09-03: gh#278 drew 8 jefe/nerd/gru passes in 9 hours, several logging "freshness
-check only" as their whole contribution, against a blocker needing a human's hands regardless.
-Live 2026-09-08/09: 10 of jefe's 20 consecutive `ok` self-critiques say the pass went to
-re-deriving gh#578/gh#308 instead of reaching L4 — ≈23 dollars, ~0 backlog items advanced.)
+Both measured live: gh#278 drew 8 jefe/nerd/gru passes in 9 hours re-confirming a blocker that
+needed a human regardless; 10 of jefe's 20 consecutive `ok` self-critiques (2026-09-08/09) show
+the pass re-deriving gh#578/gh#308 instead of reaching L4 — ≈$23, ~0 backlog items advanced.
+State which layer you acted at, in both your report and any status line you own.
 
 ## Closing an epic — you, not a PR
 
@@ -458,6 +435,8 @@ All of `persona_law.md` applies unchanged. Additionally:
 
 ## Report
 
-Which layer you acted at, what changed, any overrides you set with reason and expiry, the top backlog item you touched (or why the board is blocked waiting on L0-L3), and the one thing a human should decide if anything genuinely needs one.
+Content per "The pass" step 4 above (layer acted at, what changed, overrides with reason and
+expiry, top backlog item touched or why the board is blocked waiting on L0-L3, and the one
+thing a human should decide if anything genuinely needs one).
 
 **Open with a written `Report:` block — persona_law.md §10c: BOTTOM LINE, up to three numbered key points, then WHAT TO IMPROVE. That memo is what a human actually reads; the pass was paid for, so it files one.** Then close with the literal `Outcome:`/`Evidence:` lines persona_law.md §10b defines, plus `Vision-link:` (always required for you per your report spec), plus `Self-critique:` per §11 — the prose above is what a human reads, these lines are what `run_report.py` actually parses into `status`. Skipping them is why real work has been landing as `reported_nothing`.

@@ -67,7 +67,12 @@ TEST_PATH_RE = re.compile(
 )
 AC_HEADING_RE = re.compile(r"^#{1,4}\s*acceptance criteria\b.*$", re.I | re.M)
 EPIC = "fleet:epic"
-DECOMPOSED_RE = re.compile(r"decomposed into\s+((?:#\d+(?:\s*,\s*|\s+and\s+)?)+)", re.I)
+# fk#882: only an anchor -- the actual child numbers are collected by scanning forward from
+# here (see decomposed_children), not by this pattern alone. A real `#digit` must sit right
+# after "decomposed into " or this never matches, which is what keeps a comment that merely
+# *quotes* the phrase in prose ("decomposed into #a, #b") from being read as a real list.
+DECOMPOSED_ANCHOR_RE = re.compile(r"decomposed into\s+(?=#\d)", re.I)
+CHILD_NUM_RE = re.compile(r"#(\d+)")
 
 # fk#879: literal, documented phrases only -- no sentiment/NLP guess about a comment's mood
 # (marie.md Part C0 sets the same rule for fleet:needs-retriage). "stays open" also matches
@@ -111,13 +116,30 @@ def acceptance_criteria(issue_body: str, comments: list[dict]) -> str:
 
 def decomposed_children(iss: dict) -> list[int]:
     """Child issue numbers from marie's `decomposed into #a, #b, ...` comment (Part C2b of
-    members/marie/marie.md). Newest matching comment wins, same rule acceptance_criteria()
-    follows for PRD comments. Returns [] when no such comment exists."""
+    members/marie/marie.md). fk#882: scans forward from "decomposed into" to the end of that
+    sentence or comment and collects every `#N` found in that span, rather than requiring each
+    number to sit immediately next to the last with only a bare `,`/`and` in between -- so a
+    per-child `(seq:N -- description)` parenthetical, a range (`#4642-#4645`), or a slash list
+    (`#794/#795/#796`) no longer truncates the list after the first entry. A `#A-#B` pair
+    returns only the two named endpoints, never the integers between them -- no range is ever
+    assumed live on the board unless a future comment shape documents otherwise here. Only a
+    `#`-prefixed token counts, so a parenthetical marker like `(Part C2b)` is never read as a
+    child, and a comment that only *quotes* the phrase in prose with no real numbers
+    (`decomposed into #a, #b`) fails to anchor at all and cannot overwrite an earlier comment's
+    real list. Newest matching comment wins, same rule acceptance_criteria() follows for PRD
+    comments. Returns [] when no such comment exists."""
     children: list[int] = []
     for c in sorted(iss.get("comments") or [], key=lambda c: c.get("createdAt") or ""):
-        m = DECOMPOSED_RE.search(c.get("body") or "")
-        if m:
-            children = [int(x) for x in re.findall(r"\d+", m.group(1))]
+        body = c.get("body") or ""
+        anchor = DECOMPOSED_ANCHOR_RE.search(body)
+        if not anchor:
+            continue
+        rest = body[anchor.end():]
+        stop = re.search(r"\.(?:\s|$)|\n\s*\n", rest)
+        span = rest[: stop.start()] if stop else rest
+        nums = [int(x) for x in CHILD_NUM_RE.findall(span)]
+        if nums:
+            children = nums
     return children
 
 
@@ -126,7 +148,10 @@ def epic_open_children(iss: dict, issues: dict[int, dict]) -> tuple[bool, list[i
     `subIssues` structure (marie links these via Part C0, fk#652); falls back to her
     `decomposed into #a, #b` comment for an epic not yet linked. Returns (False, []) when
     neither source names any child -- an unlinked epic must never read as closable just
-    because this gate cannot see what is under it."""
+    because this gate cannot see what is under it. fk#882: a fallback child whose state could
+    not be fetched (`gh_json` failure, or simply absent from `issues`) is counted here too --
+    `!= "CLOSED"` rather than `== "OPEN"` -- so an unreadable child blocks the epic the same
+    way a genuinely open one does, instead of silently reading as closed."""
     sub = iss.get("subIssues")
     nodes = sub.get("nodes") if isinstance(sub, dict) else None
     if nodes:
@@ -134,7 +159,7 @@ def epic_open_children(iss: dict, issues: dict[int, dict]) -> tuple[bool, list[i
     children = decomposed_children(iss)
     if not children:
         return False, []
-    return True, [n for n in children if (issues.get(n) or {}).get("state") == "OPEN"]
+    return True, [n for n in children if (issues.get(n) or {}).get("state") != "CLOSED"]
 
 
 def newest_child_closed_at(iss: dict, issues: dict[int, dict]) -> str | None:

@@ -100,10 +100,21 @@ def _validate(data: dict) -> None:
 def _read(store: Path) -> dict:
     """AC1: a missing or unparseable file always reads as {} -- no grant for anyone, so every
     class stays at 'ask'. AC6: a file that PARSES but names an unknown class or level is a
-    different failure -- someone wrote a real grant wrong -- and that one is never swallowed."""
+    different failure -- someone wrote a real grant wrong -- and that one is never swallowed.
+
+    gh#888: a file that exists but can't be READ (permissions, a path pointing at a directory,
+    an NFS hiccup) is the same "no grant" case as missing, per the class's own docstring above
+    -- it must degrade to {} too, not propagate as a traceback that stops the ask from ever
+    being filed. Unlike missing (silently normal), an unreadable file is an operator problem,
+    so it gets one stderr line -- everything in OSError except FileNotFoundError itself.
+    """
     try:
         raw = store.read_text()
     except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        print(f"authority.py: {store}: {type(exc).__name__}: {exc} -- treating as no grants",
+              file=sys.stderr)
         return {}
     try:
         data = json.loads(raw)
