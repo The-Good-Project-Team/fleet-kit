@@ -5242,6 +5242,40 @@ def _every_hold_hands_the_pr_to_the_fleet():
         "a hold still tells the PR it needs a human; say which automatic lane owns it"
     )
 
+def _account_page_names_its_instance_and_reads_the_pool_verdict():
+    """A page must say WHICH fleet is down, and not guess at the cause.
+
+    Three instances (philanthropy, sketchyswap, fleet-kit-server-fleet) run
+    account_health_check.sh on the same 5-minute cron into the same channel. Every alert it
+    sent was instance-anonymous -- "No fleet account has succeeded in 34+ minutes" -- and
+    CONTAINER_NAME defaults to "philanthropy", so an unattributed page is actively
+    misleading, not merely vague. Live on 2026-09-11: sketchyswap's gmail pool hit its
+    weekly cap and the page read as a philanthropy outage.
+
+    It also asserted "looks like a real account/auth problem" whenever DNS resolved, while
+    the pool had already written its own verdict one line up:
+    `gated:exhausted_until_<epoch>` -- a known quota gate with a known reset, which no
+    re-auth fixes. Sending a human to hunt a fault that does not exist is worse than
+    silence.
+    """
+    src = (ROOT / "scripts" / "account_health_check.sh").read_text()
+
+    sites = re.findall(r'_ntfy "([^"]+)"', src)
+    assert sites, "no _ntfy call sites found; this check's assumptions are stale"
+    unnamed = [t for t in sites if "$CONTAINER_NAME" not in t]
+    assert not unnamed, (
+        f"alert title(s) carry no instance: {unnamed} -- three instances page into one "
+        f"channel and CONTAINER_NAME defaults to philanthropy, so an unnamed page is "
+        f"attributed to the wrong fleet")
+
+    assert "exhausted_until_" in src, (
+        "the page never reads the pool's own gate verdict, so a weekly-quota gate is "
+        "reported as an auth problem")
+    assert 'tail -20 "$POOL_LOG"' in src, (
+        "the gate verdict is scanned from $last_line only -- it is logged per-account, one "
+        "line ABOVE the 'ALL accounts failed' summary, so the last line never carries it")
+    assert "QUOTA-GATED" in src, "no quota-gate branch in the diagnosis"
+
 def _judge_judy_ticks_dont_overlap():
     """A judge-judy cron tick that overlaps a still-running prior tick must not review.
 
@@ -12214,6 +12248,7 @@ if __name__ == "__main__":
     check("git_pull_guard.sh self-heals a stray branch and leaves a normal pull unchanged", _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged)
     check("git_pull_guard.sh serializes via a lock on the .git directory", _git_pull_guard_serializes_via_a_lock_on_the_git_directory)
     check("every judge-judy hold hands the PR to the fleet", _every_hold_hands_the_pr_to_the_fleet)
+    check("an account page names its instance and reads the pool verdict", _account_page_names_its_instance_and_reads_the_pool_verdict)
     check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
     check("a judge-judy BLOCK pulls the PR out of the merge queue (fleet-kit#523)",
           _judge_block_pulls_the_pr_out_of_the_queue)
