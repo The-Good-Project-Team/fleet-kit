@@ -246,11 +246,17 @@ spawns exactly one). Your job, in order:
    #  "bet_by_issue": {"<n>": "<the bet's text>", ...}}
    ```
    Use `ranked`'s order (not the order you queried in) when you build step 3's `--items` for
-   `fanout.py`. No plan file, or one with no bets named yet, degrades silently to the input
-   order — that's a supported state, not a problem. A genuinely malformed plan file (no `##
-   Bets` heading at all, or unreadable) also degrades to the input order, but prints one
-   diagnostic line to stderr naming the file and the problem — surface that line in your
-   report if it appears rather than swallowing it.
+   `fanout.py`. No plan file, or one with no bets named yet, degrades to the input order — a
+   fully supported state, not a problem for RANKING. But say so every pass in your OWN report,
+   not just when something is wrong (fk#559 VP review fix 3): name the path `plan_rank.py`
+   resolved (`plan_path_for_instance()`, printable via `python3 -c "import sys;
+   sys.path.insert(0,'/fleet-kit/scripts'); import plan_rank;
+   print(plan_rank.plan_path_for_instance())"`) and whether the plan tier was active
+   (`bet_by_issue` non-empty) or inactive this pass. An inert tier that never says it is inert
+   is indistinguishable from a working one to anyone reading your report. A genuinely malformed
+   plan file (no `## Bets` heading at all, or unreadable) also degrades to the input order, but
+   prints one diagnostic line to stderr naming the file and the problem — surface that line in
+   your report too rather than swallowing it.
 
    Collect each candidate's `fleet:complexity-<1-10>` label with its number — marie's size
    estimate, what makes packing possible. No label means treat it as a 5 (median), never free.

@@ -39,6 +39,9 @@ import sys
 import urllib.error
 import urllib.request
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import plan_rank  # noqa: E402 -- one shared plan-path resolver, fk#559 VP review fix 1
+
 KIT = pathlib.Path(__file__).resolve().parent.parent
 LOG_DIR = pathlib.Path(os.environ.get("FLEET_LOG_DIR") or os.path.expanduser("~/Library/Logs/fleet-kit"))
 ALERT_ENV = pathlib.Path(os.environ.get("FLEET_ALERT_ENV") or "/home/ubuntu/.config/maxx/alert.env")
@@ -165,13 +168,18 @@ def number_header() -> str:
 
 
 def plan_bets() -> str:
+    """The plan file's `## Bets` section, raw markdown. Same resolver `plan_rank.py` uses for
+    gru's build-eligibility tier (fk#559 VP review fix 1: the two must agree on one path, not
+    each guess a different one). No plan file at that path is a supported state, not silence --
+    an explicit `no plan file at <path> yet` marker (fix 4) so the charter can say so instead of
+    inventing a project."""
     repo = os.environ.get("FLEET_REPO", "/repo")
-    for cand in (pathlib.Path(repo) / "docs" / "plan" / "philanthropy.md",):
-        if cand.exists():
-            text = cand.read_text(errors="ignore")
-            i = text.find("## Bets")
-            return text[i:i + 6000] if i != -1 else text[:6000]
-    return ""
+    path = plan_rank.plan_path_for_instance(root=pathlib.Path(repo))
+    if not path.exists():
+        return f"no plan file at {path} yet"
+    text = path.read_text(errors="ignore")
+    i = text.find("## Bets")
+    return text[i:i + 6000] if i != -1 else text[:6000]
 
 
 def _section(text: str, heading_re: str, cap: int = 3500) -> str:
@@ -200,7 +208,7 @@ def vision(repo: str | None = None) -> dict:
         out["key_results"] = _section(text, r"key results\b", 3500)
         out["where_we_are"] = _section(text, r"where we actually are", 2000)
         out["source"] = "docs/VISION.md"
-    plan = pathlib.Path(repo) / "docs" / "plan" / "philanthropy.md"
+    plan = plan_rank.plan_path_for_instance(root=pathlib.Path(repo))
     if plan.exists():
         m = re.search(r"^Checkpoints on the number:.*$", plan.read_text(errors="ignore"), re.M)
         out["checkpoints"] = m.group(0) if m else ""

@@ -4119,27 +4119,41 @@ def _messenger_brief_restates_the_strategy_and_points_at_pages():
     strategy table and forbids a project step without a link.
     """
     import importlib.util
+    import os as _os
     spec = importlib.util.spec_from_file_location("messenger_brief", ROOT / "scripts" / "messenger_brief.py")
     mb = importlib.util.module_from_spec(spec); spec.loader.exec_module(mb)
-    with tempfile.TemporaryDirectory() as tmp:
-        repo = Path(tmp)
-        (repo / "docs" / "plan").mkdir(parents=True)
-        (repo / "docs" / "VISION.md").write_text(
-            "# Vision\n\n## The OKR\n\n### Objective\n\nEvery org finds its people.\n\n"
-            "### Where we actually are (prod)\n\n| KR1 | 12 |\n\n### Key results\n\n*KR1 -- supply.* text\n*KR2 -- interactions.* text\n\n### How this changes ranking\n\nx\n")
-        (repo / "docs" / "plan" / "philanthropy.md").write_text("# plan\n\n## Bets\n\n1. one\n\nCheckpoints on the number: $1,000 MRR by 2026-10-31 · $25,000 by 2026-12-31.\n\n## What the fleet does not do\n")
-        api = repo / "src" / "philanthropy" / "api"; api.mkdir(parents=True)
-        (api / "routes_admin.py").write_text(
-            '@router.get("/superadmin")\ndef a(): pass\n@router.get("/superadmin/audience")\ndef b(): pass\n'
-            '@router.get("/superadmin/api/fleet")\ndef c(): pass\n@router.get("/superadmin/downloads/{download_id}")\ndef d(): pass\n'
-            '@router.get("/network/hq")\ndef e(): pass\n@router.get("/superadmin/x.csv")\ndef f(): pass\n')
-        v = mb.vision(str(repo))
-        assert v["objective"].startswith("Every org finds its people"), v
-        assert "KR2 -- interactions" in v["key_results"] and "How this changes" not in v["key_results"], v["key_results"]
-        assert "| KR1 | 12 |" in v["where_we_are"]
-        assert v["checkpoints"].startswith("Checkpoints on the number: $1,000")
-        pg = mb.pages(str(repo))
-        assert pg == ["https://philanthropy.org/network/hq", "https://philanthropy.org/superadmin", "https://philanthropy.org/superadmin/audience"], pg
+    # fk#559 VP review fix 1/2: vision() now resolves the plan path through plan_rank's shared,
+    # slot-suffix-stripping resolver instead of a hardcoded "philanthropy.md" -- pin the env this
+    # test runs under so the resolved path is deterministic regardless of the host's own
+    # FLEET_INSTANCE_NAME (this box's is a live "...-green" deploy-slot name).
+    old_instance = _os.environ.get("FLEET_INSTANCE_NAME")
+    _os.environ["FLEET_INSTANCE_NAME"] = "philanthropy"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "docs" / "plan").mkdir(parents=True)
+            (repo / "docs" / "VISION.md").write_text(
+                "# Vision\n\n## The OKR\n\n### Objective\n\nEvery org finds its people.\n\n"
+                "### Where we actually are (prod)\n\n| KR1 | 12 |\n\n### Key results\n\n*KR1 -- supply.* text\n*KR2 -- interactions.* text\n\n### How this changes ranking\n\nx\n")
+            mb.plan_rank.plan_path_for_instance(root=repo).write_text(
+                "# plan\n\n## Bets\n\n1. one\n\nCheckpoints on the number: $1,000 MRR by 2026-10-31 · $25,000 by 2026-12-31.\n\n## What the fleet does not do\n")
+            api = repo / "src" / "philanthropy" / "api"; api.mkdir(parents=True)
+            (api / "routes_admin.py").write_text(
+                '@router.get("/superadmin")\ndef a(): pass\n@router.get("/superadmin/audience")\ndef b(): pass\n'
+                '@router.get("/superadmin/api/fleet")\ndef c(): pass\n@router.get("/superadmin/downloads/{download_id}")\ndef d(): pass\n'
+                '@router.get("/network/hq")\ndef e(): pass\n@router.get("/superadmin/x.csv")\ndef f(): pass\n')
+            v = mb.vision(str(repo))
+            assert v["objective"].startswith("Every org finds its people"), v
+            assert "KR2 -- interactions" in v["key_results"] and "How this changes" not in v["key_results"], v["key_results"]
+            assert "| KR1 | 12 |" in v["where_we_are"]
+            assert v["checkpoints"].startswith("Checkpoints on the number: $1,000")
+            pg = mb.pages(str(repo))
+            assert pg == ["https://philanthropy.org/network/hq", "https://philanthropy.org/superadmin", "https://philanthropy.org/superadmin/audience"], pg
+    finally:
+        if old_instance is None:
+            _os.environ.pop("FLEET_INSTANCE_NAME", None)
+        else:
+            _os.environ["FLEET_INSTANCE_NAME"] = old_instance
     charter = (ROOT / "members" / "dont-shoot-the-messenger" / "dont-shoot-the-messenger.md").read_text()
     assert "## Where we are against the plan" in charter and "Where to look" in charter and "Done looks like" in charter
     assert "Words you may not use" in charter and "gh issue create" in charter

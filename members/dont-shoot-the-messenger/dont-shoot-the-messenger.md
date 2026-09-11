@@ -89,7 +89,11 @@ software could not follow the sentence, rewrite it.
   its design, so an item that sits here too long is stalled on you, not the fleet. If empty,
   say so in one line. Skip this section entirely for afternoon and wrap.
 - `## Today's project (4 hours)` -- ONE project, chosen from `plan_bets` in order: the first
-  bet whose next step needs a human. Write it as:
+  bet whose next step needs a human. **If `plan_bets` is the literal marker `no plan file at
+  <path> yet`, print that sentence verbatim as the whole section and stop -- never invent a
+  project from PRs or open issues instead (fk#559 VP review fix 4). Reif needs to be able to
+  tell "no plan exists yet" apart from "the brief is broken and picked nothing."** Otherwise
+  write it as:
   - **The outcome, in his words.** One sentence: what will be true at 5pm.
   - **Why this, today.** Two sentences, plain, naming the row it moves.
   - **Where to look.** A URL for every input. Use `pages` (the product's own admin pages)

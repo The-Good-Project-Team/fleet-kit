@@ -4,10 +4,12 @@ Run: python3 scripts/test_plan_rank.py
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 KIT = Path(__file__).resolve().parent.parent
@@ -97,6 +99,50 @@ class RankEndToEndTests(unittest.TestCase):
             path.write_text("## Bets\nJust prose, no issue numbers.\n")
             out = pr.rank([456, 123], plan_path=path)
             self.assertEqual(out["ranked"], [456, 123])
+
+
+class ResolveInstanceTests(unittest.TestCase):
+    """fk#559 VP review fix 2: FLEET_INSTANCE_NAME carries a deploy-slot suffix live."""
+
+    def _resolve(self, value):
+        with unittest.mock.patch.dict("os.environ", {"FLEET_INSTANCE_NAME": value}, clear=False):
+            return pr.resolve_instance()
+
+    def test_plain_name_is_unchanged(self):
+        self.assertEqual(self._resolve("fleet-kit-server-fleet"), "fleet-kit-server-fleet")
+
+    def test_green_suffix_is_stripped(self):
+        self.assertEqual(self._resolve("fleet-kit-server-fleet-green"), "fleet-kit-server-fleet")
+
+    def test_blue_suffix_is_stripped(self):
+        self.assertEqual(self._resolve("fleet-kit-server-fleet-blue"), "fleet-kit-server-fleet")
+
+    def test_missing_env_falls_back_to_default(self):
+        env = dict(os.environ)
+        env.pop("FLEET_INSTANCE_NAME", None)
+        with unittest.mock.patch.dict("os.environ", env, clear=True):
+            self.assertEqual(pr.resolve_instance(), "default")
+
+
+class SchemaExampleTests(unittest.TestCase):
+    """fk#559 VP review fix 5: parse the real checked-in example, not a fixture string."""
+
+    def test_example_plan_file_parses_per_the_schema(self):
+        example = KIT / "docs" / "plan" / "EXAMPLE.md"
+        self.assertTrue(example.exists(), f"{example} must exist per docs/plan/SCHEMA.md")
+        out = pr.rank([4495, 4494, 999], plan_path=example)
+        self.assertEqual(out["ranked"], [4495, 4494, 999])
+        self.assertIn("4494", out["bet_by_issue"])
+        self.assertIn("4495", out["bet_by_issue"])
+        self.assertNotIn("999", out["bet_by_issue"])
+
+    def test_example_plan_file_names_a_multi_issue_bet(self):
+        example = KIT / "docs" / "plan" / "EXAMPLE.md"
+        bets, diagnostic = pr.load_bets(example)
+        self.assertIsNone(diagnostic)
+        multi = [b for b in bets if len(b["issues"]) > 1]
+        self.assertTrue(multi, "EXAMPLE.md should keep its two-issue bet line")
+        self.assertEqual(multi[0]["issues"], [10, 11])
 
 
 class CliTests(unittest.TestCase):
