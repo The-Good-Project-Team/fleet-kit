@@ -35,7 +35,7 @@ import authority  # noqa: E402  -- gh#771: class -> level, so filing twice doesn
 
 ASK_COLUMNS = (
     "id", "member", "why", "unblocks", "proposed", "status",
-    "answer", "answered_by", "answered_at", "filed_at", "class",
+    "answer", "answered_by", "answered_at", "filed_at", "class", "summary",
 )
 
 # gh#558 finding 4 ("the ladder has nothing to climb"): gh#650 narrowed this to just the two
@@ -56,7 +56,7 @@ def file_ask(conn, member: str, why: str, unblocks: str | None = None,
             proposed: str | None = None, filed_at: float | None = None,
             ask_class: str | None = None, status: str = "open",
             answer: str | None = None, answered_by: str | None = None,
-            answered_at: float | None = None) -> int:
+            answered_at: float | None = None, summary: str | None = None) -> int:
     """Insert a new ask. Returns its id.
 
     Defaults record a fresh open ask exactly as before this function grew the last five
@@ -64,12 +64,16 @@ def file_ask(conn, member: str, why: str, unblocks: str | None = None,
     (status='act'/'notice', answer/answered_by/answered_at already filled in at filing time,
     see `main()`'s `file` command below) rather than duplicating the SQL, so `list_asks` and
     `answer_ask` never need to special-case how a row got its answered fields.
+
+    `summary` (gh#877) is optional and defaults to NULL -- a caller that never passes it files
+    exactly the row it always has (AC2); Home's renderer falls back to truncating `why` when
+    this is NULL (AC5).
     """
     cur = conn.execute(
         "INSERT INTO asks (member, why, unblocks, proposed, status, answer, answered_by, "
-        "answered_at, filed_at, class) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "answered_at, filed_at, class, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (member, why, unblocks, proposed, status, answer, answered_by, answered_at,
-         filed_at if filed_at is not None else time.time(), ask_class),
+         filed_at if filed_at is not None else time.time(), ask_class, summary),
     )
     conn.commit()
     return cur.lastrowid
@@ -153,6 +157,10 @@ def main(argv=None) -> int:
     p_file.add_argument("--why", required=True, help="why this needs a human")
     p_file.add_argument("--unblocks", help="what gets unstuck once this is answered")
     p_file.add_argument("--proposed", help="a proposed answer, if the filer has one")
+    p_file.add_argument("--summary",
+                        help="one plain-language sentence for a reader who has never seen the "
+                             "codebase -- no identifiers, paths, or exit codes; Home renders "
+                             "this as the card's headline instead of --why (optional)")
     p_file.add_argument("--class", dest="ask_class", choices=ASK_CLASSES,
                         help=f"ask class: {', '.join(ASK_CLASSES)} (optional)")
     p_file.add_argument("--no-notify", action="store_true",
@@ -186,8 +194,10 @@ def main(argv=None) -> int:
             return 1
 
         if level == "ask":
-            # AC1: no grant (or no --class at all) -- byte-identical to every prior release.
-            ask_id = file_ask(conn, a.member, a.why, a.unblocks, a.proposed, ask_class=a.ask_class)
+            # AC1: no grant (or no --class at all) -- byte-identical to every prior release
+            # (plus AC2's summary=None when --summary is omitted).
+            ask_id = file_ask(conn, a.member, a.why, a.unblocks, a.proposed, ask_class=a.ask_class,
+                              summary=a.summary)
             print(f"ask {ask_id} filed")
             if not a.no_notify:
                 _notify(a.member, ask_id, a.why)
@@ -202,7 +212,7 @@ def main(argv=None) -> int:
             answer = f"authorized under standing grant by {granted_by} (class={a.ask_class})"
             ask_id = file_ask(conn, a.member, a.why, a.unblocks, a.proposed, ask_class=a.ask_class,
                               status="act", answer=answer, answered_by=f"authority:{granted_by}",
-                              answered_at=now, filed_at=now)
+                              answered_at=now, filed_at=now, summary=a.summary)
             print(f"ask {ask_id} authorized -- standing grant by {granted_by} "
                   f"(class={a.ask_class}); proceed")
             return 0
@@ -212,7 +222,7 @@ def main(argv=None) -> int:
         answer = f"notice filed under standing act-and-tell grant by {granted_by} (class={a.ask_class})"
         ask_id = file_ask(conn, a.member, a.why, a.unblocks, a.proposed, ask_class=a.ask_class,
                           status="notice", answer=answer, answered_by=f"authority:{granted_by}",
-                          answered_at=now, filed_at=now)
+                          answered_at=now, filed_at=now, summary=a.summary)
         print(f"ask {ask_id} filed as notice -- act-and-tell grant by {granted_by} "
               f"(class={a.ask_class}); proceed")
         return 0

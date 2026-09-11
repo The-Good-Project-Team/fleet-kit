@@ -118,7 +118,13 @@ CREATE TABLE IF NOT EXISTS asks (
   -- either (see ask.py's ASK_CLASSES for the enforced set); quality_gate.py's `Design
   -- approved:` check reads the id out of the comment text, not this column, so a NULL class
   -- here never blocks that gate.
-  class        TEXT
+  class        TEXT,
+  -- gh#877: a distinct one-sentence plain-language headline, authored by the filing member,
+  -- for Home's "NEEDS YOU" card -- separate from `why`, which stays the full engineering
+  -- trace. NULL for every ask filed before this column existed (and for any filer that still
+  -- omits it); Home falls back to truncating `why` exactly as it did before this column, so a
+  -- NULL here never breaks rendering.
+  summary      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_asks_status ON asks(status);
 CREATE INDEX IF NOT EXISTS idx_asks_member ON asks(member);
@@ -151,6 +157,7 @@ _ADD_COLUMNS = (
 # name and every caller of it (selftest.py, the migration below) is hardcoded to `runs`.
 _ASK_ADD_COLUMNS = (
     ("class", "TEXT"),
+    ("summary", "TEXT"),
 )
 
 

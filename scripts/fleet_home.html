@@ -313,11 +313,17 @@ function renderAsks() {
   if (!asks.length) { $('asks').innerHTML = `<div class="empty">Nothing waiting on you.</div>`; return; }
   $('asks').innerHTML = asks.map(a => {
     const why = String(a.why || '');
-    const headline = askHeadline(why);
+    // gh#877: a filer-authored plain-language summary, when present, IS the headline and the
+    // full `why` trace moves behind the tap -- even if `why` alone would have fit on one line,
+    // per AC4. No summary (every ask filed before this column existed, or a filer that still
+    // omits it) falls back to askHeadline()'s truncation exactly as before, per AC5.
+    const summary = String(a.summary || '').trim();
+    const headline = summary || askHeadline(why);
+    const detail = summary ? why : (headline !== why ? why : null);
     return `
     <div class="ask" data-id="${esc(a.id)}">
       <div class="why">${esc(headline)}</div>
-      ${headline !== why ? `<details class="why-detail"><summary>full detail</summary><div class="why-full">${esc(why)}</div></details>` : ''}
+      ${detail !== null ? `<details class="why-detail"><summary>full detail</summary><div class="why-full">${esc(detail)}</div></details>` : ''}
       <div class="prop">${a.member ? `from ${esc(a.member)} · ` : ''}${a.unblocks ? `unblocks ${esc(a.unblocks)} · ` : ''}${a.proposed ? `fleet proposes: ${esc(a.proposed)}` : 'no proposed answer'}</div>
       <div class="btns">
         ${a.proposed ? `<button class="primary" data-act="answer" data-answer="${esc(a.proposed)}">Yes, do that</button>` : ''}
