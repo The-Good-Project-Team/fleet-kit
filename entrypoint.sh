@@ -152,7 +152,7 @@ case "${1:-cron-foreground}" in
     # `FLEET_CRON_MEMBERS=judge-judy`) to schedule only those. dont-shoot-the-messenger is
     # excluded from ALL_CRON_MEMBERS because its own cron line is already commented out
     # (archived 2026-09-04, see below) -- re-enabling it is a separate step from this mechanism.
-    ALL_CRON_MEMBERS=(the-fixer judge-judy gru jefe roomba marie datta dumbledore sentry librarian librarian-scrub red dont-shoot-the-messenger)
+    ALL_CRON_MEMBERS=(the-fixer judge-judy gru jefe roomba marie datta dumbledore sentry librarian librarian-scrub red custodian dont-shoot-the-messenger)
     if [ -n "${FLEET_CRON_MEMBERS:-}" ]; then
       IFS=', ' read -ra RESOLVED_CRON_MEMBERS <<< "$FLEET_CRON_MEMBERS"
       for m in "${RESOLVED_CRON_MEMBERS[@]}"; do
@@ -276,6 +276,16 @@ case "${1:-cron-foreground}" in
       fi
       if cron_member_enabled roomba; then
         echo "41 * * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh roomba >> $LOG_DIR/roomba.log 2>&1"
+      fi
+      # custodian (fk#807): one surface per job, driven DOWN. ui_surfaces.py's ratchet already
+      # stops a job GAINING a surface; nothing drove an existing count down, so duplication sat
+      # frozen at 26 extra surfaces across 19 jobs (ops-hud 6, collections 4, org-console 4).
+      # Daily, not hourly: a retirement is a human-reviewed PR, so filing more than one a day
+      # just builds the backlog this member exists to prevent -- it files ONE item and refuses
+      # to file again while that one is open. kind: shell, so it costs no model turns.
+      # 13:17 is off the hourly grids above and well clear of gru's :03 fanout.
+      if cron_member_enabled custodian; then
+        echo "17 13 * * * root export GH_TOKEN=\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh custodian >> $LOG_DIR/custodian.log 2>&1"
       fi
       # librarian (philanthropy#4439, nonprofit-atlas#4410 seq:1): scrubs credential-shaped
       # strings out of session transcripts and enforces the compress/drop retention window.

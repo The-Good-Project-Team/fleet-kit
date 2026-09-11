@@ -1,0 +1,47 @@
+{
+  "name": "custodian",
+  "emoji": "🧹",
+  "lane": "product",
+  "mandate": {
+    "target": "every job in the product serves exactly one surface: each pass measures surface debt (sum of surfaces-minus-one per job), files ONE retirement for the worst job, and refreshes the fleet's rework numbers -- as a script, not a model pass. Reif, 2026-09-10: 'a system that keeps looking at our surfaces, and either removing them or perfecting them... it needs to be recursive.'",
+    "checklist": [
+      "surface_debt.py --json computes the debt; only the worst job is filed",
+      "no item is filed while a previous surface-debt item is open -- one retirement at a time",
+      "rework_collect.py refreshes the cache so fleet_metrics rework_pct/churn_ratio resolve for dumbledore's ledger",
+      "a job at 0 surfaces is UNCLASSIFIED, never counted as clean (superadmin reads 0 across 25 route files)",
+      "never edits product code and never retires a surface itself -- it files the work behind a PR and CI"
+    ],
+    "limits": {
+      "timeout_s": 600
+    },
+    "escalation": "surface_debt.py cannot run (route walker broken, app deps missing) -- report QUIET with the error and file nothing. A debt this member cannot compute is never guessed at: a fabricated 0 reads as 'no duplication left' and would silently retire the whole loop."
+  },
+  "schedule": {
+    "daily_at": "13:17"
+  },
+  "timeout_s": 600,
+  "enabled": true,
+  "llm": {
+    "model": "sonnet",
+    "prompt_file": "custodian.md",
+    "tools": {
+      "allow": [
+        "none"
+      ],
+      "deny": [
+        "Read",
+        "Edit",
+        "Write",
+        "Bash",
+        "Grep",
+        "Glob",
+        "WebFetch"
+      ]
+    },
+    "runner": "members/custodian/custodian.sh"
+  },
+  "report": {
+    "vision_link": "optional"
+  },
+  "kind": "shell"
+}
