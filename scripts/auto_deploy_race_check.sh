@@ -78,16 +78,18 @@ SANCTIONED_ABORT_THRESHOLD="${FLEET_AUTO_DEPLOY_SANCTIONED_ABORT_THRESHOLD:-3}"
 # host access needed to actually clear it. account_health_check.sh/path_health_check.sh/
 # tunnel_health_check.sh already page a human via ntfy.sh for exactly this shape of "sanctioned,
 # detected, but needs a human's hands" condition -- this wires the same precedent in here.
-# Optional, not required (unlike account_health_check.sh's hard `:?`): this script runs on
-# every instance's container per its own header, and not every instance may have NTFY_TOPIC
-# provisioned yet, so a missing topic degrades to log-only (today's behavior), never a hard
-# failure of the detector itself.
+#
+# gh#815: this used to hand-roll its own curl-to-ntfy.sh call, gated on a single env var with
+# no fallback and no retry -- a stuck deploy on a box with NTFY_TOPIC unset paged nobody for
+# ~24h while 35 consecutive ticks wrote a perfect diagnosis into a file nobody reads. Now routes
+# through fleet_alert.sh, the fleet's shared delivery helper: email + ntfy (whichever is
+# configured) plus an undelivered-alarm retry queue, same as every other health check in this
+# repo. fleet_alert.sh itself never exits non-zero and degrades to a log-only queue entry when
+# NO channel is configured, so the "never a hard failure of the detector" guarantee still holds
+# without this function re-implementing it.
 _ntfy_page() {
-    [ -n "${NTFY_TOPIC:-}" ] || { echo "[auto_deploy_race_check] NTFY_TOPIC unset -- alert stayed log-only: $2" >> "$ALERT_LOG"; return 0; }
-    curl -sf -o /dev/null \
-        -H "Title: $1" -H "Priority: $3" -H "Tags: warning" \
-        -d "$2" "https://ntfy.sh/$NTFY_TOPIC" \
-        || echo "[auto_deploy_race_check] WARNING: ntfy POST failed, could not page: $2" >> "$ALERT_LOG"
+    bash "$KIT_DIR/scripts/fleet_alert.sh" "$1" "$2" "$3" \
+        || echo "[auto_deploy_race_check] WARNING: fleet_alert.sh failed, could not page: $2" >> "$ALERT_LOG"
 }
 
 # gh#255's original detector: an unrecognized (SUSPECT_REGEX) git failure in auto_deploy.cron.log.

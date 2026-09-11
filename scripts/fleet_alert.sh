@@ -28,12 +28,15 @@
 # been taught severity keeps its previous behavior exactly, so this change cannot mute an
 # alarm that has not been deliberately reclassified.
 #
-# Usage: fleet_alert.sh "<title>" "<body>"
+# Usage: fleet_alert.sh "<title>" "<body>" ["<ntfy priority>"]
 #        fleet_alert.sh --check <name> --problem <key> --severity transient|degraded|critical \
 #                       [--handle <h>] "<title>" "<body>"
 #        fleet_alert.sh --resolve --check <name> [--problem <key>] "<title>" "<body>"
 # Config: /home/ubuntu/.config/maxx/alert.env  (RESEND_API_KEY, MAIL_FROM, FLEET_ALERT_EMAIL)
 #         NTFY_TOPIC from the caller's env or anchor.env.
+# Priority is optional and ntfy-only (gh#815): omit it and the ntfy leg sends with no Priority
+# header at all, same as every caller before gh#815 -- adding this could not change any of
+# their behavior since none of them pass a 3rd positional arg.
 set -uo pipefail
 
 KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -52,6 +55,7 @@ done
 
 TITLE="${1:?usage: fleet_alert.sh [--check X --problem Y --severity Z] <title> <body>}"
 BODY="${2:-}"
+PRIORITY="${3:-}"
 LOG="${FLEET_ALERT_LOG:-${FLEET_LOG_DIR:-/home/ubuntu/fleet-kit-logs}/fleet_alert.log}"
 # Alarms neither channel could deliver wait here and are retried at the front of the NEXT
 # call (fleet-kit#512). See the drain block below for why.
@@ -127,18 +131,20 @@ print(json.dumps({
   log "email FAILED http=$code -- $(head -c 150 /tmp/fa_resp.json 2>/dev/null)"; rm -f /tmp/fa_resp.json; return 1
 }
 
-_send_ntfy() {  # <title> <body> -> 0 on delivered
+_send_ntfy() {  # <title> <body> [priority] -> 0 on delivered
   [ -n "${NTFY_TOPIC:-}" ] || return 1
-  if curl -sf -o /dev/null --max-time 15 -H "Title: $1" -d "$2" "https://ntfy.sh/$NTFY_TOPIC"; then
+  local prio_hdr=()
+  [ -n "${3:-}" ] && prio_hdr=(-H "Priority: $3")
+  if curl -sf -o /dev/null --max-time 15 -H "Title: $1" "${prio_hdr[@]}" -d "$2" "https://ntfy.sh/$NTFY_TOPIC"; then
     return 0
   fi
   log "ntfy FAILED -- $1"; return 1
 }
 
-_deliver() {  # <title> <body> -> 0 if ANY channel took it
+_deliver() {  # <title> <body> [priority] -> 0 if ANY channel took it
   local any=1
   _send_email "$1" "$2" && any=0
-  _send_ntfy "$1" "$2" && any=0
+  _send_ntfy "$1" "$2" "${3:-}" && any=0
   return $any
 }
 
@@ -162,7 +168,7 @@ if [ -s "$QUEUE" ]; then
   mv "$_keep" "$QUEUE"
 fi
 
-if _deliver "$TITLE" "$BODY"; then
+if _deliver "$TITLE" "$BODY" "$PRIORITY"; then
   exit 0
 fi
 log "ALARM UNDELIVERED (queued for retry) -- $TITLE :: $BODY"

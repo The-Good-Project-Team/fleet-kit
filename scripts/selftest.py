@@ -3780,10 +3780,23 @@ def _auto_deploy_race_check_escalates_after_three_consecutive_sanctioned_aborts(
     script_path = ROOT / "scripts" / "auto_deploy_race_check.sh"
 
     def run(log_dir):
+        # gh#815: escalation now routes through fleet_alert.sh, which sources the REAL
+        # /home/ubuntu/.config/maxx/alert.env if it exists on the box running this suite --
+        # stubbing curl (not the credentials) is what actually keeps this test from reaching
+        # Resend/ntfy.sh for real, same belt-and-braces reasoning as
+        # _fleet_alert_queues_an_undelivered_alarm_and_retries_it_next_call. FLEET_LOG_DIR is
+        # already a tmp dir, so fleet_alert.sh's own log/queue land there too (its defaults
+        # derive from FLEET_LOG_DIR), not under a real host path.
+        bin_dir = log_dir.parent / "bin"
+        if not bin_dir.exists():
+            bin_dir.mkdir()
+            (bin_dir / "curl").write_text("#!/bin/bash\nexit 1\n")
+            (bin_dir / "curl").chmod(0o755)
         proc = subprocess.run(
             ["bash", str(script_path)],
             capture_output=True, text=True, timeout=30,
-            env={"FLEET_LOG_DIR": str(log_dir), "FLEET_ENV_FILE": "/nonexistent", "PATH": "/usr/bin:/bin"},
+            env={"FLEET_LOG_DIR": str(log_dir), "FLEET_ENV_FILE": "/nonexistent",
+                 "PATH": f"{bin_dir}:/usr/bin:/bin"},
         )
         assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
 
@@ -3830,6 +3843,95 @@ def _auto_deploy_race_check_escalates_after_three_consecutive_sanctioned_aborts(
         # threshold) -- independent counters, not a shared one.
         assert "working tree dirty has recurred" not in alerts, \
             "the diverged-HEAD counter bled into the dirty-tree counter (or vice versa) -- they must be independent"
+
+
+def _auto_deploy_race_check_pages_through_fleet_alert_sh():
+    """gh#815 AC1/AC2/AC5: the stuck-deploy escalation must route through fleet_alert.sh, the
+    fleet's shared delivery helper (email + ntfy + an undelivered-retry queue), instead of
+    hand-rolling its own curl-to-ntfy.sh call gated on a single env var with no fallback and no
+    retry. Fired for real on 2026-09-10: NTFY_TOPIC was unset, the detector escalated a stuck
+    diverged-HEAD deploy 35 times over ~24h, and every one landed only in a log file nobody
+    reads.
+
+    Proves the route by forcing NTFY_TOPIC empty and RESEND_API_KEY/FLEET_ALERT_EMAIL present
+    (AC1): the alert must be delivered by fleet_alert.sh's OWN email leg, recorded in
+    fleet_alert.sh's OWN log ('email OK') and hitting curl with a resend.com URL -- something
+    the old hand-rolled ntfy-only pager could never produce (it had no email leg at all, so
+    this assertion fails against main before the fix). Also proves AC2: when both legs are made
+    unreachable, the alarm lands in fleet_alert.sh's undelivered queue instead of being dropped
+    with only a log line.
+    """
+    import subprocess
+    script_path = ROOT / "scripts" / "auto_deploy_race_check.sh"
+
+    def _fixture(tmp):
+        tmp = Path(tmp)
+        log_dir = tmp / "logs"
+        log_dir.mkdir()
+        (log_dir / "auto_deploy.log").write_text(
+            "[2026-09-10 21:45:02 UTC] ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged.\n"
+            "[2026-09-10 21:50:02 UTC] ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged.\n"
+            "[2026-09-10 21:55:02 UTC] ABORT: local HEAD is not an ancestor of origin/main -- host checkout has diverged. Resolve by hand, not auto-merged.\n"
+        )
+        return tmp, log_dir
+
+    # AC1 + AC5: email is the only reachable leg, and it must be fleet_alert.sh delivering it.
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp, log_dir = _fixture(tmp)
+        bin_dir = tmp / "bin"; bin_dir.mkdir()
+        curl_calls = tmp / "curl_calls.log"
+        # A fake Resend that succeeds, and a fake ntfy.sh that doesn't -- so if the email leg
+        # fires at all, it's proof fleet_alert.sh (not a hand-rolled ntfy-only call) is running.
+        (bin_dir / "curl").write_text(
+            '#!/bin/bash\n'
+            'echo "$@" >> "$CURL_CALLS"\n'
+            'for a in "$@"; do case "$a" in *resend.com*) echo 200; exit 0;; esac; done\n'
+            'exit 1\n'
+        )
+        (bin_dir / "curl").chmod(0o755)
+        fleet_alert_log = tmp / "fleet_alert.log"
+        env = {
+            "FLEET_LOG_DIR": str(log_dir), "FLEET_ENV_FILE": "/nonexistent",
+            "NTFY_TOPIC": "", "RESEND_API_KEY": "fake-key", "FLEET_ALERT_EMAIL": "ops@example.com",
+            "FLEET_ALERT_LOG": str(fleet_alert_log), "FLEET_ALERT_QUEUE": str(tmp / "queue.jsonl"),
+            "CURL_CALLS": str(curl_calls), "PATH": f"{bin_dir}:/usr/bin:/bin",
+        }
+        proc = subprocess.run(["bash", str(script_path)], capture_output=True, text=True,
+                              timeout=30, env=env)
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        assert fleet_alert_log.exists() and "email OK" in fleet_alert_log.read_text(), (
+            "the escalation did not route through fleet_alert.sh's email leg -- fleet_alert.log: "
+            f"{fleet_alert_log.read_text() if fleet_alert_log.exists() else None!r}"
+        )
+        assert "resend.com" in curl_calls.read_text(), (
+            "fleet_alert.sh's email leg was never invoked -- the check is still curling "
+            "ntfy.sh directly instead of going through the shared helper"
+        )
+
+    # AC2: both legs unreachable -> queued for retry, not dropped with only a log line.
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp, log_dir = _fixture(tmp)
+        bin_dir = tmp / "bin"; bin_dir.mkdir()
+        (bin_dir / "curl").write_text("#!/bin/bash\nexit 1\n")
+        (bin_dir / "curl").chmod(0o755)
+        fleet_alert_log = tmp / "fleet_alert.log"
+        queue = tmp / "queue.jsonl"
+        env = {
+            "FLEET_LOG_DIR": str(log_dir), "FLEET_ENV_FILE": "/nonexistent",
+            "NTFY_TOPIC": "", "RESEND_API_KEY": "", "FLEET_ALERT_EMAIL": "",
+            "FLEET_ALERT_LOG": str(fleet_alert_log), "FLEET_ALERT_QUEUE": str(queue),
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+        }
+        proc = subprocess.run(["bash", str(script_path)], capture_output=True, text=True,
+                              timeout=30, env=env)
+        assert proc.returncode == 0, f"bash failed: {proc.stderr.strip()[:300]}"
+        # auto_deploy_race_check.sh's own alert log line must still be written (AC4) --
+        # unchanged by which delivery path picked it up.
+        assert "SANCTIONED ABORT stuck" in (log_dir / "auto_deploy_race_alerts.log").read_text()
+        assert queue.exists() and queue.read_text().strip(), (
+            "both legs unreachable but the alarm was not queued for retry by fleet_alert.sh -- "
+            f"queue: {queue.read_text() if queue.exists() else None!r}"
+        )
 
 
 def _auto_deploy_race_check_does_not_alert_on_a_self_resolving_sanctioned_abort():
@@ -14004,6 +14106,7 @@ if __name__ == "__main__":
     check("the-fixer's diag wiring adds no new write capability (gh#4546 AC3)", _fixer_prod_diag_wiring_adds_no_new_write_capability)
     check("auto-deploy race check dedups an already-recorded line", _auto_deploy_race_check_dedups_an_already_recorded_line)
     check("auto-deploy race check escalates after 3 consecutive sanctioned ABORTs", _auto_deploy_race_check_escalates_after_three_consecutive_sanctioned_aborts)
+    check("auto-deploy race check pages through fleet_alert.sh, not a hand-rolled ntfy call (gh#815)", _auto_deploy_race_check_pages_through_fleet_alert_sh)
     check("auto-deploy race check does not alert on a self-resolving sanctioned ABORT", _auto_deploy_race_check_does_not_alert_on_a_self_resolving_sanctioned_abort)
     check("every entrypoint.sh-scheduled incident script is actually scheduled (gh#378, table-driven)", _every_entrypoint_scheduled_script_is_actually_scheduled)
     check("entrypoint.sh's crontab-wide env block forwards FLEET_SHARE_DIR (gh#569)", _entrypoint_crontab_forwards_fleet_share_dir)
