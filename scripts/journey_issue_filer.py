@@ -302,15 +302,26 @@ def ensure_label(runner=_run, profile: "Profile" = SENTRY) -> "str | None":
     return msg
 
 
-def find_open_issue(key: str, runner=_run, profile: "Profile" = SENTRY, repo: str | None = None) -> int | None:
+# gh#914: a `gh issue list` call that fails (rate limit, network blip) is NOT the same fact as
+# "the board genuinely has no open issue for this key" -- the caller must be able to tell them
+# apart. Confirmed live 2026-09-11: a transient rate-limit error made every lookup this call
+# made return the same bare None a real no-match returns, and the caller (process(), which
+# branches on truthiness alone) filed #911/#912 as brand-new duplicates of #814/#884.
+LOOKUP_FAILED = object()
+
+
+def find_open_issue(key: str, runner=_run, profile: "Profile" = SENTRY, repo: str | None = None):
+    """Returns an issue number on a match, None if the lookup ran cleanly and found none, or
+    LOOKUP_FAILED if the lookup itself could not be trusted -- see gh#914 note above."""
     rc, out = runner(build_list_cmd(profile.label, repo))
     if rc != 0:
         print(f"journey_issue_filer: list FAILED: {out[:300]}", file=sys.stderr)
-        return None
+        return LOOKUP_FAILED
     try:
         issues = json.loads(out)
     except json.JSONDecodeError:
-        return None
+        print(f"journey_issue_filer: list returned unparsable output: {out[:300]}", file=sys.stderr)
+        return LOOKUP_FAILED
     for issue in issues:
         if key_from_body(issue.get("body") or "", profile.marker_tag) == key:
             return issue.get("number")
@@ -349,7 +360,7 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
     run = results.get("run", "")
     deploy_sha = results.get("deploy_sha", "")
     state = load_state(state_path)
-    summary = {"filed": [], "commented": [], "closed": [], "errors": []}
+    summary = {"filed": [], "commented": [], "closed": [], "skipped": [], "errors": []}
 
     if not dry_run:
         label_error = ensure_label(runner, profile)
@@ -365,6 +376,12 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
             failing_viewports = sorted({viewport_of(j["id"]) for j, _ in failing})
             journey, step = failing[0]
             existing = None if dry_run else find_open_issue(key, runner, profile, repo)
+            if existing is LOOKUP_FAILED:
+                # gh#914: the dedup lookup could not run -- filing now risks a duplicate of an
+                # issue we simply couldn't see. Skip this key, don't guess, and say so in the
+                # summary rather than under "filed" or lumped into unrelated "errors".
+                summary["skipped"].append({"key": key, "reason": "lookup_failed"})
+                continue
             if existing:
                 note = f"Recurred again on run `{run}` (sha `{deploy_sha or 'unknown'}`)."
                 if not dry_run:
@@ -400,6 +417,9 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
             # original per-step `elif status == "pass":` guard did.
             state[key] = {"last_pass_sha": deploy_sha, "last_pass_run": run}
             existing = None if dry_run else find_open_issue(key, runner, profile, repo)
+            if existing is LOOKUP_FAILED:
+                summary["skipped"].append({"key": key, "reason": "lookup_failed"})
+                continue
             if existing:
                 note = f"Passing again as of run `{run}` (sha `{deploy_sha or 'unknown'}`)."
                 if not dry_run:
@@ -425,6 +445,14 @@ def main() -> int:
 
     summary = process(args.results, args.state, dry_run=args.dry_run, profile=PROFILES[args.profile], repo=args.repo)
     print(json.dumps(summary, indent=2))
+    if summary.get("skipped"):
+        # gh#914 AC7: a reader of the pass report must be able to see the run was degraded
+        # (the board couldn't be read for some keys), not just a clean-looking summary.
+        print(
+            f"journey_issue_filer: {len(summary['skipped'])} key(s) skipped -- "
+            "dedup lookup failed, board could not be read",
+            file=sys.stderr,
+        )
     return 1 if summary["errors"] else 0
 
 
