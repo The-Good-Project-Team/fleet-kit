@@ -11885,6 +11885,87 @@ def _fleet_env_example_documents_the_fixer_prod_visibility_vars_gh728():
     )
 
 
+class _FakeGhForIncidentTarget:
+    """Same shape as test_prod_incident.py's own FakeGh -- replays `gh issue {create,list,
+    comment}` against an in-memory store, no network."""
+
+    def __init__(self):
+        self.issues = {}
+        self._next = 1
+
+    def __call__(self, cmd):
+        sub = cmd[2]
+        if sub == "create":
+            title, body = cmd[cmd.index("--title") + 1], cmd[cmd.index("--body") + 1]
+            n = self._next
+            self._next += 1
+            self.issues[n] = {"title": title, "body": body, "open": True, "comments": []}
+            return 0, f"https://github.com/x/y/issues/{n}"
+        if sub == "list":
+            return 0, json.dumps(
+                [{"number": n, "body": v["body"]} for n, v in self.issues.items() if v["open"]])
+        if sub == "comment":
+            n = int(cmd[3])
+            self.issues[n]["comments"].append(cmd[cmd.index("--body") + 1])
+            return 0, "commented"
+        raise AssertionError(f"unexpected gh subcommand: {sub}")
+
+
+def _prod_incident_target_discriminator_separates_concurrent_outages_gh836():
+    """gh#836 AC1-6: find_open_incident()/file_or_update_incident() matched on the shared
+    INCIDENT_MARKER alone, so two distinct, concurrently-open outages (two different failing
+    URLs) collapsed onto one issue -- the second silently invisible. On main (pre-gh#836) this
+    check fails at the AC1/AC2 assertions below: find_open_incident() took no `target` argument
+    at all."""
+    import prod_incident as pi
+    A, B = "https://a.example/health", "https://b.example/health"
+
+    # AC1 + AC5: two open, differently-targeted incidents each resolve to their OWN issue,
+    # regardless of the order `gh` returns them in.
+    gh = _FakeGhForIncidentTarget()
+    a, created_a = pi.file_or_update_incident("acme/prod", "t-a", "b-a", ["incident"], run=gh, target=A)
+    b, created_b = pi.file_or_update_incident("acme/prod", "t-b", "b-b", ["incident"], run=gh, target=B)
+    assert created_a and created_b, "two distinct targets must each create their own issue"
+    assert pi.find_open_incident("acme/prod", target=B, run=gh) == b
+    assert pi.find_open_incident("acme/prod", target=A, run=gh) == a
+    gh.issues = dict(reversed(list(gh.issues.items())))
+    assert pi.find_open_incident("acme/prod", target=B, run=gh) == b, "order must not matter"
+    assert pi.find_open_incident("acme/prod", target=A, run=gh) == a, "order must not matter"
+
+    # AC2: an open incident for A only -- filing for B creates a NEW issue, comments on neither.
+    gh2 = _FakeGhForIncidentTarget()
+    a2, _ = pi.file_or_update_incident("acme/prod", "t-a", "b-a", ["incident"], run=gh2, target=A)
+    b2, created_b2 = pi.file_or_update_incident("acme/prod", "t-b", "b-b", ["incident"], run=gh2, target=B)
+    assert created_b2, "filing a second target must create a new issue, not comment on A's"
+    assert a2 != b2
+    assert gh2.issues[a2]["comments"] == [], "A's issue must not receive B's comment"
+
+    # AC3: refiling the SAME target comments on its own issue, creates nothing (gh#728 fix 3's
+    # race behaviour, unchanged).
+    number, created_again = pi.file_or_update_incident(
+        "acme/prod", "t-a2", "b-a2", ["incident"], run=gh2, target=A)
+    assert not created_again and number == a2
+    assert len(gh2.issues) == 2, "same-target refiling must never create a new issue"
+
+    # AC4: no open incident at all -- creates one, as before.
+    gh3 = _FakeGhForIncidentTarget()
+    number3, created3 = pi.file_or_update_incident("acme/prod", "t", "b", ["incident"], run=gh3, target=A)
+    assert created3 and len(gh3.issues) == 1
+
+    # AC6: a legacy issue (marker present, no discriminator recorded) never crashes a
+    # target-aware lookup. Chosen behaviour, stated here and in gh#836's PR body: it matches ANY
+    # target -- the alternative (never matching) would silently break gh#728 fix 3's
+    # cross-member race dedup for a caller with no discriminator to supply (fixer_fire_path.py
+    # today), which gh#836's PRD lists as a non-goal to preserve.
+    gh4 = _FakeGhForIncidentTarget()
+    gh4.issues[1] = {"title": "legacy", "open": True,
+                      "body": f"pre-gh836 incident\n\n{pi.INCIDENT_MARKER}", "comments": []}
+    gh4._next = 2
+    assert pi.find_open_incident("acme/prod", target=A, run=gh4) == 1
+    number4, created4 = pi.file_or_update_incident("acme/prod", "t", "b", ["incident"], run=gh4, target=B)
+    assert not created4 and number4 == 1 and len(gh4.issues) == 1
+
+
 def _maxx_share_ceiling_holds_a_5h_block_ahead_of_pace_gh781():
     """Reif 2026-09-09: "it's the session limits we should respect." Live that day the
     hourly ceiling stayed 0.015-0.048 while the account burned 77% of its 5h window in the
@@ -13605,6 +13686,7 @@ if __name__ == "__main__":
     check("worktree_guard_hook with no cwd field behaves exactly as before gh#834 (backward compat)", _worktree_guard_no_cwd_field_behaves_exactly_as_before_gh834)
 
     check("fleet.env.example documents FIXER_HEALTH_URL/PAGE_URL/PROD_DIAG_DRIVER/FLEET_DEPLOY_DRIVER with examples and what breaks empty (gh#728 AC8)", _fleet_env_example_documents_the_fixer_prod_visibility_vars_gh728)
+    check("prod_incident find_open_incident/file_or_update_incident take a target so two concurrent outages for different URLs no longer collapse onto one issue (gh#836 AC1-6)", _prod_incident_target_discriminator_separates_concurrent_outages_gh836)
 
 
     check("control_plane shares split the pool by weight; paused weight flows to the rest (gh#759 AC2)", _control_plane_shares_sum_to_pool_and_paused_weight_flows_gh759)
