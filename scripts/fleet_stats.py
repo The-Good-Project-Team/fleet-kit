@@ -45,7 +45,10 @@ def _now_epoch() -> float:
 # these dilute "is the fleet actually doing good work" if counted alongside real attempts, so
 # signal rate is computed over executed runs only. Every other status counts as executed,
 # including reported_nothing/quiet -- those DID run, they just found nothing worth reporting.
-_NOT_EXECUTED_STATUSES = {"budget_declined", "paced", "timed_out", "killed"}
+# fk#819: `heartbeat` joins them for a different reason -- a liveness ping (gh#267) did not
+# attempt a unit of work at all, so counting it alongside real attempts made signal rate
+# track how empty the PR queue was (measured 2026-09-11: 94 of 106 "executed" runs).
+_NOT_EXECUTED_STATUSES = {"budget_declined", "paced", "timed_out", "killed", "heartbeat"}
 _OK_STATUSES = {"ok"}
 
 # gh#186: split of _NOT_EXECUTED_STATUSES by whether the run spent anything before it stopped.
