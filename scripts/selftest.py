@@ -12341,6 +12341,58 @@ def _worktree_guard_no_cwd_field_behaves_exactly_as_before_gh834():
         assert p.returncode == 0, f"expected allow (exit 0) with no cwd field, got {p.returncode}: {p.stderr}"
 
 
+def _worktree_guard_blocks_compound_cd_then_checkout_gh894():
+    """gh#894 AC1: PR #893's cwd fallback only ever saw payload['cwd'], the Bash tool's
+    PRE-EXECUTION cwd ($WT_PATH per run_member.sh) -- it never re-derived cwd from a `cd`
+    living INSIDE the command string. `cd $REPO && git checkout <branch>` is one command with
+    cwd=$WT_PATH at dispatch time, but the git verb actually runs against $REPO. judge-judy
+    rated this high on PR #893 because its own comment (and AC2's incident theory) claimed this
+    exact shape was already closed; it was not."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        cmd = f"cd {repo} && git checkout somebranch"
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=wt)
+        assert p.returncode == 2, f"expected block (exit 2) for {cmd!r} with payload cwd=wt, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_blocks_compound_cd_semicolon_and_quoted_path_gh894():
+    """gh#894 AC2: the same compound shape must be caught with `;` instead of `&&`, and with the
+    cd target quoted -- both are ordinary shell forms of the identical incident, not edge cases
+    the fix gets to skip."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        for cmd in (f"cd {repo}; git reset --hard", f'cd "{repo}" && git reset --hard'):
+            p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=wt)
+            assert p.returncode == 2, f"expected block (exit 2) for {cmd!r} with payload cwd=wt, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_allows_compound_cd_into_own_worktree_gh894():
+    """gh#894 AC3: `cd $WT_PATH && git checkout <branch>` -- a `cd` into this pass's OWN
+    worktree -- must stay allowed. The fix must not block a pass from working in its own
+    worktree, which is the failure mode that would make members route around the hook."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        cmd = f"cd {wt} && git checkout somebranch"
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=wt)
+        assert p.returncode == 0, f"expected allow (exit 0) for {cmd!r}, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_allows_compound_cd_to_unrelated_dir_with_readonly_verb_gh894():
+    """gh#894 AC4: `cd /tmp && git status` -- a non-mutating verb, and a cd target outside the
+    repo entirely -- must stay allowed, same as any other read-only reference."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        cmd = "cd /tmp && git status"
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=repo)
+        assert p.returncode == 0, f"expected allow (exit 0) for {cmd!r}, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_dash_c_still_wins_over_compound_cd_gh894():
+    """gh#894 AC5: `cd $REPO && git -C $WT_PATH commit -m x` -- an explicit `-C` still wins over
+    the cwd inference, unchanged from before this fix. `-C` already redirects git elsewhere and
+    is fully handled by the existing loop."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        cmd = f"cd {repo} && git -C {wt} commit -m x"
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=repo)
+        assert p.returncode == 0, f"expected allow (exit 0) for {cmd!r}, got {p.returncode}: {p.stderr}"
+
+
 def _worktree_guard_install_merges_without_clobbering_existing_settings_gh592():
     """gh#592: the installer must MERGE into an operator's existing settings.json (their own
     hooks/permissions survive) and must be idempotent -- a second run against the same file
@@ -14473,6 +14525,11 @@ if __name__ == "__main__":
     check("worktree_guard_hook allows an explicit `git -C $WT_PATH` override even when cwd is $REPO (gh#834)", _worktree_guard_allows_dash_c_wt_override_even_with_cwd_repo_gh834)
     check("worktree_guard_hook allows read-only git commands via cwd=$REPO (gh#834)", _worktree_guard_allows_readonly_bash_by_cwd_gh834)
     check("worktree_guard_hook with no cwd field behaves exactly as before gh#834 (backward compat)", _worktree_guard_no_cwd_field_behaves_exactly_as_before_gh834)
+    check("worktree_guard_hook blocks `cd $REPO && git checkout <branch>` as one compound command (gh#894 AC1)", _worktree_guard_blocks_compound_cd_then_checkout_gh894)
+    check("worktree_guard_hook blocks the compound cd shape with `;` and with a quoted path (gh#894 AC2)", _worktree_guard_blocks_compound_cd_semicolon_and_quoted_path_gh894)
+    check("worktree_guard_hook allows `cd $WT_PATH && git checkout <branch>` into its own worktree (gh#894 AC3)", _worktree_guard_allows_compound_cd_into_own_worktree_gh894)
+    check("worktree_guard_hook allows `cd /tmp && git status`, non-mutating verb outside the repo (gh#894 AC4)", _worktree_guard_allows_compound_cd_to_unrelated_dir_with_readonly_verb_gh894)
+    check("worktree_guard_hook still allows an explicit `git -C $WT_PATH` override after a compound cd (gh#894 AC5)", _worktree_guard_dash_c_still_wins_over_compound_cd_gh894)
 
     check("fleet.env.example documents FIXER_HEALTH_URL/PAGE_URL/PROD_DIAG_DRIVER/FLEET_DEPLOY_DRIVER with examples and what breaks empty (gh#728 AC8)", _fleet_env_example_documents_the_fixer_prod_visibility_vars_gh728)
     check("prod_incident find_open_incident/file_or_update_incident take a target so two concurrent outages for different URLs no longer collapse onto one issue (gh#836 AC1-6)", _prod_incident_target_discriminator_separates_concurrent_outages_gh836)
