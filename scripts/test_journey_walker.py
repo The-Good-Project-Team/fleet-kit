@@ -770,6 +770,8 @@ CONSOLE_ERROR_HTML = "<!doctype html><html><body><h1>ok</h1>" \
 PAGE_ERROR_HTML = "<!doctype html><html><body><h1>ok</h1>" \
     "<script>throw new Error('uncaught boom');</script></body></html>"
 CLEAN_HTML = "<!doctype html><html><body><h1>ok</h1></body></html>"
+UNRELATED_SUBRESOURCE_HTML = "<!doctype html><html><body><h1>ok</h1>" \
+    "<img src=\"/missing-analytics.png\"></body></html>"
 
 
 class ConsoleAndPageErrorFailStepTest(unittest.TestCase):
@@ -832,6 +834,110 @@ class ConsoleAndPageErrorFailStepTest(unittest.TestCase):
         ctx.step(1, lambda: None)
         self.assertEqual(ctx.results[0]["status"], "fail")
         self.assertEqual(ctx.results[1]["status"], "pass")
+        ctx.close()
+
+
+class ConsoleErrorRelatednessTest(unittest.TestCase):
+    """gh#890's classifier in isolation, no browser needed -- locks the pure decision table so a
+    future edit can't silently change it. SubResourceConsoleNoiseDoesNotFailStepTest below proves
+    real Chromium actually shapes messages this way; this just pins the rule itself."""
+
+    def test_pageerror_always_related(self):
+        self.assertTrue(jw.JourneyCtx._console_error_is_related(
+            "pageerror", "TypeError: boom", None, "https://x/page"))
+
+    def test_subresource_failure_unrelated_when_url_differs_from_target(self):
+        self.assertFalse(jw.JourneyCtx._console_error_is_related(
+            "console", "Failed to load resource: the server responded with a status of 404 ()",
+            "https://x/favicon.ico", "https://x/page"))
+
+    def test_subresource_failure_related_when_it_is_the_target_itself(self):
+        self.assertTrue(jw.JourneyCtx._console_error_is_related(
+            "console", "Failed to load resource: the server responded with a status of 404 ()",
+            "https://x/page", "https://x/page"))
+
+    def test_subresource_failure_unrelated_when_target_url_unknown(self):
+        self.assertFalse(jw.JourneyCtx._console_error_is_related(
+            "console", "Failed to load resource: net::ERR_FAILED", "https://x/beacon", None))
+
+    def test_page_authored_console_error_always_related(self):
+        self.assertTrue(jw.JourneyCtx._console_error_is_related(
+            "console", "boom from the page", "https://x/page", "https://x/page"))
+
+
+class SubResourceConsoleNoiseDoesNotFailStepTest(unittest.TestCase):
+    """gh#890: a step whose own assertion passes must not be flipped to fail by an unrelated
+    sub-resource console error (a favicon, a blocked beacon -- anything that 404s or fails but
+    isn't the step's own navigation target). A console error ABOUT the target itself, or an
+    uncaught page exception, must still fail it (AC3) -- and the evidence must survive on the
+    record either way (AC2). Real Playwright, real chromium, real HTTP fixtures, same shape
+    ConsoleAndPageErrorFailStepTest uses."""
+
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+
+        cls.unrelated = _StaticPageServer(UNRELATED_SUBRESOURCE_HTML)
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+        cls.unrelated.stop()
+
+    def _ctx(self, steps=1):
+        journey = {"id": "probe", "name": "Probe",
+                   "steps": [{"action": "a", "observable_result": "o"} for _ in range(steps)]}
+        users = jw.TestUsers(env={})
+        return jw.JourneyCtx(journey, "desktop", {"width": 1280, "height": 800}, self.browser,
+                              users, Path("/tmp"), "subresource-run")
+
+    def test_unrelated_subresource_404_does_not_fail_a_passing_step(self):
+        # AC1 + AC5: today's real case (step 0 of search-and-open-org) -- the step's own
+        # assertion never threw, the only console error was an unrelated sub-resource 404.
+        ctx = self._ctx()
+        page = ctx.page()
+        ctx.step(0, lambda: page.goto(self.unrelated.base_url + "/", timeout=10000))
+        self.assertEqual(ctx.results[0]["status"], "pass")
+        ctx.close()
+
+    def test_unrelated_console_error_is_still_recorded_on_the_result(self):
+        # AC2: the evidence survives on the emitted record even though the verdict doesn't flip.
+        ctx = self._ctx()
+        page = ctx.page()
+        ctx.step(0, lambda: page.goto(self.unrelated.base_url + "/", timeout=10000))
+        self.assertEqual(ctx.results[0]["status"], "pass")
+        self.assertIn("console_errors", ctx.results[0])
+        self.assertTrue(any("missing-analytics.png" in e for e in ctx.results[0]["console_errors"]))
+        ctx.close()
+
+    def test_failed_request_to_the_steps_own_target_still_fails(self):
+        # AC3: a "Failed to load resource" for the step's OWN navigation target -- not a
+        # sub-resource -- means the page itself never loaded, and must not be waved through.
+        ctx = self._ctx()
+        page = ctx.page()
+        ctx.step(0, lambda: page.goto(self.unrelated.base_url + "/does-not-exist", timeout=10000))
+        self.assertEqual(ctx.results[0]["status"], "fail")
+        self.assertIn("404", ctx.results[0]["detail"])
+        ctx.close()
+
+    def test_assertion_failure_detail_excludes_console_suffix(self):
+        # AC4: when the assertion itself throws, `detail` stays its own message only -- an
+        # unrelated console error firing in the same step must not be appended to it, though it
+        # still lands in `console_errors` (unchanged, locked so this fix can't regress it).
+        ctx = self._ctx()
+        page = ctx.page()
+
+        def boom():
+            page.goto(self.unrelated.base_url + "/", timeout=10000)
+            raise AssertionError("real assertion failure")
+
+        ctx.step(0, boom)
+        self.assertEqual(ctx.results[0]["status"], "fail")
+        self.assertEqual(ctx.results[0]["detail"], "AssertionError: real assertion failure")
+        self.assertIn("console_errors", ctx.results[0])
         ctx.close()
 
 
