@@ -195,7 +195,9 @@ async function load() {
   const [number, plan, asks, members, kpi, spend, build] = await restP;
   STATE = { ...STATE, number, plan, asks: asks.asks || [], members: members.members || [],
             kpi: Object.fromEntries((kpi.kpi || []).map(k => [k.member, k])), spend, build };
-  render();
+  // renderBanner()/renderHealth() already ran above off the critical wave and don't depend on
+  // anything this second wave adds -- rerunning them here would just rewrite the same DOM twice.
+  renderNumber(); renderAsks(); renderAgents(); renderLanded(); renderFoot();
 }
 
 // gh#553 fix 1: /api/budget_preview shells out to a real remote meter (maxx_reader.py) and can
@@ -295,11 +297,13 @@ function renderHealth() {
 // AGENTS list (measured 8,497px). A short headline now stands in front, and the full text is
 // one tap away instead of always on screen.
 function askHeadline(why) {
-  const s = String(why || '');
-  if (s.length <= 110) return s;
-  const cut = s.slice(0, 110);
+  // Array.from() splits on code points, not UTF-16 code units, so a 110-char cut never
+  // lands in the middle of a surrogate pair (e.g. an emoji) the way String.slice() can.
+  const chars = Array.from(String(why || ''));
+  if (chars.length <= 110) return chars.join('');
+  const cut = chars.slice(0, 110);
   const sp = cut.lastIndexOf(' ');
-  return (sp > 40 ? cut.slice(0, sp) : cut) + '…';
+  return (sp > 40 ? cut.slice(0, sp) : cut).join('') + '…';
 }
 
 function renderAsks() {
