@@ -4954,7 +4954,7 @@ def _auto_deploy_sh_records_branch_on_every_tick_only_when_it_changes_gh834():
 
         proc, log_text = tick()
         assert proc.returncode == 0, f"first tick on a clean checkout must exit 0: {proc.stderr[:300]}"
-        assert "BRANCH: host checkout moved from '<unknown, first tick>' to 'main'" in log_text, \
+        assert "BRANCH: starting to track the host checkout's branch -- currently 'main'" in log_text, \
             f"first tick must record the starting branch: {log_text!r}"
 
         proc, log_text_2 = tick()
@@ -4976,6 +4976,75 @@ def _auto_deploy_sh_records_branch_on_every_tick_only_when_it_changes_gh834():
         # silent success, and not a new failure mode introduced by the branch-recording check.
         assert proc.returncode == 1, f"still on a stray branch must still ABORT: {proc.stderr[:300]}"
         assert "ABORT: local HEAD is not an ancestor of origin/main" in log_text_3
+
+
+def _auto_deploy_sh_distinguishes_never_recorded_from_detached_head_gh834():
+    """gh#834: `git branch --show-current` prints nothing on a detached HEAD, which stringifies
+    to the same "" the branch-state file's own missing-file default uses -- collapsing "never
+    recorded yet" and "on no branch" into one sentinel made an early draft mislabel a LATER
+    detached->main transition as if it were the very first tick. A fresh checkout starting
+    detached must log the tracking-start line (not a "moved from" line, since there is nothing
+    to have moved from), and a later move onto 'main' must correctly read as a real transition,
+    not a phantom "first tick" once more."""
+    import os
+    import subprocess
+
+    def git(repo, *args, check=True):
+        return subprocess.run(["git", *args], cwd=repo, check=check, capture_output=True, text=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        origin = tmp / "origin.git"
+        git(tmp, "init", "-q", "--bare", "-b", "main", str(origin))
+
+        seed = tmp / "seed"
+        seed.mkdir()
+        for cmd in (("init", "-q", "-b", "main"), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(seed, *cmd)
+        git(seed, "remote", "add", "origin", str(origin))
+        scripts_dir = seed / "scripts"
+        scripts_dir.mkdir()
+        (scripts_dir / "auto_deploy.sh").write_text((ROOT / "scripts" / "auto_deploy.sh").read_text())
+        (scripts_dir / "auto_deploy.sh").chmod(0o755)
+        (scripts_dir / "deploy.sh").write_text('#!/bin/bash\necho "DEPLOY STUB OK"\n')
+        (scripts_dir / "deploy.sh").chmod(0o755)
+        (seed / "foo.txt").write_text("v1\n")
+        git(seed, "add", "-A")
+        git(seed, "commit", "-q", "-m", "init")
+        git(seed, "push", "-q", "origin", "main")
+        main_sha = git(seed, "rev-parse", "HEAD").stdout.strip()
+
+        checkout = tmp / "host"
+        git(tmp, "clone", "-q", str(origin), str(checkout))
+        for cmd in (("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(checkout, *cmd)
+        git(checkout, "checkout", "-q", main_sha)  # detached HEAD, same commit as main
+
+        instance = tmp / "instance"
+        instance.mkdir()
+        home = tmp / "home"
+        env = dict(os.environ)
+        env.pop("FLEET_AUTO_DEPLOY_SELF_HEAL", None)
+        env.update(HOME=str(home), FLEET_LOG_DIR=str(tmp / "logs"), FLEET_CONTAINER_NAME="test",
+                   FLEET_INSTANCE_DIR=str(instance), FLEET_DEPLOY_MIN_INTERVAL_S="0")
+        log_file = tmp / "logs" / "auto_deploy.log"
+
+        def tick():
+            proc = subprocess.run(["bash", str(checkout / "scripts" / "auto_deploy.sh")], cwd=checkout,
+                                  env=env, capture_output=True, text=True, timeout=30)
+            return proc, (log_file.read_text() if log_file.exists() else "")
+
+        proc, log_text = tick()
+        assert proc.returncode == 0, f"detached-but-content-identical first tick must exit 0: {proc.stderr[:300]}"
+        assert "BRANCH: starting to track the host checkout's branch -- currently '<detached HEAD>'" in log_text, \
+            f"a detached first tick must log the tracking-start line, not be silently skipped: {log_text!r}"
+        assert "moved from" not in log_text, f"nothing has moved yet on tick 1: {log_text!r}"
+
+        git(checkout, "checkout", "-q", "main")
+        proc, log_text_2 = tick()
+        assert proc.returncode == 0, f"tick 2 must exit 0: {proc.stderr[:300]}"
+        assert "BRANCH: host checkout moved from '<detached HEAD>' to 'main'" in log_text_2, \
+            f"moving off detached HEAD must read as a real transition, not a phantom first tick: {log_text_2!r}"
 
 
 def _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged():
@@ -12028,6 +12097,7 @@ if __name__ == "__main__":
     check("auto_deploy.sh self-heals a content-identical diverged HEAD only when opted in", _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in)
     check("auto_deploy.sh names branch and SHAs on a diverged-HEAD ABORT (gh#372)", _auto_deploy_sh_names_branch_and_shas_on_diverged_abort_gh372)
     check("auto_deploy.sh records the host checkout's branch every tick, logs only the transition (gh#834 AC4/AC6)", _auto_deploy_sh_records_branch_on_every_tick_only_when_it_changes_gh834)
+    check("auto_deploy.sh distinguishes 'never recorded' from 'detached HEAD' when tracking the branch (gh#834)", _auto_deploy_sh_distinguishes_never_recorded_from_detached_head_gh834)
     check("auto_deploy.sh coalesces main moves inside FLEET_DEPLOY_MIN_INTERVAL_S (gh#619)", _auto_deploy_sh_coalesces_main_moves_inside_the_min_interval)
     check("deploy.sh kicks one gru pass right after cutover (gh#622)", _deploy_sh_kicks_a_gru_pass_right_after_cutover)
     check("deploy.sh kicks one sentry pass right after cutover (gh#663)", _deploy_sh_kicks_a_sentry_pass_right_after_cutover)
