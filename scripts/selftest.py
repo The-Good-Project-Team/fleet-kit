@@ -4334,6 +4334,8 @@ def _messenger_is_scheduled_three_times_a_day_with_creds_mounted():
     assert spec["enabled"] is True and spec["llm"]["model"] == "sonnet"
     charter = (ROOT / "members" / "dont-shoot-the-messenger" / "dont-shoot-the-messenger.md").read_text()
     assert "messenger_brief.py collect" in charter and "messenger_brief.py send" in charter and "Afternoon block" in charter
+
+
 def _run_args_strips_green_suffix_from_instance_name_gh780():
     """gh#780: `run_args()` used to bake `FLEET_INSTANCE_NAME="$name"` verbatim, so the green
     candidate (started as `run_args "${CONTAINER}-green" ...`) booted permanently believing its
