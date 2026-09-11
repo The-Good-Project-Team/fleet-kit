@@ -341,22 +341,31 @@ access in this sandbox" and, on that belief, left an acceptance criterion unveri
 open, or a `Fixes` downgraded to `Part of`. The belief was wrong, and each one costs a later pass
 the entire investigation again — the exact rework §14 and the closes-gate exist to stop.
 
-**Before you write that you could not verify something live, run one of these against your
-instance's production URL (`grep -i "Production URL" CLAUDE.md`) and report what it returned:**
+**Before you write that you could not verify something live, check for your instance's
+production URL and, if one is configured, run one of these against it and report what it
+returned:**
+
+`run_member.sh` sources `fleet.env` with `set -a` before launching any member (not just
+the-fixer), so `$FIXER_PAGE_URL` (and `$FIXER_HEALTH_URL`) are already in your environment
+whenever this instance has them set — `echo "$FIXER_PAGE_URL"` is the whole lookup, no grep,
+no CLAUDE.md field (this repo has none).
 
 ```
-curl -sL --max-time 20 -A Mozilla/5.0 -o /tmp/p.html -w '%{http_code}\n' <PROD_URL>
+curl -sL --max-time 20 -A Mozilla/5.0 -o /tmp/p.html -w '%{http_code}\n' "$FIXER_PAGE_URL"
 python3 -c "from playwright.sync_api import sync_playwright
+import os
 with sync_playwright() as p:
-    b=p.chromium.launch(); pg=b.new_page(); r=pg.goto('<PROD_URL>')
+    b=p.chromium.launch(); pg=b.new_page(); r=pg.goto(os.environ['FIXER_PAGE_URL'])
     print(r.status, pg.title()); pg.screenshot(path='/tmp/prod.png'); b.close()"
 ```
 
 Two real limits remain, and only these: a bare apex host may sit behind a bot challenge and answer
 403 (`https://philanthropy.org/` does) — use a real content path; and WRITE access, the prod
 database and a prod shell are genuinely absent (the-fixer's `FIXER_PROD_DIAG_DRIVER` only). Read
-is not. If the fetch genuinely fails, say what you ran and what came back — that is a finding
-worth filing. A blanket "sandbox has no prod" with no command behind it is not.
+is not. If `$FIXER_PAGE_URL` is unset, this instance genuinely has no known production URL to
+check — say that plainly, that is not the belief this section is correcting. If the fetch
+genuinely fails, say what you ran and what came back — that is a finding worth filing. A blanket
+"sandbox has no prod" with no command behind it is not.
 
 ## 11. Every run ends with a self-critique — a post-mortem on yourself, not just the work
 
