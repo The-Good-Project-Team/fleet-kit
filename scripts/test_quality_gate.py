@@ -86,6 +86,28 @@ class GateTests(unittest.TestCase):
         self.assertEqual(out["eligible"], [])
         self.assertNotIn("stale_prd", out["dropped"][0])
 
+    def test_epic_is_never_eligible_even_with_label_and_gwt(self):
+        """fk#634 fix 1: a tracking-only epic must not become buildable just because marie
+        stamps a quality: label on it to clear this same gate (confirmed live 2026-09-11:
+        5 of 6 open epics read eligible=True before this guard)."""
+        out = qg.gate_candidates([item(13, ["fleet:epic", "quality:solid"], comments=[GWT])])
+        self.assertEqual(out["eligible"], [])
+        self.assertIn("fleet:epic", out["dropped"][0]["reason"])
+
+    def test_epic_without_quality_label_still_reads_epic_reason_not_label_reason(self):
+        out = qg.gate_candidates([item(14, ["fleet:epic"])])
+        self.assertEqual(out["eligible"], [])
+        self.assertIn("tracking-only parent", out["dropped"][0]["reason"])
+
+    def test_reif_priority_epic_is_also_not_eligible_via_this_gate(self):
+        """gru.md:123's Reif-priority-epic path never calls this gate on the epic itself --
+        it reads the epic to find child issues/PRs instead -- but if it ever were called,
+        the epic guard must still hold rather than special-casing fleet:reif-priority."""
+        out = qg.gate_candidates([item(15, ["fleet:reif-priority", "fleet:epic", "quality:solid"],
+                                       comments=[GWT])])
+        self.assertEqual(out["eligible"], [])
+        self.assertIn("fleet:epic", out["dropped"][0]["reason"])
+
     def test_real_decision_ask_approval_clears_the_world_class_gate(self):
         """gh#650 AC8: a `class=decision` ask filed through ask.py, answered, and referenced
         from a real `Design approved: <id>` comment must clear this gate end to end -- not
