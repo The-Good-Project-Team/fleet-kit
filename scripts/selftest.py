@@ -5136,6 +5136,43 @@ def _judge_block_pulls_the_pr_out_of_the_queue():
     assert 'gh pr merge "$PR" --auto' in src[approve:block], "an approve must (re)arm auto-merge"
 
 
+def _every_hold_hands_the_pr_to_the_fleet():
+    """A PR judge-judy holds must have an owner that is not a person (gh#5290).
+
+    judge-judy has two paths that dequeue a PR and disarm auto-merge. The BLOCK path files a
+    priority-high fix item, so gru's normal build lane picks it up. The ERROR path -- the
+    reviewer's OWN output failing schema validation N times -- used to dequeue, disarm, post a
+    comment saying "it will not merge until a human intervenes", and file nothing.
+
+    That is strictly worse than a block. A block means the diff is wrong and the author has
+    something to fix. An error means the REVIEWER malfunctioned, so the author has no signal
+    and no reason to push again, and the PR sits held with nobody watching until a person
+    happens to look. Reif's standing rule: a human unwedging a failed merge is never the
+    design.
+
+    Both holds must file, and no hold may promise a human.
+    """
+    src = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
+
+    err = src.index("failed schema validation ${N}x in a row")
+    block = src.index('FIX_TITLE="fix: PR #$PR failed code review"')
+    assert err < block, "layout changed; this check's slicing assumptions no longer hold"
+
+    err_path, block_path = src[err:block], src[block:]
+    for name, chunk in (("errored-review", err_path), ("blocked-review", block_path)):
+        assert "board_github.py" in chunk and "--priority high" in chunk, (
+            f"the {name} path dequeues the PR but files no backlog item, so the hold has no "
+            f"owner and only a human can clear it"
+        )
+        assert "Vision-link" in chunk, (
+            f"the {name} path files without a Vision-link, and vision_link_gate.py drops "
+            f"any candidate that has none (gh#4597) -- the item is filed and then swept"
+        )
+
+    assert "until a human intervenes" not in src, (
+        "a hold still tells the PR it needs a human; say which automatic lane owns it"
+    )
+
 def _judge_judy_ticks_dont_overlap():
     """A judge-judy cron tick that overlaps a still-running prior tick must not review.
 
@@ -5416,11 +5453,20 @@ def _judge_judy_holds_a_pr_on_schema_invalid_verdict_not_just_marks_it():
     unqueue_i = src.index('unqueue_pr "$PR"', error_i)
     assert max_strikes_i < error_i < unqueue_i, \
         "state=error must be followed by unqueue_pr inside the MAX_PARSE_STRIKES branch -- posting the status alone does not hold the PR"
+    # unqueue_i must still be inside the same strike-exhausted branch, before the loop moves
+    # on to the next PR. This was once "within 1500 characters of unqueue_pr", which is a
+    # proximity proxy for containment, not containment itself: gh#5290 added the fix-item
+    # filing that this branch was missing -- legitimate code, inside the branch, correctly
+    # ordered -- and the distance alone failed. Bound it by the branch's own closing `fi`
+    # instead, so the check tests the structure it is actually about and does not have to be
+    # widened again every time the branch gains a line.
+    branch_end = src.index("\n    fi\n", unqueue_i)
     next_continue = src.index("continue", unqueue_i)
-    # unqueue_i must still be inside the same strike-exhausted branch, well before the loop
-    # moves on to the next PR.
-    assert unqueue_i < next_continue < unqueue_i + 1500, \
+    assert unqueue_i < branch_end, "no closing fi found after unqueue_pr"
+    assert unqueue_i < next_continue, \
         "unqueue_pr call for the error path landed outside the strike-exhausted branch"
+    assert src.index('if [ "$N" -ge "$MAX_PARSE_STRIKES" ]; then') < unqueue_i < branch_end, \
+        "unqueue_pr is not inside the MAX_PARSE_STRIKES branch"
 
     aub = (ROOT / "scripts" / "auto_update_branch.sh").read_text()
     assert aub.count('[ "$verdict" = "failure" ] || [ "$verdict" = "error" ]') >= 1, \
@@ -11999,6 +12045,7 @@ if __name__ == "__main__":
     check("judge runs the closes gate and reads the issue; law has 13 and 14 (fk#629)", _judge_runs_the_closes_gate_and_reads_the_issue)
     check("git_pull_guard.sh self-heals a stray branch and leaves a normal pull unchanged", _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged)
     check("git_pull_guard.sh serializes via a lock on the .git directory", _git_pull_guard_serializes_via_a_lock_on_the_git_directory)
+    check("every judge-judy hold hands the PR to the fleet", _every_hold_hands_the_pr_to_the_fleet)
     check("judge-judy ticks don't overlap", _judge_judy_ticks_dont_overlap)
     check("a judge-judy BLOCK pulls the PR out of the merge queue (fleet-kit#523)",
           _judge_block_pulls_the_pr_out_of_the_queue)
