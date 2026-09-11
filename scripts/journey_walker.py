@@ -80,6 +80,19 @@ passing (or annotates one that already failed) with what the browser itself repo
 console error is real product signal a Playwright assertion can silently miss (VP's own proof:
 1 unnoticed 404 on the flagship journey). Recorded once per error, per page, via a drain cursor
 so a later step never re-reports an earlier step's console noise.
+
+BLOCKED STREAKS AND ESCALATION (gh#857, Part C0 re-scope of gh#636): a journey blocked on the
+same reason run after run used to be silent past sentry's own stderr line -- the label carried
+no channel. Each run now reads the last run's per-journey streak from a small state file
+(`DEFAULT_STREAK_STATE_PATH`, same shape journey_issue_filer.py's own `journey_last_pass.json`
+already uses for last-pass sha), extends or resets it, and writes `blocked_streak` onto every
+`blocked` entry (AC1/AC2). Once any journey's streak reaches `BLOCKED_STREAK_ASK_THRESHOLD`
+runs, `file_streak_asks()` files exactly one `ask.py file --class credential` per distinct
+block reason among those journeys (AC3), first checking for an already-open ask naming the same
+reason so a persistent block doesn't re-page every run (AC4). No brief-rendering code changes
+here -- `## Needs you` already renders any open ask (AC5). A journey absent from `blocked` this
+run (passed, or failed outright rather than being blocked) is simply absent from the saved
+state, which is what resets its streak to 0 the next time it blocks again (AC6).
 """
 from __future__ import annotations
 
@@ -797,9 +810,114 @@ def summarize(journeys_out: list[dict], blocked: list[dict]) -> dict:
         "journeys_passed": journeys_passed,
         "journeys_failed": journeys_failed,
         "journeys_blocked": len(blocked),
+        "max_blocked_streak": max((b.get("blocked_streak", 0) for b in blocked), default=0),
         "steps_passed": steps_passed,
         "steps_failed": steps_failed,
     }
+
+
+# --- blocked streaks + human escalation (gh#857) ----------------------------------------------
+
+DEFAULT_STREAK_STATE_PATH = Path(
+    os.environ.get(
+        "FLEET_JOURNEY_STREAK_STATE",
+        str(Path.home() / ".cache" / "fleet-kit" / "journey_blocked_streak.json"),
+    )
+)
+
+# gh#857 AC3: "3 unless the builder argues otherwise" -- a one-run blip is noise (the PRD's own
+# Non-goal 3); three consecutive runs is the same "don't page on the first blip" bar #782's own
+# streak-shaped checks use elsewhere in this repo.
+BLOCKED_STREAK_ASK_THRESHOLD = 3
+
+
+def load_streak_state(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_streak_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+
+def _streak_key(entry: dict) -> str:
+    return f"{entry['id']}::{entry.get('viewport', 'desktop')}"
+
+
+def apply_blocked_streaks(blocked: list[dict], prior_state: dict) -> dict:
+    """AC1/AC2/AC6. Mutates each of this run's `blocked` entries with its `blocked_streak` and
+    returns the state to persist for next run. A journey blocked for the SAME reason as last
+    run extends the streak; a first-time block, or one whose reason changed, restarts it at 1.
+    A journey that is not in `blocked` this run (it passed, or it failed outright rather than
+    being blocked) is simply absent from the returned state -- which is what resets its streak
+    to 0 the next time it blocks again, with no separate reset bookkeeping needed."""
+    new_state = {}
+    for entry in blocked:
+        key = _streak_key(entry)
+        prior = prior_state.get(key)
+        streak = prior["streak"] + 1 if prior and prior.get("reason") == entry["reason"] else 1
+        entry["blocked_streak"] = streak
+        new_state[key] = {"reason": entry["reason"], "streak": streak}
+    return new_state
+
+
+def _open_streak_ask_exists(reason: str, db_path: Path | None) -> bool:
+    """AC4's dedup check: an open ask already naming this exact block reason means a later run
+    crossing the threshold again must not file a second one -- same rule dont-shoot-the-
+    messenger.md:117 states for its own asks ("check first so you never file the same one
+    twice")."""
+    import ask  # deferred: pulls in fleet_db/authority, unneeded for callers that never block
+    conn = ask.fleet_db.connect(db_path)
+    return any(reason in (row.get("why") or "") for row in ask.list_asks(conn, status="open", member="sentry"))
+
+
+def file_streak_asks(blocked: list[dict], threshold: int = BLOCKED_STREAK_ASK_THRESHOLD,
+                      db_path: Path | None = None, authority_path: Path | None = None,
+                      no_notify: bool = False) -> list[str]:
+    """AC3/AC4: once any journey's `blocked_streak` (already set by `apply_blocked_streaks`)
+    reaches `threshold`, file one ask per DISTINCT block reason among the journeys that crossed
+    it -- grouped, since journeys sharing a reason share a fix -- via the same
+    `ask.py file --member sentry --class credential` path every other member's ask goes
+    through (authority ladder + paging included), never a second one while an open ask already
+    names that reason. Returns the reasons a new ask was actually filed for."""
+    import ask  # deferred, same reason as _open_streak_ask_exists
+
+    over = [e for e in blocked if e.get("blocked_streak", 0) >= threshold]
+    if not over:
+        return []
+
+    groups: dict[str, list[dict]] = {}
+    for entry in over:
+        groups.setdefault(entry["reason"], []).append(entry)
+
+    filed = []
+    for reason, entries in sorted(groups.items()):
+        if _open_streak_ask_exists(reason, db_path):
+            continue
+        ids = sorted({e["id"] for e in entries})
+        streak = max(e["blocked_streak"] for e in entries)
+        why = (
+            f"{len(entries)} journey(s) blocked {streak} consecutive runs on: {reason} "
+            f"(affected: {', '.join(ids)})"
+        )
+        argv = []
+        if db_path is not None:
+            argv += ["--db-path", str(db_path)]
+        if authority_path is not None:
+            argv += ["--authority-path", str(authority_path)]
+        argv += ["file", "--member", "sentry", "--class", "credential", "--why", why,
+                 "--unblocks", f"testing resumes for: {', '.join(ids)}"]
+        if no_notify:
+            argv.append("--no-notify")
+        rc = ask.main(argv)
+        if rc != 0:
+            print(f"journey_walker: filing streak ask for '{reason}' FAILED (rc={rc})", file=sys.stderr)
+            continue
+        filed.append(reason)
+    return filed
 
 
 def main() -> int:
@@ -810,6 +928,8 @@ def main() -> int:
     ap.add_argument("--deploy-sha", default=os.environ.get("DEPLOY_SHA", ""))
     ap.add_argument("--journeys", nargs="*", default=None, help="only run these journey ids (debugging)")
     ap.add_argument("--headed", action="store_true")
+    ap.add_argument("--streak-state", type=Path, default=DEFAULT_STREAK_STATE_PATH,
+                    help="gh#857: per-journey blocked-streak state file")
     args = ap.parse_args()
 
     catalog = load_catalog(args.catalog)
@@ -824,6 +944,12 @@ def main() -> int:
             journeys_out, blocked = run_all(catalog, users, browser, args.out, run_id, args.journeys)
         finally:
             browser.close()
+
+    prior_streak_state = load_streak_state(args.streak_state)
+    new_streak_state = apply_blocked_streaks(blocked, prior_streak_state)
+    save_streak_state(args.streak_state, new_streak_state)
+    if blocked:
+        file_streak_asks(blocked)
 
     summary = summarize(journeys_out, blocked)
     results = {"run": run_id, "deploy_sha": args.deploy_sha, "journeys": journeys_out,
