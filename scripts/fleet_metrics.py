@@ -63,6 +63,30 @@ CATALOG = {
     "churn_ratio": "additions/deletions across recently merged PRs (cache)",
 }
 
+# gh#789: direction only for metrics whose "better" is unambiguous from CATALOG's own
+# description above -- everything else (status_per_day depends on which status; paced_per_hr,
+# runs_per_day and churn_ratio are volume/ratio metrics with no inherent orientation) is
+# left out on purpose so a baseline-less prediction against one resolves "unavailable"
+# rather than guessing (docs/kpi-doctrine.md rule 5).
+DIRECTION = {
+    "signal_rate": "higher",
+    "self_critique_rate": "higher",
+    "quiet_rate": "lower",
+    "reported_nothing_per_day": "lower",
+    "budget_declined_per_hr": "lower",
+    "avg_turns": "lower",
+    "avg_cost_usd": "lower",
+    "avg_duration_s": "lower",
+    "rework_pct": "lower",
+}
+
+
+def direction(name: str) -> str | None:
+    """'higher' or 'lower' for a metric whose direction is unambiguous; None when this
+    file doesn't record a judgment about it (see DIRECTION above)."""
+    base, _ = parse(name)
+    return DIRECTION.get(base)
+
 
 def default_runs_path() -> Path:
     return Path(os.environ.get("FLEET_LOG_DIR", "/var/log/fleet-kit")) / "runs.jsonl"

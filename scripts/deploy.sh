@@ -185,6 +185,15 @@ run_args() {
     if [ -f "$secrets_env" ]; then
         secret_mounts+=(-v "$secrets_env:$secrets_env:ro")
     fi
+    # gh#780: the green candidate is started as `run_args "${CONTAINER}-green" ...` (below) and
+    # cutover only ever renames the CONTAINER OBJECT (`podman rename "${CONTAINER}-green"
+    # "$CONTAINER"`) -- it cannot rewrite an env var already baked into the running process. A
+    # bare `FLEET_INSTANCE_NAME="$name"` here left every post-cutover container permanently
+    # believing its own name was "<instance>-green", so publish_share.sh/maxx_lease.py/pager
+    # identity all keyed off the wrong name forever. Strip only a trailing "-green" (anchored,
+    # not a substring replace -- an instance actually named e.g. "evergreen-fleet" must be
+    # unaffected) so the container's own idea of its name matches what it will be renamed TO.
+    local instance_name="${name%-green}"
     echo -d --name "$name" \
         -e FLEET_REPO_URL="$FLEET_REPO_URL" \
         -e FLEET_VIEW_PORT="$view_port" \
@@ -194,7 +203,7 @@ run_args() {
         -e FLEET_REPO=/repo \
         -e FLEET_LEASE_DIR=/fleet-kit/leases \
         -e FLEET_SHARE_DIR=/fleet-kit/shares \
-        -e FLEET_INSTANCE_NAME="$name" \
+        -e FLEET_INSTANCE_NAME="$instance_name" \
         -v "$SHARED_LEASE_DIR:/fleet-kit/leases" \
         -v "$SHARED_SHARE_DIR:/fleet-kit/shares" \
         -v "$INSTANCE_DIR/repo:/repo" \

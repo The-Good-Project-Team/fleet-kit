@@ -381,5 +381,78 @@ class RedProfileEndToEndTest(unittest.TestCase):
         self.assertIn("LANDED", gh.issues[issue_no]["body"])
 
 
+class RepoArgTest(unittest.TestCase):
+    """gh#770: the filer must target an explicit repo, not whatever `gh` defaults to for the
+    sandbox's ambient checkout (gh#151's nondeterministic repoint)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state_path = Path(self.tmp.name) / "state.json"
+        self.gh = FakeGh()
+
+    def _write(self, name: str, results: dict) -> Path:
+        p = Path(self.tmp.name) / name
+        p.write_text(json.dumps(results))
+        return p
+
+    def test_ac1_main_defaults_repo_to_philanthropy(self):
+        captured = {}
+
+        def fake_process(*args, **kwargs):
+            captured["repo"] = kwargs.get("repo")
+            return {"errors": []}
+
+        results_path = self._write("r.json", _results("fail", "run-1", "sha1"))
+        orig_argv, orig_process = sys.argv, jif.process
+        sys.argv = ["journey_issue_filer.py", "--results", str(results_path)]
+        jif.process = fake_process
+        try:
+            jif.main()
+        finally:
+            sys.argv, jif.process = orig_argv, orig_process
+        self.assertEqual(captured["repo"], jif.DEFAULT_REPO)
+        self.assertEqual(jif.DEFAULT_REPO, "The-Good-Project-Team/philanthropy")
+
+    def test_ac2_build_file_cmd_includes_repo_and_label(self):
+        cmd = jif.build_file_cmd("t", "b", repo="owner/name")
+        idx = cmd.index("--repo")
+        self.assertEqual(cmd[idx + 1], "owner/name")
+        self.assertIn("--label", cmd)
+
+    def test_ac3_build_list_cmd_includes_repo(self):
+        cmd = jif.build_list_cmd(repo="owner/name")
+        idx = cmd.index("--repo")
+        self.assertEqual(cmd[idx + 1], "owner/name")
+
+    def test_ac3_build_comment_cmd_includes_repo(self):
+        cmd = jif.build_comment_cmd(5, "note", repo="owner/name")
+        idx = cmd.index("--repo")
+        self.assertEqual(cmd[idx + 1], "owner/name")
+
+    def test_ac3_build_close_cmd_includes_repo(self):
+        cmd = jif.build_close_cmd(5, "note", repo="owner/name")
+        idx = cmd.index("--repo")
+        self.assertEqual(cmd[idx + 1], "owner/name")
+
+    def test_ac4_dry_run_prints_repo_and_calls_no_gh(self):
+        results_path = self._write("r.json", _results("fail", "run-1", "sha1"))
+
+        def exploding_runner(cmd):
+            raise AssertionError("gh must not be called during --dry-run")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            jif.process(results_path, self.state_path, runner=exploding_runner, dry_run=True, repo="owner/name")
+        self.assertIn("--repo owner/name", buf.getvalue())
+
+    def test_unset_repo_omits_flag_entirely(self):
+        # non-goal: an unset --repo must keep working for anyone running from a correct checkout.
+        self.assertNotIn("--repo", jif.build_file_cmd("t", "b"))
+        self.assertNotIn("--repo", jif.build_list_cmd())
+        self.assertNotIn("--repo", jif.build_comment_cmd(5, "n"))
+        self.assertNotIn("--repo", jif.build_close_cmd(5, "n"))
+
+
 if __name__ == "__main__":
     unittest.main()
