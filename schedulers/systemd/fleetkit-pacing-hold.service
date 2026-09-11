@@ -1,0 +1,12 @@
+[Unit]
+Description=fleet-kit pacing-hold pager — pages when a real zero pacing ceiling holds the whole fleet paced for multiple consecutive hours with nobody told (scripts/pacing_hold_check.py, gh#812)
+
+[Service]
+Type=oneshot
+# Plain host process, same shape as fleetkit-prod-health's own unit: reads runs.jsonl only,
+# no podman exec needed, so Environment= per var rather than FLEET_ENV_FILE.
+Environment=FLEET_LOG_DIR={{LOG_DIR}}
+Environment=NTFY_TOPIC={{NTFY_TOPIC}}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=/usr/bin/env python3 {{KIT_PATH}}/scripts/pacing_hold_check.py
+User={{USER}}

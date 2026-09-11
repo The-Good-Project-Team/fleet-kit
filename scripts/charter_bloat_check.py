@@ -193,6 +193,18 @@ def main():
                     help="fail instead of falling back to local git history")
     args = ap.parse_args()
 
+    try:
+        return _run(args)
+    except Exception as e:
+        # fk#920: any exception we didn't anticipate must still exit 2, never 1 -- jefe.md:317
+        # reads exit 1 as a real NEEDS CONSOLIDATION flag, so an uncaught crash of ANY kind
+        # would otherwise be misread as a verdict on an unnamed charter.
+        print(f"charter_bloat_check: unexpected error -- {type(e).__name__}: {e}",
+              file=sys.stderr)
+        return 2
+
+
+def _run(args):
     paths = member_charter_paths(args.root, args.members_glob)
     if not paths:
         print(f"no files matched {args.members_glob} under {args.root}", file=sys.stderr)

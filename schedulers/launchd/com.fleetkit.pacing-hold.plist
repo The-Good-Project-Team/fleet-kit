@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- fleet-kit pacing-hold pager — pages when a real zero pacing ceiling holds the whole
+     fleet paced for multiple consecutive hours with nobody told, scripts/pacing_hold_check.py
+     (gh#812). Reads runs.jsonl only, same shape as com.fleetkit.prod-health.plist. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fleetkit.pacing-hold</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python3</string>
+    <string>{{KIT_PATH}}/scripts/pacing_hold_check.py</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/{{USER}}</string>
+    <key>FLEET_LOG_DIR</key>
+    <string>{{LOG_DIR}}</string>
+    <key>NTFY_TOPIC</key>
+    <string>{{NTFY_TOPIC}}</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/{{USER}}/Library/Logs/fleet-kit/pacing-hold.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/{{USER}}/Library/Logs/fleet-kit/pacing-hold.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

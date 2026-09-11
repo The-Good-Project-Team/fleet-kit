@@ -325,17 +325,29 @@ if [ -n "${FIXER_HEALTH_URL:-}" ] && [ -n "${FIXER_PAGE_URL:-}" ]; then
   # burst-probing a page that's already confirmed down.
   if [ -z "$PROD_DOWN" ] && command -v python3 >/dev/null 2>&1; then
     sample_degraded_page() { # -> "error_pct p95_s" over FIXER_DEGRADED_SAMPLE_REQUESTS probes
-      local n="${FIXER_DEGRADED_SAMPLE_REQUESTS:-5}" i out code t errors=0 times=()
+      # gh#841: default raised 5 -> 10. At n=5 the top 5% of a burst is a single request, so
+      # nearest-rank p95 is really just "max" -- 10 keeps one tick's wall clock under ~10s in
+      # the healthy case while making "p95" a real percentile rather than a synonym for max.
+      local n="${FIXER_DEGRADED_SAMPLE_REQUESTS:-10}" i out code t errors=0 times=()
       for i in $(seq 1 "$n"); do
         out=$(curl -s -m 10 -o /dev/null -w '%{http_code} %{time_total}' -A 'Mozilla/5.0 (fleet-kit the-fixer)' "$FIXER_PAGE_URL" 2>/dev/null)
         code="${out%% *}"; t="${out#* }"
         [ -z "$code" ] && code=000
         [ -z "$t" ] && t=0
-        case "$code" in 5??) errors=$((errors + 1)) ;; esac
+        # gh#841: curl's own `000` (timeout / connection refused / TLS failure -- the most
+        # common way a dying site actually fails) was never counted, so a hung request scored
+        # as a clean sample. It is an error, same as a 5xx.
+        case "$code" in 5??|000) errors=$((errors + 1)) ;; esac
         times+=("$t")
       done
       local p95
-      p95=$(printf '%s\n' "${times[@]}" | sort -n | awk -v n="$n" '{a[NR-1]=$1} END{idx=int((n-1)*0.95); if (idx<0) idx=0; printf "%.3f", a[idx]}')
+      # gh#841: nearest-rank p95 is the ceil(0.95*n)-th smallest sample (1-indexed), i.e. array
+      # index ceil(0.95*n)-1 (0-indexed) once sorted ascending. The old `int((n-1)*0.95)` was
+      # off by one low and, at n=5, could never select the final (slowest) sample at all.
+      p95=$(printf '%s\n' "${times[@]}" | sort -n | awk -v n="$n" '{a[NR-1]=$1} END{
+        x = n * 0.95; idx = int(x); if (x > idx) idx++; idx = idx - 1; if (idx < 0) idx = 0
+        printf "%.3f", a[idx]
+      }')
       awk -v e="$errors" -v n="$n" -v p="$p95" 'BEGIN{printf "%.2f %s", (e*100.0/n), p}'
     }
     DEGRADED_STATE="${FIXER_DEGRADED_STATE:-$LOG_DIR/the-fixer.postpromote}"
