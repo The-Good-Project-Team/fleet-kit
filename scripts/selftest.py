@@ -11010,6 +11010,93 @@ def _deploy_sh_mounts_the_shared_secret_store_read_only_gh759():
     assert '"${secret_mounts[@]}"' in dep, "run_args does not pass the secret mount to podman run"
 
 
+def _plan_rank_ac1_bet_named_candidate_outranks_regardless_of_order_gh572():
+    """gh#572 AC1: given a plan naming bet 'Verified Org' with issue #123 attached, and two
+    candidates #123/#456 that both survive every existing filter, plan_rank.py must put #123
+    ahead of #456 regardless of which one gru's own tier/age order queried first."""
+    import plan_rank as pr
+    bets, diagnostic = pr.parse_bets(
+        "## Bets\n1. Verified Org from HQ at revenue-banded prices -- #123\n")
+    assert diagnostic is None, diagnostic
+    bet_map = pr.issue_bet_map(bets)
+    assert pr.rank_candidates([456, 123], bet_map) == [123, 456]
+    # Same thing end to end, through a real file on disk and the module's own combining call.
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "instance.md"
+        path.write_text("## Bets\n1. Verified Org -- #123\n")
+        out = pr.rank([456, 123], plan_path=path)
+    assert out["ranked"] == [123, 456], out
+    assert out["bet_by_issue"] == {"123": "Verified Org -- #123"}, out
+
+
+def _plan_rank_ac2_no_plan_file_is_byte_identical_order_gh572():
+    """gh#572 AC2: with no docs/plan/<instance>.md at all, ranking returns the same candidates
+    in the same order it was given -- today's PR#536 behaviour, unchanged."""
+    import plan_rank as pr
+    with tempfile.TemporaryDirectory() as tmp:
+        out = pr.rank([456, 123, 789], plan_path=pathlib.Path(tmp) / "nonexistent.md")
+    assert out["ranked"] == [456, 123, 789], out
+    assert out["bet_by_issue"] == {}, out
+
+
+def _plan_rank_ac3_prose_only_bets_degrade_to_unchanged_order_gh572():
+    """gh#572 AC3: a plan file that exists but names no issue numbers at all (prose-only bets)
+    returns the input order unchanged and exits 0 -- a half-written plan degrades rather than
+    erroring the pass."""
+    import subprocess
+    import plan_rank as pr
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "instance.md"
+        path.write_text("## Bets\nGrow the top of funnel.\nShip claim-then-verify as one screen.\n")
+        out = pr.rank([456, 123], plan_path=path)
+    assert out["ranked"] == [456, 123], out
+    proc = subprocess.run(
+        [sys.executable, str(HERE / "plan_rank.py"), "--items", "[456, 123]",
+         "--plan-path", str(path)],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert proc.stderr == "", proc.stderr
+
+
+def _plan_rank_ac4_malformed_plan_exits_0_with_one_diagnostic_never_a_traceback_gh572():
+    """gh#572 AC4: a plan file whose bets section is malformed/unparseable (here: no `## Bets`
+    heading found at all) exits 0, returns the input order unchanged, and prints exactly one
+    diagnostic line naming the file and the problem on stderr -- never a traceback that kills
+    gru's pass."""
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "instance.md"
+        path.write_text("no bets heading anywhere in this file\n")
+        proc = subprocess.run(
+            [sys.executable, str(HERE / "plan_rank.py"), "--items", "[456, 123]",
+             "--plan-path", str(path)],
+            capture_output=True, text=True)
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert json.loads(proc.stdout) == {"ranked": [456, 123], "bet_by_issue": {}}, proc.stdout
+    stderr_lines = proc.stderr.strip().splitlines()
+    assert len(stderr_lines) == 1, proc.stderr
+    assert str(path) in stderr_lines[0] and "Bets" in stderr_lines[0], proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
+def _gru_md_wires_plan_rank_before_packing_gh572():
+    """Doc-consistency guard, same shape as `_gru_md_gates_on_vision_link_before_packing`:
+    proves gh#572's plan-bet preference is actually wired into gru.md's step order (after the
+    quality gate it stacks on top of, before step 3's pack) and that the report step requires
+    naming the bet served -- AC5."""
+    text = (HERE.parent / "members" / "gru" / "gru.md").read_text()
+    assert "plan_rank.py" in text, "gru.md never calls plan_rank.py -- gh#572's preference tier is unreachable"
+    assert "gh#572" in text
+    quality_gate = text.index("quality_gate.py")
+    plan_rank_call = text.index("plan_rank.py")
+    step3 = text.index("3. **Pack the hour")
+    assert quality_gate < plan_rank_call < step3, \
+        "plan_rank.py must run after the quality gate it stacks on and before step 3's pack"
+    step7 = text.index("7. **Read each minion's real result**")
+    assert "which plan bet" in text[step7:], \
+        "gru.md's report step must require naming the bet each picked item serves (gh#572 AC5)"
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -11300,6 +11387,12 @@ if __name__ == "__main__":
     check("self_improve_score.sh resolves the ledger, feeds it to the prompt first, and stamps hits/misses on the row (gh#782 AC4)", _self_improve_score_reads_the_ledger_gh782)
     check("dumbledore: <=140 lines, opus, ledger-first, one predict.py add per pass, reads INTENT.md, grader off-limits (gh#783)", _dumbledore_charter_is_short_on_opus_and_ledger_first_gh783)
     check("run_member.sh calls pacing_gate after the ceiling and the exempt specs are the three named (gh#781)", _run_member_wires_pacing_gate_and_exempt_specs_gh781)
+
+    check("plan_rank prefers a plan-named bet regardless of tier/age order (gh#572 AC1)", _plan_rank_ac1_bet_named_candidate_outranks_regardless_of_order_gh572)
+    check("plan_rank with no plan file at all returns byte-identical order (gh#572 AC2)", _plan_rank_ac2_no_plan_file_is_byte_identical_order_gh572)
+    check("plan_rank with a prose-only Bets section degrades to unchanged order, exit 0 (gh#572 AC3)", _plan_rank_ac3_prose_only_bets_degrade_to_unchanged_order_gh572)
+    check("plan_rank on a malformed plan file exits 0, unchanged order, one stderr diagnostic, no traceback (gh#572 AC4)", _plan_rank_ac4_malformed_plan_exits_0_with_one_diagnostic_never_a_traceback_gh572)
+    check("gru.md wires plan_rank.py after the quality gate and before packing, and its report names the bet served (gh#572 AC5)", _gru_md_wires_plan_rank_before_packing_gh572)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:

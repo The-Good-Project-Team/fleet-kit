@@ -234,6 +234,24 @@ spawns exactly one). Your job, in order:
    still precedes medium/low); it never drops or blocks a newer item, just queues it behind
    older same-tier work until the hour's budget reaches it.
 
+   **Then prefer today's plan bets, if one exists — gh#572.** `docs/plan/<instance>.md`
+   (#570/#571, when either has landed) names the plan's current bets by issue number; a
+   candidate any of them names should build ahead of an equally-eligible candidate that isn't
+   named, regardless of tier/age order above. This is a preference tier applied to survivors —
+   it never makes anything ineligible, and a repo with no plan file is fully supported (today's
+   PR#536 order, unchanged):
+   ```
+   python3 /fleet-kit/scripts/plan_rank.py --items '[<eligible numbers, tier+age order>]'
+   # {"ranked": [<same numbers, bet-named ones moved to the front>],
+   #  "bet_by_issue": {"<n>": "<the bet's text>", ...}}
+   ```
+   Use `ranked`'s order (not the order you queried in) when you build step 3's `--items` for
+   `fanout.py`. No plan file, or one with no bets named yet, degrades silently to the input
+   order — that's a supported state, not a problem. A genuinely malformed plan file (no `##
+   Bets` heading at all, or unreadable) also degrades to the input order, but prints one
+   diagnostic line to stderr naming the file and the problem — surface that line in your
+   report if it appears rather than swallowing it.
+
    Collect each candidate's `fleet:complexity-<1-10>` label with its number — marie's size
    estimate, what makes packing possible. No label means treat it as a 5 (median), never free.
 
@@ -392,7 +410,10 @@ spawns exactly one). Your job, in order:
    and write ONE combined report as your own final output: the runway you computed, the
    priority call you made and why, and a one-line result per minion (PR #, "found already
    fixed", or "failed: <reason>"). A minion that never reports back (crashed, hung) is a FAILURE
-   you name explicitly, not a silent gap in your summary.
+   you name explicitly, not a silent gap in your summary. **For each item you picked, also name
+   which plan bet it serves** — `plan_rank.py`'s `bet_by_issue` from step 2 names it, if any;
+   an item no bet names gets said explicitly ("no bet — none of this pass's picks are plan-named"),
+   never just omitted (gh#572 AC5/AC3).
 
 8. **Never build anything yourself, and never re-rank.** Building is minion's job; ranking is
    marie's. Yours is choosing, from marie's ranking and your own runway read, what gets built
