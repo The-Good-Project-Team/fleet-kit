@@ -123,6 +123,10 @@ DEFAULT_STATE_PATH = Path(
     )
 )
 
+# gh#770: journeys.yaml's own URLs are all philanthropy.org, so an explicit target repo (not
+# whatever `gh` defaults to for the sandbox's ambient checkout, gh#151) is the correct default.
+DEFAULT_REPO = "The-Good-Project-Team/philanthropy"
+
 def _marker_re(tag):
     return re.compile(r"<!--\s*fleet:" + re.escape(tag) + r"\s+key=([^\s]+?)\s*-->")
 
@@ -226,23 +230,35 @@ def build_issue_body(
     return "\n".join(lines)
 
 
-def build_file_cmd(title: str, body: str, label: str = LABEL_JOURNEY) -> list[str]:
-    return ["gh", "issue", "create", "--title", title, "--body", body, "--label", label]
+def build_file_cmd(title: str, body: str, label: str = LABEL_JOURNEY, repo: str | None = None) -> list[str]:
+    cmd = ["gh", "issue", "create", "--title", title, "--body", body, "--label", label]
+    if repo:
+        cmd += ["--repo", repo]
+    return cmd
 
 
-def build_list_cmd(label: str = LABEL_JOURNEY) -> list[str]:
-    return [
+def build_list_cmd(label: str = LABEL_JOURNEY, repo: str | None = None) -> list[str]:
+    cmd = [
         "gh", "issue", "list", "--state", "open", "--label", label,
         "--limit", "200", "--json", "number,body",
     ]
+    if repo:
+        cmd += ["--repo", repo]
+    return cmd
 
 
-def build_comment_cmd(number: int, body: str) -> list[str]:
-    return ["gh", "issue", "comment", str(number), "--body", body]
+def build_comment_cmd(number: int, body: str, repo: str | None = None) -> list[str]:
+    cmd = ["gh", "issue", "comment", str(number), "--body", body]
+    if repo:
+        cmd += ["--repo", repo]
+    return cmd
 
 
-def build_close_cmd(number: int, body: str) -> list[str]:
-    return ["gh", "issue", "close", str(number), "--comment", body]
+def build_close_cmd(number: int, body: str, repo: str | None = None) -> list[str]:
+    cmd = ["gh", "issue", "close", str(number), "--comment", body]
+    if repo:
+        cmd += ["--repo", repo]
+    return cmd
 
 
 # --- state (last-passing sha per journey+step) ---------------------------------------------
@@ -274,8 +290,8 @@ def ensure_label(runner=_run, profile: "Profile" = SENTRY) -> None:
     runner(["gh", "label", "create", profile.label, "--color", profile.color, "--description", profile.desc])
 
 
-def find_open_issue(key: str, runner=_run, profile: "Profile" = SENTRY) -> int | None:
-    rc, out = runner(build_list_cmd(profile.label))
+def find_open_issue(key: str, runner=_run, profile: "Profile" = SENTRY, repo: str | None = None) -> int | None:
+    rc, out = runner(build_list_cmd(profile.label, repo))
     if rc != 0:
         print(f"journey_issue_filer: list FAILED: {out[:300]}", file=sys.stderr)
         return None
@@ -312,7 +328,7 @@ def group_by_key(results: dict) -> "dict[str, list[tuple[dict, dict]]]":
     return groups
 
 
-def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_run, dry_run: bool = False, profile: "Profile" = SENTRY) -> dict:
+def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_run, dry_run: bool = False, profile: "Profile" = SENTRY, repo: str | None = None) -> dict:
     """Walks one results.json, files/comments/closes as needed. Returns a summary dict of
     what happened -- never raises on a `gh` failure, since one bad call must not stop the rest
     of the run from being processed (same non-crashing-on-a-single-failure shape #657's own
@@ -334,11 +350,11 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
             # happened to pass in the same collapsed group must not be reported as broken.
             failing_viewports = sorted({viewport_of(j["id"]) for j, _ in failing})
             journey, step = failing[0]
-            existing = None if dry_run else find_open_issue(key, runner, profile)
+            existing = None if dry_run else find_open_issue(key, runner, profile, repo)
             if existing:
                 note = f"Recurred again on run `{run}` (sha `{deploy_sha or 'unknown'}`)."
                 if not dry_run:
-                    rc, out = runner(build_comment_cmd(existing, note))
+                    rc, out = runner(build_comment_cmd(existing, note, repo))
                     if rc != 0:
                         summary["errors"].append(f"comment #{existing} failed: {out[:200]}")
                         continue
@@ -350,10 +366,12 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
                     journey, step, run, deploy_sha, state.get(key, {}).get("last_pass_sha"), key,
                     collapsed_viewports, profile,
                 )
+                cmd = build_file_cmd(title, body, profile.label, repo)
                 if dry_run:
+                    print(f"[dry-run] would run: {' '.join(cmd)}")
                     summary["filed"].append({"issue": None, "key": key, "title": title})
                     continue
-                rc, out = runner(build_file_cmd(title, body, profile.label))
+                rc, out = runner(cmd)
                 if rc != 0:
                     summary["errors"].append(f"file {key} failed: {out[:300]}")
                     continue
@@ -367,11 +385,11 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
             # value), never reaches this branch: it is left untouched this run, same as the
             # original per-step `elif status == "pass":` guard did.
             state[key] = {"last_pass_sha": deploy_sha, "last_pass_run": run}
-            existing = None if dry_run else find_open_issue(key, runner, profile)
+            existing = None if dry_run else find_open_issue(key, runner, profile, repo)
             if existing:
                 note = f"Passing again as of run `{run}` (sha `{deploy_sha or 'unknown'}`)."
                 if not dry_run:
-                    rc, out = runner(build_close_cmd(existing, note))
+                    rc, out = runner(build_close_cmd(existing, note, repo))
                     if rc != 0:
                         summary["errors"].append(f"close #{existing} failed: {out[:200]}")
                         continue
@@ -388,9 +406,10 @@ def main() -> int:
     ap.add_argument("--state", type=Path, default=DEFAULT_STATE_PATH, help="per-journey last-pass state file")
     ap.add_argument("--dry-run", action="store_true", help="print what would happen, touch nothing")
     ap.add_argument("--profile", choices=sorted(PROFILES), default="sentry", help="sentry (journeys) or red (adversarial), fleet-kit#785")
+    ap.add_argument("--repo", default=DEFAULT_REPO, help="owner/name to file/list/comment/close against (gh#770); not the sandbox's ambient gh default")
     args = ap.parse_args()
 
-    summary = process(args.results, args.state, dry_run=args.dry_run, profile=PROFILES[args.profile])
+    summary = process(args.results, args.state, dry_run=args.dry_run, profile=PROFILES[args.profile], repo=args.repo)
     print(json.dumps(summary, indent=2))
     return 1 if summary["errors"] else 0
 
