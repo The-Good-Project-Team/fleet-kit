@@ -41,6 +41,23 @@ log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" >> "$LOG"; }
 
 cd "$KIT_DIR"
 
+# gh#834 AC4: record the host checkout's branch on EVERY tick, not just the abort path below --
+# checked every tick, but only LOGGED when it changes (a bare `git branch --show-current` every
+# 5 minutes forever would drown auto_deploy.log in identical lines for no reason). This is the
+# defense-in-depth half of gh#834's fix: worktree_guard_hook.py now blocks the mechanism this
+# issue's own evidence points to (an agent's ad hoc `git checkout <branch>` against $KIT_DIR,
+# see that file's gh#834 comment), but that guard only covers Claude Code tool calls -- a human
+# `ssh`ed into the box, or any future writer this pass didn't find, is still invisible until the
+# next transition. This closes that blind spot: the moment the branch changes is now timestamped
+# here, not only reconstructable from the aftermath the ABORT line below already captures.
+BRANCH_STATE_FILE="$STATE.branch"
+CURRENT_BRANCH="$(git branch --show-current 2>/dev/null || echo "")"
+LAST_RECORDED_BRANCH="$(cat "$BRANCH_STATE_FILE" 2>/dev/null || echo "")"
+if [ "$CURRENT_BRANCH" != "$LAST_RECORDED_BRANCH" ]; then
+  log "BRANCH: host checkout moved from '${LAST_RECORDED_BRANCH:-<unknown, first tick>}' to '${CURRENT_BRANCH:-<detached HEAD>}'"
+  echo "$CURRENT_BRANCH" > "$BRANCH_STATE_FILE"
+fi
+
 # gh#278: source the instance's fleet.env so host-side dials (FLEET_AUTO_DEPLOY_SELF_HEAL below)
 # can be tuned there like every other instance-scoped setting, instead of needing a crontab-line
 # edit. Same save/source/restore discipline deploy.sh already uses (scripts/deploy.sh:58) for the

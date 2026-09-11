@@ -4892,6 +4892,92 @@ def _auto_deploy_sh_names_branch_and_shas_on_diverged_abort_gh372():
             f"SHAs missing on the detached-HEAD path: {log_text!r}"
 
 
+def _auto_deploy_sh_records_branch_on_every_tick_only_when_it_changes_gh834():
+    """gh#834 AC4/AC6: worktree_guard_hook.py's fix (above) closes the mechanism this issue's
+    own evidence points to, but that guard only ever sees Claude Code tool calls -- a human `ssh`
+    session, or any writer this pass didn't find, is still invisible. This is the belt-and-
+    suspenders half: auto_deploy.sh must record the host checkout's branch on every tick, log
+    only the moment it CHANGES (not every 5-minute tick forever), and must not change exit code
+    or any existing log line on an ordinary clean tick (AC5).
+
+    Runs the REAL auto_deploy.sh against a real git fixture, same harness shape as gh#372's test
+    above."""
+    import os
+    import subprocess
+
+    def git(repo, *args, check=True):
+        return subprocess.run(["git", *args], cwd=repo, check=check, capture_output=True, text=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        origin = tmp / "origin.git"
+        git(tmp, "init", "-q", "--bare", "-b", "main", str(origin))
+
+        seed = tmp / "seed"
+        seed.mkdir()
+        for cmd in (("init", "-q", "-b", "main"), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(seed, *cmd)
+        git(seed, "remote", "add", "origin", str(origin))
+        scripts_dir = seed / "scripts"
+        scripts_dir.mkdir()
+        (scripts_dir / "auto_deploy.sh").write_text((ROOT / "scripts" / "auto_deploy.sh").read_text())
+        (scripts_dir / "auto_deploy.sh").chmod(0o755)
+        (scripts_dir / "deploy.sh").write_text('#!/bin/bash\necho "DEPLOY STUB OK"\n')
+        (scripts_dir / "deploy.sh").chmod(0o755)
+        (seed / "foo.txt").write_text("v1\n")
+        git(seed, "add", "-A")
+        git(seed, "commit", "-q", "-m", "init")
+        git(seed, "push", "-q", "origin", "main")
+
+        checkout = tmp / "host"
+        git(tmp, "clone", "-q", str(origin), str(checkout))
+        for cmd in (("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(checkout, *cmd)
+
+        instance = tmp / "instance"
+        instance.mkdir()
+        home = tmp / "home"
+        env = dict(os.environ)
+        env.pop("FLEET_AUTO_DEPLOY_SELF_HEAL", None)
+        # gh#619's deploy coalescing would otherwise defer tick 3 below (it lands inside
+        # FLEET_DEPLOY_MIN_INTERVAL_S of tick 1's successful deploy) before ever reaching the
+        # diverged-HEAD ABORT this test is proving -- disabled the same way that section's own
+        # header documents, to isolate the branch-recording behavior under test.
+        env.update(HOME=str(home), FLEET_LOG_DIR=str(tmp / "logs"), FLEET_CONTAINER_NAME="test",
+                   FLEET_INSTANCE_DIR=str(instance), FLEET_DEPLOY_MIN_INTERVAL_S="0")
+        log_file = tmp / "logs" / "auto_deploy.log"
+
+        def tick():
+            proc = subprocess.run(["bash", str(checkout / "scripts" / "auto_deploy.sh")], cwd=checkout,
+                                  env=env, capture_output=True, text=True, timeout=30)
+            return proc, (log_file.read_text() if log_file.exists() else "")
+
+        proc, log_text = tick()
+        assert proc.returncode == 0, f"first tick on a clean checkout must exit 0: {proc.stderr[:300]}"
+        assert "BRANCH: host checkout moved from '<unknown, first tick>' to 'main'" in log_text, \
+            f"first tick must record the starting branch: {log_text!r}"
+
+        proc, log_text_2 = tick()
+        assert proc.returncode == 0
+        assert log_text_2 == log_text, \
+            f"a second tick with no branch change must add nothing new: before={log_text!r} after={log_text_2!r}"
+
+        # The transition this issue is actually about: something checks the host checkout out
+        # onto a stray branch. Simulate it directly (this pass's own worktree_guard_hook.py fix
+        # is what should make this unreachable via an agent's Bash tool call; this test proves
+        # the SEPARATE, independent backstop below catches it even if it happens anyway).
+        git(checkout, "checkout", "-q", "-b", "rework-metric")
+        (checkout / "foo.txt").write_text("v2-stray-local-commit\n")
+        git(checkout, "commit", "-aq", "-m", "feat: work in progress on the wrong checkout")
+        proc, log_text_3 = tick()
+        assert "BRANCH: host checkout moved from 'main' to 'rework-metric'" in log_text_3, \
+            f"the stray-branch transition must be timestamped the moment it happens: {log_text_3!r}"
+        # And it must be the diverged-HEAD ABORT (unchanged behavior, AC5) that follows -- not a
+        # silent success, and not a new failure mode introduced by the branch-recording check.
+        assert proc.returncode == 1, f"still on a stray branch must still ABORT: {proc.stderr[:300]}"
+        assert "ABORT: local HEAD is not an ancestor of origin/main" in log_text_3
+
+
 def _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged():
     """gh#68 (originally nonprofit-atlas#3130, recurred 3x): a bare `git pull --ff-only`
     against $FLEET_REPO fails hard, and stays failed, once the checked-out branch's history can
@@ -11895,6 +11981,7 @@ if __name__ == "__main__":
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
     check("auto_deploy.sh self-heals a content-identical diverged HEAD only when opted in", _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in)
     check("auto_deploy.sh names branch and SHAs on a diverged-HEAD ABORT (gh#372)", _auto_deploy_sh_names_branch_and_shas_on_diverged_abort_gh372)
+    check("auto_deploy.sh records the host checkout's branch every tick, logs only the transition (gh#834 AC4/AC6)", _auto_deploy_sh_records_branch_on_every_tick_only_when_it_changes_gh834)
     check("auto_deploy.sh coalesces main moves inside FLEET_DEPLOY_MIN_INTERVAL_S (gh#619)", _auto_deploy_sh_coalesces_main_moves_inside_the_min_interval)
     check("deploy.sh kicks one gru pass right after cutover (gh#622)", _deploy_sh_kicks_a_gru_pass_right_after_cutover)
     check("deploy.sh kicks one sentry pass right after cutover (gh#663)", _deploy_sh_kicks_a_sentry_pass_right_after_cutover)
