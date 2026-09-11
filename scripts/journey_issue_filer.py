@@ -110,7 +110,7 @@ SENTRY = Profile("sentry", LABEL_JOURNEY, LABEL_COLOR, LABEL_DESC, "sentry-journ
                  "Sentry drove the **{name}** journey as a real person would, and this step stopped doing its job.",
                  "isn't working")
 RED = Profile("red", f"{PREFIX}red-team", "b60205",
-              "red: an adversarial attack (gh#785) LANDED against our own product and was filed by journey_issue_filer.py",
+              "red: an adversarial attack (gh#785) landed against our product; filed by journey_issue_filer.py",
               "red-team",
               "Red drove the **{name}** attack against our own product, and it LANDED -- the product did the unsafe thing.",
               "can be broken")
@@ -285,9 +285,21 @@ def _run(cmd: list[str]) -> tuple[int, str]:
         return 1, str(e)
 
 
-def ensure_label(runner=_run, profile: "Profile" = SENTRY) -> None:
-    """Idempotent: `gh` errors on a duplicate create; that failure is expected and ignored."""
-    runner(["gh", "label", "create", profile.label, "--color", profile.color, "--description", profile.desc])
+def ensure_label(runner=_run, profile: "Profile" = SENTRY) -> "str | None":
+    """Idempotent: `gh` errors on a duplicate create; that failure is expected and ignored.
+    Any other create failure (e.g. a 422 on a too-long description) is NOT a duplicate -- it
+    means the label never got made, so every later `gh issue create --label ...` will fail
+    with 'not found', silently, on a zero-finding run that never reaches that call (gh#892).
+    Returned (and printed) so the caller can fold it into the run's error summary instead of
+    swallowing it the same way the duplicate case is swallowed."""
+    rc, out = runner(
+        ["gh", "label", "create", profile.label, "--color", profile.color, "--description", profile.desc]
+    )
+    if rc == 0 or "already exists" in out:
+        return None
+    msg = f"ensure_label({profile.label}) failed: {out[:300]}"
+    print(f"journey_issue_filer: {msg}", file=sys.stderr)
+    return msg
 
 
 def find_open_issue(key: str, runner=_run, profile: "Profile" = SENTRY, repo: str | None = None) -> int | None:
@@ -340,7 +352,9 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
     summary = {"filed": [], "commented": [], "closed": [], "errors": []}
 
     if not dry_run:
-        ensure_label(runner, profile)
+        label_error = ensure_label(runner, profile)
+        if label_error:
+            summary["errors"].append(label_error)
 
     for key, entries in group_by_key(results).items():
         failing = [(j, s) for j, s in entries if s.get("status") == "fail"]
