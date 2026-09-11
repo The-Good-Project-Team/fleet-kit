@@ -1297,9 +1297,13 @@ function renderQueuePage() {
   const tierCounts = [0, 0, 0, 0];
   rest.forEach(i => tierCounts[issueTier(i)]++);
   const filterText = QUEUE_FILTER.text.trim().toLowerCase();
+  // gh#610: the operator's own habit is to recall work by issue number, not title wording --
+  // match the number exactly (leading '#' tolerated) alongside the existing title substring
+  // match, so "14" doesn't also match "#143".
+  const filterNumber = filterText.replace(/^#/, '');
   const visible = rest
     .filter(i => QUEUE_FILTER.tier === 'all' || issueTier(i) === QUEUE_FILTER.tier)
-    .filter(i => !filterText || i.title.toLowerCase().includes(filterText))
+    .filter(i => !filterText || i.title.toLowerCase().includes(filterText) || String(i.number) === filterNumber)
     .slice()
     .sort((a, b) => issueTier(a) - issueTier(b));
 
