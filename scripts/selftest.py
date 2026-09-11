@@ -10813,7 +10813,7 @@ def _intent_digest_lists_turns_by_day_and_dedupes_gh784():
             {"ts": now - 40 * 86400, "host": "mac", "project": "old", "text": "ancient"}]
     (d / "intent" / "mac.jsonl").write_text("".join(json.dumps(c) + "\n" for c in caps))
     con = sqlite3.connect(d / "fleet.db")
-    con.execute("CREATE TABLE asks (id INTEGER PRIMARY KEY, question TEXT, answer TEXT, answered_by TEXT, answered_at REAL)")
+    con.execute("CREATE TABLE asks (id INTEGER PRIMARY KEY, why TEXT, answer TEXT, answered_by TEXT, answered_at REAL)")
     con.execute("INSERT INTO asks VALUES (1, 'send the email?', 'yes 999', 'reif', ?)", (now - 50,))
     con.commit(); con.close()
     text, stats = idg.build(14, 150, d, [], now=now)
