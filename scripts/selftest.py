@@ -5021,6 +5021,42 @@ def _judge_judy_skips_an_empty_diff_instead_of_blocking():
         "an empty diff must never reach a VERDICT -- it should skip before the model is ever called"
 
 
+def _heartbeat_is_not_an_executed_run():
+    """fk#819: gh#267's no-PR liveness ping was recorded as `quiet`, and fleet_metrics.py
+    (fk#782) counts `quiet` as an EXECUTED run in SIGNAL_DENOM. Measured 2026-09-11: 94 of the
+    106 "executed" runs in the trailing 24h were judge-judy heartbeats that never launched an
+    LLM, so fleet-wide signal_rate read 0.0849 against a real 0.7500 -- the number the
+    predictions ledger resolves against tracked how empty the PR queue was.
+
+    The fix must hold on both ends, so this asserts both: the runner asks for the status, and
+    every consumer of the status excludes it from executed work. fleet_metrics.py is
+    deliberately NOT edited -- `heartbeat` drops out of EXECUTED/SIGNAL_DENOM by set
+    membership -- so that exclusion is asserted here rather than assumed.
+    """
+    import run_report
+    import fleet_metrics
+    import fleet_stats
+
+    assert run_report.classify({"outcome": "QUIET -- nothing to review"},
+                               vision_required=False, exit_code=0, heartbeat=True) \
+        == run_report.STATUS_HEARTBEAT, "--heartbeat must win over any Outcome: text"
+    assert run_report.classify({"outcome": "did a real thing #1"},
+                               vision_required=False, exit_code=0) != run_report.STATUS_HEARTBEAT, \
+        "heartbeat must never be inferred from pass text -- only the runner knows"
+
+    assert run_report.STATUS_HEARTBEAT not in fleet_metrics.EXECUTED, \
+        "a liveness ping is not an executed run -- it would dilute every avg_*/quiet_rate"
+    assert run_report.STATUS_HEARTBEAT not in fleet_metrics.SIGNAL_DENOM, \
+        "a liveness ping in SIGNAL_DENOM makes signal_rate track how empty the PR queue is"
+    assert run_report.STATUS_HEARTBEAT in fleet_stats._NOT_EXECUTED_STATUSES, \
+        "fleet_stats must agree with fleet_metrics about what executed"
+
+    jj = (Path(__file__).parent.parent / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    hb = jj[jj.index("report_heartbeat() {"):]
+    assert "--heartbeat" in hb[:hb.index("\n}")], \
+        "judge-judy's report_heartbeat no longer asks for the heartbeat status -- rows regress to quiet"
+
+
 def _judge_judy_writes_a_heartbeat_row_on_a_no_pr_tick():
     """gh#267: a tick that finds no PR to review used to exit without ever touching
     runs.jsonl/fleet.db -- fleet_view.html's sidebar dot and lane_kpi.py's
@@ -11077,6 +11113,7 @@ if __name__ == "__main__":
     check("board_github file_item can add a priority label alongside backlog/lane", _board_github_file_item_can_add_a_priority_label)
     check("judge-judy files a priority-high fix item when it blocks a PR", _judge_judy_files_a_fix_item_on_block)
     check("judge-judy skips an empty diff instead of blocking (gh#531)", _judge_judy_skips_an_empty_diff_instead_of_blocking)
+    check("a heartbeat is not an executed run (fk#819)", _heartbeat_is_not_an_executed_run)
     check("judge-judy writes a heartbeat row on a no-PR tick (gh#267)", _judge_judy_writes_a_heartbeat_row_on_a_no_pr_tick)
     check("judge-judy's heartbeat status reads distinct from a real review outcome (gh#267 AC1)", _judge_judy_heartbeat_status_is_distinct_from_a_real_review_outcome)
     check("judge-judy's pick_pr distinguishes a gh-call failure from a confirmed-empty queue (gh#627)", _judge_judy_pick_pr_distinguishes_gh_failure_from_confirmed_empty)

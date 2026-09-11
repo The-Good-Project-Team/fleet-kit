@@ -149,6 +149,20 @@ STATUS_REPORT_LOST = "report_lost"
 # looks for with no matching completion row past a grace window.
 STATUS_STARTED = "started"
 
+# fk#819: a LIVENESS PING, not a run. gh#267 gave judge-judy a heartbeat row on a tick that
+# found no PR to review, so "age of the last runs row" stayed true during a quiet-PR stretch --
+# correct, and it reused STATUS_QUIET because no other status existed. fleet_metrics.py (fk#782,
+# five weeks later) then put `quiet` in EXECUTED and SIGNAL_DENOM, and the predictions ledger
+# began resolving against those. Measured 2026-09-11: 94 of the 106 "executed" runs in the
+# trailing 24h were judge-judy heartbeats that never launched an LLM, so fleet-wide signal_rate
+# read 0.0849 where the real figure over actual passes was 0.7500 -- the headline quality number
+# tracked how EMPTY the PR queue was. A distinct status fixes that with no edit to
+# fleet_metrics.py: `heartbeat` is simply not in EXECUTED/SIGNAL_DENOM, so it drops out of every
+# rate by set membership. Set ONLY when a runner passes --heartbeat ("this tick never launched
+# an LLM"); never inferred here. The console still paints it the amber `quiet` got, so gh#267's
+# open UNKNOWN about that colour stays exactly as open as it was.
+STATUS_HEARTBEAT = "heartbeat"
+
 # gh#252: a fan-out parent (the-fixer, or any member that spawns one `--item` sub-pass per
 # unit of work, per docs/gru-minions.md's own reasoning) that dispatches background sub-passes
 # and then ends its turn without ever writing Outcome:/Evidence: reads identically to a pass
@@ -221,8 +235,13 @@ def parse_report(text: str) -> dict:
 
 
 def classify(report: dict, *, vision_required: bool, exit_code: int | None = None,
-            trailing_loss: bool = False) -> str:
+            trailing_loss: bool = False, heartbeat: bool = False) -> str:
     """The status that goes on the run record."""
+    # fk#819: checked first and unconditionally -- the runner, not this parser, is the only
+    # thing that knows a tick never launched an LLM, and no amount of Outcome:/Evidence: text
+    # can make a liveness ping into a unit of work.
+    if heartbeat:
+        return STATUS_HEARTBEAT
     outcome = (report.get("outcome") or "").strip()
     if not outcome:
         # A budget decline or a timeout never gets the chance to write a FLEET-REPORT block --
@@ -289,7 +308,8 @@ def build_started_record(*, member: str, run_id: str, kind: str = "llm",
 def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
                  pass_text: str, usage: dict | None, vision_required: bool,
                  item_id: str | None = None, pr: str | None = None,
-                 lane: str | None = None, trailing_loss: bool = False) -> dict:
+                 lane: str | None = None, trailing_loss: bool = False,
+                 heartbeat: bool = False) -> dict:
     """One run = one record. `usage` is pass_accounting's parsed JSON, or None (mechanical)."""
     report = parse_report(pass_text)
     if not report.get("report") and kind != "llm" and (pass_text or "").strip():
@@ -299,7 +319,7 @@ def build_record(*, member: str, run_id: str, kind: str, exit_code: int,
         tail = (pass_text or "").strip()[-8000:]
         report["report"] = "(script output)\n" + tail
     status = classify(report, vision_required=vision_required, exit_code=exit_code,
-                      trailing_loss=trailing_loss)
+                      trailing_loss=trailing_loss, heartbeat=heartbeat)
     rec = {
         "member": member,
         "run_id": run_id,
@@ -377,6 +397,11 @@ def main(argv=None) -> int:
                          "a real report existed one turn earlier and was overwritten by a "
                          "trailing turn (gh#167's shape). Set by run_member.sh, never inferred "
                          "here from pass_text alone.")
+    ap.add_argument("--heartbeat", action="store_true",
+                    help="fk#819: this tick never launched an LLM and did no unit of work -- "
+                         "it is a liveness ping (gh#267's no-PR judge-judy tick). Records "
+                         "status 'heartbeat', which fleet_metrics.py excludes from EXECUTED "
+                         "and SIGNAL_DENOM, so polling never dilutes a quality rate.")
     ap.add_argument("--started", action="store_true",
                     help="write a provisional 'started' row (gh#145), before claude -p runs -- "
                          "ignores --exit-code/--pass-file/--usage-file/--vision-required/--pr")
@@ -403,7 +428,8 @@ def main(argv=None) -> int:
 
     rec = build_record(member=a.member, run_id=a.run_id, kind=a.kind, exit_code=a.exit_code,
                        pass_text=text, usage=usage, vision_required=a.vision_required,
-                       item_id=a.item_id, pr=a.pr, lane=a.lane, trailing_loss=a.trailing_loss)
+                       item_id=a.item_id, pr=a.pr, lane=a.lane, trailing_loss=a.trailing_loss,
+                       heartbeat=a.heartbeat)
     print(json.dumps(rec))
     return 0
 

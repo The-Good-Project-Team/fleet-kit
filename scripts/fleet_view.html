@@ -481,6 +481,10 @@ function statusClass(status) {
   // reported_nothing is a known classify() parser-miss (#135/#167), not a confirmed failure --
   // paint it the same "uncertain, go check" amber as quiet rather than burying real fails in it.
   if (status === 'reported_nothing') return 'warn';
+  // fk#819: a heartbeat is gh#267's no-PR liveness ping, previously recorded as 'quiet'.
+  // Same amber on purpose -- gh#267 left the colour of a healthy-idle tick open for a
+  // human, and fk#819 changed only the accounting, not that pending decision.
+  if (status === 'heartbeat') return 'warn';
   if (!status) return 'off';
   return 'bad'; // no_vision_link, fail, etc.
 }
