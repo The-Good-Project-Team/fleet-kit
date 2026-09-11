@@ -113,6 +113,16 @@ _PRIORITY_LABEL_META = {
     "low": ("a2eeef", "gru builds only with spare runway"),
 }
 
+# gh#726: vision_link_gate.py's severity escape hatch -- set by hand (marie or judge-judy),
+# never auto-detected, and cleared the moment the failure stops. Unconditional, same as
+# LABEL_BACKLOG/LABEL_CLAIMED below, so any ensure_labels() call creates it if missing.
+LABEL_SEVERITY_LIVE = f"{PREFIX}severity-live"
+_SEVERITY_LABEL_META = (
+    LABEL_SEVERITY_LIVE, "b60205",
+    "an active, ongoing failure -- set only while the failure is still occurring; "
+    "removed when it stops",
+)
+
 
 def ensure_labels(priority: str = "") -> None:
     """Idempotent: create the fleet labels this call needs if absent (gh errors on duplicates;
@@ -120,6 +130,7 @@ def ensure_labels(priority: str = "") -> None:
     labels = [
         (LABEL_BACKLOG, "3e694a", "fleet work queue item"),
         (LABEL_CLAIMED, "d4a72c", "claimed by a fleet worker"),
+        _SEVERITY_LABEL_META,
     ]
     if priority:
         color, desc = _PRIORITY_LABEL_META.get(priority, ("ededed", f"priority: {priority}"))

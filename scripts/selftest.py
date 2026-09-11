@@ -1098,6 +1098,82 @@ def _vision_link_gate_eligibility_rule():
     assert json.loads(out.stdout) == out_blocked, out.stdout
 
 
+# gh#726 AC6: real body/comment text pulled from `gh issue view 716`, not fabricated.
+_GH716_BODY = '## What\'s wrong\n\nEvery deploy since ~2026-09-08T08:40 UTC (03:40 CDT) has failed with\n`FAILED: green never answered http://localhost:8581/ within 120s` (`auto_deploy.log`) — a\ncontinuous, unbroken streak (30+ retries, ~5min apart, still failing as of this pass 11:23 UTC).\nLive/blue is untouched and healthy each time (deploy.sh\'s own rollback), but the site is now\nrunning commit `c655666a`, 4h+ behind `main`\'s `ba4ce9f` and falling further behind every retry\n(`deploy_staleness_check.log`, STALE at 10:57 UTC, "oldest undeployed commit merged 4h5m ago").\n\n## Root cause (read from source this pass, not reproduced against a live container)\n\n`entrypoint.sh:27` (added by PR#708 / commit `0aa6bd1`, merged 2026-09-08T08:35:18Z — 5 minutes\nbefore the first failure): a NEW early, unconditional, whole-file source of fleet.env —\n```\n[ -f "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}" ] && { set -a; . "${FLEET_ENV_FILE:-/fleet-kit/fleet.env}"; set +a; }\n```\nruns *before* `fleet_view_server.py` is started at `entrypoint.sh:79-82`. `deploy.sh`\'s\n`run_args()` (`scripts/deploy.sh:154-198`) launches every container (blue, green, retired) with\nthe SAME bind-mounted `/fleet-kit/fleet.env` (`-v "$INSTANCE_DIR/fleet.env:/fleet-kit/fleet.env"`,\n`deploy.sh:192`) — a single file, identical content in every container — but relies on\n`-e FLEET_VIEW_PORT="$view_port"` (`deploy.sh:180`) to give each container its own correct port\n(8571 for blue, 8581 for green, matching the `-p "$view_port:$view_port"` mapping at\n`deploy.sh:197`).\n\n`entrypoint.sh:27`\'s new early source clobbers that per-container override: fleet.env hardcodes\n`FLEET_VIEW_PORT=8571` (this instance\'s config), so `set -a; . fleet.env` overwrites the\npodman-injected `8581` back to `8571` before `fleet_view_server.py` ever binds a socket. The\ngreen container ends up listening on `8571` internally, but only `8581:8581` is published for\nit — so `curl http://localhost:8581/` (the host-side health check) hits nothing and times out\nevery time, for every future commit, until this is fixed.\n\n**Why blue is unaffected:** blue\'s own injected `FLEET_VIEW_PORT` (8571) happens to equal\nfleet.env\'s hardcoded default (8571), so the clobber is a no-op for blue — that\'s why "live\nbuild untouched" reads as healthy on every single failed attempt. Only the green\ncandidate (a different port by construction) is broken. Same clobbering applies to\n`FLEET_WEBHOOK_PORT` (`entrypoint.sh` line 79-96) for the same reason, though the webhook\nreceiver only starts when `.webhook_secret` is present.\n\nBefore PR#708, entrypoint.sh\'s only fleet.env source was at what is now `entrypoint.sh:128`,\npositioned AFTER `fleet_view_server.py` already started (line 79-82) — so the podman-injected\nport survived long enough to matter. PR#708\'s fix for gh#707 (FLEET_ACCOUNTS not visible to the\ncredential-check/guard-install loops before fleet.env was sourced) is real and correctly scoped\nin intent, but sourcing the WHOLE file early — rather than just resolving `FLEET_ACCOUNTS`\nspecifically, or preserving already-injected env vars around the source — introduced this\nregression as a side effect.\n\n## Impact\n\nEvery deploy fails from this point forward (new commits keep landing on `main`, each one\ninherits the broken `entrypoint.sh`, so the streak does not self-resolve). Site staleness grows\nwithout bound until a fix merges and one deploy actually lands.\n\n## Suggested fix direction (not prescriptive — a builder should pick the mechanism)\n\n`entrypoint.sh:27` needs to stop clobbering variables that were already present in the\ncontainer\'s environment when `podman run -e ...` set them (at minimum `FLEET_VIEW_PORT`,\n`FLEET_WEBHOOK_PORT`, per `deploy.sh:180`/`183`; check the rest of `run_args()`\'s `-e` list for\nothers). Options: (a) save/restore those specific vars around the early source, (b) only extract\nthe one value PR#708 actually needed (`FLEET_ACCOUNTS`) via a targeted read instead of a\nblanket `set -a; . fleet.env`, or (c) source fleet.env with already-exported vars taking\nprecedence (e.g. filter those keys out of the sourced file, or reorder so real env wins).\nWhichever approach: verify a green deploy actually becomes healthy afterward (a synthetic\n`podman run -e FLEET_VIEW_PORT=<nonstandard port>` boot test would catch a regression of this\nexact shape).\n\nVision-link: none (maintenance) — deploy pipeline is completely blocked, this repo\'s own\nbuild/ship loop.'
+_GH716_COMMENT = 'jefe pass 2026-09-08 ~12:2x UTC — new information: this fix is stuck behind a ranking-gate bug, and the outage is still live right now.\n\n**Still failing, live, right now.** `auto_deploy.log`\'s newest entries (12:25:07 UTC) show the same `FAILED: green never answered http://localhost:8581/ within 120s` at commit `e0289151d22c5e3a56aff2480d75e905af963922` — the streak hasn\'t self-resolved, it\'s now 4h45m+ old and `deploy_staleness_check.log` (11:57:03 UTC) confirms live is 5h5m behind `main`.\n\n**Why this hasn\'t been picked up yet:** the most recent gru pass (report in `runs.jsonl`, started ~12:23 UTC data, immediately after this issue was filed) ran its Vision-link gate over the high tier and explicitly dropped this issue:\n\n> Vision-link gate dropped 4 more as crowded-out maintenance (#684,#714,#715,#716), leaving #660,#704 eligible\n\n`vision_link_gate.py`\'s `gate_candidates()` drops *every* `none (maintenance)` candidate whenever *any* linked-KR candidate is open in the same pack, with no severity distinction — #660 and #704 both carry real `Vision-link:` lines (KR2 journey coverage; the philanthropy claim/audience/coordination channel) and crowded this one out even though this one is the fix for a live, worsening, fleet-wide outage. Filed the gate\'s severity-blindness separately so it doesn\'t have to be hand-worked around per incident: see the new issue linked below.\n\nNot re-diagnosing the entrypoint.sh root cause — marie\'s comment above already has it exactly right. Flagging only because "PRD-ready and unclaimed" reads as "will get picked up next pass" and that isn\'t true here without a human/gru forcing it past the gate.'
+
+
+def _vision_link_gate_severity_escape_hatch_gh726():
+    """gh#726: the crowding-out branch (STATUS_MAINTENANCE + any_linked -> dropped) has exactly
+    one escape hatch -- an active, ongoing failure marked `fleet:severity-live` survives it.
+    AC6's own regression case: gh#716's real body and a real comment, unmodified, plus the label
+    the PRD says should have rescued it from the drop it actually suffered.
+    """
+    import vision_link_gate as vlg
+
+    # AC1: none (maintenance) + fleet:severity-live + a linked candidate open -> eligible.
+    out = vlg.gate_candidates([
+        {"number": 513, "body": "Vision-link: Stripe MRR"},
+        {"number": 100, "body": "Vision-link: none (maintenance)",
+         "labels": [{"name": "fleet:severity-live"}]},
+    ])
+    assert out == {"eligible": [513, 100], "dropped": []}, out
+
+    # AC2: same pack, no fleet:severity-live -> still dropped, reason string unchanged.
+    out_no_hatch = vlg.gate_candidates([
+        {"number": 513, "body": "Vision-link: Stripe MRR"},
+        {"number": 100, "body": "Vision-link: none (maintenance)", "labels": []},
+    ])
+    assert out_no_hatch == {"eligible": [513], "dropped": [
+        {"number": 100, "reason": "none (maintenance), but a linked-KR candidate is open: #513"}
+    ]}, out_no_hatch
+
+    # AC3: no `labels` key at all (the shape every current caller passes today) -> byte-identical
+    # to the pre-hatch output -- no KeyError, and absence never becomes an accidental rescue.
+    out_legacy = vlg.gate_candidates([
+        {"number": 513, "body": "Vision-link: Stripe MRR"},
+        {"number": 100, "body": "Vision-link: none (maintenance)"},
+    ])
+    assert out_legacy == out_no_hatch, out_legacy
+
+    # AC4: fleet:severity-live present but no Vision-link line at all (missing, not maintenance)
+    # -- the hatch rescues an honest maintenance line, never an unlinked one.
+    out_missing = vlg.gate_candidates([
+        {"number": 513, "body": "Vision-link: Stripe MRR"},
+        {"number": 100, "body": "no vision line here",
+         "labels": [{"name": "fleet:severity-live"}]},
+    ])
+    assert out_missing == {"eligible": [513], "dropped": [
+        {"number": 100, "reason": "no Vision-link line (neither a real link nor explicit "
+                                   "'none (maintenance)')"}
+    ]}, out_missing
+
+    # AC6: gh#716's real body plus its real 2026-09-08T12:26:18Z comment (jefe -- no
+    # `Vision-link:` line of its own, confirming this exercises classify_candidate's real
+    # newest-comment-wins-over-body path rather than a simplified stand-in), a synthetic linked
+    # candidate in the same pack, and #716's real labels plus fleet:severity-live -- the exact
+    # fix this PRD names.
+    out_716 = vlg.gate_candidates([
+        {"number": 660, "body": "Vision-link: KR2 journey coverage"},
+        {"number": 716, "body": _GH716_BODY, "comments": [{"body": _GH716_COMMENT}],
+         "labels": [{"name": "fleet:priority-high"}, {"name": "fleet:severity-live"}]},
+    ])
+    assert out_716 == {"eligible": [660, 716], "dropped": []}, out_716
+
+    # AC7: the CLI is a thin wrapper -- same rule, same verdict, over the same items.
+    import subprocess
+    items = json.dumps([
+        {"number": 513, "body": "Vision-link: Stripe MRR"},
+        {"number": 100, "body": "Vision-link: none (maintenance)",
+         "labels": [{"name": "fleet:severity-live"}]},
+    ])
+    cli = subprocess.run(
+        [sys.executable, str(HERE / "vision_link_gate.py"), "--items", items],
+        capture_output=True, text=True)
+    assert cli.returncode == 0, (cli.returncode, cli.stdout, cli.stderr)
+    assert json.loads(cli.stdout) == out, cli.stdout
+
+
 def _gru_md_gates_on_vision_link_before_packing():
     """Doc-consistency guard, same shape as `_gru_md_checks_claim_history_before_claiming`:
     proves gh#525's eligibility gate is wired into gru.md's step order -- documented in the
@@ -5480,6 +5556,31 @@ def _board_github_file_item_can_add_a_priority_label():
     lane_labels = with_lane[with_lane.index("--label") + 1].split(",")
     assert "fleet:lane:frontend" in lane_labels and "fleet:priority-high" in lane_labels, \
         f"lane and priority labels must compose, not clobber each other: {lane_labels}"
+
+
+def _board_github_ensure_labels_creates_severity_live_gh726():
+    """gh#726 AC5: vision_link_gate.py's escape hatch needs `fleet:severity-live` to exist on
+    the repo before marie/judge-judy can set it. ensure_labels() is the one place this fleet
+    creates its own labels idempotently (gh errors on a duplicate `label create`, ignored) --
+    this pins the new label into that same unconditional set (no `priority=` needed to get it,
+    same as LABEL_BACKLOG/LABEL_CLAIMED), with a description naming its one rule.
+    """
+    import board_github
+
+    calls = []
+    orig_run = board_github._run
+    try:
+        board_github._run = lambda cmd: calls.append(cmd) or (0, "")
+        board_github.ensure_labels()
+    finally:
+        board_github._run = orig_run
+
+    creates = {c[3]: c for c in calls if c[:3] == ["gh", "label", "create"]}
+    assert board_github.LABEL_SEVERITY_LIVE in creates, \
+        f"ensure_labels() never creates {board_github.LABEL_SEVERITY_LIVE}: {calls}"
+    desc = creates[board_github.LABEL_SEVERITY_LIVE][
+        creates[board_github.LABEL_SEVERITY_LIVE].index("--description") + 1]
+    assert "active, ongoing failure" in desc and "set only while" in desc and "removed when it stops" in desc, desc
 
 
 def _judge_judy_files_a_fix_item_on_block():
@@ -12524,6 +12625,7 @@ if __name__ == "__main__":
     check("claim_history blocks an item that keeps dead-ending", _claim_history_blocks_an_item_that_keeps_dead_ending)
     check("gru.md checks claim_history before claiming", _gru_md_checks_claim_history_before_claiming)
     check("vision_link_gate applies gh#525's eligibility rule", _vision_link_gate_eligibility_rule)
+    check("vision_link_gate's fleet:severity-live escape hatch survives crowding-out (gh#726)", _vision_link_gate_severity_escape_hatch_gh726)
     check("gru.md gates on a Vision-link before packing (gh#525)", _gru_md_gates_on_vision_link_before_packing)
     check("maxx reader reports the fleet's hourly slice, not a laptop's pacing", _maxx_reader_reports_the_fleets_hourly_slice_not_a_laptops_pacing)
     check("maxx fetch_budget classifies an MCP-level auth rejection, not maxx_unexpected_shape (gh#825)", _maxx_fetch_budget_classifies_mcp_auth_rejection)
@@ -12608,6 +12710,7 @@ if __name__ == "__main__":
     check("judge-judy lock lives somewhere persistent", _judge_judy_lock_lives_somewhere_persistent)
     check("judge-judy strikes are head-scoped and leave diagnosable evidence", _judge_judy_strikes_are_scoped_by_head_and_leave_diagnosable_evidence)
     check("board_github file_item can add a priority label alongside backlog/lane", _board_github_file_item_can_add_a_priority_label)
+    check("board_github ensure_labels creates fleet:severity-live idempotently (gh#726)", _board_github_ensure_labels_creates_severity_live_gh726)
     check("judge-judy files a priority-high fix item when it blocks a PR", _judge_judy_files_a_fix_item_on_block)
     check("judge-judy skips an empty diff instead of blocking (gh#531)", _judge_judy_skips_an_empty_diff_instead_of_blocking)
     check("judge-judy's verdict is read from validated JSON, not prose (gh#806)", _judge_judy_verdict_reads_validated_json_not_prose)

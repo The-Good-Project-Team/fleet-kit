@@ -31,6 +31,15 @@ comments superseding an earlier one: the newest comment carrying the line wins o
 comment, which wins over the body. Reuses run_report._vision_claim's regex (tolerates markdown
 heading/bold wrapping) rather than a second parser for the same field.
 
+THE SEVERITY ESCAPE HATCH (gh#726). On a fleet-internal repo, `none (maintenance)` is the
+*honest* answer for most work, so one linked candidate anywhere in the pack starves everything
+else -- including, at one point, the fix for this exact starvation (gh#726 itself was in its own
+`dropped` list). A `none (maintenance)` candidate that also carries the `fleet:severity-live`
+label (an active, ongoing failure, set by hand while it is still occurring -- never auto-detected,
+and deliberately not `fleet:priority-high`, which most of this board already carries) survives
+the crowding-out drop. Every other rule is unchanged: a candidate with no `labels` key at all
+behaves exactly as before this existed.
+
 Pure core (`classify_candidate`/`gate_candidates`), thin CLI (`main`) -- same split as
 claim_history.py and cost_bridge.py.
 """
@@ -49,6 +58,14 @@ import run_report  # noqa: E402
 STATUS_LINKED = "linked"
 STATUS_MAINTENANCE = "maintenance"
 STATUS_MISSING = "missing"
+
+# gh#726: the one escape hatch out of the crowding-out branch below -- a `none (maintenance)`
+# candidate that also carries this label survives even while a linked candidate is open.
+# Deliberately NOT `fleet:priority-high` (most of this board is high-tier maintenance; using
+# the tier itself as the hatch would empty the gate rather than fix it) and NOT auto-detected
+# from issue text -- marie/judge-judy sets it by hand while a failure is still occurring, per
+# its own label description (see `_SEVERITY_LABEL_META` in board_github.py).
+SEVERITY_LIVE_LABEL = "fleet:severity-live"
 
 # Tolerate the punctuation a model actually produces: "none(maintenance)", "None (Maintenance)",
 # and a trailing qualifier with no dash separator at all ("none (fleet guardrail/maintenance).",
@@ -90,27 +107,39 @@ def _classify_value(raw: str) -> tuple[str, str]:
     return STATUS_LINKED, raw
 
 
+def _label_names(labels) -> list[str]:
+    out = []
+    for lab in labels or []:
+        out.append(lab.get("name", "") if isinstance(lab, dict) else str(lab))
+    return out
+
+
 def gate_candidates(candidates: list[dict]) -> dict:
     """candidates: [{"number": int, "body": str, "comments": [...]}, ...], already in the
     order gru.md step 2b/2c produced (tier, then oldest-createdAt-first within a tier).
+    `labels` is optional (gh#726) -- a candidate dict with no `labels` key at all behaves
+    exactly as it did before this key existed: no escape hatch, byte-identical output.
 
     Returns {"eligible": [numbers, in the same relative order], "dropped": [{"number",
     "reason"}, ...]} -- gh#525 AC3: every drop is named, never a silent absence.
     """
     classified = [
-        (c["number"], *classify_candidate(c.get("body"), c.get("comments")))
+        (c["number"], *classify_candidate(c.get("body"), c.get("comments")), c.get("labels"))
         for c in candidates
     ]
-    linked_numbers = [n for n, status, _ in classified if status == STATUS_LINKED]
+    linked_numbers = [n for n, status, _, _ in classified if status == STATUS_LINKED]
     any_linked = bool(linked_numbers)
 
     eligible: list[int] = []
     dropped: list[dict] = []
-    for number, status, raw in classified:
+    for number, status, raw, labels in classified:
         if status == STATUS_LINKED:
             eligible.append(number)
         elif status == STATUS_MAINTENANCE:
-            if any_linked:
+            # gh#726: an active, ongoing failure survives the crowding-out drop even while a
+            # linked-KR candidate is open elsewhere in the pack -- everything else about
+            # `none (maintenance)` is unchanged.
+            if any_linked and SEVERITY_LIVE_LABEL not in _label_names(labels):
                 dropped.append({
                     "number": number,
                     "reason": (
