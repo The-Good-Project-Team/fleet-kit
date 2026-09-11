@@ -52,8 +52,12 @@ _MUTATING_BASH_RE = re.compile(
     r"|\b(rm|mv|cp|sed\s+-i|mkdir|touch|chmod|chown|tee)\b"
     r"|(?:^|[\s;&|])>>?(?!=)\s*\S"
 )
-_GIT_DASH_C_RE = re.compile(r"git\s+-C\s+(\S+)\s+(\S+)")
+_GIT_DASH_C_RE = re.compile(r"git\s+-C\s+(\S+)\s+(\S+)(?:\s+(\S+))?")
 _MUTATING_SUBCOMMANDS = {"commit", "checkout", "reset", "add", "merge", "rebase", "push", "stash", "clean", "rm", "mv"}
+# gh#837: `stash` alone is too coarse -- `stash list`/`stash show` are read-only, `stash pop`
+# (and bare `stash`, which git treats as `stash push`) are not. Only `stash` gets this second
+# check; every other verb in _MUTATING_SUBCOMMANDS stays decided by the verb alone.
+_READONLY_STASH_SUBCOMMANDS = {"list", "show"}
 _PATH_TOKEN_RE = re.compile(r"'[^']*'|\"[^\"]*\"|\S+")
 
 # gh#715: a command that merely QUOTES a mutating verb or a shared-checkout path -- prose in a
@@ -107,8 +111,13 @@ def _bash_targets_repo(command: str, repo_real: str) -> bool:
             target_dir = _resolve(m.group(1).strip("'\""))
         except OSError:
             target_dir = None
-        if target_dir and subcmd in _MUTATING_SUBCOMMANDS and _under(target_dir, repo_real):
-            return True
+        if not (target_dir and subcmd in _MUTATING_SUBCOMMANDS and _under(target_dir, repo_real)):
+            continue
+        if subcmd == "stash":
+            stash_sub = (m.group(3) or "").strip("'\"")
+            if stash_sub in _READONLY_STASH_SUBCOMMANDS:
+                continue  # `stash list`/`stash show` are reads, not writes (gh#837)
+        return True
 
     if not _MUTATING_BASH_RE.search(command):
         return False
