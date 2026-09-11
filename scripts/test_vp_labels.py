@@ -36,7 +36,9 @@ def test_collect_gathers_solid_items() -> None:
         if args[0] == "issue":
             label = args[args.index("--label") + 1]
             queried.append(label)
-            return [{"number": 5555, "comments": []}] if label == "quality:solid" else []
+            json_fields = args[args.index("--json") + 1]
+            assert "labels" in json_fields.split(","), f"labels not fetched: {json_fields}"
+            return [{"number": 5555, "comments": [], "labels": [{"name": "fleet:epic"}]}] if label == "quality:solid" else []
         return []
 
     vp_due._gh = fake_gh
@@ -44,6 +46,7 @@ def test_collect_gathers_solid_items() -> None:
 
     assert "quality:solid" in queried, f"solid tier never queried; queried {queried}"
     assert [i["number"] for i in items] == [5555], f"solid item not collected: {items}"
+    assert items[0]["labels"] == ["fleet:epic"], f"labels not propagated: {items}"
     print("ok  collect() gathers quality:solid items")
 
 
