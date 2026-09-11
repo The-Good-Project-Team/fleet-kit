@@ -244,6 +244,53 @@ def _cached(key: str, ttl_s: float, produce):
         return value
 
 
+# gh#553 VP review round 1, fix 3: this used to run only inside the request handler, on
+# whichever request happened to miss the 120s TTL -- so the one viewer unlucky enough to hit
+# a cold cache paid the full ~27s of live `gh` calls (measured on philanthropy). Pulled to
+# module level so a background thread (below) can also call it, refreshing the cache on a
+# timer instead of on a request -- a real visit then always reads an already-warm entry.
+_BACKLOG_HISTORY_DAYS = 14  # the only value fleet_view.html's Stats page ever requests
+
+
+def _backlog_history_payload(days: int):
+    issues_raw = _gh("issue", "list", "--state", "all", "--label", "fleet:backlog",
+                      "--json", "number,createdAt,closedAt", "--limit", "1000")
+    # New-PRs-opened + PRs-merged (shipped) per day -- the throughput counterpart to
+    # backlog size, plotted on the same chart/x-axis, so it's fetched alongside rather
+    # than as a separate endpoint the frontend has to join itself.
+    prs_raw = _gh("pr", "list", "--state", "all", "--json", "createdAt,mergedAt", "--limit", "500")
+    # _gh swallows failure into "" (timeout, rate limit, auth blip), and both
+    # aggregators turn "" into a full run of zero-count days -- which is
+    # indistinguishable, on the chart, from a genuinely empty backlog. Caching that
+    # would pin a false flatline over the real trend for the whole TTL, so refuse to
+    # cache it: raise, and let the caller serve this one request uncached. Slow beats
+    # confidently wrong on a page whose only job is to tell the truth about the fleet.
+    pr_activity = fleet_stats.pr_activity_by_day(prs_raw, days=days)
+    payload = {
+        "days": fleet_stats.backlog_history(issues_raw, days=days),
+        "new_prs": pr_activity["new_prs"],
+        "merged_prs": pr_activity["merged_prs"],
+    }
+    return payload, bool(issues_raw.strip())
+
+
+def refresh_backlog_history_forever(interval_s: float = 60.0):
+    """Keeps `_TTL_CACHE`'s one live backlog_history entry warm on a timer, so the 120s TTL
+    in `_cached()` never actually expires between a background refresh and the next one --
+    a person's request always reads a precomputed value instead of triggering the ~27s
+    `gh issue list --limit 1000` + `gh pr list --limit 500` pair itself."""
+    key = f"backlog_history:{_BACKLOG_HISTORY_DAYS}"
+    while True:
+        try:
+            value, cacheable = _backlog_history_payload(_BACKLOG_HISTORY_DAYS)
+            if cacheable:
+                with _TTL_LOCK:
+                    _TTL_CACHE[key] = (time.time(), value)
+        except Exception:
+            pass  # never let a slow/failed gh call kill the refresher thread
+        time.sleep(interval_s)
+
+
 # Settings page dial fields -- non-secret tuning knobs a human may want to see/edit from the
 # browser instead of ssh+vim. Allow-listed the same way dino-dashboard.py's READABLE_FIELDS
 # is: this is the ONLY set of keys /api/fleet_settings may write. Never widen to "any key".
@@ -1251,30 +1298,12 @@ class Handler(BaseHTTPRequestHandler):
             # hour while making the second load instant.
             qs = parse_qs(urlparse(self.path).query)
             days = int(qs.get("days", ["14"])[0])
-
-            def _build_backlog_history():
-                issues_raw = _gh("issue", "list", "--state", "all", "--label", "fleet:backlog",
-                                  "--json", "number,createdAt,closedAt", "--limit", "1000")
-                # New-PRs-opened + PRs-merged (shipped) per day -- the throughput counterpart to
-                # backlog size, plotted on the same chart/x-axis, so it's fetched alongside rather
-                # than as a separate endpoint the frontend has to join itself.
-                prs_raw = _gh("pr", "list", "--state", "all", "--json", "createdAt,mergedAt", "--limit", "500")
-                # _gh swallows failure into "" (timeout, rate limit, auth blip), and both
-                # aggregators turn "" into a full run of zero-count days -- which is
-                # indistinguishable, on the chart, from a genuinely empty backlog. Caching that
-                # would pin a false flatline over the real trend for the whole TTL, so refuse to
-                # cache it: raise, and let the caller serve this one request uncached. Slow beats
-                # confidently wrong on a page whose only job is to tell the truth about the fleet.
-                pr_activity = fleet_stats.pr_activity_by_day(prs_raw, days=days)
-                payload = {
-                    "days": fleet_stats.backlog_history(issues_raw, days=days),
-                    "new_prs": pr_activity["new_prs"],
-                    "merged_prs": pr_activity["merged_prs"],
-                }
-                return payload, bool(issues_raw.strip())
-
             # Key on days: /api/stats/backlog_history?days=7 and ?days=30 are different answers.
-            self._json(_cached(f"backlog_history:{days}", 120.0, _build_backlog_history))
+            # For days == _BACKLOG_HISTORY_DAYS (the only value the live page ever requests),
+            # refresh_backlog_history_forever() keeps this entry warm on its own timer, so this
+            # call almost always reads that precomputed value instead of paying for it here.
+            self._json(_cached(f"backlog_history:{days}", 120.0,
+                                lambda: _backlog_history_payload(days)))
             return
         if path == "/api/stats/self_improve_score":
             # Read-only tail of self_improve_score.jsonl -- written every 3h by
@@ -1700,6 +1729,14 @@ def main() -> int:
     threading.Thread(target=STATE.tail_member_logs_forever, daemon=True).start()
     threading.Thread(target=watch_and_broadcast, daemon=True).start()
     STATE.gh = poll_gh_state()  # one synchronous poll so the first page load isn't empty
+
+    # gh#553 VP review round 1, fix 3: same reasoning, for backlog_history's own gh calls --
+    # warm the cache once before serving so the very first Stats page load never pays the
+    # ~27s cold-path cost either, then keep it warm on a timer instead of on a request.
+    _bh_value, _bh_cacheable = _backlog_history_payload(_BACKLOG_HISTORY_DAYS)
+    if _bh_cacheable:
+        _TTL_CACHE[f"backlog_history:{_BACKLOG_HISTORY_DAYS}"] = (time.time(), _bh_value)
+    threading.Thread(target=refresh_backlog_history_forever, daemon=True).start()
 
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"fleet_view_server: serving http://0.0.0.0:{PORT}  (repo={REPO}, runs={RUNS_FILE})",
