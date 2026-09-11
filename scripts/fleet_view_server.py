@@ -286,8 +286,8 @@ def refresh_backlog_history_forever(interval_s: float = 60.0):
             if cacheable:
                 with _TTL_LOCK:
                     _TTL_CACHE[key] = (time.time(), value)
-        except Exception:
-            pass  # never let a slow/failed gh call kill the refresher thread
+        except Exception as exc:  # noqa: BLE001 -- never let a slow/failed gh call kill the
+            log_sync_error(exc)   # refresher thread; log_sync_error throttles repeats itself.
         time.sleep(interval_s)
 
 

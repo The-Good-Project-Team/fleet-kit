@@ -3374,12 +3374,20 @@ def _auto_deploy_race_check_detects_the_unrecognized_git_failure():
         assert "deploy OK" in alerts, "alert does not cross-reference the next tick's deploy outcome"
 
 
-def _fixer_check_sh(tmp, stale_prs_json, state_contents=None, state_age_hours=None, env_extra=None):
+def _fixer_check_sh(tmp, stale_prs_json, state_contents=None, state_age_hours=None, env_extra=None,
+                     curl_burst=None):
     """Run the-fixer's check.sh against a stubbed `gh`, return its one stdout line.
 
     The stub answers the three shapes check.sh asks for: `gh run list` for CI and deploy
     (always green here -- these tests are about the stale-PR path), and `gh pr list` for the
     open-PR sweep, which is fed verbatim from stale_prs_json.
+
+    `curl_burst`, when given, is a list of "code:time" strings (e.g. "000:10.0") stubbing
+    sample_degraded_page()'s burst probe, cycled by call order via a counter file so a test can
+    control exactly which of the n probes in a burst times out or runs slow. A curl call whose
+    `-w` format has no `time_total` (the hard-down health/page double-probe, not the burst) is
+    always answered "200" -- these tests are about the degraded-burst path, not the hard-down
+    one, which gh#4546's own tests already cover via a real refused connection.
     """
     import os
     import subprocess
@@ -3402,6 +3410,26 @@ def _fixer_check_sh(tmp, stale_prs_json, state_contents=None, state_age_hours=No
         "exit 0\n"
     )
     (bin_dir / "gh").chmod(0o755)
+
+    if curl_burst is not None:
+        counter = Path(tmp) / "curl_page_calls"
+        spec_literal = " ".join(curl_burst)
+        (bin_dir / "curl").write_text(
+            "#!/bin/bash\n"
+            "is_page=0\n"
+            "for a in \"$@\"; do case \"$a\" in *time_total*) is_page=1 ;; esac; done\n"
+            "if [ \"$is_page\" = 0 ]; then printf '200'; exit 0; fi\n"
+            f"spec=({spec_literal})\n"
+            f"counter=\"{counter}\"\n"
+            "n=0\n"
+            "[ -f \"$counter\" ] && n=$(cat \"$counter\")\n"
+            "echo $((n + 1)) > \"$counter\"\n"
+            "idx=$(( n % ${#spec[@]} ))\n"
+            "entry=\"${spec[$idx]}\"\n"
+            "code=\"${entry%%:*}\"; t=\"${entry#*:}\"\n"
+            "printf '%s %s' \"$code\" \"$t\"\n"
+        )
+        (bin_dir / "curl").chmod(0o755)
 
     state = log_dir / "the-fixer.state"
     if state_contents is not None:
@@ -3523,6 +3551,96 @@ def _fixer_charter_handles_every_reason_check_sh_emits():
         f"check.sh can emit {missing} but the-fixer.md has no rule naming them -- a sub-pass "
         "dispatched for one of these has no instruction to follow"
     )
+
+
+def _fixer_degraded_env():
+    """FIXER_HEALTH_URL/FIXER_PAGE_URL just need to be non-empty to switch on the double-probe
+    and burst-sampling paths -- curl itself is stubbed via `curl_burst`, so the URLs are never
+    actually dialed."""
+    return {"FIXER_HEALTH_URL": "http://health.invalid", "FIXER_PAGE_URL": "http://page.invalid"}
+
+
+def _fixer_degraded_sample_counts_a_timeout_as_an_error():
+    """gh#841 AC1: curl's own `000` -- a timeout, connection refusal, or TLS failure, the most
+    common way a dying site actually fails -- was never matched by check.sh's `case "$code" in
+    5??)`, so a hung probe scored as a clean sample. Real case: the VP ran this function
+    verbatim against https://philanthropy.org/990 and watched a full 10s timeout get recorded
+    as `error_pct 0.00%`.
+
+    Reads the sample straight out of fixer_fire_path.py's own persisted post-promote state
+    file rather than parsing a FIRE line, so this targets sample_degraded_page()'s arithmetic
+    specifically -- AC2 (the two-consecutive-tick fire) is a different, already-covered path.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _fixer_degraded_env()
+        env["FIXER_DEGRADED_SAMPLE_REQUESTS"] = "5"
+        burst = ["200:0.1", "200:0.1", "000:10.0", "200:0.1", "200:0.1"]  # 1 timeout in 5
+        out = _fixer_check_sh(tmp, "", env_extra=env, curl_burst=burst)
+        assert out.startswith("green"), f"a single degraded burst must not itself fire: {out!r}"
+
+        state = json.loads((Path(tmp) / "logs" / "the-fixer.postpromote").read_text())
+        assert state[-1]["error_pct"] == 20.0, (
+            f"a 1-in-5 timeout must count as a 20.00% error rate, got {state[-1]!r}"
+        )
+
+
+def _fixer_degraded_sample_p95_reports_the_slowest_request():
+    """gh#841 AC3: check.sh's old `idx=int((n-1)*0.95)` was off by one low and, at the default
+    n=5, could never select the final (slowest) sorted sample no matter how slow it was. The
+    issue's own worked example -- sorted times 0.6 0.8 0.9 1.0 9.5 -- must report p95=9.500,
+    not the old code's 1.000."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _fixer_degraded_env()
+        env["FIXER_DEGRADED_SAMPLE_REQUESTS"] = "5"
+        burst = ["200:1.0", "200:0.6", "200:9.5", "200:0.8", "200:0.9"]  # order shouldn't matter
+        out = _fixer_check_sh(tmp, "", env_extra=env, curl_burst=burst)
+        assert out.startswith("green"), f"a clean-error, slow-tail burst must not fire: {out!r}"
+
+        state = json.loads((Path(tmp) / "logs" / "the-fixer.postpromote").read_text())
+        assert state[-1]["p95_s"] == 9.5, (
+            f"nearest-rank p95 over [0.6 0.8 0.9 1.0 9.5] must be 9.500, got {state[-1]!r}"
+        )
+
+
+def _fixer_degraded_sample_default_n_is_above_five():
+    """gh#841 AC5: at n=5 the top 5% of a burst is a single request, so nearest-rank p95 is
+    really just "max" in disguise. FIXER_DEGRADED_SAMPLE_REQUESTS' default must be raised above
+    5, and check.sh must say why in a comment next to the default (a human reading the file
+    should not have to reconstruct the reasoning from this test)."""
+    check_sh = (ROOT / "members" / "the-fixer" / "check.sh").read_text()
+    m = re.search(r'FIXER_DEGRADED_SAMPLE_REQUESTS:-(\d+)\}', check_sh)
+    assert m, "could not find sample_degraded_page()'s FIXER_DEGRADED_SAMPLE_REQUESTS default"
+    default_n = int(m.group(1))
+    assert default_n > 5, f"default sample count must exceed 5, got {default_n}"
+    assert "top 5%" in check_sh, (
+        "no comment near the raised default explains why 5 was too small (the top-5%-is-one- "
+        "request reasoning AC5 requires a human-readable justification for)"
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _fixer_degraded_env()
+        out = _fixer_check_sh(tmp, "", env_extra=env, curl_burst=["200:0.05"])
+        assert out.startswith("green"), f"an all-clean burst must not fire: {out!r}"
+        calls = int((Path(tmp) / "curl_page_calls").read_text())
+        assert calls == default_n, (
+            f"sample_degraded_page() made {calls} burst probes but the default it read is "
+            f"{default_n} -- they must match"
+        )
+        assert calls > 5, f"the unset-default burst made only {calls} probes, still <= 5"
+
+
+def _fixer_degraded_sample_all_clean_stays_green_and_error_free():
+    """gh#841 AC6: fixing 1 and 3/4 above must not introduce a false positive on an entirely
+    healthy burst -- every probe 200, fast -- which stays 0.00% errors and never fires."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _fixer_degraded_env()
+        env["FIXER_DEGRADED_SAMPLE_REQUESTS"] = "5"
+        out = _fixer_check_sh(tmp, "", env_extra=env, curl_burst=["200:0.2"])
+        assert out.startswith("green"), f"an all-clean burst fired: {out!r}"
+
+        state = json.loads((Path(tmp) / "logs" / "the-fixer.postpromote").read_text())
+        assert state[-1]["error_pct"] == 0.0, f"an all-200 burst reported errors: {state[-1]!r}"
+        assert state[-1]["p95_s"] == 0.2, f"an all-0.2s burst reported a different p95: {state[-1]!r}"
 
 
 def _fixer_prod_down_env(diag_driver=None):
@@ -3791,6 +3909,7 @@ _ENTRYPOINT_SCHEDULED_SCRIPTS = (
     ("vp_due.sh", "bash /fleet-kit/scripts/vp_due.sh", "vp loop, 2026-09-08"),
     ("librarian-scrub (hourly shell scrub)", "run_member.sh librarian-scrub >>", "fleet-kit#784"),
     ("librarian (daily reader, 05:15 UTC)", "15 5 * * * root export GH_TOKEN=\\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh librarian >>", "fleet-kit#784"),
+    ("pacing_hold_check.py", "python3 /fleet-kit/scripts/pacing_hold_check.py", "gh#812"),
 )
 
 
@@ -4480,6 +4599,80 @@ def _closes_gate_blocks_an_epic_with_unaccepted_children():
     assert r["verdict"] == "ok", r
 
 
+def _closes_gate_epic_stays_open_when_its_own_thread_says_so_gh879():
+    """fk#879: `epic_closable()` also reads the epic's OWN comment thread, not just its
+    children's state -- reproduces #785 and #553, both closed wrongly by jefe on 2026-09-11
+    despite a human-written "stays open" verdict, because every child was CLOSED and the old
+    check never looked past that. Covers AC1, AC3, AC4, AC5 of the fk#879 PRD comment."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("closes_gate", ROOT / "scripts" / "closes_gate.py")
+    cg = importlib.util.module_from_spec(spec); spec.loader.exec_module(cg)
+
+    # AC1: real subIssues (no closedAt available, the live #785/#553 shape) all CLOSED, but a
+    # newer comment on the epic's own thread carries a documented stays-open marker -> blocked,
+    # reason names the marker and its timestamp
+    epic_reopened = {
+        "title": "epic", "labels": [{"name": "fleet:epic"}],
+        "body": "", "subIssues": {"nodes": [{"number": 1, "state": "CLOSED"}, {"number": 2, "state": "CLOSED"}]},
+        "comments": [{"createdAt": "2026-09-09T21:40:04Z", "body": "marie: all children closed as cruft -- this epic stays open, verification remains."}],
+    }
+    ec = cg.epic_closable(epic_reopened, {785: epic_reopened})
+    assert ec["closable"] is False and "stays open" in ec["reason"] and "2026-09-09T21:40:04Z" in ec["reason"], ec
+    r = cg.evaluate("Closes #785", ["src/x.py"], {785: epic_reopened})
+    assert r["verdict"] == "ok", "evaluate()'s PR path is unchanged by this issue -- only --epic reads the marker"
+
+    # AC3: same marker, but it is now OLDER than the newest child close (later work answered
+    # it) -> stale marker must not permanently block the epic
+    epic_answered = dict(epic_reopened, subIssues={"nodes": [
+        {"number": 1, "state": "CLOSED", "closedAt": "2026-09-10T00:00:00Z"},
+        {"number": 2, "state": "CLOSED", "closedAt": "2026-09-11T00:00:00Z"},
+    ]})
+    ec = cg.epic_closable(epic_answered, {785: epic_answered})
+    assert ec["closable"] is True and ec["reason"] == "every child is closed", ec
+
+    # AC4: no children discoverable at all (the #728 shape), but the thread carries VP's own
+    # reopen phrase -> still blocked; the marker check runs whether or not children were found
+    epic_unlinked_reopened = {
+        "title": "epic", "labels": [{"name": "fleet:epic"}], "body": "",
+        "comments": [{"createdAt": "2026-09-11T03:58:37Z", "body": "Not yet (VP review): the core deliverable does not work."}],
+    }
+    ec = cg.epic_closable(epic_unlinked_reopened, {728: epic_unlinked_reopened})
+    assert ec["closable"] is False and "Not yet (VP review):" in ec["reason"], ec
+    # ...but with no marker, an unlinked epic is still never blocked on epic grounds
+    epic_unlinked_plain = {"title": "epic", "labels": [{"name": "fleet:epic"}], "body": "", "comments": []}
+    ec = cg.epic_closable(epic_unlinked_plain, {729: epic_unlinked_plain})
+    assert ec["closable"] is True and "no children found" in ec["reason"], ec
+
+    # AC5: `decomposed into` fallback children now carry real closedAt -- a marker OLDER than
+    # the newest child close is stale (mirrors AC3 on the fallback path, with real timestamps)
+    epic_fallback = {
+        "title": "epic", "labels": [{"name": "fleet:epic"}], "body": "",
+        "comments": [
+            {"createdAt": "2026-09-01T00:00:00Z", "body": "marie: decomposed into #10, #11 (Part C2b) -- tracking-only from here, closes once every child is closed."},
+            {"createdAt": "2026-09-02T00:00:00Z", "body": "reif: epic stays open, still verifying."},
+        ],
+    }
+    issues_stale = {10: {"state": "CLOSED", "closedAt": "2026-09-03T00:00:00Z"}, 11: {"state": "CLOSED", "closedAt": "2026-09-04T00:00:00Z"}}
+    ec = cg.epic_closable(epic_fallback, {634: epic_fallback, **issues_stale})
+    assert ec["closable"] is True and ec["reason"] == "every child is closed", \
+        "'tracking-only from here' is routine Part C2b boilerplate, not a marker, and the genuine marker is stale here"
+    issues_fresh = {10: {"state": "CLOSED", "closedAt": "2026-08-30T00:00:00Z"}, 11: {"state": "CLOSED", "closedAt": "2026-08-31T00:00:00Z"}}
+    ec = cg.epic_closable(epic_fallback, {634: epic_fallback, **issues_fresh})
+    assert ec["closable"] is False and "stays open" in ec["reason"], ec
+
+    # AC5 (children discoverable via the fallback comment, but their fetched state carries no
+    # closedAt -- e.g. a partial fetch failure) -> marker wins rather than crash
+    ec = cg.epic_closable(epic_fallback, {634: epic_fallback, 10: {"state": "CLOSED"}, 11: {"state": "CLOSED"}})
+    assert ec["closable"] is False, ec
+
+    # regression check named in AC6/AC8: never trust a bare `closable: true` -- the module
+    # docstring and --epic help both name all three meanings
+    doc = cg.__doc__
+    assert "three" in doc.lower() and "stays-open" in doc.lower(), "module docstring must state the three closable:true meanings (AC8)"
+    ap_src = (ROOT / "scripts" / "closes_gate.py").read_text()
+    assert "closable:true means one of three things" in ap_src, "--epic help text must state the three meanings (AC8)"
+
+
 def _jefe_runs_the_epic_close_check_before_closing_an_epic():
     """AC4: members/jefe/jefe.md's epic-closing step invokes closes_gate.py's `--epic` check
     before jefe closes a `fleet:epic` issue, documented in the same shape gru.md uses for
@@ -4628,6 +4821,28 @@ def _sidebar_shows_spawned_scheduled_disabled_not_strikethrough_gh565():
     # the three modes are distinct CSS rules, not variations of one
     for mode in ("scheduled", "spawned", "disabled"):
         assert f".amode.mode-{mode} {{" in html_src, f"missing a distinct visual rule for {mode}"
+
+
+def _backlog_row_renders_blast_radius_as_chilli_not_a_grey_pill_gh844():
+    """gh#844, marie PRD: fleet:blast-N is a second axis (reach) separate from
+    fleet:complexity-N (size). renderIssueRow must render it as a 🌶️ x N glyph run, never as an
+    eighth grey `fleet:blast-N` pill (AC2); an unlabelled issue must render no glyph and every
+    other pill unchanged (AC3); two fleet:blast-* labels on one issue must collapse to the
+    highest N and exactly one glyph run, never two concatenated runs (AC4).
+    """
+    html_src = (ROOT / "scripts" / "fleet_view.html").read_text()
+    row_fn = html_src[html_src.index("const renderIssueRow = i => {"):html_src.index("const epicsHtml = epics.map(renderIssueRow)")]
+    # AC4: a single computed level (Math.max over every fleet:blast-N label), never a per-label
+    # accumulation -- this is what guarantees exactly one glyph run even with two+ labels.
+    assert "Math.max(max, Number(m[1]))" in row_fn, "renderIssueRow does not reduce to a single highest blast level (AC4)"
+    assert "'🌶️'.repeat(blastLevel)" in row_fn, "renderIssueRow does not render exactly one chilli glyph run"
+    # AC2: fleet:blast-* must never reach the grey-pill label list.
+    assert ".filter(l => !/^fleet:blast-\\d+$/.test(l.name))" in row_fn, \
+        "renderIssueRow must drop fleet:blast-* from the grey-pill label list (AC2)"
+    # AC3: the glyph is conditional on blastLevel -- an issue with none renders no glyph, and the
+    # pill filter is unconditional so every other label still renders exactly as before.
+    assert "blastLevel ? `<span class=\"blast\"" in row_fn, \
+        "glyph must be conditional on a real blast level, never rendered for an unlabelled issue (AC3)"
 
 
 def _deploy_sh_rolls_over_via_caddy_without_a_cordon():
@@ -8950,7 +9165,9 @@ def _green_pr_with_no_auto_merge_gets_armed():
             "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo \"sha$3\"; exit 0; fi\n"
             "if [ \"$1\" = \"api\" ]; then\n"
             "  # --jq is applied by the real gh; the stub answers what that filter would print.\n"
-            "  case \"$*\" in *statuses/sha294*) echo failure ;; *) echo null ;; esac\n"
+            "  # #291 carries an explicit SUCCESS verdict (judge-judy already reviewed and\n"
+            "  # approved this head, gh#862 AC3) -- an empty/null verdict must NOT arm (AC1).\n"
+            "  case \"$*\" in *statuses/sha291*) echo success ;; *statuses/sha294*) echo failure ;; *) echo null ;; esac\n"
             "  exit 0\n"
             "fi\n"
             "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"merge\" ]; then\n"
@@ -8988,6 +9205,89 @@ def _green_pr_with_no_auto_merge_gets_armed():
 
         logtext = (log_dir / "auto_update_branch.log").read_text()
         assert "armed" in logtext, "the tick summary never reports how many PRs it armed"
+
+
+def _arm_loop_never_arms_an_unreviewed_head_gh862():
+    """gh#862: `auto_update_branch.sh` keeps branches current AND arms auto-merge in the same
+    run. Keeping a branch current produces a NEW head SHA (the merge-main commit); that new SHA
+    has never had a `fleet-code-review` status posted against it, so the old guard's `verdict`
+    was the empty string, not "failure" -- and the empty-string guard fell through and armed a
+    diff judge-judy had just BLOCKed at the previous head. Live case: project-sketchyswap PR
+    #111, 2026-09-11 -- judge-judy BLOCKed head fcd6857172 at 07:18:54, auto-merge correctly
+    disabled at 07:19:02, the script merged main in at 07:20 producing 600ab420de with no new
+    evidence, and the old guard would arm that head.
+
+    Exercises the guard's three states directly (empty / failure / success) so a regression
+    back to "anything not literally failure/error arms" fails here even if the end-to-end stub
+    in `_green_pr_with_no_auto_merge_gets_armed` above is ever loosened.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"; log_dir.mkdir(parents=True, exist_ok=True)
+        repo = Path(tmp) / "repo"; repo.mkdir(parents=True, exist_ok=True)
+        bin_dir = Path(tmp) / "bin"; bin_dir.mkdir(parents=True, exist_ok=True)
+        calls = Path(tmp) / "merge_calls.txt"
+
+        # #801 empty verdict (unreviewed head -- must NOT arm, AC1/AC2), #802 failure (must NOT
+        # arm, pre-existing guard), #803 explicit success (must arm exactly as today, AC3).
+        (bin_dir / "gh").write_text(
+            "#!/bin/bash\n"
+            "if [ \"$1\" = \"repo\" ]; then echo 'acme/testrepo'; exit 0; fi\n"
+            "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n"
+            "  case \"$*\" in *autoMergeRequest*) echo 801; echo 802; echo 803 ;; *) ;; esac\n"
+            "  exit 0\n"
+            "fi\n"
+            "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo \"sha$3\"; exit 0; fi\n"
+            "if [ \"$1\" = \"api\" ]; then\n"
+            "  case \"$*\" in\n"
+            "    *statuses/sha801*) echo -n '' ;;\n"
+            "    *statuses/sha802*) echo failure ;;\n"
+            "    *statuses/sha803*) echo success ;;\n"
+            "    *) : ;;\n"
+            "  esac\n"
+            "  exit 0\n"
+            "fi\n"
+            "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"merge\" ]; then\n"
+            f"  echo \"$3\" >> {calls}\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n"
+        )
+        (bin_dir / "gh").chmod(0o755)
+
+        proc = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "auto_update_branch.sh")],
+            capture_output=True, text=True, timeout=30,
+            env={"FLEET_REPO": str(repo), "FLEET_LOG_DIR": str(log_dir),
+                 "FLEET_ENV_FILE": "/nonexistent", "PATH": f"{bin_dir}:/usr/bin:/bin"},
+        )
+        assert proc.returncode == 0, f"script failed: {proc.stderr.strip()[:300]}"
+
+        armed = calls.read_text().split() if calls.exists() else []
+        assert "801" not in armed, (
+            "an UNREVIEWED head (empty fleet-code-review verdict) was armed -- this is the "
+            f"exact gh#862 bypass (PR #111's post-branch-update head): {armed!r}"
+        )
+        assert "802" not in armed, f"a judge-blocked head (failure) was armed: {armed!r}"
+        assert "803" in armed, (
+            f"a head with an explicit fleet-code-review=success verdict was not armed -- the "
+            f"fix must not become a blanket never-arm (AC3): {armed!r}"
+        )
+
+        logtext = (log_dir / "auto_update_branch.log").read_text()
+        assert "unreviewed" in logtext, (
+            f"the log must name the empty-verdict reason as unreviewed, not silence or "
+            f"'blocked': {logtext[-2000:]!r}"
+        )
+
+    # AC5: the fix belongs on the reader side (this guard), never in how judge-judy posts its
+    # verdict -- non-goal 3 in the PRD, mechanically checkable against the diff this PR carries.
+    aub = (ROOT / "scripts" / "auto_update_branch.sh").read_text()
+    assert '[ "$verdict" != "success" ]' in aub, (
+        "auto_update_branch.sh's arm loop no longer requires an explicit success verdict to arm"
+    )
 
 
 def _stale_pr_candidate_filter_excludes_human_branches_and_fresh_prs():
@@ -11080,15 +11380,17 @@ def _ask_class_column_round_trips_and_is_migrated_gh650():
     with tempfile.TemporaryDirectory() as d:
         db_path = Path(d) / "fleet.db"
         # A "legacy" db: the asks table as it existed before gh#650, i.e. today's SCHEMA minus
-        # the `class` column and its own comment lines -- built by stripping the two lines this
-        # issue added, so the fixture can never silently drift from the real schema shape.
+        # the `class` and `summary` (gh#877) columns and their own comment lines -- built by
+        # stripping the lines those two issues added, so the fixture can never silently drift
+        # from the real schema shape.
         start = fleet_db.SCHEMA.index("  filed_at     REAL NOT NULL,")
-        end = fleet_db.SCHEMA.index("  class        TEXT\n") + len("  class        TEXT\n")
+        end = fleet_db.SCHEMA.index("  summary      TEXT\n") + len("  summary      TEXT\n")
         legacy_schema = (fleet_db.SCHEMA[:start]
                           + "  filed_at     REAL NOT NULL\n"
                           + fleet_db.SCHEMA[end:])
-        assert "class" not in legacy_schema.split("CREATE TABLE IF NOT EXISTS asks")[1].split(");")[0], \
-            "fixture still declares a class column -- bad slice"
+        asks_body = legacy_schema.split("CREATE TABLE IF NOT EXISTS asks")[1].split(");")[0]
+        assert "class" not in asks_body, "fixture still declares a class column -- bad slice"
+        assert "summary" not in asks_body, "fixture still declares a summary column -- bad slice"
 
         conn = sqlite3.connect(str(db_path))
         conn.executescript(legacy_schema)
@@ -11102,9 +11404,11 @@ def _ask_class_column_round_trips_and_is_migrated_gh650():
         conn = fleet_db.connect(db_path)  # triggers _migrate -> _ASK_ADD_COLUMNS
         cols = {r[1] for r in conn.execute("PRAGMA table_info(asks)")}
         assert "class" in cols, "connect() against a pre-existing asks table never added class"
+        assert "summary" in cols, "connect() against a pre-existing asks table never added summary (gh#877)"
         row = ask.list_asks(conn, status="all")[0]
         assert row["id"] == pre_id and row["why"] == "a pre-migration ask with no class column at all", \
             "the pre-existing row must survive the migration unchanged"
+        assert row["summary"] is None, f"a pre-migration row's summary must read NULL, got {row['summary']!r}"
         assert row["class"] is None, f"a pre-migration row's class must read NULL, got {row['class']!r}"
 
 
@@ -11557,6 +11861,84 @@ def _filer_red_profile_uses_red_label_and_marker_gh785():
     assert label_create[3].endswith("red-team")
 
 
+def _filer_lookup_failure_never_files_a_duplicate_gh914():
+    # gh#914: a `gh issue list` call that fails (rate limit, network blip) must never be read
+    # as "no open issue found" -- that misreading filed #911/#912 as duplicates of #814/#884.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("jif", ROOT / "scripts" / "journey_issue_filer.py")
+    jif = importlib.util.module_from_spec(spec); sys.modules[spec.name] = jif; spec.loader.exec_module(jif)
+
+    create_calls = []
+
+    def flaky(cmd):
+        if cmd[1] == "label":
+            return 0, "ok"
+        if cmd[2] == "list":
+            return 1, "rate limited"
+        if cmd[2] == "create":
+            create_calls.append(cmd)
+            return 0, "https://github.com/x/y/issues/999"
+        raise AssertionError(f"unexpected call: {cmd}")
+
+    d = Path(tempfile.mkdtemp())
+    results = {
+        "run": "r1", "deploy_sha": "sha1",
+        "journeys": [{"id": "send-message", "name": "Send a message",
+                      "steps": [{"index": 0, "action": "fill and send", "observable_result": "sent",
+                                 "status": "fail"}]}],
+    }
+    (d / "results.json").write_text(json.dumps(results))
+    summary = jif.process(d / "results.json", d / "state.json", runner=flaky)
+    assert create_calls == [], f"a lookup failure must file zero new issues, got {create_calls}"
+    assert summary["filed"] == [], summary
+    assert len(summary["skipped"]) == 1, summary
+
+
+def _filer_ensure_label_forwards_repo_gh922():
+    # gh#922: ensure_label() was the one call site process() made that dropped `repo`, so on a
+    # fresh target repo it created the label in the WRONG (ambient) repo and every later
+    # `--label` issue create failed "not found" -- the same mis-pointing class as gh#151/#770,
+    # reintroduced by the very PR (#916) written to close it.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("jif", ROOT / "scripts" / "journey_issue_filer.py")
+    jif = importlib.util.module_from_spec(spec); sys.modules[spec.name] = jif; spec.loader.exec_module(jif)
+
+    calls = []
+    def runner(cmd):
+        calls.append(cmd)
+        return 0, ""
+    jif.ensure_label(runner, jif.SENTRY, repo="owner/name")
+    idx = calls[0].index("--repo")
+    assert calls[0][idx + 1] == "owner/name", calls[0]
+
+    calls.clear()
+    jif.ensure_label(runner, jif.SENTRY)
+    assert "--repo" not in calls[0], calls[0]
+
+    # end to end: every gh call process() makes, label create included, carries --repo.
+    calls = []
+    def recording(cmd):
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "issue", "list"]:
+            return 0, "[]"
+        if cmd[:3] == ["gh", "issue", "create"]:
+            return 0, "https://github.com/x/y/issues/1"
+        return 0, ""
+    d = Path(tempfile.mkdtemp())
+    results = {"run": "r1", "deploy_sha": "sha", "journeys": [
+        {"id": "send-message", "name": "Send a message",
+         "steps": [{"index": 0, "action": "fill and send", "observable_result": "sent", "status": "fail"}]}]}
+    (d / "results.json").write_text(json.dumps(results))
+    summary = jif.process(d / "results.json", d / "state.json", runner=recording, repo="owner/name")
+    assert summary["errors"] == [], summary
+    assert len(summary["filed"]) == 1, summary
+    for cmd in calls:
+        assert "--repo" in cmd, f"missing --repo in {cmd}"
+        assert cmd[cmd.index("--repo") + 1] == "owner/name", cmd
+    label_create = [c for c in calls if c[:3] == ["gh", "label", "create"]]
+    assert label_create, "ensure_label never called label create"
+
+
 def _red_member_paced_and_vp_gates_on_red_gh785():
     import member_spec
     red = member_spec.by_name("red", ROOT / "members")
@@ -11852,6 +12234,87 @@ def _fleet_env_example_documents_the_fixer_prod_visibility_vars_gh728():
     )
 
 
+class _FakeGhForIncidentTarget:
+    """Same shape as test_prod_incident.py's own FakeGh -- replays `gh issue {create,list,
+    comment}` against an in-memory store, no network."""
+
+    def __init__(self):
+        self.issues = {}
+        self._next = 1
+
+    def __call__(self, cmd):
+        sub = cmd[2]
+        if sub == "create":
+            title, body = cmd[cmd.index("--title") + 1], cmd[cmd.index("--body") + 1]
+            n = self._next
+            self._next += 1
+            self.issues[n] = {"title": title, "body": body, "open": True, "comments": []}
+            return 0, f"https://github.com/x/y/issues/{n}"
+        if sub == "list":
+            return 0, json.dumps(
+                [{"number": n, "body": v["body"]} for n, v in self.issues.items() if v["open"]])
+        if sub == "comment":
+            n = int(cmd[3])
+            self.issues[n]["comments"].append(cmd[cmd.index("--body") + 1])
+            return 0, "commented"
+        raise AssertionError(f"unexpected gh subcommand: {sub}")
+
+
+def _prod_incident_target_discriminator_separates_concurrent_outages_gh836():
+    """gh#836 AC1-6: find_open_incident()/file_or_update_incident() matched on the shared
+    INCIDENT_MARKER alone, so two distinct, concurrently-open outages (two different failing
+    URLs) collapsed onto one issue -- the second silently invisible. On main (pre-gh#836) this
+    check fails at the AC1/AC2 assertions below: find_open_incident() took no `target` argument
+    at all."""
+    import prod_incident as pi
+    A, B = "https://a.example/health", "https://b.example/health"
+
+    # AC1 + AC5: two open, differently-targeted incidents each resolve to their OWN issue,
+    # regardless of the order `gh` returns them in.
+    gh = _FakeGhForIncidentTarget()
+    a, created_a = pi.file_or_update_incident("acme/prod", "t-a", "b-a", ["incident"], run=gh, target=A)
+    b, created_b = pi.file_or_update_incident("acme/prod", "t-b", "b-b", ["incident"], run=gh, target=B)
+    assert created_a and created_b, "two distinct targets must each create their own issue"
+    assert pi.find_open_incident("acme/prod", target=B, run=gh) == b
+    assert pi.find_open_incident("acme/prod", target=A, run=gh) == a
+    gh.issues = dict(reversed(list(gh.issues.items())))
+    assert pi.find_open_incident("acme/prod", target=B, run=gh) == b, "order must not matter"
+    assert pi.find_open_incident("acme/prod", target=A, run=gh) == a, "order must not matter"
+
+    # AC2: an open incident for A only -- filing for B creates a NEW issue, comments on neither.
+    gh2 = _FakeGhForIncidentTarget()
+    a2, _ = pi.file_or_update_incident("acme/prod", "t-a", "b-a", ["incident"], run=gh2, target=A)
+    b2, created_b2 = pi.file_or_update_incident("acme/prod", "t-b", "b-b", ["incident"], run=gh2, target=B)
+    assert created_b2, "filing a second target must create a new issue, not comment on A's"
+    assert a2 != b2
+    assert gh2.issues[a2]["comments"] == [], "A's issue must not receive B's comment"
+
+    # AC3: refiling the SAME target comments on its own issue, creates nothing (gh#728 fix 3's
+    # race behaviour, unchanged).
+    number, created_again = pi.file_or_update_incident(
+        "acme/prod", "t-a2", "b-a2", ["incident"], run=gh2, target=A)
+    assert not created_again and number == a2
+    assert len(gh2.issues) == 2, "same-target refiling must never create a new issue"
+
+    # AC4: no open incident at all -- creates one, as before.
+    gh3 = _FakeGhForIncidentTarget()
+    number3, created3 = pi.file_or_update_incident("acme/prod", "t", "b", ["incident"], run=gh3, target=A)
+    assert created3 and len(gh3.issues) == 1
+
+    # AC6: a legacy issue (marker present, no discriminator recorded) never crashes a
+    # target-aware lookup. Chosen behaviour, stated here and in gh#836's PR body: it matches ANY
+    # target -- the alternative (never matching) would silently break gh#728 fix 3's
+    # cross-member race dedup for a caller with no discriminator to supply (fixer_fire_path.py
+    # today), which gh#836's PRD lists as a non-goal to preserve.
+    gh4 = _FakeGhForIncidentTarget()
+    gh4.issues[1] = {"title": "legacy", "open": True,
+                      "body": f"pre-gh836 incident\n\n{pi.INCIDENT_MARKER}", "comments": []}
+    gh4._next = 2
+    assert pi.find_open_incident("acme/prod", target=A, run=gh4) == 1
+    number4, created4 = pi.file_or_update_incident("acme/prod", "t", "b", ["incident"], run=gh4, target=B)
+    assert not created4 and number4 == 1 and len(gh4.issues) == 1
+
+
 def _maxx_share_ceiling_holds_a_5h_block_ahead_of_pace_gh781():
     """Reif 2026-09-09: "it's the session limits we should respect." Live that day the
     hourly ceiling stayed 0.015-0.048 while the account burned 77% of its 5h window in the
@@ -12029,6 +12492,109 @@ def _charter_bloat_check_never_prints_ok_over_unread_prs_fk908():
         finally:
             cbc.fetch_merged_prs, _sys.argv = real_fetch, real_argv
     assert rc2 == 2 and out2.getvalue().strip() == "", (rc2, out2.getvalue())
+
+
+def _charter_bloat_check_mergedat_tie_mixed_number_types_gh920():
+    """gh#920 (code review on #913): `analyze()`'s `touching` tuples are
+    `(mergedAt, number, additions, deletions)` where `number` is an int for a squash-merged PR
+    and a str (short SHA) for a direct push. Two rows tying on mergedAt's second precision used
+    to fall through tuple comparison to `number`, and Python can't compare int < str -- crash,
+    exit 1, and jefe.md:317 reads exit 1 as a real NEEDS CONSOLIDATION flag on an unnamed
+    charter. (1) proves the raw tuple shape really does raise TypeError on that tie -- so this
+    test would have failed loudly against the pre-fix sort key, not silently passed either way.
+    (2) proves `analyze()` itself no longer raises on the identical input. (3) proves the verdict
+    for a mixed-type tie matches what the equivalent all-int input produces -- the fix must only
+    stop the crash, not change which charter gets flagged."""
+    import charter_bloat_check as cbc
+
+    tie = "2026-09-11T12:00:00+00:00"
+    older = "2026-09-10T00:00:00+00:00"
+    rel = "members/x/x.md"
+
+    # (1) The exact tuple shape `analyze()` used to sort on DOES raise TypeError on this tie --
+    # confirming the regression this test guards is real, not hypothetical.
+    try:
+        sorted([(tie, 200, 5, 0), (tie, "deadbeef1", 3, 0)], reverse=True)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError(
+            "mixed int/str tuple comparison no longer raises TypeError on its own -- "
+            "the premise behind gh#920's regression test has changed, re-check it"
+        )
+
+    # (2) `analyze()` on the same tie, through the real code path, must not raise.
+    rows_mixed = [
+        {"number": 200, "mergedAt": tie, "files": [{"path": rel, "additions": 5, "deletions": 0}]},
+        {"number": "deadbeef1", "mergedAt": tie,
+         "files": [{"path": rel, "additions": 3, "deletions": 0}]},
+        {"number": 150, "mergedAt": older,
+         "files": [{"path": rel, "additions": 1, "deletions": 10}]},
+    ]
+    res_mixed = cbc.analyze([rel], rows_mixed)[rel]
+    assert res_mixed["count_since_consolidation"] == 2, res_mixed
+    assert res_mixed["last_consolidation_pr"] == 150, res_mixed
+
+    # (3) An equivalent all-int input (the str short-SHA replaced by an int PR number) must
+    # produce the identical verdict -- the fix only widens what the sort key can compare.
+    rows_all_int = [dict(r) for r in rows_mixed]
+    rows_all_int[1] = dict(rows_all_int[1], number=201)
+    res_all_int = cbc.analyze([rel], rows_all_int)[rel]
+    assert res_mixed == res_all_int, (res_mixed, res_all_int)
+
+    # (4) Distinct mergedAt values still sort newest-first (regression, not just the tie case).
+    newer = "2026-09-12T00:00:00+00:00"
+    rows_ordered = [
+        {"number": 1, "mergedAt": older, "files": [{"path": rel, "additions": 1, "deletions": 0}]},
+        {"number": 2, "mergedAt": newer,
+         "files": [{"path": rel, "additions": 0, "deletions": 5}]},
+    ]
+    res_ordered = cbc.analyze([rel], rows_ordered)[rel]
+    assert res_ordered["last_consolidation_pr"] == 2, \
+        "newest-first ordering broke: the newer, net-reductive row must be found first"
+    assert res_ordered["count_since_consolidation"] == 0, res_ordered
+
+
+def _charter_bloat_check_unexpected_exception_exits_2_not_1_gh920():
+    """gh#920 AC5: ANY unhandled exception in `main()` -- not just `SourceUnavailable` -- must
+    exit 2 and print to stderr, never let a bare traceback fall through to Python's default
+    exit 1. jefe.md:317 reads exit 1 as a real NEEDS CONSOLIDATION flag, so a crash anywhere
+    else in the pipeline (not only the fetch step) must not be misread as a verdict."""
+    import sys as _sys
+    import contextlib
+    import io
+    import tempfile
+    import pathlib as _pathlib
+
+    import charter_bloat_check as cbc
+
+    with tempfile.TemporaryDirectory() as td:
+        d = _pathlib.Path(td) / "members" / "gru"
+        d.mkdir(parents=True)
+        (d / "gru.md").write_text("# charter\n")
+
+        def _boom(*a, **k):
+            raise ValueError("boom: something analyze()-adjacent broke")
+
+        real_analyze, real_argv = cbc.analyze, _sys.argv
+        real_fetch = cbc.fetch_merged_prs
+        cbc.analyze = _boom
+        cbc.fetch_merged_prs = lambda *a, **k: [
+            {"number": 1, "mergedAt": "2026-09-11T00:00:00+00:00",
+             "files": [{"path": "members/gru/gru.md", "additions": 1, "deletions": 0}]}
+        ]
+        _sys.argv = ["charter_bloat_check.py", "--root", td]
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = cbc.main()
+        finally:
+            cbc.analyze, cbc.fetch_merged_prs, _sys.argv = real_analyze, real_fetch, real_argv
+
+    assert rc == 2, f"an unrelated crash must exit 2 (could-not-run), not {rc}"
+    assert out.getvalue().strip() == "", \
+        f"a crash must never print a per-charter verdict: {out.getvalue()!r}"
+    assert "boom" in err.getvalue() and "ValueError" in err.getvalue(), err.getvalue()
 
 
 def _fleet_metrics_windows_runs_and_says_unavailable_gh782():
@@ -12431,7 +12997,8 @@ def _control_plane_agent_creates_and_removes_an_instance_over_http_gh759():
         cp.used_ports = lambda reg: {8420, 8562, 8591, 8592}
         srv = cp.make_server(0, registry, deploy_fn=lambda d, name, log: deployed.append((d, name)))
         port = srv.server_address[1]
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        serve_thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        serve_thread.start()
         try:
             base = f"http://127.0.0.1:{port}"
             token = cp.ensure_token()
@@ -12486,7 +13053,13 @@ def _control_plane_agent_creates_and_removes_an_instance_over_http_gh759():
             assert post("/remove", name="b")[0] == 401
         finally:
             srv.shutdown()
+            for t in srv.jobs.values():  # the /new background job(s) must not outlive the fixture
+                t.join(timeout=5)
+            serve_thread.join(timeout=5)
+            srv.server_close()
             cp.CADDYFILE, cp.TOKEN_FILE, cp.OUT_DIR, cp.read_crontab, cp.write_crontab, cp.reload_caddy, cp.used_ports = saved
+            assert not serve_thread.is_alive(), "serve_forever thread outlived the test"
+            assert all(not t.is_alive() for t in srv.jobs.values()), "a /new job thread outlived the test"
 
 
 def _control_plane_secret_store_init_check_adopt_set_gh759():
@@ -13158,6 +13731,138 @@ def _ask_authority_cli_reports_grants_gh771():
             f"ask.py authority must show the grant's level and ask_ids, got {out}"
 
 
+def _pacing_hold_check_env(tmp: Path, ntfy_calls: Path):
+    """Shared fixture plumbing for both gh#812 tests below: a stubbed `curl` on PATH (so
+    fleet_alert.sh's real network legs never fire -- same shape
+    _account_health_check_actually_pages_when_configured already uses above) and every
+    fleet_alert.sh/alert_store.py state file redirected into `tmp`, never the real box's
+    alerts.json/fleet_alert.log."""
+    bin_dir = tmp / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "curl").write_text(f'#!/bin/bash\necho called >> "{ntfy_calls}"\nexit 0\n')
+    (bin_dir / "curl").chmod(0o755)
+    return {
+        "FLEET_LOG_DIR": str(tmp),
+        "FLEET_ALERT_STATE_FILE": str(tmp / "alerts.json"),
+        "FLEET_ALERT_LOG": str(tmp / "fleet_alert.log"),
+        "FLEET_ALERT_QUEUE": str(tmp / "alerts_undelivered.jsonl"),
+        "NTFY_TOPIC": "selftest-fake-topic",
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+    }
+
+
+def _write_pacing_hold_runs(runs_path: Path, paced_hours_ago: list[int], other_hours_ago: list[int]):
+    """Two distinct members per paced hour (jefe + gru), matching pacing_hold_check.py's own
+    MIN_ROWS_PER_HOUR=2 floor -- a real fleet-wide hold, not one early ticker's single row."""
+    now = time.time()
+    lines = []
+    for h in paced_hours_ago:
+        lines.append(json.dumps({"ts": now - h * 3600, "status": "paced", "member": "jefe"}))
+        lines.append(json.dumps({"ts": now - h * 3600 - 60, "status": "paced", "member": "gru"}))
+    for h in other_hours_ago:
+        lines.append(json.dumps({"ts": now - h * 3600, "status": "ok", "member": "roomba"}))
+    runs_path.write_text("\n".join(lines) + "\n")
+
+
+def _pacing_hold_check_pages_on_sustained_hold_gh812():
+    """gh#812 AC1/AC4: a fleet-wide pacing hold (every run in runs.jsonl landing
+    status=paced) sustained across 2+ consecutive hourly ticks must page exactly once,
+    naming the streak length and the block_over_pace mechanism -- distinct from the
+    unreadable-meter case budget_read_check.sh already covers. This script does not exist
+    on `main` before this change, so this test fails there (ModuleNotFoundError via the
+    subprocess exit code) -- the AC's own "fails against main before the change" clause."""
+    import subprocess
+    script_path = ROOT / "scripts" / "pacing_hold_check.py"
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        ntfy_calls = tmp / "ntfy_calls.log"
+        env = _pacing_hold_check_env(tmp, ntfy_calls)
+        _write_pacing_hold_runs(tmp / "runs.jsonl", paced_hours_ago=[0, 1], other_hours_ago=[])
+
+        proc = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True,
+                              timeout=30, env=env)
+        assert proc.returncode == 0, f"pacing_hold_check.py must exit 0: {proc.stderr.strip()[:300]}"
+        assert "PAGED" in proc.stdout, (
+            f"a 2h sustained fleet-wide hold never printed PAGED -- stdout: {proc.stdout[:400]!r}"
+        )
+        assert ntfy_calls.exists(), "PAGED but the alert helper's curl leg never fired"
+        assert (tmp / "alerts.json").exists(), \
+            "PAGED but no alerts.json record written -- the next tick would page again"
+
+        # Second consecutive tick of the SAME open hold must not page again (AC2).
+        ntfy_calls.unlink()
+        proc2 = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True,
+                               timeout=30, env=env)
+        assert proc2.returncode == 0
+        assert "suppressed" in proc2.stdout, (
+            f"a still-open hold paged a second time instead of being suppressed (AC2) -- "
+            f"stdout: {proc2.stdout[:400]!r}"
+        )
+        assert not ntfy_calls.exists(), "a suppressed tick must not touch the alert helper at all"
+
+        # Hold clears -> a resolution notice fires (AC3).
+        _write_pacing_hold_runs(tmp / "runs.jsonl", paced_hours_ago=[], other_hours_ago=[0, 1])
+        proc3 = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True,
+                               timeout=30, env=env)
+        assert proc3.returncode == 0
+        assert "recovery reported" in proc3.stdout, (
+            f"a cleared hold that had paged must send a resolution notice (AC3) -- "
+            f"stdout: {proc3.stdout[:400]!r}"
+        )
+        assert ntfy_calls.exists(), "recovery was reported but never reached the alert helper"
+
+
+def _pacing_hold_check_single_tick_does_not_page_gh812():
+    """gh#812 AC6: a fleet paced for a single hourly tick and then recovering is normal
+    behaviour -- pacing_hold_check.py must not page for it."""
+    import subprocess
+    script_path = ROOT / "scripts" / "pacing_hold_check.py"
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        ntfy_calls = tmp / "ntfy_calls.log"
+        env = _pacing_hold_check_env(tmp, ntfy_calls)
+        _write_pacing_hold_runs(tmp / "runs.jsonl", paced_hours_ago=[0], other_hours_ago=[1, 2])
+
+        proc = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True,
+                              timeout=30, env=env)
+        assert proc.returncode == 0, f"pacing_hold_check.py must exit 0: {proc.stderr.strip()[:300]}"
+        assert "PAGED" not in proc.stdout, (
+            f"a single held tick must never page -- stdout: {proc.stdout[:400]!r}"
+        )
+        assert not ntfy_calls.exists(), "a single held tick reached the alert helper at all"
+
+
+def _pacing_hold_check_sparse_single_row_hours_never_page_gh812():
+    """Found by a post-merge /code-review pass on PR#934: current_streak() deliberately
+    looks at the CURRENT, still-forming hour too, so a lone early ticker landing `paced`
+    before anyone else has run that hour must NOT read as a fleet-wide hold. Two
+    consecutive hours with only ONE paced row each (no second member to corroborate) must
+    never page, even though the naive "at least one row, all paced" rule from before this
+    fix would have -- this is what pacing_hold_check.py's MIN_ROWS_PER_HOUR floor guards."""
+    import json as _json
+    import subprocess
+    script_path = ROOT / "scripts" / "pacing_hold_check.py"
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        ntfy_calls = tmp / "ntfy_calls.log"
+        env = _pacing_hold_check_env(tmp, ntfy_calls)
+        now = time.time()
+        lines = [
+            _json.dumps({"ts": now, "status": "paced", "member": "jefe"}),
+            _json.dumps({"ts": now - 3600, "status": "paced", "member": "jefe"}),
+        ]
+        (tmp / "runs.jsonl").write_text("\n".join(lines) + "\n")
+
+        proc = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True,
+                              timeout=30, env=env)
+        assert proc.returncode == 0, f"pacing_hold_check.py must exit 0: {proc.stderr.strip()[:300]}"
+        assert "PAGED" not in proc.stdout, (
+            f"two consecutive single-row paced hours (one early ticker each) must never "
+            f"page on their own -- stdout: {proc.stdout[:400]!r}"
+        )
+        assert not ntfy_calls.exists(), "a sparse single-row hold reached the alert helper at all"
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -13218,6 +13923,10 @@ if __name__ == "__main__":
     check("the-fixer dedup still suppresses an unchanged batch", _fixer_dedup_still_suppresses_an_unchanged_batch)
     check("the-fixer dedup expires so a wedge cannot last forever", _fixer_dedup_expires_so_a_wedge_cannot_last_forever)
     check("the-fixer charter handles every reason check.sh emits", _fixer_charter_handles_every_reason_check_sh_emits)
+    check("the-fixer degraded sample counts a timeout as an error (gh#841)", _fixer_degraded_sample_counts_a_timeout_as_an_error)
+    check("the-fixer degraded sample p95 reports the slowest request (gh#841)", _fixer_degraded_sample_p95_reports_the_slowest_request)
+    check("the-fixer degraded sample default n is above five (gh#841)", _fixer_degraded_sample_default_n_is_above_five)
+    check("the-fixer degraded sample all-clean burst stays green and error-free (gh#841)", _fixer_degraded_sample_all_clean_stays_green_and_error_free)
     check("the-fixer captures diag output when FIXER_PROD_DIAG_DRIVER is configured (gh#4546)", _fixer_prod_down_captures_diag_output_when_driver_is_configured)
     check("the-fixer logs the gap when no diag driver is configured (gh#4546)", _fixer_prod_down_logs_the_gap_when_no_driver_is_configured)
     check("the-fixer distinguishes a broken diag driver from a healthy read (gh#4546)", _fixer_prod_down_reports_a_nonzero_driver_without_pretending_it_succeeded)
@@ -13342,6 +14051,8 @@ if __name__ == "__main__":
     check("the-fixer does not fire on a parked PR already in the merge queue",
           _fixer_does_not_fire_on_a_parked_pr_already_in_the_merge_queue)
     check("a green PR with no auto-merge gets armed", _green_pr_with_no_auto_merge_gets_armed)
+    check("arm loop never arms an unreviewed head after a branch-update SHA change (gh#862)",
+          _arm_loop_never_arms_an_unreviewed_head_gh862)
     check("stale-PR close filter excludes human branches and fresh PRs (gh#527)",
           _stale_pr_candidate_filter_excludes_human_branches_and_fresh_prs)
     check("a stale unarmed/red PR is closed and its claim freed, a queued one is untouched (gh#527)",
@@ -13443,6 +14154,8 @@ if __name__ == "__main__":
     check("librarian-scrub is a shell member on the hourly line; librarian is the daily reader with /repo and /fleet-kit denied; marie+gru read INTENT.md (gh#784 AC1)", _librarian_scrub_is_shell_hourly_and_librarian_runs_daily_gh784)
     check("red_walker expands an overflow payload, inverts landed_when to fail, and blocks a 403 (gh#785 AC1-3)", _red_walker_payload_landed_and_blocked_gh785)
     check("journey_issue_filer red profile files under fleet:red-team with its own marker, sentry unchanged (gh#785 AC4)", _filer_red_profile_uses_red_label_and_marker_gh785)
+    check("journey_issue_filer never files a duplicate when the dedup lookup itself fails (gh#914)", _filer_lookup_failure_never_files_a_duplicate_gh914)
+    check("journey_issue_filer ensure_label forwards --repo to every gh call, label create included (gh#922)", _filer_ensure_label_forwards_repo_gh922)
     check("red is a paced 6h member and vp requires a red pass before Accepted (gh#785 AC5)", _red_member_paced_and_vp_gates_on_red_gh785)
     check("worktree_guard_hook blocks an Edit under the shared $REPO when isolated (gh#592 AC2)", _worktree_guard_blocks_edit_under_shared_repo_gh592)
     check("worktree_guard_hook allows an Edit under the pass's own $WT_PATH (gh#592 AC5)", _worktree_guard_allows_edit_under_own_worktree_gh592)
@@ -13468,6 +14181,7 @@ if __name__ == "__main__":
     check("worktree_guard_hook with no cwd field behaves exactly as before gh#834 (backward compat)", _worktree_guard_no_cwd_field_behaves_exactly_as_before_gh834)
 
     check("fleet.env.example documents FIXER_HEALTH_URL/PAGE_URL/PROD_DIAG_DRIVER/FLEET_DEPLOY_DRIVER with examples and what breaks empty (gh#728 AC8)", _fleet_env_example_documents_the_fixer_prod_visibility_vars_gh728)
+    check("prod_incident find_open_incident/file_or_update_incident take a target so two concurrent outages for different URLs no longer collapse onto one issue (gh#836 AC1-6)", _prod_incident_target_discriminator_separates_concurrent_outages_gh836)
 
 
     check("control_plane shares split the pool by weight; paused weight flows to the rest (gh#759 AC2)", _control_plane_shares_sum_to_pool_and_paused_weight_flows_gh759)
@@ -13483,6 +14197,8 @@ if __name__ == "__main__":
     check("pacing_gate holds a zero ceiling, runs an exempt member or an unreadable meter (gh#781 AC1-3)", _pacing_gate_holds_zero_ceiling_unless_exempt_gh781)
     check("fleet_metrics computes signal_rate/avg_cost over a window, unavailable when empty (gh#782 AC1)", _fleet_metrics_windows_runs_and_says_unavailable_gh782)
     check("charter_bloat_check exits 2 with no rows when the PR list is unreadable, and reads git when gh is down (fk#908)", _charter_bloat_check_never_prints_ok_over_unread_prs_fk908)
+    check("charter_bloat_check analyze() doesn't crash on a mergedAt tie between int and str PR numbers (gh#920)", _charter_bloat_check_mergedat_tie_mixed_number_types_gh920)
+    check("charter_bloat_check exits 2, not 1, on any unexpected exception (gh#920)", _charter_bloat_check_unexpected_exception_exits_2_not_1_gh920)
     check("predict.py add/resolve: hit in the baseline->target direction, miss otherwise, unavailable on no data (gh#782 AC2)", _predict_add_resolve_hit_miss_unavailable_gh782)
     check("predict.py ledger reports hit rate and the authoring pass turns/cost (gh#782 AC3)", _predict_ledger_reports_hit_rate_and_pass_cost_gh782)
     check("predict.py judge() reads direction from the metric when baseline is unknown, never guesses (gh#789 AC4-6)", _predict_judge_uses_metric_direction_when_baseline_missing_gh789)
@@ -13514,6 +14230,7 @@ if __name__ == "__main__":
     check("stash_pile_expiry report is parseable and tracks the last run's drop count (gh#714 AC4)", _stash_pile_expiry_report_is_parseable_and_tracks_last_run_gh714)
     check("stash_pile_expiry warns distinctly when the pile is still over ceiling after a run (gh#714 AC5)", _stash_pile_expiry_warns_distinctly_when_still_over_ceiling_gh714)
     check("closes_gate.py blocks an epic with unaccepted children, never blocks an unlinked one (fk#652)", _closes_gate_blocks_an_epic_with_unaccepted_children)
+    check("closes_gate.py --epic reads the epic's own thread for a stays-open marker, ignores stale ones (fk#879)", _closes_gate_epic_stays_open_when_its_own_thread_says_so_gh879)
     check("jefe.md runs closes_gate.py --epic before closing a fleet:epic issue (fk#652)", _jefe_runs_the_epic_close_check_before_closing_an_epic)
     check("vp.md authorizes every label vp_due.VP_LABELS spawns on (gh#855 AC5)", _vp_md_authorizes_every_label_vp_due_spawns_on_gh855)
 
@@ -13525,6 +14242,11 @@ if __name__ == "__main__":
     check("authority.grant() itself refuses an unknown class or level at write time (gh#771)", _authority_grant_itself_rejects_unknown_class_or_level_gh771)
     check("ask.py authority reports a grant's level and ask_ids over the CLI (gh#771 AC5)", _ask_authority_cli_reports_grants_gh771)
     check("run_args() strips a trailing -green suffix from FLEET_INSTANCE_NAME, anchored not substring (gh#780 AC1/AC2/AC3)", _run_args_strips_green_suffix_from_instance_name_gh780)
+
+    check("backlog row renders blast radius as a chilli glyph, never a grey fleet:blast-N pill (gh#844 AC2/AC3/AC4)", _backlog_row_renders_blast_radius_as_chilli_not_a_grey_pill_gh844)
+    check("pacing_hold_check pages once on a sustained fleet-wide hold, suppresses the repeat, resolves on recovery (gh#812 AC1/AC2/AC3/AC4)", _pacing_hold_check_pages_on_sustained_hold_gh812)
+    check("pacing_hold_check never pages a single held tick that clears on its own (gh#812 AC6)", _pacing_hold_check_single_tick_does_not_page_gh812)
+    check("pacing_hold_check never pages on two sparse single-row hours (one early ticker each, not a real fleet-wide hold)", _pacing_hold_check_sparse_single_row_hours_never_page_gh812)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:

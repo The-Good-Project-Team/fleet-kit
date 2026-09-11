@@ -731,8 +731,17 @@ def run_fleet_console_loads_with_runs(ctx: JourneyCtx):
         # gh#724: the console's real markup renders each agent as
         # `<div class="row" data-agent="...">` -- the previous selector list
         # ([data-run],[data-testid="run-row"],tr,li) matched none of it.
+        # gh#859: `[data-agent]` alone counts *configured members*, not *recent runs* --
+        # renderAgents() emits a row for every member even if it has 'never run', so a
+        # fleet that hung days ago still walked this step green. fleet_home.html now
+        # stamps each row with `data-last-ts` (the member's last run's unix ts, or empty
+        # for never-run); this step passes only when at least one row is fresher than the
+        # 24h bar journeys.yaml:254-270 step 2 states.
         page.wait_for_function(
-            "() => document.querySelectorAll('[data-agent]').length > 0",
+            """() => Array.from(document.querySelectorAll('[data-agent]')).some(el => {
+                const ts = Number(el.dataset.lastTs);
+                return ts > 0 && (Date.now() / 1000 - ts) < 86400;
+            })""",
             timeout=8000,
         )
 

@@ -65,6 +65,8 @@ jobs:
         run: python3 scripts/test_fixer_fire_path.py
       - name: run test_philanthropy_drivers.py
         run: python3 scripts/test_philanthropy_drivers.py
+      - name: run test_ui_render_check.py
+        run: python3 scripts/test_ui_render_check.py
 
   # Not a required check (see selftest above for why) -- but still runs on every PR, and its
   # failures are still visible on the PR's checks tab. `--with-deps` here can still fail on an
@@ -72,8 +74,13 @@ jobs:
   playwright-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write  # gh#809: post the UI render check's screenshot/console report
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # gh#809: needs full history to diff against the PR's base branch
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -88,3 +95,33 @@ jobs:
         run: playwright install --with-deps chromium
       - name: run test_settings_wiring.py
         run: python3 scripts/test_settings_wiring.py
+
+      # gh#809: give the fleet a pre-merge look at its own UI. Only runs the (heavier) render
+      # step when the diff actually touches a rendered surface -- criterion 3, no added latency
+      # otherwise. Never blocks the PR (criterion 5) -- report only, no verdict (gh#809 non-goal).
+      - name: detect UI-relevant changes (gh#809)
+        id: ui_detect
+        if: github.event_name == 'pull_request'
+        run: |
+          BASE="origin/${{ github.event.pull_request.base.ref }}"
+          CHANGED=$(git diff --name-only "$BASE"...HEAD || true)
+          echo "$CHANGED"
+          if echo "$CHANGED" | grep -qE '\.(html|css)$|^scripts/fleet_view_server\.py$|^scripts/status_page\.py$'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: run UI render check (gh#809)
+        if: steps.ui_detect.outputs.relevant == 'true'
+        run: python3 scripts/ui_render_check.py --base "origin/${{ github.event.pull_request.base.ref }}" --out qa-out/ui_render
+      - name: upload UI render evidence (gh#809)
+        if: steps.ui_detect.outputs.relevant == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-render-check
+          path: qa-out/ui_render
+      - name: post UI render comment (gh#809)
+        if: steps.ui_detect.outputs.relevant == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr comment "${{ github.event.pull_request.number }}" --body-file qa-out/ui_render/report.md
