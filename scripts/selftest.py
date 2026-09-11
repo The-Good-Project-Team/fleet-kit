@@ -27,7 +27,16 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 ROOT = HERE.parent
 
-ok, fail = [], []
+ok, fail, skipped = [], [], []
+
+
+def check_skip(name: str, reason: str) -> None:
+    """fk#854 AC5: record a step whose SPEC this repo already states but whose BUILD is a
+    different issue's job (here, fk#653's closes_gate.py label read) -- distinct from `fail`,
+    which means broken, not "known gap, tracked elsewhere." Never used to quietly weaken an
+    assertion to match today's bug; the caller still runs the real assertion first and only
+    calls this when it raises (see `_world_class_path_walks_end_to_end_gh854`)."""
+    skipped.append((name, reason))
 
 
 def _redact_secrets(text):
@@ -13936,6 +13945,79 @@ def _vp_md_authorizes_every_label_vp_due_spawns_on_gh855():
         f"vp_due.VP_LABELS has label(s) vp.md never mentions -- {missing} (gh#855/fk#805 desync)"
 
 
+def _world_class_path_walks_end_to_end_gh854():
+    """fk#854 AC5: `docs/quality-standard.md`'s whole world-class chain -- label -> gate blocks
+    -> `References:` criteria -> gate allows the research pass -> `Design approved (VP
+    review):` -> gate allows a build slice -> a `Closes` PR is blocked -> the acceptance ask is
+    filed and answered -> the issue closes -- had no single test walking it end to end. Half the
+    steps had tests in isolation; the joins between them had none, which is how fix 3
+    (`closes_gate.py` never reading `fleet:reif-asked`/`quality:world-class`) survived three VP
+    review rounds on fk#634 undetected. Every step here asserts; the `Closes`-blocked step is
+    the one fix 3 owns (fk#653, still open) and is recorded via `check_skip`, not weakened."""
+    import ask, fleet_db, closes_gate as cg
+    import quality_gate as qg
+
+    n = 634
+    labels = [{"name": "quality:world-class"}]
+    item = {"number": n, "labels": labels, "body": "", "comments": []}
+
+    # 1. label world-class, nothing else yet -> gate blocks
+    ok1, why1 = qg.classify_candidate(labels, item["body"], item["comments"])
+    assert not ok1, f"a bare world-class label with no criteria must not be eligible, got {why1!r}"
+
+    # 2. add `References:` criteria (the research pass) -> gate allows it
+    gwt = ("Given the reference screenshots in docs/design/634/references/, when the parity "
+           "matrix is reviewed, then every affordance has a RAIL budget.")
+    item["comments"].append({"body": f"References: Telegram, iMessage, WhatsApp\n{gwt}"})
+    ok2, why2 = qg.classify_candidate(labels, item["body"], item["comments"])
+    assert ok2 and "research-pass" in why2, f"a References: research-pass slice must be eligible, got {why2!r}"
+
+    # 3. post `Design approved (VP review):` -> gate allows a build slice
+    item["comments"].append({"body": "Design approved (VP review): clears the bar"})
+    ok3, why3 = qg.classify_candidate(labels, item["body"], item["comments"])
+    assert ok3 and "design approved" in why3, f"a Design approved verdict must allow a build slice, got {why3!r}"
+
+    # 4. a PR writing `Closes` on it is blocked -- fk#653's job, not built yet. Run the SPEC'd
+    # assertion first; only if it raises (today's real gap) do we record the skip, naming #653,
+    # rather than weakening the assertion to match the bug.
+    issue_for_gate = {"title": "t", "labels": labels + [{"name": "fleet:reif-asked"}],
+                       "body": item["body"], "comments": item["comments"], "state": "OPEN"}
+    result = cg.evaluate(f"Closes #{n}", ["app/chat.py"], {n: issue_for_gate})
+    try:
+        assert result["verdict"] == "block", (
+            f"a Closes PR on an unaccepted world-class/reif-asked item should block, got {result}"
+        )
+    except AssertionError as exc:
+        check_skip(
+            "closes_gate blocks a Closes PR on an unaccepted world-class/reif-asked item (fk#854 AC5)",
+            f"known gap, tracked at fk#653 (closes_gate.py never reads fleet:reif-asked/"
+            f"quality:world-class), not this PR's Non-goal: {exc}",
+        )
+    else:
+        raise AssertionError(
+            "closes_gate now blocks a reif-asked world-class Closes -- fk#653 looks landed; "
+            "promote this from a skip to a real assertion instead"
+        )
+
+    # 5. the acceptance ask is filed and answered
+    with tempfile.TemporaryDirectory() as d:
+        conn = fleet_db.connect(Path(d) / "fleet.db")
+        ask_id = ask.file_ask(conn, "marie", f"accept #{n}: does this meet the bar?",
+                              ask_class="acceptance")
+        answered = ask.answer_ask(conn, ask_id, "yes, ships", "reif")
+        assert answered, "the acceptance ask must record Reif's answer exactly once"
+        rows = [a for a in ask.list_asks(conn, status="all") if a["id"] == ask_id]
+        assert rows and rows[0]["status"] == "answered" and rows[0]["answer"] == "yes, ships", \
+            f"acceptance ask must round-trip its answer, got {rows}"
+
+        # 6. the issue closes -- the definition of done rule 5 (docs/quality-standard.md) is
+        # that nothing else counts as acceptance for a request in Reif's own words; the
+        # answered acceptance-class ask is that evidence, and it is what the finishing PR
+        # quotes when it claims `Closes #634`.
+        assert rows[0]["class"] == "acceptance", \
+            "the evidence a Closes PR quotes must be an acceptance-class ask, not any other class"
+
+
 def _authority_absent_file_is_byte_identical_to_pre_authority_ask_gh771():
     """gh#771 AC1: no authority.json at all (or a --class the file has no row for) must file
     an open ask exactly as every ask.py release before this one did -- an absent or unreadable
@@ -14739,6 +14821,7 @@ if __name__ == "__main__":
     check("closes_gate.py --epic reads the epic's own thread for a stays-open marker, ignores stale ones (fk#879)", _closes_gate_epic_stays_open_when_its_own_thread_says_so_gh879)
     check("jefe.md runs closes_gate.py --epic before closing a fleet:epic issue (fk#652)", _jefe_runs_the_epic_close_check_before_closing_an_epic)
     check("vp.md authorizes every label vp_due.VP_LABELS spawns on (gh#855 AC5)", _vp_md_authorizes_every_label_vp_due_spawns_on_gh855)
+    check("the world-class path walks label->gate->research->design->build->accept->close end to end (fk#854 AC5)", _world_class_path_walks_end_to_end_gh854)
 
     check("authority: no authority.json files an open ask exactly as before (gh#771 AC1)", _authority_absent_file_is_byte_identical_to_pre_authority_ask_gh771)
     check("authority: an act grant authorizes and leaves no open row, but a countable record lands (gh#771 AC2/AC3)", _authority_act_grant_authorizes_and_leaves_no_open_row_gh771)
@@ -14762,7 +14845,9 @@ if __name__ == "__main__":
     check("pacing_hold_check never pages on two sparse single-row hours (one early ticker each, not a real fleet-wide hold)", _pacing_hold_check_sparse_single_row_hours_never_page_gh812)
     for n in ok:
         print(f"  ok    {n}")
+    for n, why in skipped:
+        print(f"  SKIP  {n}\n        {why}")
     for n, why in fail:
         print(f"  FAIL  {n}\n        {why}")
-    print(f"\n{len(ok)} passed, {len(fail)} failed")
+    print(f"\n{len(ok)} passed, {len(skipped)} skipped, {len(fail)} failed")
     raise SystemExit(1 if fail else 0)

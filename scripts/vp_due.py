@@ -29,11 +29,16 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import closes_gate  # noqa: E402 -- fk#854: reuse the one parser marie's `decomposed into`
+# comment already has (fk#882's edge cases: ranges, slash lists, per-child parentheticals),
+# rather than growing a second one here that drifts from it.
 
 VERDICT_RE = re.compile(r"^\W*(design approved|accepted|not yet)\s*\(vp review\)\s*:", re.IGNORECASE | re.MULTILINE)
 REIF_RE = re.compile(r"^\W*reif\s*:", re.IGNORECASE | re.MULTILINE)
 NOT_YET_RE = re.compile(r"^\W*not yet\s*\(vp review\)\s*:", re.IGNORECASE | re.MULTILINE)
-ISSUE_REF_RE = re.compile(r"#(\d+)")
 EPIC_LABEL = "fleet:epic"
 
 # THE SAME CAP BINDS BOTH SIDES OF THE LOOP (fleet-kit#798). MAX_ROUNDS used to bound only
@@ -122,36 +127,39 @@ def is_epic(item: dict) -> bool:
     return EPIC_LABEL in _label_names(item.get("labels"))
 
 
-def named_children(item: dict) -> list[int]:
-    """Issue numbers the newest `Not yet (VP review):` comment names, in the order they first
-    appear, excluding the item's own number. Text parse only -- open/closed state (and PR vs.
-    issue) is resolved separately via `gh` in `redo_targets`, since the same prose also names
-    the merged PR that triggered the round and children that already closed."""
-    not_yets = [c for c in item.get("comments") or [] if NOT_YET_RE.search(c.get("body") or "")]
-    if not not_yets:
-        return []
-    newest = max(not_yets, key=lambda c: c.get("createdAt") or "")
-    seen: set[int] = set()
-    out: list[int] = []
-    for m in ISSUE_REF_RE.finditer(newest.get("body") or ""):
-        n = int(m.group(1))
-        if n != item["number"] and n not in seen:
-            seen.add(n)
-            out.append(n)
-    return out
+def real_children(item: dict) -> tuple[list[int], str]:
+    """An epic's real children, and which source produced them -- GitHub's own `subIssues`
+    link when marie has made one (fk#652), else her `decomposed into #a, #b, ...` comment
+    (`closes_gate.decomposed_children`, the same source `closes_gate.py` already trusts to
+    decide whether an epic can close). Never a number merely NAMED in a verdict's prose: fk#634
+    round-3 measured `named_children()`'s old bare `#(\\d+)` scrape returning 10 "targets" on
+    #634, 5 of them other teams' tracking epics, named only because the verdict was *counting*
+    open epics ("all 6 open fleet:epic issues now drop..."). Returns ([], "no source") when
+    neither source names anything -- `redo_targets` falls back to the epic itself, same as an
+    all-closed child list."""
+    sub = item.get("subIssues")
+    nodes = sub.get("nodes") if isinstance(sub, dict) else None
+    if nodes:
+        return [n["number"] for n in nodes], "subIssues"
+    children = closes_gate.decomposed_children(item)
+    return children, ("a `decomposed into` comment" if children else "no source")
 
 
 def redo_targets(item: dict, is_open) -> tuple[list[int], str]:
     """fk#634 round-2 fix 1: PR#842 closed the gru dispatch door onto a tracking-only epic, but
     left this one open -- `vp_due.sh` spawns a redo minion straight at the epic itself. A
-    non-epic redo is unchanged: it targets itself. An epic redo targets each open child issue
-    the newest `Not yet (VP review):` comment names; with none open, it falls back to the epic
-    itself so epic-level work (fixes with no child owner, like this one) is never starved."""
+    non-epic redo is unchanged: it targets itself. An epic redo targets each open REAL child
+    (`real_children`, never a number merely named in the verdict's prose); `is_open` also
+    excludes a candidate that itself carries `fleet:epic` (fk#854 AC2 -- a real child can be
+    another team's parent, and a builder can no more build that than the epic that named it).
+    With no open real child, it falls back to the epic itself so epic-level work (fixes with no
+    child owner, like this one) is never starved."""
     if not is_epic(item):
         return [item["number"]], "single item"
-    open_kids = [n for n in named_children(item) if is_open(n)]
+    children, source = real_children(item)
+    open_kids = [n for n in children if is_open(n)]
     if open_kids:
-        return open_kids, f"{len(open_kids)} open child issue(s) named in the verdict"
+        return open_kids, f"{len(open_kids)} open child issue(s) via {source}"
     return [item["number"]], "epic-level redo: no child named"
 
 
@@ -207,12 +215,14 @@ def _claims_item(body: str, n: int) -> bool:
 
 
 def collect(repo_dir: str) -> list[dict]:
-    """Open items in any VP_LABELS tier, with their comments and the merged PRs that mention them."""
+    """Open items in any VP_LABELS tier, with their comments, their real GitHub `subIssues`
+    link (fk#854 AC1 -- `gh issue list --json subIssues` returns each child's number+state
+    directly, no per-issue round-trip needed), and the merged PRs that mention them."""
     issues = []
     seen: set[int] = set()
     for label in VP_LABELS:
         for iss in _gh(["issue", "list", "--state", "open", "--label", label, "--limit", "100",
-                        "--json", "number,comments,labels"], repo_dir):
+                        "--json", "number,comments,labels,subIssues"], repo_dir):
             # an item carrying two quality labels must not be collected (or reviewed) twice
             if iss["number"] not in seen:
                 seen.add(iss["number"])
@@ -227,22 +237,29 @@ def collect(repo_dir: str) -> list[dict]:
         items.append({"number": n,
                       "labels": _label_names(iss.get("labels")),
                       "comments": [{"body": c.get("body"), "createdAt": c.get("createdAt")} for c in iss.get("comments") or []],
+                      "subIssues": iss.get("subIssues"),
                       "merged_prs": merged})
     return items
 
 
-def _issue_is_open(repo_dir: str, n: int) -> bool:
-    """fk#634 round-2 fix 1: is issue #n (a candidate child named in a redo verdict) open? A PR
-    number named in the same prose (e.g. the merged PR that triggered the round) fails here too
-    -- `gh issue view` on a PR number errors, which this treats the same as closed/nonexistent."""
-    out = subprocess.run(["gh", "issue", "view", str(n), "--json", "state"], cwd=repo_dir,
+def _valid_redo_target(repo_dir: str, n: int) -> bool:
+    """fk#634 round-2 fix 1 (widened by fk#854 AC2): is issue #n a real child a redo minion may
+    safely be dispatched at -- open, AND not itself carrying `fleet:epic`. A real child of one
+    epic can be another team's tracking parent (a nested epic), and a builder can no more build
+    that than the epic that named it could. A PR number that ends up here too (e.g. the merged
+    PR that triggered the round, on the pre-fk#854 prose path) fails here too -- `gh issue view`
+    on a PR number errors, which this treats the same as closed/nonexistent."""
+    out = subprocess.run(["gh", "issue", "view", str(n), "--json", "state,labels"], cwd=repo_dir,
                           capture_output=True, text=True, timeout=30)
     if out.returncode != 0:
         return False
     try:
-        return json.loads(out.stdout).get("state") == "OPEN"
+        data = json.loads(out.stdout)
     except ValueError:
         return False
+    if data.get("state") != "OPEN":
+        return False
+    return EPIC_LABEL not in _label_names(data.get("labels"))
 
 
 RUN_TIMEOUT_S = 2400  # minion and vp both carry timeout_s 2400 in their fleet.json
@@ -297,7 +314,7 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
     items = json.loads(a.items) if a.items else collect(a.repo_dir)
     out = due_items(items, running_vp_items())
-    out.update(redo_items(items, running_minion_items(), is_open=lambda n: _issue_is_open(a.repo_dir, n)))
+    out.update(redo_items(items, running_minion_items(), is_open=lambda n: _valid_redo_target(a.repo_dir, n)))
     print(json.dumps(out))
     return 0
 

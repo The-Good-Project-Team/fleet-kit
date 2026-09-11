@@ -172,15 +172,56 @@ class ClaimsItemTests(unittest.TestCase):
         self.assertEqual([p["number"] for p in claiming], [1])
 
 
-def epic(n, comments=()):
+def epic(n, comments=(), sub_issues=None):
     return {"number": n, "labels": ["fleet:epic"],
-            "comments": [{"body": b, "createdAt": t} for b, t in comments]}
+            "comments": [{"body": b, "createdAt": t} for b, t in comments],
+            "subIssues": sub_issues}
+
+
+def sub_issues(*numbers_and_states):
+    """{"nodes": [...]} shaped like `gh issue list --json subIssues` -- (number, state) pairs."""
+    return {"nodes": [{"number": n, "state": s} for n, s in numbers_and_states]}
+
+
+class RealChildrenTests(unittest.TestCase):
+    """fk#854 AC1: a real child comes from GitHub's own `subIssues` link when the epic has one,
+    else marie's `decomposed into #a, #b, ...` comment -- never a number merely mentioned
+    somewhere else on the issue."""
+
+    def test_subissues_present_wins(self):
+        it = epic(634, sub_issues=sub_issues((651, "OPEN"), (652, "CLOSED")))
+        children, source = vp_due.real_children(it)
+        self.assertEqual(children, [651, 652])
+        self.assertEqual(source, "subIssues")
+
+    def test_falls_back_to_decomposed_comment_when_no_subissues(self):
+        it = epic(634, comments=[("marie: decomposed into #10, #11 (Part C2b)", T1)])
+        children, source = vp_due.real_children(it)
+        self.assertEqual(children, [10, 11])
+        self.assertIn("decomposed into", source)
+
+    def test_empty_subissues_nodes_falls_back_too(self):
+        it = epic(634, comments=[("marie: decomposed into #10 (Part C2b)", T1)], sub_issues=sub_issues())
+        children, source = vp_due.real_children(it)
+        self.assertEqual(children, [10])
+
+    def test_neither_source_returns_empty(self):
+        it = epic(634, comments=[("**Not yet (VP review):** thin, no child named", T1)])
+        children, source = vp_due.real_children(it)
+        self.assertEqual(children, [])
+        self.assertEqual(source, "no source")
 
 
 class RedoTargetsTests(unittest.TestCase):
     """fk#634 round-2 fix 1: PR#842 closed gru's door onto a tracking-only epic; this one --
-    vp_due spawning a redo minion straight at the epic -- was still open, and is the bug that
-    built round 1's own fix."""
+    vp_due spawning a redo minion straight at the epic itself -- was still open, and is the bug
+    that built round 1's own fix.
+
+    fk#854 round-3 fix 1: PR#845's own `named_children()` regex-scraped every `#N` out of the
+    newest `Not yet (VP review):` comment with no parent/child check -- live on #634 this
+    returned 10 "targets", 5 of them other teams' tracking epics, named only because the verdict
+    was *counting* open epics ("all 6 open fleet:epic issues now drop..."). These tests replace
+    that prose scrape with real children only (`vp_due.real_children`)."""
 
     def test_non_epic_redo_targets_itself(self):
         it = item(30, comments=[("Not yet (VP review): thin\n1. ...", T1)])
@@ -188,14 +229,44 @@ class RedoTargetsTests(unittest.TestCase):
         self.assertEqual(targets, [30])
         self.assertEqual(why, "single item")
 
-    def test_epic_redo_targets_open_named_children(self):
-        body = ("**Not yet (VP review):** ...\nFixes belong to #652 (slices) and #653 "
-                "(reif-asked), plus PR #842 which already merged.")
-        it = epic(634, comments=[(body, T1)])
-        opened = {652, 653}
-        targets, why = vp_due.redo_targets(it, is_open=lambda n: n in opened)
+    def test_epic_redo_targets_open_subissues_children(self):
+        it = epic(634, sub_issues=sub_issues((652, "OPEN"), (653, "OPEN")))
+        targets, why = vp_due.redo_targets(it, is_open=lambda n: True)
         self.assertEqual(targets, [652, 653])
-        self.assertIn("open child issue", why)
+        self.assertIn("open child issue(s) via subIssues", why)
+
+    def test_epic_redo_ignores_numbers_named_only_in_the_verdicts_prose(self):
+        """fk#854 AC1/AC3: #634's real (live) shape -- subIssues names #651/#653/#654/#655 as
+        open children, but the newest `Not yet` comment's prose also names five OTHER open
+        `fleet:epic` issues (#785/#728/#636/#559/#553) purely because it was counting them.
+        Those five must never appear in `targets`, whatever named them."""
+        body = ("**Not yet (VP review):** all 6 open `fleet:epic` issues (#785 #728 #636 #634 "
+                "#559 #553) now drop with the tracking-only reason. Fixes belong to #651, #653, "
+                "#654, #655, plus PR #842 which already merged.")
+        it = epic(634, comments=[(body, T1)],
+                  sub_issues=sub_issues((649, "CLOSED"), (650, "CLOSED"), (651, "OPEN"),
+                                         (652, "CLOSED"), (653, "OPEN"), (654, "OPEN"),
+                                         (655, "OPEN")))
+        opened = {651, 653, 654, 655}
+        targets, why = vp_due.redo_targets(it, is_open=lambda n: n in opened)
+        self.assertEqual(targets, [651, 653, 654, 655])
+        for other_epic in (785, 728, 636, 559, 553):
+            self.assertNotIn(other_epic, targets)
+
+    def test_epic_redo_falls_back_to_decomposed_comment_when_no_subissues(self):
+        it = epic(634, comments=[("marie: decomposed into #10, #11 (Part C2b)", T1)])
+        targets, why = vp_due.redo_targets(it, is_open=lambda n: True)
+        self.assertEqual(targets, [10, 11])
+        self.assertIn("decomposed into", why)
+
+    def test_epic_redo_excludes_a_real_child_that_is_itself_an_epic(self):
+        """fk#854 AC2: a real child that itself carries `fleet:epic` is never dispatched,
+        whatever named it -- `is_open` (which in production also checks the candidate's own
+        labels, see `vp_due._valid_redo_target`) is what excludes it here."""
+        it = epic(634, sub_issues=sub_issues((651, "OPEN"), (656, "OPEN")))
+        not_itself_an_epic = {651}  # 656 is open but is itself a nested fleet:epic
+        targets, why = vp_due.redo_targets(it, is_open=lambda n: n in not_itself_an_epic)
+        self.assertEqual(targets, [651])
 
     def test_epic_redo_falls_back_to_parent_when_no_child_named(self):
         it = epic(634, comments=[("**Not yet (VP review):** thin, no child named", T1)])
@@ -203,20 +274,19 @@ class RedoTargetsTests(unittest.TestCase):
         self.assertEqual(targets, [634])
         self.assertEqual(why, "epic-level redo: no child named")
 
-    def test_epic_redo_falls_back_when_named_children_are_closed(self):
-        """#649 and #650 are named in the prose (already closed and built) -- naming them is
-        not enough to dispatch a builder onto a closed issue."""
-        body = "**Not yet (VP review):** #649 and #650 are closed and built."
-        it = epic(634, comments=[(body, T1)])
+    def test_epic_redo_falls_back_when_real_children_are_closed(self):
+        """#649 and #650 are real subIssues (already closed and built) -- being real is not
+        enough to dispatch a builder onto a closed issue."""
+        it = epic(634, sub_issues=sub_issues((649, "CLOSED"), (650, "CLOSED")))
         targets, why = vp_due.redo_targets(it, is_open=lambda n: False)
         self.assertEqual(targets, [634])
         self.assertEqual(why, "epic-level redo: no child named")
 
     def test_redo_items_dispatches_epic_children(self):
-        body = "**Not yet (VP review):** #652 owns it."
-        it = epic(634, comments=[(body, T1)])
+        it = epic(634, comments=[("**Not yet (VP review):** #652 owns it.", T1)],
+                  sub_issues=sub_issues((652, "OPEN")))
         out = vp_due.redo_items([it], is_open=lambda n: True)
-        self.assertEqual(out["redo"], [{"number": 634, "targets": [652], "why": "1 open child issue(s) named in the verdict"}])
+        self.assertEqual(out["redo"], [{"number": 634, "targets": [652], "why": "1 open child issue(s) via subIssues"}])
 
     def test_redo_items_preserves_non_epic_shape(self):
         it = item(31, comments=[("Not yet (VP review): a", T1)])
