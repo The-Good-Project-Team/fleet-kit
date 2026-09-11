@@ -296,7 +296,7 @@ def refresh_backlog_history_forever(interval_s: float = 60.0):
 # is: this is the ONLY set of keys /api/fleet_settings may write. Never widen to "any key".
 DIAL_FIELDS = [
     "FLEET_SHARE_FRACTION", "FLEET_GRU_ALLOWANCE_FRACTION", "FLEET_GRU_CADENCE",
-    "FLEET_DATTA_CADENCE",
+    "FLEET_DATTA_CADENCE", "FLEET_VP_DUE_CADENCE",
     "FLEET_CADENCE_BUILD", "FLEET_CADENCE_REVIEW", "FLEET_CADENCE_GITPULL",
     "FLEET_BUILDER_MODEL", "FLEET_CODE_REVIEW_MODEL",
     "FLEET_QUEUE_CAP", "FLEET_MAX_BUDGET_USD", "FLEET_DATTA_MAX_NERDS_PER_PASS",
@@ -333,6 +333,13 @@ _SHELL_METACHARS = set("$`;&|\n\r\\\"'<>(){}")
 # field (0-23) would reject their own documented default of 3600. Validate each family by
 # what actually consumes it, not by name resemblance.
 _CRON_HOUR_FIELDS = {"FLEET_GRU_CADENCE", "FLEET_DATTA_CADENCE"}
+# FLEET_VP_DUE_CADENCE is spliced into the MINUTE position, not the hour one
+# (entrypoint.sh: `${FLEET_VP_DUE_CADENCE:-*/15} * * * *`), so it must be validated 0-59.
+# Validating it as an hour field would reject its own default of */15. This is the same
+# family-by-name-resemblance mistake the comment above warns about, in the other direction:
+# there an operator's minute-shaped value reached an hour field and took the fleet dark for
+# 40h; here an hour-shaped validator would refuse every legitimate minute value.
+_CRON_MINUTE_FIELDS = {"FLEET_VP_DUE_CADENCE"}
 _NONNEG_INT_FIELDS = {
     "FLEET_QUEUE_CAP", "FLEET_DATTA_MAX_NERDS_PER_PASS",
     "FLEET_CADENCE_BUILD", "FLEET_CADENCE_REVIEW", "FLEET_CADENCE_GITPULL",
@@ -364,6 +371,25 @@ def _valid_cron_hour_field(value: str) -> bool:
     return True
 
 
+
+def _valid_cron_minute_field(value: str) -> bool:
+    """Same shapes as the hour validator, but each N in 0-59 (the minute position)."""
+    if value == "" or value == "*":
+        return True
+    for part in value.split(","):
+        if not part:
+            return False
+        base, _, step = part.partition("/")
+        if step and not (step.isdigit() and int(step) >= 1):
+            return False
+        if base == "*":
+            continue
+        lo, _, hi = base.partition("-")
+        for n in (lo, hi) if hi else (lo,):
+            if not (n.isdigit() and 0 <= int(n) <= 59):
+                return False
+    return True
+
 def _validate_dial_value(key: str, value: str) -> str | None:
     """Return an error string if `value` is unsafe/malformed for `key`, else None. Called for
     every field in an /api/fleet_settings request BEFORE any write -- see that handler for the
@@ -376,6 +402,9 @@ def _validate_dial_value(key: str, value: str) -> str | None:
     if key in _CRON_HOUR_FIELDS:
         if not _valid_cron_hour_field(value):
             return "not a valid cron hour field (expected '*', 'N', 'N-M', '*/N', or a comma list, N in 0-23)"
+    elif key in _CRON_MINUTE_FIELDS:
+        if not _valid_cron_minute_field(value):
+            return "not a valid cron minute field (expected '*', 'N', 'N-M', '*/N', or a comma list, N in 0-59)"
     elif key in _NONNEG_INT_FIELDS:
         if value != "" and not (value.isdigit()):
             return "must be a non-negative integer"
