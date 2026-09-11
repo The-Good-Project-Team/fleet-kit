@@ -939,14 +939,31 @@ class WalkerOutputFeedsIssueFilerTest(unittest.TestCase):
 
 
 class FleetConsoleActivityRowSelectorTest(unittest.TestCase):
-    """gh#724 AC3: step 1's wait condition matches the console's real `[data-agent]` row
-    markup, and does not match a page with no activity rows -- both directions asserted, so
-    the fix cannot be a selector that matches everything."""
+    """gh#724 AC3 + gh#859 AC1/AC2/AC3: step 1's wait condition matches the console's real
+    `[data-agent]` row markup only when at least one row is fresher than the 24h bar
+    journeys.yaml:254-270 step 2 states -- a page whose rows are all stale (or absent) must
+    fail, not just a page with zero rows, so the fix cannot be a selector that matches on
+    member presence alone."""
 
-    HEALTHY_HTML = ('<!doctype html><html><body><h1>Needs you</h1>'
-                     '<div class="row" data-agent="minion">minion 47s ago</div>'
-                     '</body></html>')
     EMPTY_HTML = '<!doctype html><html><body><h1>Needs you</h1></body></html>'
+
+    @staticmethod
+    def _healthy_html():
+        fresh_ts = int(time.time()) - 47
+        return ('<!doctype html><html><body><h1>Needs you</h1>'
+                f'<div class="row" data-agent="minion" data-last-ts="{fresh_ts}">minion 47s ago</div>'
+                '</body></html>')
+
+    @staticmethod
+    def _stale_html():
+        # gh#859 AC1: every row is stale -- one with a run older than 24h, one that has
+        # never run at all (no data-last-ts, matching renderAgents()'s real markup for a
+        # member with no runs). Neither should count as fresh.
+        stale_ts = int(time.time()) - (25 * 3600)
+        return ('<!doctype html><html><body><h1>Needs you</h1>'
+                f'<div class="row" data-agent="minion" data-last-ts="{stale_ts}">minion 25h ago</div>'
+                '<div class="row" data-agent="vp" data-last-ts="">vp never run</div>'
+                '</body></html>')
 
     @classmethod
     def setUpClass(cls):
@@ -979,10 +996,15 @@ class FleetConsoleActivityRowSelectorTest(unittest.TestCase):
             server.stop()
 
     def test_real_activity_row_markup_matches(self):
-        self.assertEqual(self._run(self.HEALTHY_HTML, "healthy-run"), ["pass", "pass"])
+        self.assertEqual(self._run(self._healthy_html(), "healthy-run"), ["pass", "pass"])
 
     def test_no_activity_rows_does_not_match(self):
         self.assertEqual(self._run(self.EMPTY_HTML, "empty-run"), ["pass", "fail"])
+
+    def test_stale_but_populated_rows_does_not_match(self):
+        # gh#859 AC1: this is the case that passed before the fix -- rows exist (so the old
+        # `.length > 0` selector matched) but none is within the 24h freshness bar.
+        self.assertEqual(self._run(self._stale_html(), "stale-run"), ["pass", "fail"])
 
 
 if __name__ == "__main__":
