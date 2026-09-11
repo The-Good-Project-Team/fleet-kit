@@ -10159,6 +10159,77 @@ def _weekly_reset_date_and_hour_is_parsed_not_just_the_hour():
     )
 
 
+def _timeout_exit_code_is_never_exhausted_or_unauthenticated():
+    """gh#878 AC1/AC2: rc=124 (timeout(1)'s exit code) must never classify as exhausted or
+    unauthenticated, no matter what prose the timed-out transcript happens to contain.
+
+    Live incident, 2026-09-11: the identical rc=124 classified as "exhausted" once and
+    "unauthenticated" two minutes later purely off incidental transcript text -- one of those
+    two wrote a 355-day gate on a healthy account. Checks both directions the issue names
+    (a transcript that reads like an exhaustion message, and one that reads like an auth
+    failure) so the exit code demonstrably wins over the prose either way.
+    """
+    for out in (
+        "401 unauthorized",
+        "you've hit your weekly limit",
+    ):
+        got = _bash_eval("", f'_account_pool_classify_failure {json.dumps(out)} 124')
+        assert got not in ("exhausted", "unauthenticated"), (
+            f"rc=124 with output {out!r} classified as {got!r} -- a timeout must never gate "
+            f"an account as exhausted or unauthenticated"
+        )
+
+
+def _non_timeout_exit_codes_still_classify_from_prose():
+    """gh#878 AC3/AC4: today's correct behaviour must not regress -- a genuine, non-timeout
+    failure (a real auth error, a real usage-limit response) still classifies from its prose
+    exactly as before, now that rc is checked first."""
+    got = _bash_eval("", f'_account_pool_classify_failure {json.dumps("token has been revoked")} 1')
+    assert got == "unauthenticated", f"genuine auth failure (rc=1) classified as {got!r}"
+    got = _bash_eval("", f'_account_pool_classify_failure {json.dumps("you have reached your usage limit")} 1')
+    assert got == "exhausted", f"genuine usage-limit failure (rc=1) classified as {got!r}"
+
+
+def _epoch_beyond_sanity_ceiling_is_refused_not_written():
+    """gh#878 AC5: a computed gate epoch wildly beyond any real weekly reset is refused and
+    logged, never written -- no repeat of epoch=1820016000 (2027-09-04) gating a healthy
+    account for 355 days.
+
+    _account_pool_parse_reset only understands a bare month/day (no year), so it resolves any
+    such date against the CURRENT year, rolling to next year if that date has already passed
+    (see its own "date already past this year means next year" comment) -- reproduce the live
+    incident's exact mechanism by feeding a date a few days in the PAST, which forces that same
+    rollover and lands ~360 days out, same order of magnitude as the reported epoch=1820016000.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    target_date = (now - datetime.timedelta(days=5)).date()
+    mon = target_date.strftime("%b")
+    day = target_date.day
+    with tempfile.TemporaryDirectory() as tmp:
+        state = pathlib.Path(tmp) / "account-pool-exhausted.state"
+        log = pathlib.Path(tmp) / "account-pool.log"
+        pool = ROOT / "scripts" / "account_pool.sh"
+        script = (
+            "set -uo pipefail\n"
+            f'export FLEET_LOG_DIR="{tmp}"\n'
+            f'export ACCOUNT_POOL_STATE_FILE="{state}"\n'
+            f'export ACCOUNT_POOL_LOG_FILE="{log}"\n'
+            f'source "{pool}"\n'
+            f'_account_pool_mark_exhausted acct "hit your weekly limit, resets {mon} {day}, 12am (UTC)"\n'
+        )
+        import subprocess
+        subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        state_text = state.read_text() if state.exists() else ""
+        log_text = log.read_text() if log.exists() else ""
+    assert "acct" not in state_text, (
+        f"a ~year-out epoch was written to the state file -- sanity ceiling did not refuse "
+        f"it: {state_text!r}"
+    )
+    assert "exceeds the sanity ceiling" in log_text, (
+        f"refusal was not logged -- log was:\n{log_text[:500]}"
+    )
+
+
 def _run_pool_then_readiness(account_cmds):
     """Run account_pool_run once per entry in `account_cmds` (a shell command each) against a
     shared scratch state, then return account_readiness.sh's own output line -- gh#134's ACs
@@ -14075,6 +14146,9 @@ if __name__ == "__main__":
     check("exhaustion with no stated reset backs off minutes, not an hour", _unparseable_exhaustion_gates_briefly_not_for_an_hour)
     check("a stated reset time is honored over the fallback", _a_real_reset_time_is_still_honored)
     check("a date+hour weekly reset is parsed, not just the hour-only form", _weekly_reset_date_and_hour_is_parsed_not_just_the_hour)
+    check("a timeout (rc=124) is never classified exhausted or unauthenticated (gh#878)", _timeout_exit_code_is_never_exhausted_or_unauthenticated)
+    check("a non-timeout failure still classifies from its prose (gh#878)", _non_timeout_exit_codes_still_classify_from_prose)
+    check("a gate epoch beyond the sanity ceiling is refused, not written (gh#878)", _epoch_beyond_sanity_ceiling_is_refused_not_written)
     check("an unauthenticated failure gates readiness on the first occurrence", _unauthenticated_failure_gates_the_account_on_first_occurrence)
     check("a single 'other' failure does not gate the account", _single_other_failure_does_not_gate_the_account)
     check("'other' failures gate only after the consecutive threshold", _other_failure_gates_after_consecutive_threshold)
