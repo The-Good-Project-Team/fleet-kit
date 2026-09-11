@@ -1105,14 +1105,54 @@ function renderMergedPage() {
 // an agent-definition path as incidental work (see fleet_view_server.py's poll_gh_state for the
 // branch-name filter and why PR author can't be used). Distinct from the plain Recently Merged
 // page, which is unfiltered.
+//
+// gh#564: a single undifferentiated list under "Self-Evolution" let 23 of 31 real rows on
+// philanthropy (.claude/dumbledore-memory.md, CLAUDE.md, hooks, scripts/**, tests/**) hide
+// behind a heading that promised charter/dial/member rewrites and showed docs churn instead
+// (VP review, 2026-09-11: "the console lying more confidently than before"). Split into three
+// named sections -- charter/dial/member, docs-only, and everything else -- so an empty charter
+// section is a real, visible finding instead of indistinguishable from "nothing rendered".
 // ---------------------------------------------------------------------------------------------
+function prFiles(pr) { return pr.files || []; }
+// members/*/*.md and *.fleet.json both live under members/** (verified: every .fleet.json in
+// this repo is), so one prefix check covers marie's AC2 (fleet PRD, 2026-09-09).
+function touchesCharter(pr) { return prFiles(pr).some(f => f.path.startsWith('members/')); }
+// "docs-only" means EVERY changed file is under docs/** -- a PR that also touches CLAUDE.md or
+// .claude/* is not "docs", it's the third bucket (matches VP's live count: those files landed
+// in the 23-row "neither" bucket, not the 8-row "docs-only" one).
+function isDocsOnly(pr) {
+  const files = prFiles(pr);
+  return files.length > 0 && files.every(f => f.path.startsWith('docs/'));
+}
+const fmtDate = iso => iso ? new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+
 function renderEvolutionPage() {
   if (PAGE !== 'evolution') return;
+  const t0 = performance.now();
   const prs = GH.self_evolution || [];
-  detailHeadEl.innerHTML = `<div class="title-row"><h2>Self-Evolution</h2></div>
-    <div class="spend-line">merged PRs sourced by jefe or dumbledore -- the fleet deciding its own rules should change</div>`;
-  const rowsHtml = prs.map(pr => {
-    const fileList = (pr.files || []).map(f =>
+  const charterPRs = prs.filter(touchesCharter);
+  const docsPRs = prs.filter(p => !touchesCharter(p) && isDocsOnly(p));
+  const codePRs = prs.filter(p => !touchesCharter(p) && !isDocsOnly(p));
+
+  // VP fix #4: the feed is "last 20 merged PRs per branch prefix", not a time range -- state
+  // the real span of the rows on screen rather than claiming a "window" that doesn't exist.
+  const dates = prs.map(p => p.mergedAt).filter(Boolean).sort();
+  const spanHtml = dates.length
+    ? `${prs.length} PRs, ${fmtDate(dates[0])} – ${fmtDate(dates[dates.length - 1])}`
+    : `${prs.length} PRs`;
+
+  // VP fix #3: the feed only searches jefe/dumbledore branch prefixes, so it silently misses
+  // charter/dial changes shipped on minion/feature branches. Computed from gh.merged, which
+  // already carries files + headRefName -- no new fetch, no server change (non-goals 1-2 intact).
+  const evoNumbers = new Set(prs.map(p => p.number));
+  const merged = GH.merged || [];
+  const missedCharter = merged.filter(p => !evoNumbers.has(p.number) && touchesCharter(p));
+
+  detailHeadEl.innerHTML = `<div class="title-row"><h2>Fleet self-changes — charters vs docs vs code</h2></div>
+    <div class="spend-line">${esc(spanHtml)} sourced by jefe/dumbledore branches</div>`;
+
+  const renderRow = pr => {
+    const fileList = prFiles(pr).map(f =>
       `<code>${esc(f.path)}</code> <span class="rmeta">+${f.additions}/-${f.deletions}</span>`
     ).join('<br>');
     return `<div class="rail-row">
@@ -1121,8 +1161,34 @@ function renderEvolutionPage() {
       <div class="rmeta">${esc(pr.headRefName || '')} · merged ${ago(pr.mergedAt)}</div>
       <div class="rmeta" style="margin-top:4px">${fileList}</div>
     </div>`;
-  }).join('') || '<div class="run-empty">no jefe/dumbledore self-evolution PRs found yet</div>';
-  runListEl.innerHTML = `<div class="rail-section">${rowsHtml}</div>`;
+  };
+
+  // VP fix #2: an empty charter section must name the scope it checked, never make a bare
+  // claim about "the fleet" -- charters for this fleet live in the fleet-kit repo, which this
+  // console does not query.
+  const charterHtml = charterPRs.map(renderRow).join('') ||
+    `<div class="run-empty">no charter, dial, or member changes in this repo's last ${prs.length} self-evolution PRs — charters for this fleet live in the fleet-kit repo</div>`;
+  const docsHtml = docsPRs.map(renderRow).join('') ||
+    '<div class="run-empty">no docs-only changes in this feed</div>';
+  const codeHtml = codePRs.map(renderRow).join('') ||
+    '<div class="run-empty">no other code/tooling changes in this feed</div>';
+
+  runListEl.innerHTML = `
+    <div class="rail-section">
+      <div class="rail-head">Charters, dials &amp; members <span class="count-badge">${charterPRs.length}</span></div>
+      <div class="rmeta">this section only searches jefe/dumbledore branch names -- ${missedCharter.length} of the last ${merged.length} merged PRs changed a charter or dial outside that filter and are not shown here</div>
+      ${charterHtml}
+    </div>
+    <div class="rail-section">
+      <div class="rail-head">Docs only <span class="count-badge">${docsPRs.length}</span></div>
+      ${docsHtml}
+    </div>
+    <div class="rail-section">
+      <div class="rail-head">Code &amp; tooling <span class="count-badge">${codePRs.length}</span></div>
+      ${codeHtml}
+    </div>`;
+  const elapsed = performance.now() - t0;
+  if (elapsed > 100) console.warn(`renderEvolutionPage: ${elapsed.toFixed(1)}ms, over the 100ms budget`);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2309,6 +2375,14 @@ async function boot() {
   if (BOOTING) return;
   BOOTING = true;
   try {
+    // gh#564 fix 6: read the hash and switch pages BEFORE the slow gh-backed awaits below --
+    // those (fetchJSON('/api/snapshot') and friends) measured 90-207s on a cold load (VP
+    // review, 2026-09-11), and this used to be read only after they all resolved, so
+    // '#evolution'/'#stats'/'#queue' sat on Home with zero rows the whole time. Rendering the
+    // page frame immediately -- with whatever's cached, even nothing yet -- and letting the
+    // slow fetches fill it in below gets a deep link onto the right tab well under 5s.
+    const hashPage = (location.hash || '').slice(1);
+    if (HASH_PAGES.includes(hashPage)) { PAGE = hashPage; selectPage(PAGE); }
     let snap;
     try {
       // renderQueue() is folded into this same try -- it's still part of boot()'s own
@@ -2333,8 +2407,6 @@ async function boot() {
       return;
     }
     clearBootError();
-    const hashPage = (location.hash || '').slice(1);
-    if (HASH_PAGES.includes(hashPage)) PAGE = hashPage;
     // gh#228: boot() used to call selectAgent(SELECTED) unconditionally here, which forces
     // PAGE = 'agent' regardless of the fire-first default set above -- respect PAGE instead,
     // so a fresh load actually lands on 'home' (gh#560) rather than being immediately overridden
