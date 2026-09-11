@@ -495,8 +495,14 @@ This reflects a parse/format issue in the reviewer's own output, not a finding a
       # File the same shape of item the block path files, so the same lane picks it up. Best
       # effort (`||`, never `set -e`): the status and the hold already landed above, and a
       # filing failure must not stop the tick from draining the rest of the queue.
+      # gh#887: `none (maintenance)` is only eligible for gru to pick while no OTHER open
+      # candidate anywhere on the board carries a real Vision-link (vision_link_gate.py's
+      # crowding-out rule) -- on this fleet's board that is never true (115/116 open
+      # fleet:backlog candidates linked, measured live 2026-09-11), so that fallback silently
+      # filed a fix item gru could never pick. Use a real, named guardrail link instead so the
+      # filed item classifies as `linked`, not `maintenance`.
       ERR_VISION_LINK=$(grep -iE '^[[:space:]]*#{0,6}[[:space:]]*[*_]{0,2}Vision-link' "$BODY_FILE" 2>/dev/null | head -1)
-      [ -z "$ERR_VISION_LINK" ] && ERR_VISION_LINK="Vision-link: none (maintenance)"
+      [ -z "$ERR_VISION_LINK" ] && ERR_VISION_LINK="Vision-link: guardrail -- an errored review hands the PR to the fleet with a ticket gru can actually pick"
       ERR_FIX_TITLE="fix: code review could not run on PR #$PR -- reviewer output failed schema validation"
       ERR_FIX_BODY="judge-judy dequeued PR #$PR at head ${HEAD_SHA:0:12} and disarmed auto-merge, but could NOT post a verdict: its own output failed schema validation ${N}x in a row ($PARSE_REASON).
 
