@@ -14,8 +14,27 @@ THE RULE. (Also: a `Not yet` verdict with no newer merge and fewer than three ro
 the redo minion -- see redo_due.) An open `quality:world-class` item is due for a VP review when a merged PR that
 references it is newer than the newest VP verdict on it (or there is no verdict yet), unless a
 comment starting `Reif:` is newer than that merge (his veto or instruction wins), and no vp
-pass is already running for it, and it has had fewer than MAX_ROUNDS `Not yet` rounds -- the
-same cap `redo_due` puts on the builder now binds the reviewer too (see MAX_ROUNDS below).
+pass is already running for it, and no redo minion is already building it, and it has had
+fewer than MAX_ROUNDS `Not yet` rounds -- the same cap `redo_due` puts on the builder now
+binds the reviewer too (see MAX_ROUNDS below).
+
+fk#840: `is_due` used to only know about `running` vp passes, never about a redo minion
+already in flight for the same item -- `redo_due` got that guard, `is_due` never did. Live on
+#573, 2026-09-11: vp posted `Not yet` at 03:55:30Z, `vp_due.sh` correctly spawned the redo
+minion at 04:00:46Z, and at 04:30:56Z -- with that minion still 33 minutes into rewriting
+`scripts/fleet_home.html` -- vp_due spawned a second `vp --item 573` pass. A fresh
+`Not yet (VP review):` comment becomes the newest Given/When/Then on the item, which is
+exactly what `quality_gate.py` and the minion read as the spec: posting one mid-build rewrites
+the spec underneath a builder that is partway through making the old one true. The guard below
+only ever delays the review to the next tick once the minion clears -- it never cancels one.
+
+fk#840 (marie, Part C0 re-scope of #636 round-3 fix 7): an item labelled `fleet:epic` is a
+tracking-only parent -- `quality_gate.py` already refuses to let gru build one directly, and
+the same reasoning applies to a VP review: reviewing the parent while a child is still open
+reviews a spec no single builder owns. `is_due` skips a `fleet:epic` item while
+`closes_gate.epic_open_children` finds any open child, same source epic-aware redo dispatch
+already reads (`is_epic`/`redo_targets` below); once the last child closes it becomes a
+candidate again on the normal Not-yet-round/merge rule, never permanently lost.
 
 Pure core (`is_due`, `due_items`), thin `gh` seam (`collect`), CLI (`main`) -- same split as
 vision_link_gate.py and quality_gate.py.
@@ -29,6 +48,8 @@ import re
 import subprocess
 import sys
 import time
+
+import closes_gate
 
 VERDICT_RE = re.compile(r"^\W*(design approved|accepted|not yet)\s*\(vp review\)\s*:", re.IGNORECASE | re.MULTILINE)
 REIF_RE = re.compile(r"^\W*reif\s*:", re.IGNORECASE | re.MULTILINE)
@@ -54,12 +75,19 @@ def _newest(stamps):
     return max(stamps) if stamps else None
 
 
-def is_due(item: dict, running: set[int] | None = None) -> tuple[bool, str]:
-    """item = {number, comments:[{body, createdAt}], merged_prs:[{number, mergedAt}]}.
-    ISO-8601 Zulu timestamps compare correctly as strings."""
+def is_due(item: dict, running: set[int] | None = None, running_minions: set[int] | None = None) -> tuple[bool, str]:
+    """item = {number, comments:[{body, createdAt}], merged_prs:[{number, mergedAt}],
+    labels?, subIssues?}. ISO-8601 Zulu timestamps compare correctly as strings."""
     n = item["number"]
     if running and n in running:
         return False, "vp already running"
+    if running_minions and n in running_minions:
+        return False, "minion already running"
+    if is_epic(item):
+        _, open_children = closes_gate.epic_open_children(item, {})
+        if open_children:
+            return False, ("tracking-only parent (fleet:epic); open child(ren) "
+                            + ", ".join(f"#{c}" for c in open_children))
     merge = _newest(pr.get("mergedAt") for pr in item.get("merged_prs") or [])
     if not merge:
         return False, "nothing merged yet"
@@ -106,10 +134,11 @@ def running_minion_items() -> set[int]:
     return running_items(_runs_rows(), "minion")
 
 
-def due_items(items: list[dict], running: set[int] | None = None) -> dict:
+def due_items(items: list[dict], running: set[int] | None = None,
+              running_minions: set[int] | None = None) -> dict:
     due, skipped = [], []
     for it in items:
-        ok, why = is_due(it, running)
+        ok, why = is_due(it, running, running_minions)
         (due if ok else skipped).append({"number": it["number"], "why": why})
     return {"due": [d["number"] for d in due], "skipped": skipped}
 
@@ -212,7 +241,7 @@ def collect(repo_dir: str) -> list[dict]:
     seen: set[int] = set()
     for label in VP_LABELS:
         for iss in _gh(["issue", "list", "--state", "open", "--label", label, "--limit", "100",
-                        "--json", "number,comments,labels"], repo_dir):
+                        "--json", "number,comments,labels,subIssues"], repo_dir):
             # an item carrying two quality labels must not be collected (or reviewed) twice
             if iss["number"] not in seen:
                 seen.add(iss["number"])
@@ -226,6 +255,7 @@ def collect(repo_dir: str) -> list[dict]:
                   if _claims_item(p.get("body") or "", n)]
         items.append({"number": n,
                       "labels": _label_names(iss.get("labels")),
+                      "subIssues": iss.get("subIssues"),
                       "comments": [{"body": c.get("body"), "createdAt": c.get("createdAt")} for c in iss.get("comments") or []],
                       "merged_prs": merged})
     return items
@@ -296,8 +326,9 @@ def main(argv=None) -> int:
     p.add_argument("--items", help="JSON list of items (skips gh; for tests)")
     a = p.parse_args(argv)
     items = json.loads(a.items) if a.items else collect(a.repo_dir)
-    out = due_items(items, running_vp_items())
-    out.update(redo_items(items, running_minion_items(), is_open=lambda n: _issue_is_open(a.repo_dir, n)))
+    minions = running_minion_items()
+    out = due_items(items, running_vp_items(), minions)
+    out.update(redo_items(items, minions, is_open=lambda n: _issue_is_open(a.repo_dir, n)))
     print(json.dumps(out))
     return 0
 
