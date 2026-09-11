@@ -44,8 +44,7 @@ class DiagnoseBeforeRollbackOrderingTests(unittest.TestCase):
             ("diag-driver", "pg"): (0, "pg looks fine"),
             ("deploy-driver", "current_sha"): (0, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             ("deploy-driver", "rollback"): (0, ""),
-            ("gh", "issue", "list", "--state", "open", "--label", "incident",
-             "--search", ffp.INCIDENT_MARKER, "--json", "number", "--limit", "5"): (0, "[]"),
+            tuple(ffp.build_incident_search_cmd()): (0, "[]"),
         }
         base_run = _fake_run(script, calls)
 
@@ -79,8 +78,7 @@ class DiagnoseBeforeRollbackOrderingTests(unittest.TestCase):
             script = {
                 ("deploy-driver", "current_sha"): (0, sha),
                 ("deploy-driver", "rollback"): (0, ""),
-                ("gh", "issue", "list", "--state", "open", "--label", "incident",
-                 "--search", ffp.INCIDENT_MARKER, "--json", "number", "--limit", "5"): (0, "[]"),
+                tuple(ffp.build_incident_search_cmd()): (0, "[]"),
             }
             stubbed = _fake_run(script, calls)
             # gh issue create's cmd includes the body text, which is only known at call time --
@@ -310,7 +308,7 @@ class IncidentDedupTests(unittest.TestCase):
         def run(cmd, timeout=60):
             calls.append(tuple(cmd))
             if cmd[:3] == ["gh", "issue", "list"]:
-                return (0, json.dumps([{"number": 17}]))
+                return (0, json.dumps([{"number": 17, "body": f"old\n\n{ffp.INCIDENT_MARKER}"}]))
             if cmd[:3] == ["gh", "issue", "comment"]:
                 return (0, "")
             raise AssertionError(cmd)
@@ -321,19 +319,44 @@ class IncidentDedupTests(unittest.TestCase):
         self.assertFalse(any(c[:3] == ("gh", "issue", "create") for c in calls),
                           "a second incident was filed even though one was already open")
 
-    def test_incident_search_is_scoped_to_the_marker_so_unrelated_incidents_are_ignored(self):
+    def test_gh_search_flag_is_never_used_for_identity(self):
+        """gh's own full-text --search tokenizes a marker and can match unrelated issues that
+        never contained it (verified live against this repo -- see prod_incident.py's header).
+        Identity is always an exact substring test on each open issue's body, in Python."""
         cmd = ffp.build_incident_search_cmd()
-        self.assertIn(ffp.INCIDENT_MARKER, cmd)
+        self.assertNotIn("--search", cmd)
+        self.assertIn("--repo", cmd)
+        self.assertIn(ffp.INCIDENT_REPO, cmd)
         self.assertIn(ffp.INCIDENT_LABEL, cmd)
+
+    def test_decoy_issue_mentioning_the_markers_words_but_not_the_literal_marker_is_ignored(self):
+        decoy_body = "This mentions fixer fire path incident tracking but not the real marker."
+        real_body = f"the real incident\n\n{ffp.INCIDENT_MARKER}"
+
+        def run(cmd, timeout=60):
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return (0, json.dumps([
+                    {"number": 5, "body": decoy_body},
+                    {"number": 9, "body": real_body},
+                ]))
+            raise AssertionError(cmd)
+
+        self.assertEqual(ffp.find_open_incident(run=run), 9)
 
 
 class IncidentLabelTests(unittest.TestCase):
     def test_create_command_carries_priority_high_and_incident_labels(self):
         cmd = ffp.build_incident_create_cmd("t", "b")
-        label_idx = cmd.index("--label") + 1
-        labels = cmd[label_idx].split(",")
+        labels = [cmd[i + 1] for i, tok in enumerate(cmd) if tok == "--label"]
         self.assertIn(ffp.PRIORITY_HIGH_LABEL, labels)
         self.assertIn(ffp.INCIDENT_LABEL, labels)
+
+    def test_create_command_pins_an_explicit_repo(self):
+        """gh#728 VP fix 3: the old command had no --repo and depended on the caller's cwd
+        (FLEET_REPO having been `cd`'d into). It's explicit now, same as prod_health_check.py."""
+        cmd = ffp.build_incident_create_cmd("t", "b")
+        self.assertIn("--repo", cmd)
+        self.assertIn(ffp.INCIDENT_REPO, cmd)
 
 
 if __name__ == "__main__":
