@@ -27,13 +27,22 @@ from pathlib import Path
 MATCHER = "Edit|Write|Bash"
 
 
-def _hook_command() -> str:
-    kit_dir = Path(__file__).resolve().parent.parent
-    return f"python3 {kit_dir / 'scripts' / 'worktree_guard_hook.py'}"
+def _hook_commands() -> list[str]:
+    """Every PreToolUse guard this kit ships, registered in one pass.
+
+    Same matcher, same settings files, same idempotence -- a second installer would duplicate
+    all of that to register one more line. pretest_push_hook.py joins the list rather than
+    getting its own entrypoint.
+    """
+    scripts = Path(__file__).resolve().parent
+    return [f"python3 {scripts / name}" for name in
+            ("worktree_guard_hook.py", "pretest_push_hook.py")]
 
 
-def merge_one(path: Path, hook_cmd: str) -> bool:
-    """Registers hook_cmd in path's settings.json. Returns True iff the file changed."""
+def merge_one(path: Path, hook_cmds: list[str] | str) -> bool:
+    """Registers every hook command in path's settings.json. True iff the file changed."""
+    if isinstance(hook_cmds, str):
+        hook_cmds = [hook_cmds]
     if path.exists():
         try:
             settings = json.loads(path.read_text())
@@ -45,13 +54,14 @@ def merge_one(path: Path, hook_cmd: str) -> bool:
         settings = {}
 
     pre_list = settings.setdefault("hooks", {}).setdefault("PreToolUse", [])
+    present = {h.get("command") for entry in pre_list for h in entry.get("hooks", [])}
 
-    for entry in pre_list:
-        for h in entry.get("hooks", []):
-            if h.get("command") == hook_cmd:
-                return False  # already registered, nothing to do
+    missing = [c for c in hook_cmds if c not in present]
+    if not missing:
+        return False  # already registered, nothing to do
 
-    pre_list.append({"matcher": MATCHER, "hooks": [{"type": "command", "command": hook_cmd}]})
+    for cmd in missing:
+        pre_list.append({"matcher": MATCHER, "hooks": [{"type": "command", "command": cmd}]})
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2) + "\n")
     return True
@@ -62,7 +72,7 @@ def main(argv: list[str]) -> int:
         print("usage: worktree_guard_hook_install.py <settings.json-or-CLAUDE_CONFIG_DIR-path> [...]",
               file=sys.stderr)
         return 2
-    hook_cmd = _hook_command()
+    hook_cmds = _hook_commands()
     exit_code = 0
     for raw in argv:
         p = Path(raw)
@@ -75,8 +85,8 @@ def main(argv: list[str]) -> int:
         if p.suffix != ".json":
             p = p / "settings.json"
         try:
-            if merge_one(p, hook_cmd):
-                print(f"worktree_guard_hook_install: registered gh#592 guard in {p}")
+            if merge_one(p, hook_cmds):
+                print(f"worktree_guard_hook_install: registered PreToolUse guards in {p}")
             else:
                 print(f"worktree_guard_hook_install: {p} already up to date")
         except OSError as exc:

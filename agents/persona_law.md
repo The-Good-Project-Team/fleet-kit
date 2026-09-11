@@ -45,6 +45,31 @@ behavior.
 the terminal pass/fail per job. A test that did not execute (skipped, never collected) is not
 a test regardless of what the suite's total count implies.
 
+## 4b. The suite runs BEFORE the push, not after it
+
+MEASURED on philanthropy, 95 CI runs (2026-09-11): the `test` job produced **50 green, 22 red,
+23 cancelled**. Nearly half of every run of the most expensive gate in the repo did no work —
+a member pushed, CI discovered the break, the member pushed a fix, and the new push cancelled
+the run still grinding on the old one. That is 1,202 of the suite's 2,152 minutes, and no gate
+you could delete comes close to it: `lighthouse-budget` burned 471 minutes and went red ZERO
+times in the same window.
+
+So testing is YOUR job, not the gate's:
+
+    bash /fleet-kit/scripts/verified_test.sh              # the whole suite
+    bash /fleet-kit/scripts/verified_test.sh tests/x.py   # narrower, recorded as such
+
+Run it, get it green, THEN push. `pretest_push_hook.py` blocks a `git push` out of a worktree
+whose current content has no green receipt behind it — the same mechanical layer §6's worktree
+guard is, for the same reason: prose alone did not hold.
+
+The receipt keys on CONTENT, not on HEAD, so "run the suite, then commit what you tested" is
+the intended order and costs you nothing. Change one line afterwards and the receipt goes
+stale, because it no longer describes what you are pushing. A branch that touches only `.md`
+needs no receipt.
+
+CI stays exactly what §4 says it is — the conclusion. It is no longer where you find out.
+
 ## 5. Mutation is the bar for "the test proves anything"
 
 For any logic change: show the test RED without the fix, GREEN with it, same command, both
