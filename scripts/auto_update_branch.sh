@@ -196,7 +196,8 @@ done
 # Arming is NOT merging, so this keeps the file header's promise that this script never merges
 # a PR itself and needs no content judgment: GitHub merges an armed PR only once every REQUIRED
 # check passes, so judge-judy's fleet-code-review gate still decides. Arming a PR that is red
-# or unreviewed simply parks it -- it waits, exactly as an armed member-opened PR does.
+# simply parks it -- it waits, exactly as an armed member-opened PR does. An UNREVIEWED head
+# (no fleet-code-review status at all) must not be armed either -- see gh#862 below.
 #
 # Draft PRs are excluded (a draft is explicitly "not ready"), and so is anything already armed
 # -- re-arming is a no-op API call, but skipping it keeps the log honest about what changed.
@@ -213,6 +214,16 @@ for pr in $(gh pr list --state open --json number,isDraft,autoMergeRequest \
   verdict=$(timeout 25s gh api "repos/${REPO_SLUG}/statuses/${head}" --jq '[.[] | select(.context=="fleet-code-review")][0].state' 2>/dev/null || true)
   if [ "$verdict" = "failure" ] || [ "$verdict" = "error" ]; then
     log "PR #$pr: not armed -- judge-judy blocked or errored this head (${head:0:12}, state=$verdict)"
+    continue
+  fi
+  # gh#862: this loop runs AFTER the branch-update loop above, so a PR judge-judy blocked can
+  # already have a NEW head here -- the branch-update loop's own merge-main commit. That new
+  # SHA has never had a fleet-code-review status posted against it, so verdict is the empty
+  # string, not "failure": the guard above falls through and this would arm a diff judge-judy
+  # just blocked. An empty (or any non-"success") verdict means "not reviewed yet", never "not
+  # blocked" -- only an explicit success may arm.
+  if [ "$verdict" != "success" ]; then
+    log "PR #$pr: not armed -- unreviewed head, no fleet-code-review verdict yet (${head:0:12}, state=${verdict:-<empty>})"
     continue
   fi
   if arm_err="$(arm_pr_auto_merge "$pr")"; then
