@@ -11,6 +11,7 @@ Run: python3 scripts/test_fixer_fire_path.py
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -210,6 +211,79 @@ class PostPromoteBreachTests(unittest.TestCase):
     def test_all_clean_never_fires(self):
         samples = [{"error_pct": 0.1, "p95_s": 0.5}] * 5
         self.assertFalse(ffp.should_fire_post_promote(samples))
+
+
+class PostPromoteCliWiringTests(unittest.TestCase):
+    """VP follow-up on gh#728 (2026-09-11): should_fire_post_promote() had no caller anywhere --
+    check.sh never took samples for it, so "degraded" (this issue's own title) was never
+    actually detected. check.sh now calls the `--check-post-promote` CLI added to
+    fixer_fire_path.py every tick; these tests exercise that CLI exactly as check.sh does (a
+    real subprocess, a samples-state file that persists across calls, plain floats as argv) --
+    never should_fire_post_promote() directly, which PostPromoteBreachTests above already
+    covers as a pure function."""
+
+    def _check(self, state_file: Path, error_pct: float, p95_s: float):
+        return subprocess.run(
+            [sys.executable, str(Path(ffp.__file__)), "--check-post-promote",
+             str(state_file), str(error_pct), str(p95_s)],
+            capture_output=True, text=True, timeout=10,
+        )
+
+    def test_two_consecutive_error_rate_breaches_fire_with_a_healthy_page(self):
+        """The PRD's own scenario: a healthy (200) health page proves nothing about the page's
+        own error rate -- two consecutive breaching samples must still fire."""
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "the-fixer.postpromote"
+            clean = self._check(state, 1.0, 0.8)
+            self.assertEqual(clean.returncode, 1)
+            self.assertEqual(clean.stdout.strip(), "no-fire")
+
+            first_breach = self._check(state, 8.0, 1.0)
+            self.assertEqual(first_breach.returncode, 1, "one breach alone must not fire")
+
+            second_breach = self._check(state, 9.0, 1.0)
+            self.assertEqual(second_breach.returncode, 0)
+            self.assertEqual(second_breach.stdout.strip(), "fire")
+
+    def test_one_breach_then_one_clean_sample_does_not_fire(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "the-fixer.postpromote"
+            breach = self._check(state, 9.0, 1.0)
+            self.assertEqual(breach.returncode, 1)
+
+            clean = self._check(state, 0.5, 1.0)
+            self.assertEqual(clean.returncode, 1)
+            self.assertEqual(clean.stdout.strip(), "no-fire")
+
+    def test_recovery_after_a_fired_pair_does_not_keep_re_firing(self):
+        """Caught building this wiring: a history window wider than 2 let a long-past breaching
+        pair keep tripping the verdict on a tick that was itself clean, because the old pair
+        hadn't aged out of the trimmed history yet. Two breaches then a clean sample must read
+        as recovered, same as PostPromoteBreachTests' pure-function case above -- this asserts
+        it holds through the persisted CLI wrapper too, not just the in-memory function."""
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "the-fixer.postpromote"
+            self._check(state, 9.0, 1.0)                       # breach 1
+            fired = self._check(state, 9.5, 1.0)                # breach 2 -> fires
+            self.assertEqual(fired.returncode, 0)
+
+            recovered = self._check(state, 0.2, 1.0)             # clean tick after the fire
+            self.assertEqual(recovered.returncode, 1, "a clean tick right after a fire must not keep firing")
+            self.assertEqual(recovered.stdout.strip(), "no-fire")
+
+    def test_state_file_persists_across_separate_process_invocations(self):
+        """Each call is a fresh `python3 ... --check-post-promote` process, same as check.sh
+        invoking it once per tick -- the breach memory has to live in the state file, not in
+        any in-process state, or every tick would see history of exactly one sample."""
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "the-fixer.postpromote"
+            self._check(state, 8.0, 1.0)
+            history = json.loads(state.read_text())
+            self.assertEqual(history, [{"error_pct": 8.0, "p95_s": 1.0}])
+
+            self._check(state, 9.0, 1.0)
+            history = json.loads(state.read_text())
+            self.assertEqual(len(history), 2)
 
 
 class IncidentDedupTests(unittest.TestCase):

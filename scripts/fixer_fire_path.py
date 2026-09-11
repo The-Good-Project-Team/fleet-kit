@@ -27,6 +27,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 PREFIX = os.environ.get("FLEET_LABEL_PREFIX", "fleet:")
 INCIDENT_LABEL = "incident"
@@ -122,6 +123,46 @@ def should_fire_post_promote(samples: list[dict], error_pct_threshold: float = 5
     return False
 
 
+# --- CLI wiring for check.sh (gh#728 VP follow-up, 2026-09-11) --------------------------------
+#
+# should_fire_post_promote() had no caller anywhere outside its own unit tests -- check.sh never
+# took the samples it needs, so "degraded" (this issue's own title, second half) was never
+# actually detected. check.sh has no JSON handling of its own, so this CLI is the thin seam: it
+# takes ONE new sample's numbers as argv, appends them to a small state file that survives across
+# ticks (the same "persist a state file under $LOG_DIR" convention check.sh's own dedup and
+# heartbeat files already use), and prints the verdict. Exit code doubles as the verdict so
+# check.sh can write `if python3 ... --check-post-promote ...; then PROD_DOWN=...; fi` directly --
+# 0 means fire, 1 means no-fire, matching every other boolean check in that script.
+
+# Exactly 2, not more: should_fire_post_promote() reports true the moment ANY adjacent pair in
+# the list it's given breaches -- it has no notion of "recent" on its own, that's the caller's
+# job. A window > 2 would let a breaching pair from several ticks ago keep re-firing the CLI
+# long after prod recovered, simply because it was still sitting earlier in the trimmed history
+# (caught live while building this wiring: a 3-sample window kept firing on a tick that was
+# itself clean, because ticks 1-2's breach pair hadn't aged out yet). 2 means the CLI's verdict
+# is always "did the last two ticks both breach", which is what AC4 actually asks.
+POST_PROMOTE_HISTORY_LEN = 2
+
+
+def _load_post_promote_history(state_file: str) -> list[dict]:
+    try:
+        return json.loads(Path(state_file).read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def check_post_promote_cli(state_file: str, error_pct: float, p95_s: float) -> bool:
+    """Appends one new sample to `state_file` (creating it if absent), trims to the last
+    POST_PROMOTE_HISTORY_LEN samples, and returns should_fire_post_promote() over that history.
+    Persisting BEFORE deciding means a tick that crashes after this call still recorded its
+    sample -- the next tick's decision is never silently missing data."""
+    history = _load_post_promote_history(state_file)
+    history.append({"error_pct": error_pct, "p95_s": p95_s})
+    history = history[-POST_PROMOTE_HISTORY_LEN:]
+    Path(state_file).write_text(json.dumps(history))
+    return should_fire_post_promote(history)
+
+
 # --- Step 3: file or update the incident, never duplicate it (AC7) -----------------------------
 
 def build_incident_search_cmd() -> list[str]:
@@ -205,6 +246,15 @@ def run_fire_path(*, diag_driver: str, diag_section: str, deploy_driver: str, ru
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--check-post-promote":
+        if len(sys.argv) != 5:
+            print("usage: fixer_fire_path.py --check-post-promote <state-file> <error_pct> <p95_s>",
+                  file=sys.stderr)
+            sys.exit(2)
+        fire = check_post_promote_cli(sys.argv[2], float(sys.argv[3]), float(sys.argv[4]))
+        print("fire" if fire else "no-fire")
+        sys.exit(0 if fire else 1)
+
     diag_driver = os.environ.get("FIXER_PROD_DIAG_DRIVER", "")
     deploy_driver = os.environ.get("FLEET_DEPLOY_DRIVER", "")
     repo = os.environ.get("FLEET_REPO", "")
