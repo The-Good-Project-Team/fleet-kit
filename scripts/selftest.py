@@ -4362,7 +4362,13 @@ def _console_run_panel_shows_everything_about_one_run_fk748():
     assert llm["report"] is None, "an llm pass with no Report: block must stay None (reported_nothing stays honest)"
     jj = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
     assert "Report:\\n%s" in jj or "Report:\n%s" in jj, "judge-judy's report_run must carry the review text as Report:"
-    assert jj.count('"$FINDINGS"') >= 1 and "sed '/^VERDICT: /d' \"$OUT_FILE\"" in jj, "both verdict paths must pass the review text"
+    # gh#806: the review text now comes from judge_judy_verdict.py's structured findings_text,
+    # not a sed-stripped slice of the raw prose OUT_FILE -- both report_run calls must still
+    # carry it through.
+    assert jj.count('"$FINDINGS"') >= 1, "block verdict path must pass the review text via FINDINGS"
+    approve_report_i = jj.index('report_run "$PR" "$HEAD_SHA" "$USAGE_FILE" "approved PR #$PR"')
+    assert "FINDINGS" in jj[approve_report_i:approve_report_i + 300], \
+        "approve path's report_run call must still surface any (non-blocking) findings text"
 
 
 def _console_home_is_usable_on_a_phone_and_the_number_tile_reads_fleet_env():
@@ -5250,6 +5256,137 @@ def _judge_judy_skips_an_empty_diff_instead_of_blocking():
     assert "continue" in empty_branch, "an empty diff must continue the tick loop, not fall through into a verdict"
     assert "VERDICT" not in empty_branch, \
         "an empty diff must never reach a VERDICT -- it should skip before the model is ever called"
+
+
+def _judge_judy_verdict_reads_validated_json_not_prose():
+    """gh#806 AC1/AC2/AC5/AC6: judge_judy_verdict.py reads the verdict from validated JSON --
+    prefers the CLI's own `structured_output`, falls back to a second `json.loads` of `.result`
+    -- and never leaves a genuinely bad answer looking like a valid one. This is the behavioral
+    test AC5 asks for: it runs the real script as a subprocess against a deliberately
+    unparseable envelope and asserts the result is "held" (ok=False, a named reason, exit 1),
+    never an absent/ambiguous status. It fails against `main` today because the script does not
+    exist there at all (FileNotFoundError) -- this IS the fix, not a test written after it.
+    """
+    import subprocess
+
+    script = ROOT / "scripts" / "judge_judy_verdict.py"
+
+    def run(raw: str) -> tuple[int, dict]:
+        p = subprocess.run([sys.executable, str(script)], input=raw,
+                            capture_output=True, text=True, timeout=30)
+        return p.returncode, json.loads(p.stdout)
+
+    # AC1: a valid approve verdict parses clean, no regex over prose involved.
+    rc, out = run(json.dumps({"result": json.dumps({"verdict": "approve", "findings": []})}))
+    assert rc == 0 and out == {"ok": True, "verdict": "approve", "findings": [], "findings_text": ""}, out
+
+    # Prefer the CLI's own already-parsed structured_output over a second parse of .result.
+    rc, out = run(json.dumps({"structured_output": {"verdict": "block", "findings": [
+        {"file": "a.py", "line": 10, "severity": "high", "what_breaks": "null deref"}]},
+        "result": "{\"verdict\": \"approve\", \"findings\": []}"}))
+    assert rc == 0 and out["verdict"] == "block", "must prefer structured_output over .result"
+    assert out["findings_text"] == "- a.py:10 (high): null deref", out["findings_text"]
+
+    # AC2/AC5: deliberately unparseable output -- the outer envelope itself is not JSON. Must
+    # hold (ok=False, exit 1), never come back looking like a valid, silently-approved answer.
+    rc, out = run("the model hedged and never emitted valid json at all")
+    assert rc == 1 and out["ok"] is False and out["reason"], \
+        "unparseable output must be a named, non-empty reason at exit 1 -- never a silent pass"
+
+    # AC6: the reason names the SPECIFIC schema violation, not a generic "parsing failed".
+    rc, out = run(json.dumps({"result": json.dumps({"verdict": "maybe", "findings": []})}))
+    assert rc == 1 and "verdict" in out["reason"] and "maybe" in out["reason"], \
+        f"reason must name the specific violation (bad verdict value), got: {out['reason']!r}"
+
+    # gh#3170, folded into the same schema-violation path: a block with zero findings is not a
+    # valid answer either.
+    rc, out = run(json.dumps({"result": json.dumps({"verdict": "block", "findings": []})}))
+    assert rc == 1 and "empty findings" in out["reason"], out
+
+    # judge-judy.sh itself must call --json-schema and read this script's output -- no regex
+    # grep over a VERDICT: line left anywhere.
+    src = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    assert "--json-schema" in src, "judge-judy.sh no longer requests structured output"
+    assert "judge_judy_verdict.py" in src, "judge-judy.sh no longer reads the validated verdict parser"
+    assert "grep -E '^VERDICT: (approve|block)$'" not in src, \
+        "a regex-over-prose verdict grep is still present -- gh#806 was supposed to remove it"
+
+
+def _judge_judy_holds_a_pr_on_schema_invalid_verdict_not_just_marks_it():
+    """gh#806 AC2: "a verdict that cannot be obtained holds the PR instead of releasing it."
+
+    Verified live this pass (2026-09-11) against this repo's own branch protection --
+    `fleet-code-review` is NOT a required status check (only `selftest` is), so posting
+    `state=error` alone changes nothing the merge queue looks at. The only thing that actually
+    holds a PR here is `unqueue_pr` (dequeue + `--disable-auto`, fk#523) -- exactly what the
+    BLOCK branch already did and the state=error/strike-exhausted branch did NOT, until this
+    fix. auto_update_branch.sh's own re-arm guard used to key off "failure" only, so an errored
+    head could still get re-armed later -- both are checked here.
+    """
+    src = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    strike_branch = src.index('if [ -z "$VERDICT" ]; then')
+    error_i = src.index('post_status "$HEAD_SHA" "error"', strike_branch)
+    max_strikes_i = src.index('if [ "$N" -ge "$MAX_PARSE_STRIKES" ]; then', strike_branch)
+    unqueue_i = src.index('unqueue_pr "$PR"', error_i)
+    assert max_strikes_i < error_i < unqueue_i, \
+        "state=error must be followed by unqueue_pr inside the MAX_PARSE_STRIKES branch -- posting the status alone does not hold the PR"
+    next_continue = src.index("continue", unqueue_i)
+    # unqueue_i must still be inside the same strike-exhausted branch, well before the loop
+    # moves on to the next PR.
+    assert unqueue_i < next_continue < unqueue_i + 1500, \
+        "unqueue_pr call for the error path landed outside the strike-exhausted branch"
+
+    aub = (ROOT / "scripts" / "auto_update_branch.sh").read_text()
+    assert aub.count('[ "$verdict" = "failure" ] || [ "$verdict" = "error" ]') >= 1, \
+        "auto_update_branch.sh's re-arm guard must also exclude state=error, not just failure"
+    assert aub.count('"$verdict" = "error"') >= 2, \
+        "both the re-arm guard AND the stale-close reason check must treat error like failure"
+
+
+def _judge_judy_records_block_events_for_override_audit():
+    """gh#806 AC4: an override ("blocked, then merged anyway at the same head with no
+    remediation commit") must be recorded somewhere a later pass can count it, rather than
+    reconstructed by hand every time -- exactly what 3 separate marie passes on this issue did
+    manually before this fix. judge-judy.sh appends one line per block; review_override_audit.py
+    reads them back and cross-checks against each PR's actual merge state.
+    """
+    src = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
+    block_i = src.index("fleet-code-review: BLOCK")
+    record_i = src.index("judge-judy-blocks.jsonl", block_i)
+    report_i = src.index('report_run "$PR" "$HEAD_SHA"', block_i)
+    assert block_i < record_i < report_i, \
+        "the block event must be recorded in the BLOCK branch, before report_run"
+
+    import review_override_audit as roa
+
+    blocks = [
+        {"pr": 100, "head": "aaa111", "blocked_at": 1},   # merges unfixed -> override
+        {"pr": 101, "head": "bbb222", "blocked_at": 2},    # merges after a real push -> not an override
+        {"pr": 102, "head": "ccc333", "blocked_at": 3},    # still open -> not an override
+    ]
+
+    def fake_run(cmd, timeout=30):
+        pr = cmd[cmd.index("view") + 1]
+        states = {
+            "100": {"state": "MERGED", "headRefOid": "aaa111", "mergedAt": "2026-09-11T00:00:00Z"},
+            "101": {"state": "MERGED", "headRefOid": "zzz999", "mergedAt": "2026-09-11T00:00:00Z"},
+            "102": {"state": "OPEN", "headRefOid": "ccc333", "mergedAt": None},
+        }
+        return 0, json.dumps(states[pr])
+
+    result = roa.audit(blocks, run=fake_run)
+    assert result["total_blocks"] == 3
+    assert result["override_count"] == 1 and result["overrides"][0]["pr"] == 100, result
+    assert abs(result["override_rate"] - 1 / 3) < 1e-9, result
+
+    # A torn/partial line in the jsonl store must never crash the read, same discipline
+    # overrides.py's live_overrides() already applies to its own append-only store.
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "blocks.jsonl"
+        p.write_text('{"pr": 1, "head": "a"}\nnot json\n{"pr": 2, "head": "b"}\n')
+        rows = roa.read_blocks(p)
+        assert len(rows) == 2, "a torn line must be skipped, not crash the whole read"
 
 
 def _heartbeat_is_not_an_executed_run():
@@ -11541,6 +11678,9 @@ if __name__ == "__main__":
     check("board_github file_item can add a priority label alongside backlog/lane", _board_github_file_item_can_add_a_priority_label)
     check("judge-judy files a priority-high fix item when it blocks a PR", _judge_judy_files_a_fix_item_on_block)
     check("judge-judy skips an empty diff instead of blocking (gh#531)", _judge_judy_skips_an_empty_diff_instead_of_blocking)
+    check("judge-judy's verdict is read from validated JSON, not prose (gh#806)", _judge_judy_verdict_reads_validated_json_not_prose)
+    check("judge-judy holds a PR on a schema-invalid verdict, not just marks it (gh#806 AC2)", _judge_judy_holds_a_pr_on_schema_invalid_verdict_not_just_marks_it)
+    check("judge-judy records block events for a later override audit (gh#806 AC4)", _judge_judy_records_block_events_for_override_audit)
     check("a heartbeat is not an executed run (fk#819)", _heartbeat_is_not_an_executed_run)
     check("judge-judy writes a heartbeat row on a no-PR tick (gh#267)", _judge_judy_writes_a_heartbeat_row_on_a_no_pr_tick)
     check("judge-judy's heartbeat status reads distinct from a real review outcome (gh#267 AC1)", _judge_judy_heartbeat_status_is_distinct_from_a_real_review_outcome)
