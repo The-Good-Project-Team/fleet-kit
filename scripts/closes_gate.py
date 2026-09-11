@@ -15,7 +15,13 @@ when the PR cannot possibly be finishing the issue:
   1. the PR body says so itself ("not a fix", "Step 1 only", "does not build", "first slice",
      "follow-up PR", ...) -- a PR that calls itself partial does not get to close anything;
   2. the PR touches only docs (docs/ or *.md) while the issue carries a non-docs lane label
-     (lane:ui, lane:backend, ...) -- prose cannot finish a product item.
+     (lane:ui, lane:backend, ...) -- prose cannot finish a product item;
+  3. the target issue carries `fleet:epic` (fk#652, docs/quality-standard.md rule 3 --
+     "jefe closes epics, not PRs"): a docs/tests-only PR can never close an epic, and any PR
+     closing an epic with an unaccepted (open) child is blocked, naming each open child. An
+     epic with no children discoverable (neither real GitHub sub-issues nor marie's
+     `decomposed into #a, #b` comment) is left alone -- an unlinked epic must never become
+     unclosable just because this gate cannot see its children.
 
 Everything else is left to the reviewer, who now sees the issue's acceptance criteria and is
 told to block unless the diff meets every one. The fix for the author is always the same one
@@ -43,7 +49,12 @@ PARTIAL_RE = re.compile(
     re.I,
 )
 DOC_PATH_RE = re.compile(r"^(docs/|.*\.md$)")
+TEST_PATH_RE = re.compile(
+    r"(^|/)tests?/|(^|/)test_[^/]+\.py$|_test\.py$|\.test\.[jt]sx?$|\.spec\.[jt]sx?$", re.I
+)
 AC_HEADING_RE = re.compile(r"^#{1,4}\s*acceptance criteria\b.*$", re.I | re.M)
+EPIC = "fleet:epic"
+DECOMPOSED_RE = re.compile(r"decomposed into\s+((?:#\d+(?:\s*,\s*|\s+and\s+)?)+)", re.I)
 
 
 def closing_numbers(pr_body: str) -> list[int]:
@@ -72,12 +83,63 @@ def acceptance_criteria(issue_body: str, comments: list[dict]) -> str:
     return found
 
 
+def decomposed_children(iss: dict) -> list[int]:
+    """Child issue numbers from marie's `decomposed into #a, #b, ...` comment (Part C2b of
+    members/marie/marie.md). Newest matching comment wins, same rule acceptance_criteria()
+    follows for PRD comments. Returns [] when no such comment exists."""
+    children: list[int] = []
+    for c in sorted(iss.get("comments") or [], key=lambda c: c.get("createdAt") or ""):
+        m = DECOMPOSED_RE.search(c.get("body") or "")
+        if m:
+            children = [int(x) for x in re.findall(r"\d+", m.group(1))]
+    return children
+
+
+def epic_open_children(iss: dict, issues: dict[int, dict]) -> tuple[bool, list[int]]:
+    """(children_found, open_child_numbers) for an epic issue. Prefers GitHub's real
+    `subIssues` structure (marie links these via Part C0, fk#652); falls back to her
+    `decomposed into #a, #b` comment for an epic not yet linked. Returns (False, []) when
+    neither source names any child -- an unlinked epic must never read as closable just
+    because this gate cannot see what is under it."""
+    sub = iss.get("subIssues")
+    nodes = sub.get("nodes") if isinstance(sub, dict) else None
+    if nodes:
+        return True, [c["number"] for c in nodes if c.get("state") == "OPEN"]
+    children = decomposed_children(iss)
+    if not children:
+        return False, []
+    return True, [n for n in children if (issues.get(n) or {}).get("state") == "OPEN"]
+
+
+def epic_closable(iss: dict, issues: dict[int, dict]) -> dict:
+    """Whether an epic issue can be closed right now -- jefe's own pre-close check
+    (members/jefe/jefe.md), independent of any PR. {"closable": bool, "reason": str}."""
+    found, open_children = epic_open_children(iss, issues)
+    if not found:
+        return {
+            "closable": True,
+            "reason": "no children found (no real GitHub sub-issues, no `decomposed into` "
+            "comment) -- an unlinked epic is never blocked on epic grounds",
+        }
+    if open_children:
+        return {
+            "closable": False,
+            "reason": "unaccepted children: " + ", ".join(f"#{c}" for c in open_children),
+        }
+    return {"closable": True, "reason": "every child is closed"}
+
+
 def evaluate(pr_body: str, pr_files: list[str], issues: dict[int, dict]) -> dict:
-    """Pure: no network. issues = {number: {title, labels[], body, comments[{body,createdAt}]}}."""
+    """Pure: no network. issues = {number: {title, labels[], body, comments[{body,createdAt}],
+    subIssues?, state?}}. `subIssues`/`state` are only needed for an issue that carries
+    `fleet:epic` and/or is named as a child of one (see epic_open_children)."""
     reasons: list[str] = []
     intent_parts: list[str] = []
     partial = PARTIAL_RE.search(pr_body or "")
     docs_only = bool(pr_files) and all(DOC_PATH_RE.match(p) for p in pr_files)
+    docs_or_test_only = bool(pr_files) and all(
+        DOC_PATH_RE.match(p) or TEST_PATH_RE.search(p) for p in pr_files
+    )
     for n in closing_numbers(pr_body):
         iss = issues.get(n)
         if not iss:
@@ -85,6 +147,7 @@ def evaluate(pr_body: str, pr_files: list[str], issues: dict[int, dict]) -> dict
             continue
         labels = [l if isinstance(l, str) else l.get("name", "") for l in iss.get("labels") or []]
         lanes = [l for l in labels if l.startswith("lane:")]
+        epic = EPIC in labels
         ac = acceptance_criteria(iss.get("body") or "", iss.get("comments") or [])
         if partial:
             reasons.append(
@@ -96,6 +159,20 @@ def evaluate(pr_body: str, pr_files: list[str], issues: dict[int, dict]) -> dict
                 f"PR changes only docs ({len(pr_files)} file(s)) but closes #{n}, a {', '.join(lanes)} item. "
                 f"Prose cannot finish a product item: write `Part of #{n}`."
             )
+        if epic and docs_or_test_only:
+            reasons.append(
+                f"PR changes only docs/tests but closes #{n}, an epic (`fleet:epic`). jefe closes "
+                f"epics, not PRs, and only once every child is accepted -- write `Part of #{n}` instead."
+            )
+        elif epic:
+            found, open_children = epic_open_children(iss, issues)
+            if found and open_children:
+                reasons.append(
+                    f"#{n} is an epic (`fleet:epic`) with unaccepted children: "
+                    + ", ".join(f"#{c}" for c in open_children)
+                    + f". jefe closes epics, not PRs -- write `Part of #{n}` and let jefe close it "
+                    "once every child is accepted."
+                )
         spec = ac if ac else (iss.get("body") or "").strip()[:1500] or "(empty issue body)"
         intent_parts.append(
             f"#{n} {iss.get('title', '')}\n" + ("Acceptance criteria:\n" if ac else "No acceptance-criteria block; the issue body is the spec:\n") + spec
@@ -116,20 +193,60 @@ def gh_json(args: list[str]) -> dict | list | None:
         return None
 
 
+def fetch_issue_and_epic_children(n: int, repo: list[str]) -> dict[int, dict]:
+    """Fetch issue #n plus, if it is an epic with no real `subIssues` link, the state of
+    each child named in marie's `decomposed into` comment. Returns {number: issue-dict},
+    keyed the way evaluate()/epic_closable() expect."""
+    issues: dict[int, dict] = {}
+    iss = gh_json(
+        ["issue", "view", str(n), *repo, "--json", "title,labels,body,comments,subIssues,state"]
+    )
+    if not isinstance(iss, dict):
+        return issues
+    issues[n] = iss
+    labels = [l if isinstance(l, str) else l.get("name", "") for l in iss.get("labels") or []]
+    sub = iss.get("subIssues")
+    nodes = sub.get("nodes") if isinstance(sub, dict) else None
+    if EPIC in labels and not nodes:
+        # no real sub-issue links -- fetch state for marie's "decomposed into" children
+        for child_n in decomposed_children(iss):
+            if child_n not in issues:
+                child_iss = gh_json(["issue", "view", str(child_n), *repo, "--json", "state"])
+                if isinstance(child_iss, dict):
+                    issues[child_n] = child_iss
+    return issues
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="block a PR that closes an issue it does not finish")
-    ap.add_argument("pr", type=int)
+    ap.add_argument("pr", type=int, nargs="?", help="PR number to gate (mutually exclusive with --epic)")
+    ap.add_argument(
+        "--epic",
+        type=int,
+        help="check whether THIS issue (an epic) can be closed right now, no PR involved "
+        "-- the check members/jefe/jefe.md runs before it closes an epic (fk#652)",
+    )
     ap.add_argument("--repo", help="owner/name (default: the current repo)")
     a = ap.parse_args(argv)
     repo = ["--repo", a.repo] if a.repo else []
+
+    if a.epic is not None:
+        issues = fetch_issue_and_epic_children(a.epic, repo)
+        iss = issues.get(a.epic, {})
+        result = epic_closable(iss, issues)
+        result["issue"] = a.epic
+        json.dump(result, sys.stdout)
+        print()
+        return 0 if result["closable"] else 1
+
+    if a.pr is None:
+        ap.error("pr is required unless --epic is given")
     pr = gh_json(["pr", "view", str(a.pr), *repo, "--json", "body,files"]) or {}
     body = pr.get("body") or ""
     files = [f.get("path", "") for f in pr.get("files") or []]
-    issues: dict[int, dict] = {}
+    issues = {}
     for n in closing_numbers(body):
-        iss = gh_json(["issue", "view", str(n), *repo, "--json", "title,labels,body,comments"])
-        if isinstance(iss, dict):
-            issues[n] = iss
+        issues.update(fetch_issue_and_epic_children(n, repo))
     result = evaluate(body, files, issues)
     result["pr"] = a.pr
     json.dump(result, sys.stdout)

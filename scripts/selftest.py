@@ -4237,6 +4237,63 @@ def _judge_runs_the_closes_gate_and_reads_the_issue():
     assert (ROOT / "docs" / "quality-standard.md").exists()
 
 
+def _closes_gate_blocks_an_epic_with_unaccepted_children():
+    """fk#652 (Part C0 re-scope, 2026-09-11): an epic (`fleet:epic`) closes only when every
+    child is accepted -- the same principle closes_gate.py already enforces per-issue, one
+    layer up. Covers AC1-3, AC5 of the superseding PRD comment."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("closes_gate", ROOT / "scripts" / "closes_gate.py")
+    cg = importlib.util.module_from_spec(spec); spec.loader.exec_module(cg)
+
+    epic_all_closed = {"title": "epic", "labels": [{"name": "fleet:epic"}], "body": "", "comments": [],
+                        "subIssues": {"nodes": [{"number": 1, "state": "CLOSED"}, {"number": 2, "state": "CLOSED"}, {"number": 3, "state": "CLOSED"}]}}
+    # AC1: three closed children -> closable
+    r = cg.evaluate("Closes #634", ["src/x.py"], {634: epic_all_closed})
+    assert r["verdict"] == "ok", r
+    assert cg.epic_closable(epic_all_closed, {634: epic_all_closed})["closable"] is True
+
+    epic_one_open = dict(epic_all_closed, subIssues={"nodes": [{"number": 1, "state": "CLOSED"}, {"number": 2, "state": "OPEN"}, {"number": 3, "state": "CLOSED"}]})
+    # AC2: one open child -> blocked, names it
+    r = cg.evaluate("Closes #634", ["src/x.py"], {634: epic_one_open})
+    assert r["verdict"] == "block" and "#2" in r["reasons"][0], r
+    ec = cg.epic_closable(epic_one_open, {634: epic_one_open})
+    assert ec["closable"] is False and "#2" in ec["reason"], ec
+
+    # AC3: no subIssues at all, no "decomposed into" comment -> never blocks on epic grounds
+    epic_unlinked = {"title": "epic", "labels": [{"name": "fleet:epic"}], "body": "", "comments": []}
+    r = cg.evaluate("Closes #634", ["src/x.py"], {634: epic_unlinked})
+    assert r["verdict"] == "ok", r
+    assert cg.epic_closable(epic_unlinked, {634: epic_unlinked})["closable"] is True
+
+    # AC3 fallback: no subIssues, but marie's "decomposed into #a, #b" comment names children
+    epic_fallback = {"title": "epic", "labels": [{"name": "fleet:epic"}], "body": "",
+                      "comments": [{"createdAt": "2026-09-01T00:00:00Z", "body": "marie: decomposed into #10, #11 (Part C2b)"}]}
+    r = cg.evaluate("Closes #634", ["src/x.py"], {634: epic_fallback, 10: {"state": "CLOSED"}, 11: {"state": "OPEN"}})
+    assert r["verdict"] == "block" and "#11" in r["reasons"][0], r
+
+    # AC5: a docs/tests-only PR can never close an epic, message distinguishes epic reason
+    # from the generic docs-only-on-a-lane-item reason
+    r = cg.evaluate("Closes #634", ["docs/x.md", "scripts/test_x.py"], {634: epic_all_closed})
+    assert r["verdict"] == "block" and "docs/tests" in r["reasons"][0] and "epic" in r["reasons"][0], r
+
+    # a non-epic issue is unaffected by any of this
+    plain = {"title": "x", "labels": [{"name": "lane:ui"}], "body": "body", "comments": []}
+    r = cg.evaluate("Closes #1", ["src/x.py"], {1: plain})
+    assert r["verdict"] == "ok", r
+
+
+def _jefe_runs_the_epic_close_check_before_closing_an_epic():
+    """AC4: members/jefe/jefe.md's epic-closing step invokes closes_gate.py's `--epic` check
+    before jefe closes a `fleet:epic` issue, documented in the same shape gru.md uses for
+    vision_link_gate.py / quality_gate.py (a fenced command plus the JSON shape it returns)."""
+    md = (ROOT / "members" / "jefe" / "jefe.md").read_text()
+    assert "closes epics, not PRs" in md
+    assert "closes_gate.py --epic" in md, "jefe.md never invokes the epic-closure check"
+    assert '"closable"' in md, "jefe.md does not document the check's JSON shape"
+    ap_src = (ROOT / "scripts" / "closes_gate.py").read_text()
+    assert '"--epic"' in ap_src, "closes_gate.py has no --epic CLI mode for jefe to call"
+
+
 def _share_dials_offer_every_five_percent_labelled_as_percent():
     """Reif, 2026-09-07: "where is .3, etc. and show them as percents." The two fraction dials
     list every 5% step from 5% to 100%, labelled as percents, and a stored "0.20" matches the
@@ -11688,6 +11745,8 @@ if __name__ == "__main__":
     check("journey_walker fleet-console default resolves to the instance's real console path, not the bare host (gh#724 AC1)", _journey_walker_console_url_defaults_to_fleet_instance_path_gh724)
     check("journey_walker fleet-console URL: an explicit FLEET_CONSOLE_URL wins unchanged (gh#724 AC2)", _journey_walker_console_url_env_override_wins_unchanged_gh724)
 
+    check("closes_gate.py blocks an epic with unaccepted children, never blocks an unlinked one (fk#652)", _closes_gate_blocks_an_epic_with_unaccepted_children)
+    check("jefe.md runs closes_gate.py --epic before closing a fleet:epic issue (fk#652)", _jefe_runs_the_epic_close_check_before_closing_an_epic)
     check("vp.md authorizes every label vp_due.VP_LABELS spawns on (gh#855 AC5)", _vp_md_authorizes_every_label_vp_due_spawns_on_gh855)
     for n in ok:
         print(f"  ok    {n}")
