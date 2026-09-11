@@ -9165,7 +9165,9 @@ def _green_pr_with_no_auto_merge_gets_armed():
             "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo \"sha$3\"; exit 0; fi\n"
             "if [ \"$1\" = \"api\" ]; then\n"
             "  # --jq is applied by the real gh; the stub answers what that filter would print.\n"
-            "  case \"$*\" in *statuses/sha294*) echo failure ;; *) echo null ;; esac\n"
+            "  # #291 carries an explicit SUCCESS verdict (judge-judy already reviewed and\n"
+            "  # approved this head, gh#862 AC3) -- an empty/null verdict must NOT arm (AC1).\n"
+            "  case \"$*\" in *statuses/sha291*) echo success ;; *statuses/sha294*) echo failure ;; *) echo null ;; esac\n"
             "  exit 0\n"
             "fi\n"
             "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"merge\" ]; then\n"
@@ -9203,6 +9205,89 @@ def _green_pr_with_no_auto_merge_gets_armed():
 
         logtext = (log_dir / "auto_update_branch.log").read_text()
         assert "armed" in logtext, "the tick summary never reports how many PRs it armed"
+
+
+def _arm_loop_never_arms_an_unreviewed_head_gh862():
+    """gh#862: `auto_update_branch.sh` keeps branches current AND arms auto-merge in the same
+    run. Keeping a branch current produces a NEW head SHA (the merge-main commit); that new SHA
+    has never had a `fleet-code-review` status posted against it, so the old guard's `verdict`
+    was the empty string, not "failure" -- and the empty-string guard fell through and armed a
+    diff judge-judy had just BLOCKed at the previous head. Live case: project-sketchyswap PR
+    #111, 2026-09-11 -- judge-judy BLOCKed head fcd6857172 at 07:18:54, auto-merge correctly
+    disabled at 07:19:02, the script merged main in at 07:20 producing 600ab420de with no new
+    evidence, and the old guard would arm that head.
+
+    Exercises the guard's three states directly (empty / failure / success) so a regression
+    back to "anything not literally failure/error arms" fails here even if the end-to-end stub
+    in `_green_pr_with_no_auto_merge_gets_armed` above is ever loosened.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"; log_dir.mkdir(parents=True, exist_ok=True)
+        repo = Path(tmp) / "repo"; repo.mkdir(parents=True, exist_ok=True)
+        bin_dir = Path(tmp) / "bin"; bin_dir.mkdir(parents=True, exist_ok=True)
+        calls = Path(tmp) / "merge_calls.txt"
+
+        # #801 empty verdict (unreviewed head -- must NOT arm, AC1/AC2), #802 failure (must NOT
+        # arm, pre-existing guard), #803 explicit success (must arm exactly as today, AC3).
+        (bin_dir / "gh").write_text(
+            "#!/bin/bash\n"
+            "if [ \"$1\" = \"repo\" ]; then echo 'acme/testrepo'; exit 0; fi\n"
+            "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n"
+            "  case \"$*\" in *autoMergeRequest*) echo 801; echo 802; echo 803 ;; *) ;; esac\n"
+            "  exit 0\n"
+            "fi\n"
+            "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo \"sha$3\"; exit 0; fi\n"
+            "if [ \"$1\" = \"api\" ]; then\n"
+            "  case \"$*\" in\n"
+            "    *statuses/sha801*) echo -n '' ;;\n"
+            "    *statuses/sha802*) echo failure ;;\n"
+            "    *statuses/sha803*) echo success ;;\n"
+            "    *) : ;;\n"
+            "  esac\n"
+            "  exit 0\n"
+            "fi\n"
+            "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"merge\" ]; then\n"
+            f"  echo \"$3\" >> {calls}\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n"
+        )
+        (bin_dir / "gh").chmod(0o755)
+
+        proc = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "auto_update_branch.sh")],
+            capture_output=True, text=True, timeout=30,
+            env={"FLEET_REPO": str(repo), "FLEET_LOG_DIR": str(log_dir),
+                 "FLEET_ENV_FILE": "/nonexistent", "PATH": f"{bin_dir}:/usr/bin:/bin"},
+        )
+        assert proc.returncode == 0, f"script failed: {proc.stderr.strip()[:300]}"
+
+        armed = calls.read_text().split() if calls.exists() else []
+        assert "801" not in armed, (
+            "an UNREVIEWED head (empty fleet-code-review verdict) was armed -- this is the "
+            f"exact gh#862 bypass (PR #111's post-branch-update head): {armed!r}"
+        )
+        assert "802" not in armed, f"a judge-blocked head (failure) was armed: {armed!r}"
+        assert "803" in armed, (
+            f"a head with an explicit fleet-code-review=success verdict was not armed -- the "
+            f"fix must not become a blanket never-arm (AC3): {armed!r}"
+        )
+
+        logtext = (log_dir / "auto_update_branch.log").read_text()
+        assert "unreviewed" in logtext, (
+            f"the log must name the empty-verdict reason as unreviewed, not silence or "
+            f"'blocked': {logtext[-2000:]!r}"
+        )
+
+    # AC5: the fix belongs on the reader side (this guard), never in how judge-judy posts its
+    # verdict -- non-goal 3 in the PRD, mechanically checkable against the diff this PR carries.
+    aub = (ROOT / "scripts" / "auto_update_branch.sh").read_text()
+    assert '[ "$verdict" != "success" ]' in aub, (
+        "auto_update_branch.sh's arm loop no longer requires an explicit success verdict to arm"
+    )
 
 
 def _stale_pr_candidate_filter_excludes_human_branches_and_fresh_prs():
@@ -13962,6 +14047,8 @@ if __name__ == "__main__":
     check("the-fixer does not fire on a parked PR already in the merge queue",
           _fixer_does_not_fire_on_a_parked_pr_already_in_the_merge_queue)
     check("a green PR with no auto-merge gets armed", _green_pr_with_no_auto_merge_gets_armed)
+    check("arm loop never arms an unreviewed head after a branch-update SHA change (gh#862)",
+          _arm_loop_never_arms_an_unreviewed_head_gh862)
     check("stale-PR close filter excludes human branches and fresh PRs (gh#527)",
           _stale_pr_candidate_filter_excludes_human_branches_and_fresh_prs)
     check("a stale unarmed/red PR is closed and its claim freed, a queued one is untouched (gh#527)",
