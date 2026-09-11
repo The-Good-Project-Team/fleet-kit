@@ -116,6 +116,26 @@ ROOT = HERE.parent
 
 BYPASS_HEADER = "X-Atlas-Test-Bypass"
 
+# gh#956: Playwright's own page.goto() default, wait_until="load", blocks until every
+# subresource on the page resolves -- images, fonts, third-party beacons -- not just the
+# content a step actually asserts on. A slow/hanging subresource then reads as a navigation
+# TimeoutError, a false product failure. domcontentloaded is the fleet's documented default:
+# it returns once the DOM is parsed, and any content a step still needs is covered by that
+# step's own explicit wait (expect_visible/wait_text_matches/wait_for_function), which then
+# fails with a real selector/content message instead of a bare navigation timeout (AC1/AC2).
+DEFAULT_WAIT_UNTIL = "domcontentloaded"
+
+
+def step_wait_until(step_def: dict, viewport: str) -> str:
+    """Resolves the page.goto() wait_until for one journeys.yaml step: a per-step,
+    per-viewport `wait_until` override if the catalog sets one, else DEFAULT_WAIT_UNTIL
+    (AC3). The override lives in the same viewport_overrides dict action/observable_result
+    already use, so a journey that genuinely needs a fully-settled page (e.g. a screenshot
+    that depends on webfonts) can say so per step without changing every other step's
+    behavior -- see journeys.yaml's schema comment."""
+    overrides = (step_def.get("viewport_overrides") or {}).get(viewport, {})
+    return overrides.get("wait_until", step_def.get("wait_until", DEFAULT_WAIT_UNTIL))
+
 # gh#890: the exact text Chromium's own devtools protocol logs as a console "error" when a
 # sub-resource fetch fails (a 404, a blocked request, a net:: error) -- distinct from a
 # console.error() call the page's own code made, which never has this shape.
@@ -292,6 +312,25 @@ class JourneyCtx:
             self._contexts[key] = (context, page_obj)
         return self._contexts[key][1]
 
+    def goto(self, index: int | None, page, url: str, timeout: int = 15000):
+        """Navigates `page` to `url`, applying gh#956's per-step wait_until (AC1/AC3) and
+        logging which one it used. `index` is the journeys.yaml step this navigation belongs
+        to, so the resolved value can come from that step's own override; pass None for a
+        precondition navigation (e.g. signing in before step 0 proper starts) that isn't
+        itself a catalog step -- it still gets DEFAULT_WAIT_UNTIL, just with no per-step
+        override to look up."""
+        if index is None:
+            wait_until, label = DEFAULT_WAIT_UNTIL, "precondition"
+        else:
+            wait_until = step_wait_until(self.journey["steps"][index], self.viewport)
+            label = f"step {index}"
+        print(
+            f"journey_walker: {self.journey['id']} [{self.viewport}] {label} "
+            f"goto {url} wait_until={wait_until}",
+            file=sys.stderr,
+        )
+        return page.goto(url, timeout=timeout, wait_until=wait_until)
+
     def close(self):
         for context, _ in self._contexts.values():
             context.close()
@@ -410,7 +449,7 @@ def run_sign_in(ctx: JourneyCtx):
     page = ctx.page("alice")
 
     def s0():
-        page.goto(users.url("https://philanthropy.org/login"), timeout=15000)
+        ctx.goto(0, page, users.url("https://philanthropy.org/login"))
         expect_visible(email_field(page))
         expect_visible(password_field(page))
         expect_visible(submit_button(page))
@@ -479,7 +518,7 @@ def run_search_and_open_org(ctx: JourneyCtx):
     page = ctx.page()
 
     def s0():
-        page.goto(ctx.users.url("https://philanthropy.org/990/?q=hospital"), timeout=15000)
+        ctx.goto(0, page, ctx.users.url("https://philanthropy.org/990/?q=hospital"))
         page.wait_for_function(
             "() => document.querySelectorAll('a[href*=\"/990/report/\"]').length > 0", timeout=10000
         )
@@ -553,7 +592,7 @@ def run_open_990_report(ctx: JourneyCtx):
     page = ctx.page()
 
     def s0():
-        response = page.goto(ctx.users.url(f"https://philanthropy.org/990/report/{ein}"), timeout=15000)
+        response = ctx.goto(0, page, ctx.users.url(f"https://philanthropy.org/990/report/{ein}"))
         blocked = _blocked_for_403(response, ctx.users)
         if blocked:
             raise blocked
@@ -580,7 +619,7 @@ def run_claim_org_through_verify_screen(ctx: JourneyCtx):
     page = ctx.page("alice")
 
     def sign_in_alice():
-        page.goto(users.url("https://philanthropy.org/login"), timeout=15000)
+        ctx.goto(0, page, users.url("https://philanthropy.org/login"))
         email_field(page).first.fill(alice["email"])
         password_field(page).first.fill(alice["password"])
         submit_button(page).first.click()
@@ -588,7 +627,7 @@ def run_claim_org_through_verify_screen(ctx: JourneyCtx):
 
     def s0():
         sign_in_alice()
-        response = page.goto(users.url(f"https://philanthropy.org/990/report/{ein}"), timeout=15000)
+        response = ctx.goto(0, page, users.url(f"https://philanthropy.org/990/report/{ein}"))
         blocked = _blocked_for_403(response, users)
         if blocked:
             raise blocked
@@ -622,12 +661,12 @@ def run_verified_org_checkout_to_stripe(ctx: JourneyCtx):
     page = ctx.page("alice")
 
     def s0():
-        page.goto(users.url("https://philanthropy.org/login"), timeout=15000)
+        ctx.goto(0, page, users.url("https://philanthropy.org/login"))
         email_field(page).first.fill(alice["email"])
         password_field(page).first.fill(alice["password"])
         submit_button(page).first.click()
         wait_path_no_longer_contains(page, "/login", timeout=10000)
-        page.goto(users.url(admin_path), timeout=15000)
+        ctx.goto(0, page, users.url(admin_path))
         page.get_by_role("button", name=re.compile("upgrade to verified|upgrade", re.I)).first.click()
         wait_text_matches(page, r"plan|checkout", timeout=8000)
 
@@ -650,15 +689,15 @@ def run_message_send_and_read_receipt(ctx: JourneyCtx):
     alice_page, bob_page = ctx.page("alice"), ctx.page("bob")
     marker = f"sentry-{ctx.run_id}-{int(time.time())}"
 
-    def sign_in(page, creds):
-        page.goto(users.url("https://philanthropy.org/login"), timeout=15000)
+    def sign_in(page, creds, index):
+        ctx.goto(index, page, users.url("https://philanthropy.org/login"))
         email_field(page).first.fill(creds["email"])
         password_field(page).first.fill(creds["password"])
         submit_button(page).first.click()
         wait_path_no_longer_contains(page, "/login", timeout=10000)
 
     def s0():
-        sign_in(alice_page, users.users["alice"])
+        sign_in(alice_page, users.users["alice"], 0)
         composer = alice_page.get_by_role("textbox")
         composer.first.fill(marker)
         alice_page.get_by_role("button", name=re.compile("send", re.I)).first.click()
@@ -668,7 +707,7 @@ def run_message_send_and_read_receipt(ctx: JourneyCtx):
         return
 
     def s1():
-        sign_in(bob_page, users.users["bob"])
+        sign_in(bob_page, users.users["bob"], 1)
         bob_page.reload()
         wait_text_matches(bob_page, re.escape(marker), timeout=30000)
 
@@ -696,12 +735,12 @@ def run_open_thread_from_notification_link_and_send(ctx: JourneyCtx):
     marker = f"sentry-reply-{ctx.run_id}-{int(time.time())}"
 
     def s0():
-        page.goto(users.url("https://philanthropy.org/login"), timeout=15000)
+        ctx.goto(0, page, users.url("https://philanthropy.org/login"))
         email_field(page).first.fill(bob["email"])
         password_field(page).first.fill(bob["password"])
         submit_button(page).first.click()
         wait_path_no_longer_contains(page, "/login", timeout=10000)
-        page.goto(users.url(deeplink), timeout=15000)
+        ctx.goto(0, page, users.url(deeplink))
 
     if not ctx.step(0, s0, page):
         return
@@ -721,7 +760,7 @@ def run_typing_indicator(ctx: JourneyCtx):
     alice_page, bob_page = ctx.page("alice"), ctx.page("bob")
 
     def sign_in(page, creds):
-        page.goto(users.url("https://philanthropy.org/login"), timeout=15000)
+        ctx.goto(None, page, users.url("https://philanthropy.org/login"))
         email_field(page).first.fill(creds["email"])
         password_field(page).first.fill(creds["password"])
         submit_button(page).first.click()
@@ -752,7 +791,7 @@ def run_sign_out(ctx: JourneyCtx):
     page = ctx.page("alice")
 
     def s0():
-        page.goto(users.url("https://philanthropy.org/login"), timeout=15000)
+        ctx.goto(0, page, users.url("https://philanthropy.org/login"))
         email_field(page).first.fill(alice["email"])
         password_field(page).first.fill(alice["password"])
         submit_button(page).first.click()
@@ -764,7 +803,7 @@ def run_sign_out(ctx: JourneyCtx):
         return
 
     def s1():
-        page.goto(users.url("https://philanthropy.org/account"), timeout=15000)
+        ctx.goto(1, page, users.url("https://philanthropy.org/account"))
         wait_path_no_longer_contains(page, "/account", timeout=8000)
 
     ctx.step(1, s1, page)
@@ -774,7 +813,7 @@ def run_fleet_console_loads_with_runs(ctx: JourneyCtx):
     page = ctx.page()
 
     def s0():
-        page.goto(ctx.users.fleet_console_url, timeout=15000)
+        ctx.goto(0, page, ctx.users.fleet_console_url)
         wait_text_matches(page, r"runs|needs you", timeout=8000)
 
     if not ctx.step(0, s0, page):

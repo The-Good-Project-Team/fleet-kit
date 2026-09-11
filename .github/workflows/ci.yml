@@ -67,6 +67,8 @@ jobs:
         run: python3 scripts/test_philanthropy_drivers.py
       - name: run test_ui_render_check.py
         run: python3 scripts/test_ui_render_check.py
+      - name: run test_journey_walker_wait_until.py
+        run: python3 scripts/test_journey_walker_wait_until.py
 
   # Not a required check (see selftest above for why) -- but still runs on every PR, and its
   # failures are still visible on the PR's checks tab. `--with-deps` here can still fail on an
