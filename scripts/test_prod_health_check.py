@@ -46,7 +46,8 @@ class FakeGh:
             return 0, f"https://github.com/x/y/issues/{n}"
         if sub == "list":
             open_issues = [
-                {"number": n, "title": v["title"]} for n, v in self.issues.items() if v["open"]
+                {"number": n, "title": v["title"], "body": v["body"]}
+                for n, v in self.issues.items() if v["open"]
             ]
             return 0, json.dumps(open_issues)
         if sub == "comment":

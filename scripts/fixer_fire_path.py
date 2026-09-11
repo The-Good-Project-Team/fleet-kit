@@ -29,13 +29,22 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import prod_incident  # noqa: E402 -- shared with prod_health_check.py (gh#728 VP fix 3): one
+                       # marker, one filing helper, one explicit repo. See prod_incident.py's
+                       # own header for why gh's own --search can't be used for identity here.
+
 PREFIX = os.environ.get("FLEET_LABEL_PREFIX", "fleet:")
-INCIDENT_LABEL = "incident"
 PRIORITY_HIGH_LABEL = f"{PREFIX}priority-high"
+# Re-exported for backward compat with call sites/tests that reference these off this module.
+INCIDENT_LABEL = prod_incident.INCIDENT_LABEL
+INCIDENT_REPO = prod_incident.INCIDENT_REPO
 # A fixed, hidden marker every incident this file opens carries, so a repeat firing can find and
 # update the SAME issue (AC7) -- the fire's own dedup key in check.sh (a 30-minute "prod-<N>"
 # time bucket) rotates every half hour and can't be used to find yesterday's still-open incident.
-INCIDENT_MARKER = "<!-- fixer-fire-path-incident -->"
+# Shared with prod_health_check.py so ONE outage that both members independently observe files
+# only one ticket, whichever member gets there first (gh#728 VP fix 3).
+INCIDENT_MARKER = prod_incident.INCIDENT_MARKER
 
 
 def _run(cmd: list[str], timeout: int = 60) -> tuple[int, str]:
@@ -164,49 +173,39 @@ def check_post_promote_cli(state_file: str, error_pct: float, p95_s: float) -> b
 
 
 # --- Step 3: file or update the incident, never duplicate it (AC7) -----------------------------
+#
+# All the actual logic (search, create, comment, marker) lives in prod_incident.py, shared with
+# prod_health_check.py (gh#728 VP fix 3) -- these are thin wrappers pinning this file's repo and
+# label set, kept so existing call sites/tests naming these functions don't have to change shape.
+
+INCIDENT_LABELS = [PRIORITY_HIGH_LABEL, INCIDENT_LABEL]
+
 
 def build_incident_search_cmd() -> list[str]:
-    # No --repo flag: same convention board_github.py already uses -- the caller `cd`s into the
-    # product repo (FLEET_REPO) first, and `gh` infers the repo from the working directory's
-    # git remote, so this works unmodified for whatever repo an instance is pointed at.
-    return ["gh", "issue", "list", "--state", "open", "--label", INCIDENT_LABEL,
-            "--search", INCIDENT_MARKER, "--json", "number", "--limit", "5"]
+    return prod_incident.build_list_open_incidents_cmd(INCIDENT_REPO)
 
 
 def build_incident_create_cmd(title: str, body: str) -> list[str]:
-    return ["gh", "issue", "create", "--title", title, "--body", f"{body}\n\n{INCIDENT_MARKER}",
-            "--label", f"{PRIORITY_HIGH_LABEL},{INCIDENT_LABEL}"]
+    return prod_incident.build_create_cmd(INCIDENT_REPO, title, body, INCIDENT_LABELS)
 
 
 def build_incident_comment_cmd(number: int, body: str) -> list[str]:
-    return ["gh", "issue", "comment", str(number), "--body", body]
+    return prod_incident.build_comment_cmd(INCIDENT_REPO, number, body)
 
 
 def find_open_incident(run=_run) -> int | None:
-    rc, out = run(build_incident_search_cmd())
-    if rc != 0 or not out:
-        return None
-    try:
-        found = json.loads(out)
-    except json.JSONDecodeError:
-        return None
-    return found[0]["number"] if found else None
+    return prod_incident.find_open_incident(INCIDENT_REPO, run=run)
 
 
 def file_or_update_incident(title: str, body: str, run=_run) -> tuple[int | None, bool]:
     """Returns (issue_number, created). A repeat firing updates the SAME open incident rather
-    than filing a second one (AC7) -- searched by INCIDENT_MARKER."""
-    number = find_open_incident(run=run)
-    if number is not None:
-        run(build_incident_comment_cmd(number, body))
-        return number, False
-
-    rc, out = run(build_incident_create_cmd(title, body))
-    if rc != 0:
-        print(f"fixer_fire_path: filing the incident FAILED: {out[:300]}", file=sys.stderr)
-        return None, False
-    m = re.search(r"/issues/(\d+)\s*$", out)
-    return (int(m.group(1)) if m else None), True
+    than filing a second one (AC7) -- searched by INCIDENT_MARKER, shared with
+    prod_health_check.py so a single outage both members observe never files twice."""
+    number, created = prod_incident.file_or_update_incident(
+        INCIDENT_REPO, title, body, INCIDENT_LABELS, run=run)
+    if number is None:
+        print("fixer_fire_path: filing the incident FAILED", file=sys.stderr)
+    return number, created
 
 
 # --- orchestrator --------------------------------------------------------------------------
@@ -257,13 +256,12 @@ if __name__ == "__main__":
 
     diag_driver = os.environ.get("FIXER_PROD_DIAG_DRIVER", "")
     deploy_driver = os.environ.get("FLEET_DEPLOY_DRIVER", "")
-    repo = os.environ.get("FLEET_REPO", "")
     if not diag_driver or not deploy_driver:
         print("fixer_fire_path: FIXER_PROD_DIAG_DRIVER and FLEET_DEPLOY_DRIVER must both be set "
               "-- refusing to roll back blind", file=sys.stderr)
         sys.exit(1)
-    if repo:
-        os.chdir(repo)  # `gh` infers owner/repo from the cwd's git remote (board_github.py convention)
+    # No cwd/FLEET_REPO dependency here (gh#728 VP fix 3): the incident issue always targets
+    # prod_incident.INCIDENT_REPO explicitly, the same repo prod_health_check.py pins.
     result = run_fire_path(
         diag_driver=diag_driver,
         diag_section=os.environ.get("FIXER_PROD_DIAG_SECTION", "pg"),

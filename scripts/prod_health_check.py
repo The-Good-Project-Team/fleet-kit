@@ -93,6 +93,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import alert_store  # noqa: E402
+import prod_incident  # noqa: E402 -- shared with fixer_fire_path.py (gh#728 VP fix 3): one
+                       # marker, one filing helper, one explicit repo for the "a probe is
+                       # actually down" incident class both members can independently observe.
 
 KIT_DIR = Path(__file__).resolve().parent.parent
 CHECK = "prod_external"
@@ -104,8 +107,9 @@ TIMEOUT_S = float(os.environ.get("PROD_HEALTH_TIMEOUT_S", "10"))
 # from a non-200 status -- not configurable, the PRD names this number specifically.
 SLOW_BUDGET_S = 8.0
 
-# gh#727 AC4/AC6: where and how the incident issue is filed/deduped/labelled.
-INCIDENT_REPO = "The-Good-Project-Team/philanthropy"
+# gh#727 AC4/AC6: where and how the incident issue is filed/deduped/labelled. Same repo
+# fixer_fire_path.py pins (prod_incident.INCIDENT_REPO) -- one source of truth (gh#728 VP fix 3).
+INCIDENT_REPO = prod_incident.INCIDENT_REPO
 INCIDENT_TITLE_PREFIX = "prod down: "
 INCIDENT_LABELS = ["fleet:backlog", "lane:devops", "fleet:priority-high", "incident"]
 
@@ -339,6 +343,10 @@ def find_all_open_incidents(runner=_run_gh) -> list[int]:
 
 
 def build_file_cmd(title: str, body: str) -> list[str]:
+    # Deliberately NOT prod_incident.build_create_cmd: this builder is used only for the
+    # heartbeat-stale ticket (see file_or_update_incident below), which must NEVER carry the
+    # shared INCIDENT_MARKER -- a probe-down event's shared-marker search would otherwise find
+    # and silently comment onto an unrelated heartbeat ticket instead of filing its own.
     cmd = ["gh", "issue", "create", "--repo", INCIDENT_REPO, "--title", title, "--body", body]
     for label in INCIDENT_LABELS:
         cmd += ["--label", label]
@@ -353,16 +361,34 @@ def file_or_update_incident(probes: list[ProbeResult], alerts: list[AlertCall],
                              runner=_run_gh) -> dict:
     """Called only on the tick where page() actually paged (gh#727 AC2's debounce). Files
     one incident issue on the product board, or comments the existing open one -- never a
-    second issue for the same open incident (AC4)."""
-    url = first_failing_url(probes) or (BASE_URL + HEARTBEAT_PATH)
-    title = incident_title(url)
+    second issue for the same open incident (AC4).
+
+    A probe that is ACTUALLY unreachable (`url` below is not None) is the same class of
+    "site unreachable" event the-fixer's own rollback fire path (gh#728, fixer_fire_path.py)
+    can independently detect and file for -- that branch goes through prod_incident's SHARED
+    marker + helper, the same one fixer_fire_path.py uses, so whichever member notices first
+    keeps the only open ticket instead of both filing one (gh#728 VP fix 3: "a single outage
+    could file two open incident issues"). A stale heartbeat with every HTTP probe healthy is
+    a signal only this script watches (gh#4363) -- it keeps its own separate title-based
+    ticket, unmarked, so it can never be silently absorbed into an unrelated rollback ticket.
+    """
     detail = "\n".join(f"- {a.title}: {a.body}" for a in alerts)
+    body = (f"Detected by `prod_health_check.py` running on dino, outside atlas-serve "
+            f"(gh#727).\n\n{detail}")
+
+    url = first_failing_url(probes)
+    if url is not None:
+        title = incident_title(url)
+        number, created = prod_incident.file_or_update_incident(
+            INCIDENT_REPO, title, body, INCIDENT_LABELS, run=runner)
+        return {"action": "filed" if created else "commented", "issue": number,
+                "ok": number is not None}
+
+    title = incident_title(BASE_URL + HEARTBEAT_PATH)
     existing = find_open_incident(title, runner)
     if existing is not None:
         code, out = runner(build_comment_cmd(existing, f"Still failing:\n\n{detail}"))
         return {"action": "commented", "issue": existing, "ok": code == 0}
-    body = (f"Detected by `prod_health_check.py` running on dino, outside atlas-serve "
-            f"(gh#727).\n\n{detail}")
     code, out = runner(build_file_cmd(title, body))
     m = re.search(r"/issues/(\d+)\s*$", out.strip())
     return {"action": "filed", "issue": int(m.group(1)) if m else None, "ok": code == 0}
