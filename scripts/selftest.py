@@ -4630,6 +4630,28 @@ def _sidebar_shows_spawned_scheduled_disabled_not_strikethrough_gh565():
         assert f".amode.mode-{mode} {{" in html_src, f"missing a distinct visual rule for {mode}"
 
 
+def _backlog_row_renders_blast_radius_as_chilli_not_a_grey_pill_gh844():
+    """gh#844, marie PRD: fleet:blast-N is a second axis (reach) separate from
+    fleet:complexity-N (size). renderIssueRow must render it as a 🌶️ x N glyph run, never as an
+    eighth grey `fleet:blast-N` pill (AC2); an unlabelled issue must render no glyph and every
+    other pill unchanged (AC3); two fleet:blast-* labels on one issue must collapse to the
+    highest N and exactly one glyph run, never two concatenated runs (AC4).
+    """
+    html_src = (ROOT / "scripts" / "fleet_view.html").read_text()
+    row_fn = html_src[html_src.index("const renderIssueRow = i => {"):html_src.index("const epicsHtml = epics.map(renderIssueRow)")]
+    # AC4: a single computed level (Math.max over every fleet:blast-N label), never a per-label
+    # accumulation -- this is what guarantees exactly one glyph run even with two+ labels.
+    assert "Math.max(max, Number(m[1]))" in row_fn, "renderIssueRow does not reduce to a single highest blast level (AC4)"
+    assert "'🌶️'.repeat(blastLevel)" in row_fn, "renderIssueRow does not render exactly one chilli glyph run"
+    # AC2: fleet:blast-* must never reach the grey-pill label list.
+    assert ".filter(l => !/^fleet:blast-\\d+$/.test(l.name))" in row_fn, \
+        "renderIssueRow must drop fleet:blast-* from the grey-pill label list (AC2)"
+    # AC3: the glyph is conditional on blastLevel -- an issue with none renders no glyph, and the
+    # pill filter is unconditional so every other label still renders exactly as before.
+    assert "blastLevel ? `<span class=\"blast\"" in row_fn, \
+        "glyph must be conditional on a real blast level, never rendered for an unlabelled issue (AC3)"
+
+
 def _deploy_sh_rolls_over_via_caddy_without_a_cordon():
     """gh#625: on a caddy-fronted box deploy.sh cuts over by swapping the proxy upstream, never
     by cordoning the fleet and draining passes. Pins (a) the proxy path runs INSTEAD of
@@ -13525,6 +13547,8 @@ if __name__ == "__main__":
     check("authority.grant() itself refuses an unknown class or level at write time (gh#771)", _authority_grant_itself_rejects_unknown_class_or_level_gh771)
     check("ask.py authority reports a grant's level and ask_ids over the CLI (gh#771 AC5)", _ask_authority_cli_reports_grants_gh771)
     check("run_args() strips a trailing -green suffix from FLEET_INSTANCE_NAME, anchored not substring (gh#780 AC1/AC2/AC3)", _run_args_strips_green_suffix_from_instance_name_gh780)
+
+    check("backlog row renders blast radius as a chilli glyph, never a grey fleet:blast-N pill (gh#844 AC2/AC3/AC4)", _backlog_row_renders_blast_radius_as_chilli_not_a_grey_pill_gh844)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:
