@@ -5757,6 +5757,25 @@ def _every_hold_hands_the_pr_to_the_fleet():
         "a hold still tells the PR it needs a human; say which automatic lane owns it"
     )
 
+    # gh#887: the errored-review path's fallback (when the PR body carries no Vision-link of
+    # its own) used to be the literal "none (maintenance)" -- eligible for gru to pick only
+    # while no OTHER open candidate anywhere on the board carries a real link
+    # (vision_link_gate.gate_candidates' crowding-out rule), which on this fleet's board is
+    # never true. That made the fallback value filed-but-unpickable, not merely low-priority.
+    # Import the real gate instead of re-implementing its regex, so a regression to the old
+    # literal is caught the moment it stops classifying as `linked`.
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import vision_link_gate
+
+    fallback_match = re.search(r'ERR_VISION_LINK="(Vision-link:[^"]*)"', err_path)
+    assert fallback_match, "could not find the errored-review path's fallback Vision-link literal"
+    status, _ = vision_link_gate.classify_candidate(fallback_match.group(1), None)
+    assert status == vision_link_gate.STATUS_LINKED, (
+        f"the errored-review fallback Vision-link classifies as {status!r}, not "
+        f"{vision_link_gate.STATUS_LINKED!r} -- a fix item filed with it is unpickable by gru "
+        f"(gh#887)"
+    )
+
 def _account_page_names_its_instance_and_reads_the_pool_verdict():
     """A page must say WHICH fleet is down, and not guess at the cause.
 
