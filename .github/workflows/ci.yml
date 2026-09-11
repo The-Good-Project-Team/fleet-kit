@@ -115,15 +115,26 @@ jobs:
           fi
       - name: run UI render check (gh#809)
         if: steps.ui_detect.outputs.relevant == 'true'
-        run: python3 scripts/ui_render_check.py --base "origin/${{ github.event.pull_request.base.ref }}" --out qa-out/ui_render
+        run: >
+          python3 scripts/ui_render_check.py
+          --base "origin/${{ github.event.pull_request.base.ref }}"
+          --out qa-out/ui_render
+          --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       - name: upload UI render evidence (gh#809)
         if: steps.ui_detect.outputs.relevant == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ui-render-check
           path: qa-out/ui_render
+      # gh#809 VP review round 1: --edit-last so a PR with five pushes carries one current
+      # render comment instead of five stale ones (falls back to a fresh comment on the first
+      # push, when there is no prior render comment to edit).
       - name: post UI render comment (gh#809)
         if: steps.ui_detect.outputs.relevant == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh pr comment "${{ github.event.pull_request.number }}" --body-file qa-out/ui_render/report.md
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --body-file qa-out/ui_render/report.md --edit-last \
+          || gh pr comment "${{ github.event.pull_request.number }}" \
+            --body-file qa-out/ui_render/report.md
