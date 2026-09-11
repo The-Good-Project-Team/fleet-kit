@@ -47,13 +47,21 @@ import sys
 # require only that `>`/`>>` be preceded by whitespace/start/a separator (so it reads as an
 # operator, not `-mmethod>Object` arrows or `>=` comparisons) and allow the usual optional
 # space before the target.
+#
+# gh#834: `checkout` used to require a literal `--` right after it (`git checkout -- <file>`,
+# the file-restore form) -- so `git checkout <branch>`/`git switch <branch>`, which move HEAD
+# to a different branch entirely, matched nothing at all. That is the exact shape of the
+# fleet's own #834 incident (host checkout of the self-hosted instance left on a stray feature
+# branch): confirmed live that `git checkout rework-metric` and `git switch rework-metric` both
+# returned exit 0 (allowed) against this hook before this fix. `switch` and `pull` are added for
+# the same reason -- both move/rewrite HEAD and were simply absent from the verb list.
 _MUTATING_BASH_RE = re.compile(
-    r"\bgit\s+(commit|checkout\s+--|reset|add|merge|rebase|push|stash\s+pop|clean)\b"
+    r"\bgit\s+(commit|checkout|switch|reset|add|merge|rebase|push|pull|stash\s+pop|clean)\b"
     r"|\b(rm|mv|cp|sed\s+-i|mkdir|touch|chmod|chown|tee)\b"
     r"|(?:^|[\s;&|])>>?(?!=)\s*\S"
 )
 _GIT_DASH_C_RE = re.compile(r"git\s+-C\s+(\S+)\s+(\S+)(?:\s+(\S+))?")
-_MUTATING_SUBCOMMANDS = {"commit", "checkout", "reset", "add", "merge", "rebase", "push", "stash", "clean", "rm", "mv"}
+_MUTATING_SUBCOMMANDS = {"commit", "checkout", "switch", "reset", "add", "merge", "rebase", "push", "pull", "stash", "clean", "rm", "mv"}
 # gh#837: `stash` alone is too coarse -- `stash list`/`stash show` are read-only, `stash pop`
 # (and bare `stash`, which git treats as `stash push`) are not. Only `stash` gets this second
 # check; every other verb in _MUTATING_SUBCOMMANDS stays decided by the verb alone.
@@ -95,7 +103,7 @@ def _under(path: str, root: str) -> bool:
     return path == root or path.startswith(root)
 
 
-def _bash_targets_repo(command: str, repo_real: str) -> bool:
+def _bash_targets_repo(command: str, repo_real: str, wt_real: str, cwd_real: str | None) -> bool:
     if not command:
         return False
 
@@ -133,6 +141,17 @@ def _bash_targets_repo(command: str, repo_real: str) -> bool:
                 return True
         except OSError:
             continue
+
+    # gh#834: none of the above requires an explicit path at all -- `cd $REPO && git checkout
+    # <branch>` never names $REPO inside the git command itself, so every check above sees only
+    # "git checkout <branch>" and finds no path token to test. A mutating git verb with no `-C`
+    # override implicitly operates on the process's cwd; if that cwd is the shared checkout
+    # (and not this pass's own worktree), the command targets $REPO regardless of what it spells
+    # out. `-C` is excluded here because it already redirects git elsewhere, and that case is
+    # fully handled by the loop above (including the "allowed" case of `-C $WT_PATH`).
+    if (cwd_real and _under(cwd_real, repo_real) and not _under(cwd_real, wt_real)
+            and re.search(r"\bgit\b", command) and not _GIT_DASH_C_RE.search(command)):
+        return True
     return False
 
 
@@ -171,7 +190,15 @@ def decide(payload: dict, env: dict) -> str | None:
 
     if tool_name == "Bash":
         command = tool_input.get("command") or ""
-        if _bash_targets_repo(command, repo_real):
+        # gh#834: Claude Code's PreToolUse payload carries the command's own `cwd` -- read it so
+        # a bare mutating command with no explicit path (`cd $REPO && git checkout <branch>`)
+        # can be caught via cwd, not just via a path token spelled out in the command string.
+        cwd = payload.get("cwd") or ""
+        try:
+            cwd_real = _resolve(cwd) if cwd else None
+        except OSError:
+            cwd_real = None
+        if _bash_targets_repo(command, repo_real, wt_real, cwd_real):
             return (f"BLOCKED by worktree_guard_hook.py (gh#592): this Bash command appears to "
                      f"mutate the SHARED checkout {repo} directly, but this pass is isolated in "
                      f"its own worktree {wt_path}. Target {wt_path} instead (a read-only "

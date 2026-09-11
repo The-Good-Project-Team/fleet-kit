@@ -97,6 +97,39 @@ if command -v flock >/dev/null 2>&1; then
     fi
 fi
 
+# gh#834 AC4: record the host checkout's branch on EVERY tick that gets this far, not just the
+# abort path below -- checked every tick, but only LOGGED when it changes (a bare `git branch
+# --show-current` every 5 minutes forever would drown auto_deploy.log in identical lines for no
+# reason). Placed AFTER the flock above (not right after `cd`) so it's serialized against a
+# concurrent tick the same way every other read/write below it is -- an earlier draft read/wrote
+# this before the lock and could log a duplicate transition or race the state-file write against
+# a sibling tick still draining.
+#
+# This is the defense-in-depth half of gh#834's fix: worktree_guard_hook.py now blocks the
+# mechanism this issue's own evidence points to (an agent's ad hoc `git checkout <branch>`
+# against $KIT_DIR, see that file's gh#834 comment), but that guard only covers Claude Code tool
+# calls -- a human `ssh`ed into the box, or any future writer this pass didn't find, is still
+# invisible until the next transition. This closes that blind spot: the moment the branch
+# changes is now timestamped here, not only reconstructable from the aftermath the ABORT line
+# below already captures.
+#
+# BRANCH_STATE_FILE's ABSENCE (never written) and CURRENT_BRANCH being empty (detached HEAD) are
+# kept as two distinct signals -- both stringify to "", and collapsing them made an early draft
+# mislabel a later detached->named-branch transition as "the first tick" (the file was still
+# unwritten because detached HEAD's "" happened to match the missing-file default of "").
+BRANCH_STATE_FILE="$STATE.branch"
+CURRENT_BRANCH="$(git branch --show-current 2>/dev/null || echo "")"
+if [ -f "$BRANCH_STATE_FILE" ]; then
+  LAST_RECORDED_BRANCH="$(cat "$BRANCH_STATE_FILE" 2>/dev/null || echo "")"
+  if [ "$CURRENT_BRANCH" != "$LAST_RECORDED_BRANCH" ]; then
+    log "BRANCH: host checkout moved from '${LAST_RECORDED_BRANCH:-<detached HEAD>}' to '${CURRENT_BRANCH:-<detached HEAD>}'"
+    echo "$CURRENT_BRANCH" > "$BRANCH_STATE_FILE"
+  fi
+else
+  log "BRANCH: starting to track the host checkout's branch -- currently '${CURRENT_BRANCH:-<detached HEAD>}'"
+  echo "$CURRENT_BRANCH" > "$BRANCH_STATE_FILE"
+fi
+
 # Never deploy over a dirty checkout -- a local uncommitted edit (a live-patch hotfix, say)
 # silently getting stashed/blown away by a pull is exactly the kind of "healed silently" this
 # kit's own persona_law.md warns against. Loud stop, not a guess.

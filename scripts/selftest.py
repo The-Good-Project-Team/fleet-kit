@@ -4892,6 +4892,161 @@ def _auto_deploy_sh_names_branch_and_shas_on_diverged_abort_gh372():
             f"SHAs missing on the detached-HEAD path: {log_text!r}"
 
 
+def _auto_deploy_sh_records_branch_on_every_tick_only_when_it_changes_gh834():
+    """gh#834 AC4/AC6: worktree_guard_hook.py's fix (above) closes the mechanism this issue's
+    own evidence points to, but that guard only ever sees Claude Code tool calls -- a human `ssh`
+    session, or any writer this pass didn't find, is still invisible. This is the belt-and-
+    suspenders half: auto_deploy.sh must record the host checkout's branch on every tick, log
+    only the moment it CHANGES (not every 5-minute tick forever), and must not change exit code
+    or any existing log line on an ordinary clean tick (AC5).
+
+    Runs the REAL auto_deploy.sh against a real git fixture, same harness shape as gh#372's test
+    above."""
+    import os
+    import subprocess
+
+    def git(repo, *args, check=True):
+        return subprocess.run(["git", *args], cwd=repo, check=check, capture_output=True, text=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        origin = tmp / "origin.git"
+        git(tmp, "init", "-q", "--bare", "-b", "main", str(origin))
+
+        seed = tmp / "seed"
+        seed.mkdir()
+        for cmd in (("init", "-q", "-b", "main"), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(seed, *cmd)
+        git(seed, "remote", "add", "origin", str(origin))
+        scripts_dir = seed / "scripts"
+        scripts_dir.mkdir()
+        (scripts_dir / "auto_deploy.sh").write_text((ROOT / "scripts" / "auto_deploy.sh").read_text())
+        (scripts_dir / "auto_deploy.sh").chmod(0o755)
+        (scripts_dir / "deploy.sh").write_text('#!/bin/bash\necho "DEPLOY STUB OK"\n')
+        (scripts_dir / "deploy.sh").chmod(0o755)
+        (seed / "foo.txt").write_text("v1\n")
+        git(seed, "add", "-A")
+        git(seed, "commit", "-q", "-m", "init")
+        git(seed, "push", "-q", "origin", "main")
+
+        checkout = tmp / "host"
+        git(tmp, "clone", "-q", str(origin), str(checkout))
+        for cmd in (("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(checkout, *cmd)
+
+        instance = tmp / "instance"
+        instance.mkdir()
+        home = tmp / "home"
+        env = dict(os.environ)
+        env.pop("FLEET_AUTO_DEPLOY_SELF_HEAL", None)
+        # gh#619's deploy coalescing would otherwise defer tick 3 below (it lands inside
+        # FLEET_DEPLOY_MIN_INTERVAL_S of tick 1's successful deploy) before ever reaching the
+        # diverged-HEAD ABORT this test is proving -- disabled the same way that section's own
+        # header documents, to isolate the branch-recording behavior under test.
+        env.update(HOME=str(home), FLEET_LOG_DIR=str(tmp / "logs"), FLEET_CONTAINER_NAME="test",
+                   FLEET_INSTANCE_DIR=str(instance), FLEET_DEPLOY_MIN_INTERVAL_S="0")
+        log_file = tmp / "logs" / "auto_deploy.log"
+
+        def tick():
+            proc = subprocess.run(["bash", str(checkout / "scripts" / "auto_deploy.sh")], cwd=checkout,
+                                  env=env, capture_output=True, text=True, timeout=30)
+            return proc, (log_file.read_text() if log_file.exists() else "")
+
+        proc, log_text = tick()
+        assert proc.returncode == 0, f"first tick on a clean checkout must exit 0: {proc.stderr[:300]}"
+        assert "BRANCH: starting to track the host checkout's branch -- currently 'main'" in log_text, \
+            f"first tick must record the starting branch: {log_text!r}"
+
+        proc, log_text_2 = tick()
+        assert proc.returncode == 0
+        assert log_text_2 == log_text, \
+            f"a second tick with no branch change must add nothing new: before={log_text!r} after={log_text_2!r}"
+
+        # The transition this issue is actually about: something checks the host checkout out
+        # onto a stray branch. Simulate it directly (this pass's own worktree_guard_hook.py fix
+        # is what should make this unreachable via an agent's Bash tool call; this test proves
+        # the SEPARATE, independent backstop below catches it even if it happens anyway).
+        git(checkout, "checkout", "-q", "-b", "rework-metric")
+        (checkout / "foo.txt").write_text("v2-stray-local-commit\n")
+        git(checkout, "commit", "-aq", "-m", "feat: work in progress on the wrong checkout")
+        proc, log_text_3 = tick()
+        assert "BRANCH: host checkout moved from 'main' to 'rework-metric'" in log_text_3, \
+            f"the stray-branch transition must be timestamped the moment it happens: {log_text_3!r}"
+        # And it must be the diverged-HEAD ABORT (unchanged behavior, AC5) that follows -- not a
+        # silent success, and not a new failure mode introduced by the branch-recording check.
+        assert proc.returncode == 1, f"still on a stray branch must still ABORT: {proc.stderr[:300]}"
+        assert "ABORT: local HEAD is not an ancestor of origin/main" in log_text_3
+
+
+def _auto_deploy_sh_distinguishes_never_recorded_from_detached_head_gh834():
+    """gh#834: `git branch --show-current` prints nothing on a detached HEAD, which stringifies
+    to the same "" the branch-state file's own missing-file default uses -- collapsing "never
+    recorded yet" and "on no branch" into one sentinel made an early draft mislabel a LATER
+    detached->main transition as if it were the very first tick. A fresh checkout starting
+    detached must log the tracking-start line (not a "moved from" line, since there is nothing
+    to have moved from), and a later move onto 'main' must correctly read as a real transition,
+    not a phantom "first tick" once more."""
+    import os
+    import subprocess
+
+    def git(repo, *args, check=True):
+        return subprocess.run(["git", *args], cwd=repo, check=check, capture_output=True, text=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        origin = tmp / "origin.git"
+        git(tmp, "init", "-q", "--bare", "-b", "main", str(origin))
+
+        seed = tmp / "seed"
+        seed.mkdir()
+        for cmd in (("init", "-q", "-b", "main"), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(seed, *cmd)
+        git(seed, "remote", "add", "origin", str(origin))
+        scripts_dir = seed / "scripts"
+        scripts_dir.mkdir()
+        (scripts_dir / "auto_deploy.sh").write_text((ROOT / "scripts" / "auto_deploy.sh").read_text())
+        (scripts_dir / "auto_deploy.sh").chmod(0o755)
+        (scripts_dir / "deploy.sh").write_text('#!/bin/bash\necho "DEPLOY STUB OK"\n')
+        (scripts_dir / "deploy.sh").chmod(0o755)
+        (seed / "foo.txt").write_text("v1\n")
+        git(seed, "add", "-A")
+        git(seed, "commit", "-q", "-m", "init")
+        git(seed, "push", "-q", "origin", "main")
+        main_sha = git(seed, "rev-parse", "HEAD").stdout.strip()
+
+        checkout = tmp / "host"
+        git(tmp, "clone", "-q", str(origin), str(checkout))
+        for cmd in (("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(checkout, *cmd)
+        git(checkout, "checkout", "-q", main_sha)  # detached HEAD, same commit as main
+
+        instance = tmp / "instance"
+        instance.mkdir()
+        home = tmp / "home"
+        env = dict(os.environ)
+        env.pop("FLEET_AUTO_DEPLOY_SELF_HEAL", None)
+        env.update(HOME=str(home), FLEET_LOG_DIR=str(tmp / "logs"), FLEET_CONTAINER_NAME="test",
+                   FLEET_INSTANCE_DIR=str(instance), FLEET_DEPLOY_MIN_INTERVAL_S="0")
+        log_file = tmp / "logs" / "auto_deploy.log"
+
+        def tick():
+            proc = subprocess.run(["bash", str(checkout / "scripts" / "auto_deploy.sh")], cwd=checkout,
+                                  env=env, capture_output=True, text=True, timeout=30)
+            return proc, (log_file.read_text() if log_file.exists() else "")
+
+        proc, log_text = tick()
+        assert proc.returncode == 0, f"detached-but-content-identical first tick must exit 0: {proc.stderr[:300]}"
+        assert "BRANCH: starting to track the host checkout's branch -- currently '<detached HEAD>'" in log_text, \
+            f"a detached first tick must log the tracking-start line, not be silently skipped: {log_text!r}"
+        assert "moved from" not in log_text, f"nothing has moved yet on tick 1: {log_text!r}"
+
+        git(checkout, "checkout", "-q", "main")
+        proc, log_text_2 = tick()
+        assert proc.returncode == 0, f"tick 2 must exit 0: {proc.stderr[:300]}"
+        assert "BRANCH: host checkout moved from '<detached HEAD>' to 'main'" in log_text_2, \
+            f"moving off detached HEAD must read as a real transition, not a phantom first tick: {log_text_2!r}"
+
+
 def _git_pull_guard_self_heals_a_stray_branch_and_leaves_a_normal_pull_unchanged():
     """gh#68 (originally nonprofit-atlas#3130, recurred 3x): a bare `git pull --ff-only`
     against $FLEET_REPO fails hard, and stays failed, once the checked-out branch's history can
@@ -10439,13 +10594,18 @@ def _ask_classes_and_real_callers_carry_a_class_gh558():
         "the thinking-project ask must name --class idea explicitly, gh#558 finding 4"
 
 
-def _run_worktree_guard_hook(repo, wt_path, tool_name, tool_input):
+def _run_worktree_guard_hook(repo, wt_path, tool_name, tool_input, cwd=None):
     """Runs the real worktree_guard_hook.py CLI (gh#592) as a subprocess, exactly as Claude
     Code's PreToolUse hook mechanism would -- proving its ACTUAL exit-code behavior (AC5), not
-    just its importable decide() logic."""
+    just its importable decide() logic. `cwd` mirrors the `cwd` field Claude Code's own
+    PreToolUse payload carries (gh#834); omitted, it matches every pre-gh#834 test's payload
+    shape exactly."""
     import os
     import subprocess
-    payload = json.dumps({"tool_name": tool_name, "tool_input": tool_input})
+    payload_dict = {"tool_name": tool_name, "tool_input": tool_input}
+    if cwd is not None:
+        payload_dict["cwd"] = cwd
+    payload = json.dumps(payload_dict)
     env = dict(os.environ)
     if repo is None:
         env.pop("REPO", None)
@@ -10828,6 +10988,70 @@ def _worktree_guard_still_blocks_quoted_single_token_mutation_target_gh715():
         cmd = f'sed -i "{repo}/f"'
         p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd})
         assert p.returncode == 2, f"expected block (exit 2), got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_blocks_bare_branch_switch_by_cwd_gh834():
+    """gh#834: the fleet's own incident -- the host checkout of a self-hosted instance was found
+    on a stray feature branch (`rework-metric`, ahead=1 behind=2) with no in-repo script ever
+    checking it out. Confirmed live before this fix: `git checkout <branch>` and
+    `git switch <branch>`, run with cwd=$REPO and no explicit path in the command at all (the
+    exact shape of `cd $REPO && git checkout <branch>`), both returned exit 0 (allowed) -- the
+    old regex only matched `checkout --` (the file-restore form) and never looked at cwd, so a
+    bare branch switch was invisible to the guard no matter where it ran."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        for cmd in ("git checkout rework-metric", "git switch rework-metric"):
+            p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=repo)
+            assert p.returncode == 2, f"expected block (exit 2) for {cmd!r} with cwd=repo, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_blocks_bare_mutating_verbs_by_cwd_gh834():
+    """gh#834: not just checkout/switch -- ANY bare mutating git verb (commit/reset/pull/add/
+    etc.) run with cwd=$REPO and no `-C`/explicit path was equally invisible before this fix,
+    since the guard never inspected the command's cwd at all, only path-shaped tokens inside the
+    command string."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        for cmd in ("git commit -am wip", "git reset --hard origin/main", "git pull"):
+            p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=repo)
+            assert p.returncode == 2, f"expected block (exit 2) for {cmd!r} with cwd=repo, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_allows_bare_mutating_verbs_when_cwd_is_own_worktree_gh834():
+    """gh#834: the cwd-based check must not over-block -- the normal, correct case (a bare
+    mutating git command with cwd=$WT_PATH, this pass's own worktree) must stay allowed."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        for cmd in ("git checkout main", "git switch main", "git commit -am wip"):
+            p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=wt)
+            assert p.returncode == 0, f"expected allow (exit 0) for {cmd!r} with cwd=wt, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_allows_dash_c_wt_override_even_with_cwd_repo_gh834():
+    """gh#834: a command that explicitly redirects via `git -C $WT_PATH` must stay allowed even
+    when the pass's own cwd happens to be $REPO -- `-C` already names the real target, and the
+    new cwd-fallback must defer to it rather than double-guessing."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        cmd = f"git -C {wt} commit -am wip"
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=repo)
+        assert p.returncode == 0, f"expected allow (exit 0), got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_allows_readonly_bash_by_cwd_gh834():
+    """gh#834: the cwd-fallback only applies to the existing mutating-verb list -- a read-only
+    command (`git status`, `git log`) with cwd=$REPO must stay allowed, same as it always was
+    when the command explicitly named a path under $REPO."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        for cmd in ("git status", "git log --oneline -5", "ls -la"):
+            p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": cmd}, cwd=repo)
+            assert p.returncode == 0, f"expected allow (exit 0) for {cmd!r} with cwd=repo, got {p.returncode}: {p.stderr}"
+
+
+def _worktree_guard_no_cwd_field_behaves_exactly_as_before_gh834():
+    """gh#834: a payload with no `cwd` field at all (older Claude Code, or any caller that omits
+    it) must behave exactly as the pre-gh#834 hook did -- fail open on the new check, decided
+    only by explicit path tokens in the command, same as every gh#592/gh#715/gh#837 test above
+    (none of which pass cwd)."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as wt:
+        p = _run_worktree_guard_hook(repo, wt, "Bash", {"command": "git checkout rework-metric"})
+        assert p.returncode == 0, f"expected allow (exit 0) with no cwd field, got {p.returncode}: {p.stderr}"
 
 
 def _worktree_guard_install_merges_without_clobbering_existing_settings_gh592():
@@ -11872,6 +12096,8 @@ if __name__ == "__main__":
     check("deploys never stack, and the drain can count to zero", _one_deploy_at_a_time_and_a_countable_drain)
     check("auto_deploy.sh self-heals a content-identical diverged HEAD only when opted in", _auto_deploy_sh_self_heals_a_content_identical_diverged_head_when_opted_in)
     check("auto_deploy.sh names branch and SHAs on a diverged-HEAD ABORT (gh#372)", _auto_deploy_sh_names_branch_and_shas_on_diverged_abort_gh372)
+    check("auto_deploy.sh records the host checkout's branch every tick, logs only the transition (gh#834 AC4/AC6)", _auto_deploy_sh_records_branch_on_every_tick_only_when_it_changes_gh834)
+    check("auto_deploy.sh distinguishes 'never recorded' from 'detached HEAD' when tracking the branch (gh#834)", _auto_deploy_sh_distinguishes_never_recorded_from_detached_head_gh834)
     check("auto_deploy.sh coalesces main moves inside FLEET_DEPLOY_MIN_INTERVAL_S (gh#619)", _auto_deploy_sh_coalesces_main_moves_inside_the_min_interval)
     check("deploy.sh kicks one gru pass right after cutover (gh#622)", _deploy_sh_kicks_a_gru_pass_right_after_cutover)
     check("deploy.sh kicks one sentry pass right after cutover (gh#663)", _deploy_sh_kicks_a_sentry_pass_right_after_cutover)
@@ -12074,6 +12300,12 @@ if __name__ == "__main__":
     check("worktree_guard_hook allows a heredoc to /tmp whose body quotes a repo path (gh#715 AC2)", _worktree_guard_allows_heredoc_to_tmp_whose_body_quotes_repo_path_gh715)
     check("worktree_guard_hook blocks a real shell redirect into $REPO despite a read-only-looking leading program (gh#715 AC4)", _worktree_guard_blocks_redirect_into_repo_despite_readonly_leading_program_gh715)
     check("worktree_guard_hook still blocks a quoted single-token mutation target (gh#715, no new bypass)", _worktree_guard_still_blocks_quoted_single_token_mutation_target_gh715)
+    check("worktree_guard_hook blocks a bare `git checkout`/`git switch` branch change via cwd, no explicit path needed (gh#834)", _worktree_guard_blocks_bare_branch_switch_by_cwd_gh834)
+    check("worktree_guard_hook blocks other bare mutating git verbs (commit/reset/pull) via cwd (gh#834)", _worktree_guard_blocks_bare_mutating_verbs_by_cwd_gh834)
+    check("worktree_guard_hook allows bare mutating git verbs when cwd is the pass's own worktree (gh#834)", _worktree_guard_allows_bare_mutating_verbs_when_cwd_is_own_worktree_gh834)
+    check("worktree_guard_hook allows an explicit `git -C $WT_PATH` override even when cwd is $REPO (gh#834)", _worktree_guard_allows_dash_c_wt_override_even_with_cwd_repo_gh834)
+    check("worktree_guard_hook allows read-only git commands via cwd=$REPO (gh#834)", _worktree_guard_allows_readonly_bash_by_cwd_gh834)
+    check("worktree_guard_hook with no cwd field behaves exactly as before gh#834 (backward compat)", _worktree_guard_no_cwd_field_behaves_exactly_as_before_gh834)
 
     check("fleet.env.example documents FIXER_HEALTH_URL/PAGE_URL/PROD_DIAG_DRIVER/FLEET_DEPLOY_DRIVER with examples and what breaks empty (gh#728 AC8)", _fleet_env_example_documents_the_fixer_prod_visibility_vars_gh728)
 
