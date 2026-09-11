@@ -11941,6 +11941,96 @@ def _gh782_runs(now):
     ]
 
 
+def _charter_bloat_check_never_prints_ok_over_unread_prs_fk908():
+    """fk#908: `_gh_json(...) or []` turned EVERY gh failure into an empty PR list, and an empty
+    list is arithmetically identical to "no PR has touched any charter" -- so a rate-limited run
+    printed `since_consolidation=0 ... ok` for all 17 members and exited 0. jefe.md:317 reads
+    exit 0 as "no charter needs consolidating today", so a GitHub quota outage silently retired
+    the daily duty fk#753 built the script to force. Measured live 2026-09-11."""
+    import sys as _sys
+    import tempfile
+    import contextlib
+    import io
+    import pathlib as _pathlib
+
+    import charter_bloat_check as cbc
+
+    # (1) The git fallback's parser turns real `git log --numstat` text into analyze()'s rows.
+    log = (
+        "\x00" "2026-09-10T00:00:00+00:00\tabc123def456789\tTrim gru's charter (#829)\n"
+        "3\t40\tmembers/gru/gru.md\n"
+        "\x00" "2026-09-11T00:00:00+00:00\tfeed000beef0123\tAdd one more gru rule\n"
+        "50\t1\tmembers/gru/gru.md\n"
+        "1\t-\tdocs/logo.png\n"
+    )
+    rows = cbc.parse_git_numstat(log)
+    assert [r["number"] for r in rows] == [829, "feed000be"], rows
+    assert rows[1]["files"] == [{"path": "members/gru/gru.md", "additions": 50, "deletions": 1}], \
+        "binary (`-`) numstat lines must be skipped, not crash the parse"
+    res = cbc.analyze(["members/gru/gru.md"], rows)["members/gru/gru.md"]
+    assert res["count_since_consolidation"] == 1 and res["last_consolidation_pr"] == 829, res
+
+    # (2) A failing `gh` raises SourceUnavailable -- it never degrades into an empty list.
+    class _Fail:
+        returncode = 1
+        stdout = ""
+        stderr = "GraphQL: API rate limit already exceeded for user ID 1.\n"
+
+    real_run = cbc.subprocess.run
+    cbc.subprocess.run = lambda *a, **k: _Fail()
+    try:
+        try:
+            cbc.fetch_merged_prs("owner/repo", 300)
+        except cbc.SourceUnavailable as e:
+            assert "rate limit" in str(e), e
+        else:
+            raise AssertionError("fetch_merged_prs swallowed a gh failure into a value")
+    finally:
+        cbc.subprocess.run = real_run
+
+    # (3) THE REGRESSION: gh down and no fallback must exit 2 with NO per-charter rows at all.
+    with tempfile.TemporaryDirectory() as td:
+        for m in ("gru", "jefe"):
+            d = _pathlib.Path(td) / "members" / m
+            d.mkdir(parents=True)
+            (d / f"{m}.md").write_text("# charter\n")
+
+        def _boom(*a, **k):
+            raise cbc.SourceUnavailable("API rate limit already exceeded")
+
+        real_fetch, real_argv = cbc.fetch_merged_prs, _sys.argv
+        cbc.fetch_merged_prs = _boom
+        _sys.argv = ["charter_bloat_check.py", "--root", td, "--no-git-fallback"]
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = cbc.main()
+        finally:
+            cbc.fetch_merged_prs, _sys.argv = real_fetch, real_argv
+
+    assert rc == 2, f"unreadable PR list must exit 2 (no verdict), got {rc}"
+    assert "ok" not in out.getvalue(), \
+        f"printed a per-charter verdict over data it never read: {out.getvalue()!r}"
+    assert out.getvalue().strip() == "", f"expected no stdout rows, got {out.getvalue()!r}"
+    assert "NO VERDICT" in err.getvalue(), err.getvalue()
+
+    # (4) And the same guard covers a read that genuinely returned nothing.
+    with tempfile.TemporaryDirectory() as td:
+        d = _pathlib.Path(td) / "members" / "gru"
+        d.mkdir(parents=True)
+        (d / "gru.md").write_text("# charter\n")
+        real_fetch, real_argv = cbc.fetch_merged_prs, _sys.argv
+        cbc.fetch_merged_prs = lambda *a, **k: []
+        _sys.argv = ["charter_bloat_check.py", "--root", td]
+        out2 = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out2), contextlib.redirect_stderr(io.StringIO()):
+                rc2 = cbc.main()
+        finally:
+            cbc.fetch_merged_prs, _sys.argv = real_fetch, real_argv
+    assert rc2 == 2 and out2.getvalue().strip() == "", (rc2, out2.getvalue())
+
+
 def _fleet_metrics_windows_runs_and_says_unavailable_gh782():
     import fleet_metrics
     now = 1_800_000_000.0
@@ -13392,6 +13482,7 @@ if __name__ == "__main__":
     check("share ceiling is 0.0000 while the 5h block runs ahead of linear pace (gh#781 follow-up)", _maxx_share_ceiling_holds_a_5h_block_ahead_of_pace_gh781)
     check("pacing_gate holds a zero ceiling, runs an exempt member or an unreadable meter (gh#781 AC1-3)", _pacing_gate_holds_zero_ceiling_unless_exempt_gh781)
     check("fleet_metrics computes signal_rate/avg_cost over a window, unavailable when empty (gh#782 AC1)", _fleet_metrics_windows_runs_and_says_unavailable_gh782)
+    check("charter_bloat_check exits 2 with no rows when the PR list is unreadable, and reads git when gh is down (fk#908)", _charter_bloat_check_never_prints_ok_over_unread_prs_fk908)
     check("predict.py add/resolve: hit in the baseline->target direction, miss otherwise, unavailable on no data (gh#782 AC2)", _predict_add_resolve_hit_miss_unavailable_gh782)
     check("predict.py ledger reports hit rate and the authoring pass turns/cost (gh#782 AC3)", _predict_ledger_reports_hit_rate_and_pass_cost_gh782)
     check("predict.py judge() reads direction from the metric when baseline is unknown, never guesses (gh#789 AC4-6)", _predict_judge_uses_metric_direction_when_baseline_missing_gh789)

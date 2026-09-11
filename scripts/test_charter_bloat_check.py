@@ -80,6 +80,18 @@ def test_zero_diff_pr_never_counts_as_consolidation():
     assert r["last_consolidation_pr"] is None
 
 
+def test_tied_mergedat_mixing_int_and_str_number_does_not_raise():
+    # A squash-merged PR (`number` is int) and a direct push (`number` is `sha[:9]`, a str) can
+    # land within the same calendar second. analyze() must not compare int < str while sorting.
+    prs = [
+        _pr(1, "2026-09-01T00:00:00Z", "members/x/x.md", 10, 0),
+        _pr("abc123def", "2026-09-01T00:00:00Z", "members/x/x.md", 5, 0),
+    ]
+    r = cbc.analyze(["members/x/x.md"], prs)["members/x/x.md"]
+    assert r["count_since_consolidation"] == 2
+    assert r["last_consolidation_pr"] is None
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
     failures = 0
