@@ -140,13 +140,25 @@ let OPEN_RUN = null;    // run_id shown in the side panel (fk#748), survives re-
 let LIVE_TIMER = null;
 let STATE = { number: null, plan: null, asks: [], members: [], runs: [], gh: {}, kpi: {}, spend: null, build: null, fleet: null, budget: null };
 
+// gh#553 fix 1 (round 2): this console is served behind a path prefix (Caddy routes
+// /fleet/<instance>/* to this backend, e.g. /fleet/fleet-kit/), but this page's own root-
+// absolute URLs (`/api/...`, `/classic`, `/status`) ignore that prefix -- they resolve
+// against the DOMAIN root, not the console's own mount point. That 404s every link, and
+// worse: the unprefixed `/api/*` root is a *different* route that picks its backend from
+// the Referer header, so a browser that sends no Referer (privacy mode, an in-app webview,
+// `Referrer-Policy: no-referrer`) silently gets another instance's numbers under this
+// instance's brand. Every URL this page builds must instead resolve from the document's own
+// path, so it always lands back inside the same prefix Caddy already routed the browser to.
+const BASE_PATH = (() => { const p = location.pathname; return p.endsWith('/') ? p : p + '/'; })();
+const withBase = path => BASE_PATH + String(path).replace(/^\//, '');
+
 async function getJSON(path) {
-  const r = await fetch(path, {cache: 'no-store'});
+  const r = await fetch(withBase(path), {cache: 'no-store'});
   if (!r.ok) throw new Error(`${path} ${r.status}`);
   return r.json();
 }
 async function postJSON(path, body) {
-  const r = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  const r = await fetch(withBase(path), {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
   const j = await r.json().catch(() => ({}));
   if (r.status === 401) throw new Error('sign in first (Settings on the classic console)');
   if (!r.ok || j.ok === false) throw new Error(j.error || `${path} ${r.status}`);
@@ -256,7 +268,7 @@ function renderHealth() {
   const nho = needsHumanOp();
   $('health').innerHTML = `
     <div class="sub">${pctHtml} · alive ${aliveHtml}</div>
-    <div class="sub">Waiting on human ${num(nho.count)}${nho.count ? ` · oldest ${Math.round(nho.oldest_age_hours)}h` : ''} · merged 24h ${num(mergedLast24hCount())} · <a href="/classic#stats">Stats</a></div>`;
+    <div class="sub">Waiting on human ${num(nho.count)}${nho.count ? ` · oldest ${Math.round(nho.oldest_age_hours)}h` : ''} · merged 24h ${num(mergedLast24hCount())} · <a href="${withBase('/classic#stats')}">Stats</a></div>`;
 }
 
 function renderAsks() {
@@ -334,7 +346,7 @@ function renderFoot() {
   $('foot').innerHTML = `
     ${total !== null ? `Spent ${money(total)} in the last 24 hours.<br>` : ''}
     ${b && b.sha ? `Live build ${esc(String(b.sha).slice(0, 7))}${b.started_at ? `, up since ${esc(ago(b.started_at))}` : ''}.<br>` : ''}
-    <a href="/classic">Classic console</a> · <a href="/classic#settings">Settings and sign in</a> · <a href="/status">Status</a> · updated ${esc(new Date().toLocaleTimeString('en-US', {timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit'}))} CT`;
+    <a href="${withBase('/classic')}">Classic console</a> · <a href="${withBase('/classic#settings')}">Settings and sign in</a> · <a href="${withBase('/status')}">Status</a> · updated ${esc(new Date().toLocaleTimeString('en-US', {timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit'}))} CT`;
 }
 
 // ---- fk#748: the run panel. Click a run, everything about that one run slides in from the right.
