@@ -114,9 +114,31 @@ _account_pool_parse_reset() {
 # single tick; one wrong 1-hour skip costs twelve, and the fleet cannot fix anything (this bug
 # included) while it is gated. Bias the failure toward re-trying too eagerly, never toward
 # staying dark: a genuine limit re-reports itself on the next call and re-gates for free.
+#
+# gh#878: sanity-clamp the computed epoch before writing it. Live incident: a misclassified
+# rc=124 timeout fed an unrelated fragment of transcript text into _account_pool_parse_reset,
+# whose "a date already past this year means next year" rollover (see above) turned it into
+# epoch=1820016000 -- 2027-09-04, 358 days out, on an account that was working fine. A genuine
+# weekly-limit reset is always within the next few days (the CLI states its own reset time), so
+# anything beyond this ceiling is itself evidence the match was bogus. Ceiling is a week plus a
+# day of slack, not literally 24h: a real weekly cap can legitimately be up to ~7 days out (a
+# limit hit the moment its window resets waits the full week), and the existing
+# `_weekly_reset_date_and_hour_is_parsed_not_just_the_hour` selftest already asserts that a
+# multi-day-out weekly reset is honored exactly -- a 24h ceiling would silently break that
+# real, already-shipped behaviour on every account whose weekly window resets more than a day
+# out. Refusing (not clamping/truncating) is deliberate: a truncated epoch is still a fabricated
+# number with no basis in what the account actually reported, and this pool already biases
+# toward retrying too eagerly over staying dark -- an ungated account just gets tried again next
+# tick.
 _account_pool_mark_exhausted() {
-  local account="$1" out="$2" epoch
+  local account="$1" out="$2" epoch now ceiling
   epoch=$(_account_pool_parse_reset "$out") || epoch=$(( $(date +%s) + 300 ))
+  now=$(date +%s)
+  ceiling=$(( now + 8 * 86400 ))
+  if [ "$epoch" -gt "$ceiling" ]; then
+    _account_pool_log "account=$account computed gate epoch=$epoch ($(date -d "@$epoch" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || date -r "$epoch" '+%Y-%m-%d %H:%M UTC' 2>/dev/null)) exceeds the sanity ceiling -- refusing to write, account not gated this call"
+    return 1
+  fi
   mkdir -p "$(dirname "$ACCOUNT_POOL_STATE_FILE")" 2>/dev/null
   grep -v "^${account} " "$ACCOUNT_POOL_STATE_FILE" 2>/dev/null > "${ACCOUNT_POOL_STATE_FILE}.tmp" || true
   echo "$account $epoch" >> "${ACCOUNT_POOL_STATE_FILE}.tmp"
@@ -365,8 +387,22 @@ _account_pool_order() {
 # that wording costs nothing and stops the fleet from gating itself on its own log text. HTTP
 # 429 is kept, but anchored to the status code rather than prose. Sin #1 of a self-running
 # system is running itself out of tokens: everything else, it can fix.
+#
+# gh#878: exit code, when we have one, now wins BEFORE any prose match. rc=124 is timeout(1)'s
+# exit code -- a hang or slow call, never a genuine auth or budget signal from the account
+# itself. Live in $FLEET_LOG_DIR/account-pool.log, 2026-09-11: the identical rc=124 classified
+# as "exhausted" once and "unauthenticated" two minutes later, purely off which incidental words
+# the timed-out transcript happened to contain -- one of those two gated a healthy account for
+# 355 days. A timeout's transcript is often a fragment of something else entirely (a partial
+# tool call, another account's carried-over output in the same captured stream), so trusting its
+# prose is exactly the failure mode the "rate limit" removal above already fixed for one branch;
+# this closes the other two the same way, for the one rc unambiguous enough to key off safely.
+# $2 is optional so direct unit-test callers that only care about the prose match keep working.
 _account_pool_classify_failure() {
-  local out="$1"
+  local out="$1" rc="${2:-}"
+  if [ "$rc" = "124" ]; then
+    echo "other"; return
+  fi
   if grep -qiE "(reached|hit) your (weekly|usage|5-hour|session) limit|quota exceeded|\b429\b|too many requests" <<<"$out"; then
     echo "exhausted"; return
   fi
@@ -550,7 +586,7 @@ account_pool_run() {
       _account_pool_clear_streak "$account"
       return 0
     fi
-    reason=$(_account_pool_classify_failure "$(cat "$capture")")
+    reason=$(_account_pool_classify_failure "$(cat "$capture")" "$rc")
     _account_pool_log "account=$account command failed rc=$rc reason=$reason"
     export ACCOUNT_POOL_LAST_REASON="$reason"
     [ -n "${ACCOUNT_POOL_REASON_FILE:-}" ] && printf '%s\n' "$reason" > "$ACCOUNT_POOL_REASON_FILE" 2>/dev/null
