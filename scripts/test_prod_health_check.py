@@ -313,6 +313,30 @@ class IncidentFilingTest(unittest.TestCase):
         for n in (first["issue"], second["issue"]):
             self.assertIn("Recovered", gh.issues[n]["comments"][-1])
 
+    def test_recovery_finds_an_incident_fixer_fire_path_titled_and_filed_first(self):
+        """gh#728 VP fix 3, code review follow-up: fixer_fire_path.py can file the SHARED
+        incident first, under its own title ("PROD DOWN -- automatic rollback ..."), which
+        does not start with "prod down: ". report_recovery()'s title-prefix search alone would
+        never find it -- it must also catch it by the shared marker."""
+        import prod_incident
+        gh = FakeGh()
+        ffp_number, created = prod_incident.file_or_update_incident(
+            phc.INCIDENT_REPO, "PROD DOWN -- automatic rollback succeeded", "rollback body",
+            ["fleet:priority-high", "incident"], run=gh)
+        self.assertTrue(created)
+
+        # prod_health_check's own probe later observes the same outage and comments on that
+        # SAME shared ticket (found via the marker), rather than filing a second one.
+        probes = [fail("home", "http 500"), ok("search"), ok("report")]
+        alerts = phc.evaluate(probes, FRESH_HEARTBEAT)
+        commented = phc.file_or_update_incident(probes, alerts, runner=gh)
+        self.assertEqual(commented["issue"], ffp_number)
+        self.assertEqual(commented["action"], "commented")
+
+        recs = phc.report_recovery(runner=gh)
+        self.assertEqual([r["issue"] for r in recs], [ffp_number])
+        self.assertIn("Recovered", gh.issues[ffp_number]["comments"][-1])
+
     def test_recovery_with_no_open_incident_is_a_noop(self):
         gh = FakeGh()
         self.assertEqual(phc.report_recovery(runner=gh), [])
