@@ -10129,6 +10129,28 @@ def _gru_md_calls_ask_file_alongside_needs_human_op_stop_gh568():
         "ask.py file should be wired alongside the existing gh#361 needs-human-op stop, not before it"
 
 
+def _ask_classes_and_real_callers_carry_a_class_gh558():
+    """gh#558 finding 4 ("the ladder has nothing to climb"): gh#650 narrowed ASK_CLASSES down
+    to the two values its own world-class gate needed, which dropped the rest of #558's class
+    list and left both real callers (gru.md, dont-shoot-the-messenger.md) filing with no
+    `--class` at all -- so every real ask landed class=NULL and #771's authority ladder (which
+    keys promotion on class) had nothing to promote. Proves the full class list is back and
+    both callers actually pass one."""
+    import ask
+    for cls in ("credential", "money", "pricing", "product-copy", "infra",
+                "external-merge", "decision", "acceptance", "idea"):
+        assert cls in ask.ASK_CLASSES, f"gh#558's class {cls!r} missing from ASK_CLASSES"
+    gru_text = (HERE.parent / "members" / "gru" / "gru.md").read_text()
+    assert "ask.py file --member gru --class infra" in gru_text, \
+        "gru.md's ask.py file call must pass --class, gh#558 finding 4"
+    messenger_text = (HERE.parent / "members" / "dont-shoot-the-messenger"
+                       / "dont-shoot-the-messenger.md").read_text()
+    assert "ask.py file --member dont-shoot-the-messenger --class decision" in messenger_text, \
+        "dont-shoot-the-messenger.md's ask.py file call must pass --class, gh#558 finding 4"
+    assert "--class idea" in messenger_text, \
+        "the thinking-project ask must name --class idea explicitly, gh#558 finding 4"
+
+
 def _run_worktree_guard_hook(repo, wt_path, tool_name, tool_input):
     """Runs the real worktree_guard_hook.py CLI (gh#592) as a subprocess, exactly as Claude
     Code's PreToolUse hook mechanism would -- proving its ACTUAL exit-code behavior (AC5), not
@@ -11467,6 +11489,7 @@ if __name__ == "__main__":
     check("check() redacts secrets from every failure message it records (gh#682)", _check_redacts_secrets_from_every_failure_message_gh682)
     check("check() calls _redact_secrets (gh#682)", _check_calls_redact_secrets_gh682)
     check("gru.md calls ask.py file alongside its own needs-human-op stop (gh#568 AC6)", _gru_md_calls_ask_file_alongside_needs_human_op_stop_gh568)
+    check("ASK_CLASSES carries #558's full class list and both real callers pass --class (gh#558 finding 4)", _ask_classes_and_real_callers_carry_a_class_gh558)
 
     check("asks.class round-trips through ask.py file/list and migrates a pre-existing db (gh#650 AC1/AC2)", _ask_class_column_round_trips_and_is_migrated_gh650)
     check("ask.py file with no --class still exits 0, class reads None (gh#650 AC3)", _ask_file_no_class_is_unchanged_gh650)
