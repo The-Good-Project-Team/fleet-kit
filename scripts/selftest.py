@@ -3791,6 +3791,7 @@ _ENTRYPOINT_SCHEDULED_SCRIPTS = (
     ("vp_due.sh", "bash /fleet-kit/scripts/vp_due.sh", "vp loop, 2026-09-08"),
     ("librarian-scrub (hourly shell scrub)", "run_member.sh librarian-scrub >>", "fleet-kit#784"),
     ("librarian (daily reader, 05:15 UTC)", "15 5 * * * root export GH_TOKEN=\\$(cat $TOKEN_FILE) && bash /fleet-kit/scripts/run_member.sh librarian >>", "fleet-kit#784"),
+    ("pacing_hold_check.py", "python3 /fleet-kit/scripts/pacing_hold_check.py", "gh#812"),
 )
 
 
@@ -13158,6 +13159,104 @@ def _ask_authority_cli_reports_grants_gh771():
             f"ask.py authority must show the grant's level and ask_ids, got {out}"
 
 
+def _pacing_hold_check_env(tmp: Path, ntfy_calls: Path):
+    """Shared fixture plumbing for both gh#812 tests below: a stubbed `curl` on PATH (so
+    fleet_alert.sh's real network legs never fire -- same shape
+    _account_health_check_actually_pages_when_configured already uses above) and every
+    fleet_alert.sh/alert_store.py state file redirected into `tmp`, never the real box's
+    alerts.json/fleet_alert.log."""
+    bin_dir = tmp / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "curl").write_text(f'#!/bin/bash\necho called >> "{ntfy_calls}"\nexit 0\n')
+    (bin_dir / "curl").chmod(0o755)
+    return {
+        "FLEET_LOG_DIR": str(tmp),
+        "FLEET_ALERT_STATE_FILE": str(tmp / "alerts.json"),
+        "FLEET_ALERT_LOG": str(tmp / "fleet_alert.log"),
+        "FLEET_ALERT_QUEUE": str(tmp / "alerts_undelivered.jsonl"),
+        "NTFY_TOPIC": "selftest-fake-topic",
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+    }
+
+
+def _write_pacing_hold_runs(runs_path: Path, paced_hours_ago: list[int], other_hours_ago: list[int]):
+    now = time.time()
+    lines = []
+    for h in paced_hours_ago:
+        lines.append(json.dumps({"ts": now - h * 3600, "status": "paced", "member": "jefe"}))
+    for h in other_hours_ago:
+        lines.append(json.dumps({"ts": now - h * 3600, "status": "ok", "member": "roomba"}))
+    runs_path.write_text("\n".join(lines) + "\n")
+
+
+def _pacing_hold_check_pages_on_sustained_hold_gh812():
+    """gh#812 AC1/AC4: a fleet-wide pacing hold (every run in runs.jsonl landing
+    status=paced) sustained across 2+ consecutive hourly ticks must page exactly once,
+    naming the streak length and the block_over_pace mechanism -- distinct from the
+    unreadable-meter case budget_read_check.sh already covers. This script does not exist
+    on `main` before this change, so this test fails there (ModuleNotFoundError via the
+    subprocess exit code) -- the AC's own "fails against main before the change" clause."""
+    import subprocess
+    script_path = ROOT / "scripts" / "pacing_hold_check.py"
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        ntfy_calls = tmp / "ntfy_calls.log"
+        env = _pacing_hold_check_env(tmp, ntfy_calls)
+        _write_pacing_hold_runs(tmp / "runs.jsonl", paced_hours_ago=[0, 1], other_hours_ago=[])
+
+        proc = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True,
+                              timeout=30, env=env)
+        assert proc.returncode == 0, f"pacing_hold_check.py must exit 0: {proc.stderr.strip()[:300]}"
+        assert "PAGED" in proc.stdout, (
+            f"a 2h sustained fleet-wide hold never printed PAGED -- stdout: {proc.stdout[:400]!r}"
+        )
+        assert ntfy_calls.exists(), "PAGED but the alert helper's curl leg never fired"
+        assert (tmp / "alerts.json").exists(), \
+            "PAGED but no alerts.json record written -- the next tick would page again"
+
+        # Second consecutive tick of the SAME open hold must not page again (AC2).
+        ntfy_calls.unlink()
+        proc2 = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True,
+                               timeout=30, env=env)
+        assert proc2.returncode == 0
+        assert "suppressed" in proc2.stdout, (
+            f"a still-open hold paged a second time instead of being suppressed (AC2) -- "
+            f"stdout: {proc2.stdout[:400]!r}"
+        )
+        assert not ntfy_calls.exists(), "a suppressed tick must not touch the alert helper at all"
+
+        # Hold clears -> a resolution notice fires (AC3).
+        _write_pacing_hold_runs(tmp / "runs.jsonl", paced_hours_ago=[], other_hours_ago=[0, 1])
+        proc3 = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True,
+                               timeout=30, env=env)
+        assert proc3.returncode == 0
+        assert "recovery reported" in proc3.stdout, (
+            f"a cleared hold that had paged must send a resolution notice (AC3) -- "
+            f"stdout: {proc3.stdout[:400]!r}"
+        )
+        assert ntfy_calls.exists(), "recovery was reported but never reached the alert helper"
+
+
+def _pacing_hold_check_single_tick_does_not_page_gh812():
+    """gh#812 AC6: a fleet paced for a single hourly tick and then recovering is normal
+    behaviour -- pacing_hold_check.py must not page for it."""
+    import subprocess
+    script_path = ROOT / "scripts" / "pacing_hold_check.py"
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        ntfy_calls = tmp / "ntfy_calls.log"
+        env = _pacing_hold_check_env(tmp, ntfy_calls)
+        _write_pacing_hold_runs(tmp / "runs.jsonl", paced_hours_ago=[0], other_hours_ago=[1, 2])
+
+        proc = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True,
+                              timeout=30, env=env)
+        assert proc.returncode == 0, f"pacing_hold_check.py must exit 0: {proc.stderr.strip()[:300]}"
+        assert "PAGED" not in proc.stdout, (
+            f"a single held tick must never page -- stdout: {proc.stdout[:400]!r}"
+        )
+        assert not ntfy_calls.exists(), "a single held tick reached the alert helper at all"
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -13525,6 +13624,9 @@ if __name__ == "__main__":
     check("authority.grant() itself refuses an unknown class or level at write time (gh#771)", _authority_grant_itself_rejects_unknown_class_or_level_gh771)
     check("ask.py authority reports a grant's level and ask_ids over the CLI (gh#771 AC5)", _ask_authority_cli_reports_grants_gh771)
     check("run_args() strips a trailing -green suffix from FLEET_INSTANCE_NAME, anchored not substring (gh#780 AC1/AC2/AC3)", _run_args_strips_green_suffix_from_instance_name_gh780)
+
+    check("pacing_hold_check pages once on a sustained fleet-wide hold, suppresses the repeat, resolves on recovery (gh#812 AC1/AC2/AC3/AC4)", _pacing_hold_check_pages_on_sustained_hold_gh812)
+    check("pacing_hold_check never pages a single held tick that clears on its own (gh#812 AC6)", _pacing_hold_check_single_tick_does_not_page_gh812)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:

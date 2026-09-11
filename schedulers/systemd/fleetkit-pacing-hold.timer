@@ -1,0 +1,12 @@
+[Unit]
+Description=Run fleetkit-pacing-hold hourly
+
+[Timer]
+# Hourly, matching entrypoint.sh's own cadence for this check (minute 52) -- it is watching
+# for consecutive HOURLY ticks of a fleet-wide pacing hold (gh#812 AC1), so sampling faster
+# than that buys nothing.
+OnBootSec=5min
+OnUnitActiveSec=60min
+
+[Install]
+WantedBy=timers.target
