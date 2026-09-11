@@ -11336,6 +11336,18 @@ def _journey_walker_console_url_env_override_wins_unchanged_gh724():
     assert users.fleet_console_url == "https://example.com/custom-console", users.fleet_console_url
 
 
+def _vp_md_authorizes_every_label_vp_due_spawns_on_gh855():
+    """gh#855 AC5: fk#805 widened vp_due.VP_LABELS to quality:world-class,quality:solid but
+    left vp.md's line-120 stop rule world-class-only, so vp declined 126 of 150 (84%) of the
+    items it was spawned on. This is the guard that stops that desync recurring a third time:
+    the next widening of VP_LABELS must also touch vp.md, or this fails."""
+    import vp_due
+    md = (ROOT / "members" / "vp" / "vp.md").read_text()
+    missing = [lbl for lbl in vp_due.VP_LABELS if lbl not in md]
+    assert not missing, \
+        f"vp_due.VP_LABELS has label(s) vp.md never mentions -- {missing} (gh#855/fk#805 desync)"
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -11643,6 +11655,8 @@ if __name__ == "__main__":
 
     check("journey_walker fleet-console default resolves to the instance's real console path, not the bare host (gh#724 AC1)", _journey_walker_console_url_defaults_to_fleet_instance_path_gh724)
     check("journey_walker fleet-console URL: an explicit FLEET_CONSOLE_URL wins unchanged (gh#724 AC2)", _journey_walker_console_url_env_override_wins_unchanged_gh724)
+
+    check("vp.md authorizes every label vp_due.VP_LABELS spawns on (gh#855 AC5)", _vp_md_authorizes_every_label_vp_due_spawns_on_gh855)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in fail:
