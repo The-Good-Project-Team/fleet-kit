@@ -35,10 +35,18 @@ lacks a credential, not that the product broke):
                           page alice can administer, for the Verified Org checkout journey.
   NOTIFICATION_DEEPLINK_URL  a thread deep-link URL for bob, for the "open from notification"
                           journey -- this walker has no mailbox/notification-fetch of its own.
-  FLEET_CONSOLE_URL       default https://dino.luckymachines.co/fleet/<instance> (<instance>
-                          from plan_rank.resolve_instance(), gh#724 -- the bare host is dino's
-                          own multi-instance container list, not a fleet console) for the
-                          fleet-console journey.
+  FLEET_CONSOLE_URL       default https://dino.luckymachines.co/fleet/<slug>/ (gh#724 -- the
+                          bare host is dino's own multi-instance container list, not a fleet
+                          console) for the fleet-console journey. <slug> is NOT
+                          plan_rank.resolve_instance()'s own output taken literally (gh#884):
+                          dino's control plane can register an instance under a display slug
+                          that differs from its container/env name (e.g. container
+                          `fleet-kit-server-fleet` routes on slug `fleet-kit`), so the walker
+                          looks resolve_instance()'s value up in dino's own `/fleet/` listing
+                          and uses the slug dino actually routes on. An instance absent from
+                          that listing entirely BLOCKs the journey rather than failing it --
+                          an unresolvable slug is the checker missing its target, not a
+                          product outage.
 
 RESULTS.JSON ID CONVENTION (not specified by #656/#660, decided here): a journey run at the
 desktop viewport keeps the catalog's own `id` unchanged; a journey run at any OTHER viewport
@@ -159,23 +167,82 @@ def step_text(step: dict, viewport: str) -> tuple[str, str]:
 
 # --- config ------------------------------------------------------------------------------------
 
+DINO_FLEET_INDEX_URL = "https://dino.luckymachines.co/fleet/"
+
+# dino's `/fleet/` index lists each hosted instance as
+# `<a href='/fleet/<slug>/'>...</a><div class=sub><container-name> · Up ...</div>` (gh#884).
+_DINO_LISTING_ROW_RE = re.compile(
+    r"<a\s+href=['\"]/fleet/([^/'\"]+)/['\"]>[^<]*</a>\s*<div\s+class=sub>([^<]+)</div>",
+    re.IGNORECASE,
+)
+
+
+def _parse_dino_fleet_listing(html: str) -> dict[str, str]:
+    """Maps dino's container/env name (`plan_rank.resolve_instance()`'s output) to the URL
+    slug dino's control plane actually routes fleet-console requests on -- the two can differ
+    (container `fleet-kit-server-fleet` routes on slug `fleet-kit`), which is gh#884's root
+    cause. The container name is read as the sub-div's first whitespace-separated token so the
+    separator before "Up ..." (a middle dot on the live page, possibly HTML-entity-encoded)
+    never has to be matched exactly."""
+    mapping: dict[str, str] = {}
+    for slug, sub in _DINO_LISTING_ROW_RE.findall(html):
+        tokens = sub.strip().split()
+        if tokens:
+            mapping[tokens[0]] = slug
+    return mapping
+
+
+def _fetch_dino_fleet_listing() -> str:
+    import urllib.request
+
+    with urllib.request.urlopen(DINO_FLEET_INDEX_URL, timeout=10) as resp:  # noqa: S310
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def resolve_fleet_console_slug(instance: str, fetch_listing=_fetch_dino_fleet_listing) -> str:
+    """Maps `instance` (`plan_rank.resolve_instance()`'s container/env name -- that resolver's
+    own contract is untouched, gh#884's PRD non-goal 1) to the URL slug dino's control plane
+    actually routes fleet-console requests on. Raises `Blocked`, not a plain `KeyError`, when
+    dino's own listing does not register `instance` under any slug at all: an unresolvable slug
+    means the CHECKER can't find its target, not that the product is down (sentry.md's
+    BLOCKED-vs-BROKEN mandate, AC3)."""
+    mapping = _parse_dino_fleet_listing(fetch_listing())
+    slug = mapping.get(instance)
+    if slug is None:
+        raise Blocked(f"dino's fleet listing does not register instance {instance!r} under any slug")
+    return slug
+
+
 class TestUsers:
-    def __init__(self, env=None):
+    def __init__(self, env=None, dino_listing_fetcher=_fetch_dino_fleet_listing):
         env = env or os.environ
         self.base_url = env.get("PHILANTHROPY_BASE_URL", "https://philanthropy.org")
         self.bypass = env.get("ATLAS_TEST_BYPASS")
         self.fixture_ein = env.get("FIXTURE_EIN")
         self.fixture_claimed_org_url = env.get("FIXTURE_CLAIMED_ORG_URL")
         self.notification_deeplink_url = env.get("NOTIFICATION_DEEPLINK_URL")
-        self.fleet_console_url = env.get(
-            "FLEET_CONSOLE_URL",
-            f"https://dino.luckymachines.co/fleet/{plan_rank.resolve_instance()}",
-        )
+        self._fleet_console_url_override = env.get("FLEET_CONSOLE_URL")
+        self._dino_listing_fetcher = dino_listing_fetcher
+        self._fleet_console_url_cache: str | None = None
         self.users = {}
         for name in ("alice", "bob"):
             email, password = env.get(f"{name.upper()}_EMAIL"), env.get(f"{name.upper()}_PASSWORD")
             if email and password:
                 self.users[name] = {"email": email, "password": password}
+
+    @property
+    def fleet_console_url(self) -> str:
+        """`FLEET_CONSOLE_URL` unchanged if set (gh#724 AC2, untouched by gh#884); otherwise
+        resolved lazily -- not at construction time -- against dino's live listing, so a walker
+        run that never touches the fleet-console journey never pays for the fetch, and a
+        `Blocked` from an unresolvable slug surfaces from inside that journey's own step, the
+        same place every other missing-config Blocked in this class already raises from."""
+        if self._fleet_console_url_override is not None:
+            return self._fleet_console_url_override
+        if self._fleet_console_url_cache is None:
+            slug = resolve_fleet_console_slug(plan_rank.resolve_instance(), self._dino_listing_fetcher)
+            self._fleet_console_url_cache = f"https://dino.luckymachines.co/fleet/{slug}/"
+        return self._fleet_console_url_cache
 
     def require_users(self, *names) -> None:
         missing = [n for n in names if n not in self.users]

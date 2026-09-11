@@ -13420,31 +13420,85 @@ def _gru_md_wires_plan_rank_before_packing_gh572():
 
 
 def _journey_walker_console_url_defaults_to_fleet_instance_path_gh724():
-    """gh#724 AC1: with no FLEET_CONSOLE_URL set, TestUsers must resolve the instance's real
-    console path (dino.luckymachines.co/fleet/<instance>), not the bare host -- the bare host
-    is dino's own multi-instance container list, which is what made step 0 fail in the run
-    that filed the two false product-break issues (#690/#691) this item exists to stop."""
+    """gh#724 AC1 (slug resolution superseded by gh#884): with no FLEET_CONSOLE_URL set,
+    TestUsers must resolve the instance's real console path (dino.luckymachines.co/fleet/<slug>),
+    not the bare host -- the bare host is dino's own multi-instance container list, which is
+    what made step 0 fail in the run that filed the two false product-break issues (#690/#691)
+    this item exists to stop. Stubs dino's listing (`dino_listing_fetcher`) rather than hitting
+    the network -- selftest.py runs with no network."""
     import os as _os
     import journey_walker as jw
+    fake_listing = "<a href='/fleet/fleet-kit/'>fleet-kit</a><div class=sub>fleet-kit · Up 4 minutes ago</div>"
     old = _os.environ.get("FLEET_INSTANCE_NAME")
     _os.environ["FLEET_INSTANCE_NAME"] = "fleet-kit"
     try:
-        users = jw.TestUsers(env={})
+        users = jw.TestUsers(env={}, dino_listing_fetcher=lambda: fake_listing)
+        url = users.fleet_console_url  # resolved lazily (gh#884) -- must read before restoring env below
     finally:
         if old is None:
             _os.environ.pop("FLEET_INSTANCE_NAME", None)
         else:
             _os.environ["FLEET_INSTANCE_NAME"] = old
-    assert users.fleet_console_url == "https://dino.luckymachines.co/fleet/fleet-kit", \
-        users.fleet_console_url
+    assert url == "https://dino.luckymachines.co/fleet/fleet-kit/", url
 
 
 def _journey_walker_console_url_env_override_wins_unchanged_gh724():
     """gh#724 AC2: an explicit FLEET_CONSOLE_URL wins unchanged -- the fix is to the default
-    only."""
+    only. No dino_listing_fetcher is even given -- an override must never trigger a fetch."""
     import journey_walker as jw
     users = jw.TestUsers(env={"FLEET_CONSOLE_URL": "https://example.com/custom-console"})
     assert users.fleet_console_url == "https://example.com/custom-console", users.fleet_console_url
+
+
+def _journey_walker_console_url_maps_container_name_to_dino_slug_gh884():
+    """gh#884 AC1: dino can register an instance's container name under a DIFFERENT display
+    slug (`fleet-kit-server-fleet` -> `fleet-kit` is the live case that made this journey file
+    the identical false failure five times -- #690/#691/#848/#884). With no FLEET_CONSOLE_URL
+    override, TestUsers must resolve through dino's own listing rather than passing
+    plan_rank.resolve_instance()'s container name straight through -- this test fails against
+    main as it stood before gh#884 (the old code returned
+    `.../fleet/fleet-kit-server-fleet`, a 404) and passes with the slug lookup."""
+    import os as _os
+    import journey_walker as jw
+    fake_listing = (
+        "<a href='/fleet/fleet-kit/'>fleet-kit</a>"
+        "<div class=sub>fleet-kit-server-fleet · Up 4 minutes ago</div>"
+    )
+    old = _os.environ.get("FLEET_INSTANCE_NAME")
+    _os.environ["FLEET_INSTANCE_NAME"] = "fleet-kit-server-fleet-green"
+    try:
+        users = jw.TestUsers(env={}, dino_listing_fetcher=lambda: fake_listing)
+        url = users.fleet_console_url
+    finally:
+        if old is None:
+            _os.environ.pop("FLEET_INSTANCE_NAME", None)
+        else:
+            _os.environ["FLEET_INSTANCE_NAME"] = old
+    assert url == "https://dino.luckymachines.co/fleet/fleet-kit/", url
+
+
+def _journey_walker_console_url_unregistered_instance_blocks_not_fails_gh884():
+    """gh#884 AC3: an instance dino's listing does not register at all must raise Blocked (so
+    journey_issue_filer.py never files a product-break issue for it), not a plain KeyError or
+    a silently-wrong URL."""
+    import os as _os
+    import journey_walker as jw
+    fake_listing = "<a href='/fleet/other-instance/'>other-instance</a><div class=sub>other-container · Up 1 minute ago</div>"
+    old = _os.environ.get("FLEET_INSTANCE_NAME")
+    _os.environ["FLEET_INSTANCE_NAME"] = "fleet-kit-server-fleet-green"
+    try:
+        users = jw.TestUsers(env={}, dino_listing_fetcher=lambda: fake_listing)
+        try:
+            users.fleet_console_url
+            raised = False
+        except jw.Blocked:
+            raised = True
+    finally:
+        if old is None:
+            _os.environ.pop("FLEET_INSTANCE_NAME", None)
+        else:
+            _os.environ["FLEET_INSTANCE_NAME"] = old
+    assert raised, "an unregistered instance must raise Blocked, not resolve to a wrong URL"
 
 
 def _journey_walker_blocked_streak_extends_on_same_reason_gh857():
@@ -14392,6 +14446,8 @@ if __name__ == "__main__":
 
     check("journey_walker fleet-console default resolves to the instance's real console path, not the bare host (gh#724 AC1)", _journey_walker_console_url_defaults_to_fleet_instance_path_gh724)
     check("journey_walker fleet-console URL: an explicit FLEET_CONSOLE_URL wins unchanged (gh#724 AC2)", _journey_walker_console_url_env_override_wins_unchanged_gh724)
+    check("journey_walker fleet-console URL maps the container name to dino's registered slug, not the bare container name (gh#884 AC1)", _journey_walker_console_url_maps_container_name_to_dino_slug_gh884)
+    check("journey_walker fleet-console URL: an instance dino doesn't register at all Blocks rather than failing (gh#884 AC3)", _journey_walker_console_url_unregistered_instance_blocks_not_fails_gh884)
 
     check("journey_walker blocked_streak extends across runs for the same reason (gh#857 AC1)", _journey_walker_blocked_streak_extends_on_same_reason_gh857)
     check("journey_walker blocked_streak starts at 1 on a first block or a changed reason (gh#857 AC2)", _journey_walker_blocked_streak_restarts_on_new_reason_or_first_block_gh857)

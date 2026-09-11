@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -1005,6 +1006,59 @@ class FleetConsoleActivityRowSelectorTest(unittest.TestCase):
         # gh#859 AC1: this is the case that passed before the fix -- rows exist (so the old
         # `.length > 0` selector matched) but none is within the 24h freshness bar.
         self.assertEqual(self._run(self._stale_html(), "stale-run"), ["pass", "fail"])
+
+
+class FleetConsoleSlugResolutionTest(unittest.TestCase):
+    """gh#884 AC1/AC2/AC3/AC4: dino's control plane can register an instance's container/env
+    name under a different display slug (the live case: container `fleet-kit-server-fleet`
+    routes on slug `fleet-kit`) -- resolving the URL by passing
+    plan_rank.resolve_instance()'s value straight through 404s. All asserts run against a
+    stubbed listing string, never a live network call."""
+
+    LISTING = (
+        "<a href='/fleet/fleet-kit/'>fleet-kit</a>"
+        "<div class=sub>fleet-kit-server-fleet &middot; Up 4 minutes ago</div>"
+        "<a href='/fleet/other/'>other</a>"
+        "<div class=sub>other-container-name · Up 9 days ago</div>"
+    )
+
+    def test_resolves_container_name_to_registered_slug(self):
+        # AC1: the mismatched (real, live) case -- container name != dino's routing slug.
+        self.assertEqual(jw.resolve_fleet_console_slug("fleet-kit-server-fleet", lambda: self.LISTING),
+                          "fleet-kit")
+
+    def test_resolves_a_second_row_independently(self):
+        self.assertEqual(jw.resolve_fleet_console_slug("other-container-name", lambda: self.LISTING),
+                          "other")
+
+    def test_unregistered_instance_raises_blocked_not_a_bare_lookup_error(self):
+        # AC3: an instance dino's own listing never mentions must Block, not fail as a
+        # product outage.
+        with self.assertRaises(jw.Blocked):
+            jw.resolve_fleet_console_slug("no-such-instance", lambda: self.LISTING)
+
+    def test_test_users_default_console_url_uses_resolved_slug_with_trailing_slash(self):
+        # AC1, exercised through TestUsers.fleet_console_url the same way the walker's own
+        # fleet-console journey reads it -- with no FLEET_CONSOLE_URL override.
+        old = os.environ.get("FLEET_INSTANCE_NAME")
+        os.environ["FLEET_INSTANCE_NAME"] = "fleet-kit-server-fleet-green"
+        try:
+            users = jw.TestUsers(env={}, dino_listing_fetcher=lambda: self.LISTING)
+            self.assertEqual(users.fleet_console_url, "https://dino.luckymachines.co/fleet/fleet-kit/")
+        finally:
+            if old is None:
+                os.environ.pop("FLEET_INSTANCE_NAME", None)
+            else:
+                os.environ["FLEET_INSTANCE_NAME"] = old
+
+    def test_explicit_override_never_triggers_a_listing_fetch(self):
+        # AC2: an explicit FLEET_CONSOLE_URL still wins unchanged, and never even calls the
+        # fetcher -- gh#884 must not regress gh#724 AC2.
+        def _boom():
+            raise AssertionError("dino listing must not be fetched when FLEET_CONSOLE_URL is set")
+
+        users = jw.TestUsers(env={"FLEET_CONSOLE_URL": "https://example.com/x"}, dino_listing_fetcher=_boom)
+        self.assertEqual(users.fleet_console_url, "https://example.com/x")
 
 
 if __name__ == "__main__":
