@@ -11783,6 +11783,51 @@ def _filer_lookup_failure_never_files_a_duplicate_gh914():
     assert len(summary["skipped"]) == 1, summary
 
 
+def _filer_ensure_label_forwards_repo_gh922():
+    # gh#922: ensure_label() was the one call site process() made that dropped `repo`, so on a
+    # fresh target repo it created the label in the WRONG (ambient) repo and every later
+    # `--label` issue create failed "not found" -- the same mis-pointing class as gh#151/#770,
+    # reintroduced by the very PR (#916) written to close it.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("jif", ROOT / "scripts" / "journey_issue_filer.py")
+    jif = importlib.util.module_from_spec(spec); sys.modules[spec.name] = jif; spec.loader.exec_module(jif)
+
+    calls = []
+    def runner(cmd):
+        calls.append(cmd)
+        return 0, ""
+    jif.ensure_label(runner, jif.SENTRY, repo="owner/name")
+    idx = calls[0].index("--repo")
+    assert calls[0][idx + 1] == "owner/name", calls[0]
+
+    calls.clear()
+    jif.ensure_label(runner, jif.SENTRY)
+    assert "--repo" not in calls[0], calls[0]
+
+    # end to end: every gh call process() makes, label create included, carries --repo.
+    calls = []
+    def recording(cmd):
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "issue", "list"]:
+            return 0, "[]"
+        if cmd[:3] == ["gh", "issue", "create"]:
+            return 0, "https://github.com/x/y/issues/1"
+        return 0, ""
+    d = Path(tempfile.mkdtemp())
+    results = {"run": "r1", "deploy_sha": "sha", "journeys": [
+        {"id": "send-message", "name": "Send a message",
+         "steps": [{"index": 0, "action": "fill and send", "observable_result": "sent", "status": "fail"}]}]}
+    (d / "results.json").write_text(json.dumps(results))
+    summary = jif.process(d / "results.json", d / "state.json", runner=recording, repo="owner/name")
+    assert summary["errors"] == [], summary
+    assert len(summary["filed"]) == 1, summary
+    for cmd in calls:
+        assert "--repo" in cmd, f"missing --repo in {cmd}"
+        assert cmd[cmd.index("--repo") + 1] == "owner/name", cmd
+    label_create = [c for c in calls if c[:3] == ["gh", "label", "create"]]
+    assert label_create, "ensure_label never called label create"
+
+
 def _red_member_paced_and_vp_gates_on_red_gh785():
     import member_spec
     red = member_spec.by_name("red", ROOT / "members")
@@ -13963,6 +14008,7 @@ if __name__ == "__main__":
     check("red_walker expands an overflow payload, inverts landed_when to fail, and blocks a 403 (gh#785 AC1-3)", _red_walker_payload_landed_and_blocked_gh785)
     check("journey_issue_filer red profile files under fleet:red-team with its own marker, sentry unchanged (gh#785 AC4)", _filer_red_profile_uses_red_label_and_marker_gh785)
     check("journey_issue_filer never files a duplicate when the dedup lookup itself fails (gh#914)", _filer_lookup_failure_never_files_a_duplicate_gh914)
+    check("journey_issue_filer ensure_label forwards --repo to every gh call, label create included (gh#922)", _filer_ensure_label_forwards_repo_gh922)
     check("red is a paced 6h member and vp requires a red pass before Accepted (gh#785 AC5)", _red_member_paced_and_vp_gates_on_red_gh785)
     check("worktree_guard_hook blocks an Edit under the shared $REPO when isolated (gh#592 AC2)", _worktree_guard_blocks_edit_under_shared_repo_gh592)
     check("worktree_guard_hook allows an Edit under the pass's own $WT_PATH (gh#592 AC5)", _worktree_guard_allows_edit_under_own_worktree_gh592)

@@ -285,16 +285,21 @@ def _run(cmd: list[str]) -> tuple[int, str]:
         return 1, str(e)
 
 
-def ensure_label(runner=_run, profile: "Profile" = SENTRY) -> "str | None":
+def ensure_label(runner=_run, profile: "Profile" = SENTRY, repo: str | None = None) -> "str | None":
     """Idempotent: `gh` errors on a duplicate create; that failure is expected and ignored.
     Any other create failure (e.g. a 422 on a too-long description) is NOT a duplicate -- it
     means the label never got made, so every later `gh issue create --label ...` will fail
     with 'not found', silently, on a zero-finding run that never reaches that call (gh#892).
     Returned (and printed) so the caller can fold it into the run's error summary instead of
-    swallowing it the same way the duplicate case is swallowed."""
-    rc, out = runner(
-        ["gh", "label", "create", profile.label, "--color", profile.color, "--description", profile.desc]
-    )
+    swallowing it the same way the duplicate case is swallowed.
+
+    gh#922: `repo` must be forwarded like every sibling builder -- without it this call falls
+    back to the ambient checkout's repo, which recreates the label in the wrong place on a
+    fresh target repo and makes every later `--label` issue create fail "not found"."""
+    cmd = ["gh", "label", "create", profile.label, "--color", profile.color, "--description", profile.desc]
+    if repo:
+        cmd += ["--repo", repo]
+    rc, out = runner(cmd)
     if rc == 0 or "already exists" in out:
         return None
     msg = f"ensure_label({profile.label}) failed: {out[:300]}"
@@ -363,7 +368,7 @@ def process(results_path: Path, state_path: Path = DEFAULT_STATE_PATH, runner=_r
     summary = {"filed": [], "commented": [], "closed": [], "skipped": [], "errors": []}
 
     if not dry_run:
-        label_error = ensure_label(runner, profile)
+        label_error = ensure_label(runner, profile, repo)
         if label_error:
             summary["errors"].append(label_error)
 
