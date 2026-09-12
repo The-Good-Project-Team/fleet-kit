@@ -23,6 +23,7 @@ vision_link_gate.py and quality_gate.py.
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import os
 import re
@@ -163,17 +164,108 @@ def redo_targets(item: dict, is_open) -> tuple[list[int], str]:
     return [item["number"]], "epic-level redo: no child named"
 
 
-def redo_items(items: list[dict], running_minions: set[int] | None = None, is_open=None) -> dict:
+# ONE DISPATCH PER VERDICT, NOT ONE PER HOUR (fleet-kit#883). `redo_due` caps the number of
+# `Not yet` ROUNDS at MAX_ROUNDS, but nothing capped the number of DISPATCHES per round: a
+# single un-superseded `Not yet` re-spawns its redo minion on every cron tick, forever, because
+# the condition that armed it ("newest verdict is a Not yet, no merge newer") only clears when a
+# PR merges. Measured on this instance 2026-09-12: the identical 16-target redo list dispatched
+# at 13:04, 14:04 and 15:03 (`vp_due.log`), 35 minion passes onto philanthropy#5237 in 23h, and
+# 171 of 196 minion passes that day ended "already done / blocked" with no PR. `running_minions`
+# did not catch it -- it is checked against the SOURCE issue, while an epic's redo spawns onto
+# its CHILDREN, so a running minion on #5237 never suppressed the next tick's dispatch at #5237.
+#
+# The rule: a target is dispatched once for a given verdict. It re-arms when a newer `Not yet`
+# lands (a real new work order), or after REDO_RETRY_AFTER_S, so a redo whose minion crashed or
+# was budget-declined still gets another try -- bounded at 2/day instead of 24/day rather than
+# traded away entirely.
+REDO_RETRY_AFTER_S = int(os.environ.get("FLEET_REDO_RETRY_AFTER_S", 12 * 3600))
+
+
+def _iso_to_epoch(stamp: str | None) -> float | None:
+    """`2026-09-12T13:28:22Z` -> epoch seconds. None for anything unparseable -- a missing
+    timestamp must never make a guard fire, only make it abstain."""
+    if not stamp:
+        return None
+    try:
+        return calendar.timegm(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S"))
+    except (ValueError, TypeError):
+        return None
+
+
+def newest_not_yet_epoch(item: dict) -> float | None:
+    """When this item's newest `Not yet (VP review):` comment landed -- the moment its redo was
+    armed. Everything dispatched after it belongs to that verdict."""
+    stamps = [c.get("createdAt") for c in item.get("comments") or []
+              if NOT_YET_RE.search(c.get("body") or "")]
+    return _iso_to_epoch(_newest(stamps))
+
+
+def last_dispatch_at(rows: list[dict], member: str) -> dict[int, float]:
+    """Newest run timestamp per item for `member`, epoch seconds -- read from the same
+    runs.jsonl rows `running_items` uses, so it sees passes in a retired container too."""
+    out: dict[int, float] = {}
+    for r in rows:
+        if r.get("member") != member or r.get("item_id") in (None, "", "None"):
+            continue
+        try:
+            n = int(r["item_id"])
+            ts = float(r.get("ts") or 0)
+        except (TypeError, ValueError, KeyError):
+            continue
+        if ts > out.get(n, 0):
+            out[n] = ts
+    return out
+
+
+def last_minion_dispatch() -> dict[int, float]:
+    return last_dispatch_at(_runs_rows(), "minion")
+
+
+def redo_items(items: list[dict], running_minions: set[int] | None = None, is_open=None,
+               dispatched: dict[int, float] | None = None, now: float | None = None) -> dict:
     is_open = is_open or (lambda n: True)
+    dispatched = dispatched or {}
+    now = time.time() if now is None else now
+    running_minions = running_minions or set()
     due, skipped = [], []
+    claimed: set[int] = set()   # targets this pass already spawned, under any source
     for it in items:
         ok, why = redo_due(it, running_minions)
         if not ok:
             skipped.append({"number": it["number"], "why": why})
             continue
         targets, reason = redo_targets(it, is_open)
-        due.append({"number": it["number"], "targets": targets, "why": reason})
+        armed_at = newest_not_yet_epoch(it)
+        kept = []
+        for t in targets:
+            drop = _redo_target_skip(t, armed_at, claimed, running_minions, dispatched, now)
+            if drop:
+                skipped.append({"number": t, "source": it["number"], "why": drop})
+                continue
+            claimed.add(t)
+            kept.append(t)
+        if kept:
+            due.append({"number": it["number"], "targets": kept, "why": reason})
     return {"redo": due, "redo_skipped": skipped}
+
+
+def _redo_target_skip(target: int, armed_at: float | None, claimed: set[int],
+                      running_minions: set[int], dispatched: dict[int, float],
+                      now: float) -> str | None:
+    """Why this TARGET should not be spawned, or None to spawn it. Every guard here is
+    target-scoped on purpose -- the source-scoped `running_minions` check in `redo_due` misses
+    every epic child, which is most of what this script actually dispatches."""
+    if target in claimed:
+        return "already dispatched this pass under another source"
+    if target in running_minions:
+        return "minion already running for this target"
+    prev = dispatched.get(target)
+    if prev is None:
+        return None
+    if armed_at is not None and prev >= armed_at and now - prev < REDO_RETRY_AFTER_S:
+        return (f"redo already dispatched for this verdict "
+                f"({int((now - prev) / 60)}m ago, retry after {REDO_RETRY_AFTER_S // 3600}h)")
+    return None
 
 
 def _gh(args: list[str], cwd: str) -> list:
@@ -314,7 +406,9 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
     items = json.loads(a.items) if a.items else collect(a.repo_dir)
     out = due_items(items, running_vp_items())
-    out.update(redo_items(items, running_minion_items(), is_open=lambda n: _valid_redo_target(a.repo_dir, n)))
+    out.update(redo_items(items, running_minion_items(),
+                          is_open=lambda n: _valid_redo_target(a.repo_dir, n),
+                          dispatched=last_minion_dispatch()))
     print(json.dumps(out))
     return 0
 
