@@ -294,5 +294,73 @@ class RedoTargetsTests(unittest.TestCase):
         self.assertEqual(out["redo"], [{"number": 31, "targets": [31], "why": "single item"}])
 
 
+class RedoDispatchOnceTests(unittest.TestCase):
+    """fleet-kit#883: a redo is dispatched once per verdict, not once per cron tick."""
+
+    ARMED = vp_due._iso_to_epoch(T1)
+
+    def test_redo_fires_when_nothing_dispatched_yet(self):
+        it = item(31, comments=[("Not yet (VP review): a", T1)])
+        out = vp_due.redo_items([it], dispatched={}, now=self.ARMED + 60)
+        self.assertEqual(out["redo"], [{"number": 31, "targets": [31], "why": "single item"}])
+
+    def test_second_tick_does_not_redispatch_the_same_verdict(self):
+        it = item(31, comments=[("Not yet (VP review): a", T1)])
+        out = vp_due.redo_items([it], dispatched={31: self.ARMED + 60}, now=self.ARMED + 3660)
+        self.assertEqual(out["redo"], [])
+        self.assertEqual(out["redo_skipped"][0]["number"], 31)
+        self.assertIn("already dispatched for this verdict", out["redo_skipped"][0]["why"])
+
+    def test_a_newer_not_yet_rearms_the_redo(self):
+        """A real new work order dispatches again even though a minion ran for the old one."""
+        it = item(31, comments=[("Not yet (VP review): a", T1), ("Not yet (VP review): b", T3)])
+        armed = vp_due._iso_to_epoch(T3)
+        out = vp_due.redo_items([it], dispatched={31: vp_due._iso_to_epoch(T2)}, now=armed + 60)
+        self.assertEqual(out["redo"], [{"number": 31, "targets": [31], "why": "single item"}])
+
+    def test_a_stale_dispatch_retries_after_the_cooldown(self):
+        """A redo whose minion crashed or was budget-declined is not lost forever."""
+        it = item(31, comments=[("Not yet (VP review): a", T1)])
+        prev = self.ARMED + 60
+        out = vp_due.redo_items([it], dispatched={31: prev},
+                                now=prev + vp_due.REDO_RETRY_AFTER_S + 1)
+        self.assertEqual(out["redo"], [{"number": 31, "targets": [31], "why": "single item"}])
+
+    def test_one_target_named_by_two_sources_spawns_once(self):
+        """Live 2026-09-12: philanthropy#5237 was dispatched twice in the same tick, once as a
+        single item and once as a child of epic #5234 -- two minions, one branch."""
+        solo = item(5237, comments=[("Not yet (VP review): a", T1)])
+        parent = epic(5234, comments=[("**Not yet (VP review):** #5237 owns it.", T1)],
+                      sub_issues=sub_issues((5237, "OPEN")))
+        out = vp_due.redo_items([solo, parent], is_open=lambda n: True,
+                                dispatched={}, now=self.ARMED + 60)
+        self.assertEqual([t for e in out["redo"] for t in e["targets"]], [5237])
+        self.assertIn("already dispatched this pass", out["redo_skipped"][0]["why"])
+
+    def test_a_running_minion_on_an_epic_child_blocks_the_child(self):
+        """The old source-scoped guard checked the epic's number, which never has a minion."""
+        parent = epic(5234, comments=[("**Not yet (VP review):** #5237 owns it.", T1)],
+                      sub_issues=sub_issues((5237, "OPEN")))
+        out = vp_due.redo_items([parent], running_minions={5237}, is_open=lambda n: True,
+                                dispatched={}, now=self.ARMED + 60)
+        self.assertEqual(out["redo"], [])
+        self.assertIn("minion already running", out["redo_skipped"][0]["why"])
+
+    def test_unparseable_timestamps_abstain_rather_than_block(self):
+        self.assertIsNone(vp_due._iso_to_epoch("not-a-date"))
+        self.assertIsNone(vp_due._iso_to_epoch(None))
+        it = item(31, comments=[("Not yet (VP review): a", "not-a-date")])
+        out = vp_due.redo_items([it], dispatched={31: 1.0}, now=2.0)
+        self.assertEqual(out["redo"], [{"number": 31, "targets": [31], "why": "single item"}])
+
+    def test_last_dispatch_at_reads_the_newest_row_per_item(self):
+        rows = [{"member": "minion", "item_id": "31", "ts": 100},
+                {"member": "minion", "item_id": "31", "ts": 300},
+                {"member": "minion", "item_id": "32", "ts": 200},
+                {"member": "vp", "item_id": "31", "ts": 900},
+                {"member": "minion", "item_id": None, "ts": 400}]
+        self.assertEqual(vp_due.last_dispatch_at(rows, "minion"), {31: 300.0, 32: 200.0})
+
+
 if __name__ == "__main__":
     unittest.main()
