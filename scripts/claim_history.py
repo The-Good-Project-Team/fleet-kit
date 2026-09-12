@@ -44,14 +44,19 @@ DEFAULT_WINDOW_DAYS = 14.0
 
 
 def dead_end_claim_count(run_ids: list[str], item_number: int) -> int:
-    """How many of `run_ids` are minion runs against `item_number`.
+    """How many DISTINCT `run_ids` are minion runs against `item_number`.
 
     `run_ids` should already be scoped by the caller to the recent window and to
     member='minion' (see `minion_runs_for_item`) -- this only matches the run_id SHAPE gru.md
     step 7 already documents minion's own runs follow: `minion-item<n>-<pid>-<timestamp>`.
+
+    gh#4966: `runs` writes two rows per real attempt (a `started` row and a terminal-status
+    row) sharing one `run_id` -- de-duping here, on top of `minion_runs_for_item`'s own
+    `SELECT DISTINCT`, means this still counts correctly even if a future caller passes in an
+    undeduped list.
     """
     prefix = f"minion-item{item_number}-"
-    return sum(1 for run_id in run_ids if (run_id or "").startswith(prefix))
+    return sum(1 for run_id in set(run_ids) if (run_id or "").startswith(prefix))
 
 
 def is_dead_end_blocked(run_ids: list[str], item_number: int,
@@ -61,12 +66,18 @@ def is_dead_end_blocked(run_ids: list[str], item_number: int,
 
 def minion_runs_for_item(conn, item_number: int,
                          window_days: float = DEFAULT_WINDOW_DAYS) -> list[str]:
-    """Real run_ids from fleet.db: every minion run against `item_number` in the last
+    """Real DISTINCT run_ids from fleet.db: every minion run against `item_number` in the last
     `window_days`, regardless of that run's own reported status -- see the module docstring for
-    why status doesn't matter here (the issue still being open is the proof of no merge)."""
+    why status doesn't matter here (the issue still being open is the proof of no merge).
+
+    gh#4966: `runs` has a composite (run_id, recorded_at) primary key, so a single real run
+    (started + terminal-status rows) is two rows sharing one `run_id`. Grepped every caller of
+    this function (just `main()` below, plus selftest.py) -- none wants the raw duplicate rows
+    (no cost/duration calc reads this), so de-duping at the query is the smaller, correct fix.
+    """
     since = time.time() - window_days * 86400
     cur = conn.execute(
-        "SELECT run_id FROM runs WHERE member = 'minion' AND item_id = ? AND recorded_at >= ?",
+        "SELECT DISTINCT run_id FROM runs WHERE member = 'minion' AND item_id = ? AND recorded_at >= ?",
         (str(item_number), since),
     )
     return [row[0] for row in cur.fetchall()]

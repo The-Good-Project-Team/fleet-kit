@@ -989,6 +989,67 @@ def _claim_history_blocks_an_item_that_keeps_dead_ending():
         assert "ok" in out_clean.stdout, out_clean.stdout
 
 
+def _claim_history_does_not_double_count_a_runs_started_and_terminal_rows():
+    """gh#4966: `runs` has a composite (run_id, recorded_at) PRIMARY KEY (fleet-kit#212), so one
+    real minion attempt is written as TWO rows sharing a single `run_id` -- a `started` row and
+    a terminal-status row. Before this fix, neither `minion_runs_for_item`'s query nor
+    `dead_end_claim_count` de-duplicated on `run_id`, so every real attempt counted twice and
+    the documented 3-strike threshold (module docstring) actually fired at 2 real attempts --
+    exactly the live #4761/#4814 discrepancy this issue was filed against (BLOCKED count=4 for
+    2 real attempts). This must fail against the pre-fix code (no de-dup) and pass after.
+    """
+    import time
+    import claim_history
+    import fleet_db
+
+    # Pure core: dead_end_claim_count must de-dup even when handed a raw, undeduped run_id list.
+    run_ids_with_duplicates = [
+        "minion-item64-111-1", "minion-item64-111-1",  # same run: started + terminal rows
+        "minion-item64-222-2", "minion-item64-222-2",
+    ]
+    assert claim_history.dead_end_claim_count(run_ids_with_duplicates, 64) == 2, (
+        "2 distinct real runs, each written twice, must count as 2 -- not 4")
+    assert not claim_history.is_dead_end_blocked(run_ids_with_duplicates, 64, threshold=3)
+
+    # A NULL/empty run_id must still not raise and must still not count (gh#4966 AC6).
+    assert claim_history.dead_end_claim_count(
+        run_ids_with_duplicates + [None, ""], 64) == 2
+
+    # Real integration through fleet.db: 2 real attempts, each recorded as a started + a
+    # terminal row sharing one run_id -- the exact shape live in fleet.db.
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        runs_file = d / "runs.jsonl"
+        now = time.time()
+        recs = [
+            {"run_id": "minion-item4761-141190-1788808104", "member": "minion", "item_id": "4761",
+             "status": "started", "_recorded_at": now - 3 * 86400},
+            {"run_id": "minion-item4761-141190-1788808104", "member": "minion", "item_id": "4761",
+             "status": "budget_declined", "_recorded_at": now - 3 * 86400 + 60},
+            {"run_id": "minion-item4761-12091-1788818817", "member": "minion", "item_id": "4761",
+             "status": "started", "_recorded_at": now - 2 * 86400},
+            {"run_id": "minion-item4761-12091-1788818817", "member": "minion", "item_id": "4761",
+             "status": "budget_declined", "_recorded_at": now - 2 * 86400 + 60},
+        ]
+        runs_file.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+        conn = fleet_db.connect(d / "fleet.db")
+        fleet_db.sync(conn, runs_file=runs_file)
+
+        run_ids = claim_history.minion_runs_for_item(conn, 4761, window_days=14.0)
+        assert len(run_ids) == 2, run_ids  # DISTINCT: 2 real runs, not 4 rows
+        assert claim_history.dead_end_claim_count(run_ids, 4761) == 2
+        assert not claim_history.is_dead_end_blocked(run_ids, 4761, threshold=3), (
+            "2 real attempts must stay below the 3-strike threshold")
+
+        import subprocess
+        out = subprocess.run(
+            [sys.executable, str(HERE / "claim_history.py"), "--item", "4761",
+             "--db-path", str(d / "fleet.db")],
+            capture_output=True, text=True)
+        assert out.returncode == 0, (out.returncode, out.stdout, out.stderr)
+        assert "count=2" in out.stdout, out.stdout
+
+
 def _gru_md_gates_candidates_on_vision_link():
     """fleet-kit#523: Reif, 2026-09-06 -- "I don't care about the number of PRs we hit ... I
     just want to make autonomous progress on agreed upon goals." Measured the same night:
@@ -14487,6 +14548,7 @@ if __name__ == "__main__":
     check("fanout packs the hour by complexity, in percent", _fanout_packs_the_hour_by_complexity)
     check("cost_bridge converts real spend into fanout's --observed shape", _cost_bridge_converts_real_spend_into_fanouts_observed_shape)
     check("claim_history blocks an item that keeps dead-ending", _claim_history_blocks_an_item_that_keeps_dead_ending)
+    check("claim_history does not double-count a run's started and terminal rows (gh#4966)", _claim_history_does_not_double_count_a_runs_started_and_terminal_rows)
     check("gru.md checks claim_history before claiming", _gru_md_checks_claim_history_before_claiming)
     check("vision_link_gate applies gh#525's eligibility rule", _vision_link_gate_eligibility_rule)
     check("vision_link_gate's fleet:severity-live escape hatch survives crowding-out (gh#726)", _vision_link_gate_severity_escape_hatch_gh726)
