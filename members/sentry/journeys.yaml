@@ -42,6 +42,15 @@
 #           behind a hamburger menu instead of a top bar). Fields given here replace the
 #           step's action/observable_result for that viewport only; anything not overridden
 #           is inherited unchanged.
+#         wait_until:              # OPTIONAL (gh#956). Playwright's page.goto() wait_until
+#           for this step's own navigation. Defaults to "domcontentloaded" (see
+#           DEFAULT_WAIT_UNTIL in journey_walker.py) if omitted -- Playwright's own default,
+#           "load", blocks until every subresource on the page resolves (images, fonts,
+#           third-party beacons), not just the content this step asserts on, so a slow one
+#           false-fails the step. Set this to "load" (or "networkidle") only when a step's
+#           OWN assertion genuinely needs the full page settled -- e.g. a screenshot that
+#           depends on webfonts having loaded -- not as a general timeout workaround. May
+#           also be set per-viewport inside viewport_overrides.
 #
 # Viewport definitions:
 #   desktop     -- 1280x800
