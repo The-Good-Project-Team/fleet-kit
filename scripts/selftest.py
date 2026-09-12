@@ -1423,6 +1423,11 @@ def _maxx_share_ceiling_uses_hourly_headroom_not_the_week_bank():
         "sustainable_pct_per_hour": 0.35,
         "per_diem_hourly_pct": 0.10,
         "reserved_pct": 0,
+        # Anchored block: nothing spent, full 5h window left -- keeps the fail-closed
+        # block-pace clamp (maxx_share_ceiling.block_over_pace) out of a test about the
+        # HOURLY slice formula. An unanchored budget now clamps to 0.0 on purpose.
+        "session_used_pct": 0.0,
+        "five_reset_in_sec": 5 * 3600,
     }
     orig = maxx_share_ceiling.get_headroom
     try:
@@ -1513,6 +1518,8 @@ def _maxx_share_ceiling_subtracts_local_leases_not_just_the_remotes_reserved_pct
             remote_budget = {
                 "verdict": "ok", "sustainable_pct_per_hour": 0.35,
                 "per_diem_hourly_pct": 0.10, "reserved_pct": 0,
+                # Anchored block -- see the note on the other budget fixtures.
+                "session_used_pct": 0.0, "five_reset_in_sec": 5 * 3600,
             }
             maxx_share_ceiling.get_headroom = lambda: (1.0, "ok", remote_budget)
 
@@ -1556,6 +1563,11 @@ def _maxx_share_ceiling_respects_a_real_over_verdict_not_just_unreadable_meters(
         "sustainable_pct_per_hour": 0.35,
         "per_diem_hourly_pct": 0.10,
         "reserved_pct": 0,
+        # Anchored block: nothing spent, full 5h window left -- keeps the fail-closed
+        # block-pace clamp (maxx_share_ceiling.block_over_pace) out of a test about the
+        # HOURLY slice formula. An unanchored budget now clamps to 0.0 on purpose.
+        "session_used_pct": 0.0,
+        "five_reset_in_sec": 5 * 3600,
     }
     orig = maxx_share_ceiling.get_headroom
     try:
@@ -9811,7 +9823,11 @@ def _share_ceiling_is_a_slice_of_the_hour_not_the_leftovers():
         (stub / "maxx_reader.py").write_text(
             "def get_headroom():\n"
             "    return (1.0, 'ok', {'sustainable_pct_per_hour': 1.0,\n"
-            "                        'per_diem_hourly_pct': 0.50, 'reserved_pct': 0})\n")
+            "                        'per_diem_hourly_pct': 0.50, 'reserved_pct': 0,\n"
+            # Anchored block -- the fail-closed block-pace clamp must not fire in a
+            # test about the hourly slice formula.
+            "                        'session_used_pct': 0.0,\n"
+            "                        'five_reset_in_sec': 5 * 3600})\n")
         (stub / "maxx_lease.py").write_text(
             "def total_reserved_pct():\n    return 0.0\n"
             "def reserved_pct_for(*a, **k):\n    return 0.0\n")
@@ -12707,7 +12723,7 @@ def _maxx_share_ceiling_holds_a_5h_block_ahead_of_pace_gh781():
     hourly ceiling stayed 0.015-0.048 while the account burned 77% of its 5h window in the
     first 90 minutes (session_used_pct=77, five_reset_in_sec=12534 at 16:51Z), walled, then
     sat budget_declined for 3.5h. The ceiling must read 0.0000 while the block is ahead of
-    linear pace, and the usual number once it is not. Missing fields fail open."""
+    linear pace, and the usual number once it is not. Missing fields fail CLOSED."""
     import io
     from contextlib import redirect_stdout
     import maxx_share_ceiling
@@ -12735,8 +12751,17 @@ def _maxx_share_ceiling_holds_a_5h_block_ahead_of_pace_gh781():
     # Fresh block, small burst inside the slack -> run; past the slack -> hold.
     assert ceiling({**live, "session_used_pct": 9, "five_reset_in_sec": 18000}) != "0.0000"
     assert ceiling({**live, "session_used_pct": 11, "five_reset_in_sec": 18000}) == "0.0000"
-    # No block fields at all (older maxx, or a stripped reading) -> fail open, unchanged.
-    assert abs(float(ceiling(healthy_hour)) - 0.25) < 1e-6
+    # No block fields at all (older maxx, or a stripped reading) -> fail CLOSED. Inverted
+    # 2026-09-11 (Reif locked out 40min mid-block): a null session_used_pct means the handle
+    # has no live anchor, not that the block is healthy, and failing open made this clamp
+    # dead code on every unanchored handle. Eyes-open opt-out restores the old reading.
+    assert ceiling(healthy_hour) == "0.0000", ceiling(healthy_hour)
+    import os as _os
+    _os.environ["FLEET_BLOCK_PACE_REQUIRE_ANCHOR"] = "0"
+    try:
+        assert abs(float(ceiling(healthy_hour)) - 0.25) < 1e-6, ceiling(healthy_hour)
+    finally:
+        del _os.environ["FLEET_BLOCK_PACE_REQUIRE_ANCHOR"]
     # The reader passes both fields through, otherwise the clamp can never see them.
     import maxx_reader
     _, _, allowance = maxx_reader.get_headroom(
