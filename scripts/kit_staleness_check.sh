@@ -19,8 +19,20 @@
 #
 # Advisory only, per this issue's own non-goals: never blocks, never a nonzero exit, regardless
 # of network/auth/git state. Silent means "nothing worth saying", not "definitely current" --
-# the missing-.deploy_sha, unknown-SHA and unreachable-remote branches below are all silent by
-# design (AC3/AC4), not an oversight.
+# the unreachable-remote branch below is silent by design (AC4), not an oversight.
+#
+# fk#1006: the UNTRACEABLE case is no longer silent. AC3 originally lumped three things
+# together -- absent, `unknown`, and malformed `.deploy_sha` -- on the reasoning that none of
+# them can PROVE the snapshot is stale, so none should claim it. That reasoning is right about
+# staleness and wrong about what it leaves unsaid. An unreachable remote is transient: the next
+# pass, an hour later, checks again and speaks. A `.deploy_sha` of `unknown` is permanent: the
+# image was built without recording what it was built from, so this check can never say anything
+# about that image, ever, and no pass is told that the answer is missing rather than reassuring.
+# Measured live on the philanthropy instance 2026-09-14: `/fleet-kit/.deploy_sha` read `unknown`
+# while the baked snapshot was two days behind main (`up.sh` had none of fk#1002, merged that
+# morning), and every member pass in that window read silence from this script. Untraceable
+# provenance is itself a proven fact, so it is reported as one -- without claiming staleness,
+# which is still never guessed.
 set -uo pipefail
 
 KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -50,10 +62,17 @@ KIT_REPO_SLUG="${KIT_REPO_SLUG:-$(_repo_slug "$KIT_DIR")}"
 
 DEPLOYED_SHA=""
 [ -f "$DEPLOY_SHA_FILE" ] && DEPLOYED_SHA="$(cat "$DEPLOY_SHA_FILE" 2>/dev/null | tr -d '[:space:]')"
-# AC3: absent, empty, or not shaped like a SHA at all -- silent, never a guess.
+# fk#1006: absent, empty, `unknown`, or not shaped like a SHA -- the snapshot's provenance is
+# untraceable. Still never a guess about staleness; it reports only what is proven, that this
+# check cannot run against this image at all.
+untraceable() {
+    echo "kit snapshot provenance is untraceable ($DEPLOY_SHA_FILE $1) -- staleness of scripts under the kit path CANNOT be checked; verify fixes from a fresh worktree, not from $KIT_DIR."
+    exit 0
+}
 case "$DEPLOYED_SHA" in
-    ""|unknown) exit 0 ;;
-    *[!0-9a-fA-F]*) exit 0 ;;
+    "") [ -f "$DEPLOY_SHA_FILE" ] && untraceable "is empty" || untraceable "is missing" ;;
+    unknown) untraceable "reads 'unknown' -- the image was built without recording its source commit" ;;
+    *[!0-9a-fA-F]*) untraceable "is not a commit SHA" ;;
 esac
 
 # AC4: bounded by `timeout`, and any failure (unreachable, unauthenticated, rate-limited)
