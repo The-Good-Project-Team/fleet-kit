@@ -19,6 +19,14 @@ NAMES = ["minute", "hour", "day-of-month", "month", "day-of-week"]
 MONTHS = "jan feb mar apr may jun jul aug sep oct nov dec".split()
 DAYS = "sun mon tue wed thu fri sat".split()
 
+# gh#5200: Vixie cron discards the ENTIRE file -- not just the offending line -- the moment it
+# sees one env assignment with an empty right-hand side (`FLEET_SHARE_DIR=` with nothing after
+# the `=`). The env-assignment branch below used to skip these lines outright (any `NAME=...`
+# line was assumed always safe), so a render that emptied one variable passed validation clean
+# and printed "crontab OK" against a file cron was about to reject wholesale.
+ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*=")
+EMPTY_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*=\s*$")
+
 
 def _num(tok, idx):
     t = tok.strip().lower()
@@ -67,7 +75,10 @@ def check(path):
         if not s or s.startswith("#"):
             continue
         # env assignment (NAME=value) before any whitespace
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*\s*=", s):
+        if ENV_ASSIGNMENT_RE.match(s):
+            if EMPTY_ENV_ASSIGNMENT_RE.match(s):
+                bad.append((i, raw, "empty env assignment -- Vixie cron discards the ENTIRE "
+                                     "file on one empty assignment (gh#5200)"))
             continue
         parts = s.split()
         if s.startswith("@"):
