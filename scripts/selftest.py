@@ -14988,6 +14988,91 @@ def _pacing_hold_check_sparse_single_row_hours_never_page_gh812():
         assert not ntfy_calls.exists(), "a sparse single-row hold reached the alert helper at all"
 
 
+def _judge_judy_records_pool_declines_and_stops_the_walk_fk989():
+    """A tick the account pool declined is recorded as budget_declined, not as nothing at all.
+
+    MEASURED 2026-09-13 on the philanthropy instance: judge-judy.log carried 559
+    "claude -p failed rc=3 (account=none)" lines against 5 posted verdicts in one day (~28
+    attempts each on #5495/#5468/#5457/#5597/#5508/#5507), spanning a 01:00-06:59Z window where
+    account-pool.log recorded 854 "ALL accounts failed this call" and zero successes. No
+    runs.jsonl row was written for any of them, so `fleet_metrics.py signal_rate:judge-judy`
+    read 1.0 and `budget_declined_per_hr:judge-judy` read 0.0 straight through a six-hour review
+    blackout -- and a PR only gets auto-merge armed once a verdict posts, so the lane that gates
+    every merge was both dead and invisible.
+
+    Two halves, both asserted here:
+
+    1. BEHAVIOURAL, and the subtle one. run_report.py's classify() consults --exit-code ONLY
+       when the parsed outcome is empty (`if not outcome:` -> _EXIT_CODE_STATUS). So the row
+       must carry NO `Outcome:` line; adding a friendly one silently reclassifies it `ok`,
+       recreating the exact blind spot. This drives run_report.py for real and asserts
+       `budget_declined` comes back with the evidence intact.
+    2. STATIC, same style as this file's other judge-judy.sh checks: a decline must be told
+       apart from a real claude failure by the call's own result ($RAW empty and $0 spent) --
+       never by ACCOUNT_POOL_SELECTED/ACCOUNT_POOL_LAST_REASON, which are set inside the
+       `RAW=$(account_pool_run ...)` command substitution's subshell and are always empty at
+       that log line; and a confirmed decline must stop the walk rather than continue it,
+       because the gate is per-account and the next PR would be declined identically.
+    """
+    import json as _json
+    import subprocess
+
+    # --- 1. the row really classifies as budget_declined, evidence preserved ---------------
+    script_path = ROOT / "scripts" / "run_report.py"
+    proc = subprocess.run(
+        [sys.executable, str(script_path), "--member", "judge-judy",
+         "--run-id", "selftest-pool-declined", "--kind", "shell", "--exit-code", "3",
+         "--pass-file", "-"],
+        input="Evidence: account-pool.log: every account gated, $0 spent\n"
+              "Self-critique: none -- no review attempted, the account pool had no headroom\n",
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, f"run_report.py must exit 0: {proc.stderr.strip()[:300]}"
+    rows = [_json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
+    assert rows, f"run_report.py wrote no row: {proc.stdout[:300]!r}"
+    row = rows[-1]
+    assert row.get("status") == "budget_declined", (
+        f"a no-Outcome row with --exit-code 3 must classify as budget_declined so "
+        f"budget_declined_per_hr:judge-judy can see a review blackout -- got {row.get('status')!r}"
+    )
+    assert "every account gated" in (row.get("evidence") or ""), (
+        f"the decline row lost its evidence: {row.get('evidence')!r}"
+    )
+
+    # --- 2. judge-judy.sh distinguishes a decline and stops the walk -----------------------
+    src = (ROOT / "members" / "judge-judy" / "judge-judy.sh").read_text()
+
+    assert "report_pool_declined()" in src, \
+        "judge-judy.sh no longer defines report_pool_declined -- a declined tick records nothing"
+    decl_i = src.index("report_pool_declined() {")
+    decl_body = src[decl_i:src.index("\n}", decl_i)]
+    assert "--exit-code 3" in decl_body, \
+        "report_pool_declined must pass --exit-code 3 or the row cannot classify as budget_declined"
+    assert "Outcome:" not in decl_body, (
+        "report_pool_declined must NOT emit an Outcome: line -- classify() then ignores "
+        "--exit-code and the row comes back `ok`, which is the blind spot this closes"
+    )
+    assert "--heartbeat" not in decl_body, (
+        "a declined tick is not a heartbeat: PRs were waiting and none got reviewed, and "
+        "heartbeat rows are excluded from fleet_metrics' executed set entirely"
+    )
+
+    rc_i = src.index('if [ "$RC" -ne 0 ]; then')
+    rc_block = src[rc_i:rc_i + 3000]
+    assert '[ -z "${RAW:-}" ]' in rc_block, (
+        "the decline test must read the call's own result ($RAW empty) -- "
+        "ACCOUNT_POOL_SELECTED/ACCOUNT_POOL_LAST_REASON are set in a command-substitution "
+        "subshell and are empty by construction at this point"
+    )
+    assert "POOL_DECLINES" in rc_block and "MAX_POOL_DECLINES" in rc_block, \
+        "no consecutive-decline counter/cap in the rc!=0 branch -- the walk still burns the queue"
+    assert "report_pool_declined " in rc_block, \
+        "a capped-out decline does not record a budget_declined row"
+    decline_i = rc_block.index("POOL_DECLINES=$((POOL_DECLINES + 1))")
+    assert "break" in rc_block[decline_i:], \
+        "a confirmed pool decline must stop the walk, not continue to the next PR"
+
+
 if __name__ == "__main__":
     check("PR tile rollup reflects mergeability, not just CI (#179)", _pr_tile_rollup_reflects_mergeability_not_just_ci)
     check("member specs load and validate", _member_specs_validate)
@@ -15401,6 +15486,7 @@ if __name__ == "__main__":
     check("pacing_hold_check pages once on a sustained fleet-wide hold, suppresses the repeat, resolves on recovery (gh#812 AC1/AC2/AC3/AC4)", _pacing_hold_check_pages_on_sustained_hold_gh812)
     check("pacing_hold_check never pages a single held tick that clears on its own (gh#812 AC6)", _pacing_hold_check_single_tick_does_not_page_gh812)
     check("pacing_hold_check never pages on two sparse single-row hours (one early ticker each, not a real fleet-wide hold)", _pacing_hold_check_sparse_single_row_hours_never_page_gh812)
+    check("judge-judy records a pool-declined tick as budget_declined and stops the walk (fk#989)", _judge_judy_records_pool_declines_and_stops_the_walk_fk989)
     for n in ok:
         print(f"  ok    {n}")
     for n, why in skipped:

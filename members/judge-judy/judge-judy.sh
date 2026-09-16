@@ -202,6 +202,34 @@ report_heartbeat() { # <evidence-line>
       --pass-file - >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
 }
 
+# report_pool_declined — the tick found PRs waiting and could not review any of them, because
+# account_pool.sh declined the call (its own log line: "budget verdict=gated:exhausted_until_N,
+# skipping without spending a call"). That is NOT a heartbeat: a heartbeat means there was
+# nothing to review. Here there was, and the review did not happen, which strands every green
+# PR behind it -- a PR only gets auto-merge armed after a verdict posts.
+#
+# MEASURED 2026-09-13 on the philanthropy instance, and this is why the row has to exist:
+# judge-judy logged 559 "claude -p failed rc=3 (account=none)" lines against 5 posted verdicts
+# in one day (~28 attempts each on #5495 #5468 #5457 #5597 #5508 #5507), across a six-hour
+# 01:00-06:59Z window where account-pool.log recorded 854 "ALL accounts failed this call" and
+# ZERO successes. It wrote a runs.jsonl row for NONE of them, so `fleet_metrics.py
+# signal_rate:judge-judy` read 1.0 and `budget_declined_per_hr:judge-judy` read 0.0 straight
+# through the blackout. Every member whose pass reads fleet metrics -- dumbledore's own rot
+# hunt included -- saw a perfectly healthy reviewer, and two dumbledore passes spent their ONE
+# change on the downstream symptom (stranded green PRs, minions re-deriving "blocked") instead
+# of this. An unmeasured lane is worse than a red one.
+#
+# NO `Outcome:` LINE, DELIBERATELY. run_report.py's classify() only consults --exit-code when
+# the outcome is EMPTY (`if not outcome:` -> _EXIT_CODE_STATUS), so adding a human-friendly
+# Outcome line here would silently reclassify this row as `ok` -- the exact lie this function
+# exists to stop telling. Evidence:/Self-critique: still parse and still land on the row.
+report_pool_declined() { # <evidence-line>
+  printf 'Evidence: %s\nSelf-critique: none -- no review attempted, the account pool had no headroom\n' "$1" \
+    | python3 "$KIT_DIR/scripts/run_report.py" \
+      --member "judge-judy" --run-id "pool-declined-$(date -u +%s)-$$" --kind shell --exit-code 3 \
+      --pass-file - >> "$LOG_DIR/runs.jsonl" 2>>"$LOG"
+}
+
 EXPLICIT_PR="${1:-}"
 
 # --- single-tick mutex -------------------------------------------------------------------
@@ -244,6 +272,12 @@ SPENT_USD="0"
 LAST_CALL_USD="0"
 REVIEWED_COUNT=0
 SKIPPED_THIS_TICK=""
+# Consecutive calls this tick that account_pool.sh declined without spending anything. The gate
+# is per-ACCOUNT, not per-PR, so once two in a row come back declined the remaining PRs in the
+# queue cannot possibly fare better -- walking them is pure gh-API spend for a guaranteed zero.
+# Two, not one, so a single odd failure never abandons a tick that could still do real work.
+POOL_DECLINES=0
+MAX_POOL_DECLINES="${JUDGE_JUDY_MAX_POOL_DECLINES:-2}"
 
 while :; do
   # Budget gate before each pick: skip on the FIRST call of the tick (nothing spent yet to
@@ -259,6 +293,18 @@ while :; do
   PICK=$(pick_pr "$EXPLICIT_PR" "$SKIPPED_THIS_TICK")
   PICK_RC=$?
   if [ "$PICK_RC" -ne 0 ]; then
+    # A tick that declined its way through a one- or two-PR queue also arrives here with
+    # REVIEWED_COUNT still 0, and it must NOT write gh#267's heartbeat: "no PR needs review"
+    # would be false -- PRs needed review and the pool had no headroom to give. That case gets
+    # report_pool_declined's budget_declined row instead (written at the decline cap above, or
+    # here when the queue ran dry before the cap).
+    if [ "$REVIEWED_COUNT" -eq 0 ] && [ "$POOL_DECLINES" -gt 0 ]; then
+      if [ -z "$EXPLICIT_PR" ]; then
+        report_pool_declined "account-pool.log: every account gated, $POOL_DECLINES decline(s) with \$0 spent; queue exhausted with no verdict posted (attempted:${SKIPPED_THIS_TICK:-none})"
+      fi
+      log "tick done: account pool declined all $POOL_DECLINES call(s), no PR reviewed -- recorded a budget_declined row"
+      break
+    fi
     if [ "$REVIEWED_COUNT" -eq 0 ]; then
       # gh#627: pick_pr returns 2 (not 1) when a gh call failed partway through the scan (list,
       # view, or statuses) -- that queue was never fully accounted for, so it must not be
@@ -418,18 +464,49 @@ Answer with a verdict of block unless there is truly nothing blocking, plus one 
   RC=$?
   printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" text > "$OUT_FILE"
   printf '%s' "$RAW" | python3 "$KIT_DIR/scripts/pass_accounting.py" usage > "$USAGE_FILE" 2>/dev/null
-  REVIEWED_COUNT=$((REVIEWED_COUNT + 1))
   CALL_COST=$(python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("total_cost_usd"); print(c if c is not None else 0)' < "$USAGE_FILE" 2>/dev/null)
   [ -z "$CALL_COST" ] && CALL_COST=0
   LAST_CALL_USD="$CALL_COST"
   SPENT_USD=$(awk -v s="$SPENT_USD" -v c="$CALL_COST" 'BEGIN { printf "%.4f", s + c }')
   if [ "$RC" -ne 0 ]; then
-    log "PR #$PR: claude -p failed rc=$RC (account=${ACCOUNT_POOL_SELECTED:-none} reason=${ACCOUNT_POOL_LAST_REASON:-}) -- no status posted, next tick retries"
+    # Two different failures wear the same rc here, and they need opposite responses.
+    #
+    # A POOL DECLINE: account_pool.sh found every account gated and skipped "without spending a
+    # call", so no API call happened -- $RAW is empty and the cost is 0. The gate is per-account,
+    # so the next PR in the queue would be declined identically; retrying the rest of the walk
+    # cannot produce a verdict. Measured 2026-09-13: 559 of these in one day against 5 posted
+    # verdicts, ~28 futile attempts per open PR, none of them recorded anywhere but this log.
+    #
+    # A REAL CLAUDE FAILURE: the call ran and died (timeout, crash, a rejected prompt). That is
+    # per-PR, the next PR may well succeed, and the pre-existing skip-and-continue is right.
+    #
+    # ACCOUNT_POOL_SELECTED / ACCOUNT_POOL_LAST_REASON cannot tell them apart, and never could:
+    # `RAW=$(account_pool_run ...)` is a command substitution, so the pool sets those variables
+    # in a subshell that exits before this line runs. That is why every one of those 559 log
+    # lines reads a content-free `(account=none reason=)`. Test the call's own result instead.
+    if [ -z "${RAW:-}" ] && awk -v c="$CALL_COST" 'BEGIN { exit !(c + 0 == 0) }'; then
+      POOL_DECLINES=$((POOL_DECLINES + 1))
+      log "PR #$PR: account pool declined the call (nothing spent, no output) -- decline $POOL_DECLINES/$MAX_POOL_DECLINES this tick"
+      SKIPPED_THIS_TICK="$SKIPPED_THIS_TICK $PR"
+      cleanup_pass
+      if [ -z "$EXPLICIT_PR" ] && [ "$POOL_DECLINES" -ge "$MAX_POOL_DECLINES" ]; then
+        report_pool_declined "account-pool.log: every account gated, $POOL_DECLINES consecutive declines with \$0 spent; abandoned the walk with PR(s) still unreviewed (attempted:${SKIPPED_THIS_TICK:-none})"
+        log "tick abandoned: account pool declined $POOL_DECLINES consecutive calls -- recorded a budget_declined row, remaining PRs wait for headroom"
+        break
+      fi
+      [ -n "$EXPLICIT_PR" ] && break
+      continue
+    fi
+    REVIEWED_COUNT=$((REVIEWED_COUNT + 1))
+    POOL_DECLINES=0
+    log "PR #$PR: claude -p failed rc=$RC after a real call (spent \$${CALL_COST}) -- no status posted, next tick retries"
     SKIPPED_THIS_TICK="$SKIPPED_THIS_TICK $PR"
     cleanup_pass
     [ -n "$EXPLICIT_PR" ] && break
     continue
   fi
+  REVIEWED_COUNT=$((REVIEWED_COUNT + 1))
+  POOL_DECLINES=0
 
   # judge_judy_verdict.py reads the SAME envelope: prefers the CLI's own already-parsed
   # `structured_output`, falls back to a second json.loads of `.result`, and validates the
